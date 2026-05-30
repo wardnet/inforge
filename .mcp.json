@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "context7": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp",
+        "--api-key",
+        "$CONTEXT7_KEY"
+      ],
+      "env": {
+        "DATABASE_URL": "${CONTEXT7_KEY}"
+      }
+    }
+  }
+}

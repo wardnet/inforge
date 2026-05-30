@@ -1,0 +1,44 @@
+{
+  "agents": {
+    "kotlin-spring": [
+      {
+        "name": "performance",
+        "model": "sonnet",
+        "prompt_file": "prompts/kotlin-spring/performance.md",
+        "description": "Performance review: complexity, blocking calls, N+1, allocations."
+      },
+      {
+        "name": "security",
+        "model": "opus",
+        "prompt_file": "prompts/kotlin-spring/security.md",
+        "description": "Security review: OWASP, secrets, redaction, deserialization, authz."
+      },
+      {
+        "name": "best-practices",
+        "model": "sonnet",
+        "prompt_file": "prompts/kotlin-spring/best-practices.md",
+        "description": "Logic bugs and Kotlin/Spring/project-convention violations."
+      }
+    ],
+    "react": [
+      {
+        "name": "performance",
+        "model": "sonnet",
+        "prompt_file": "prompts/react/performance.md",
+        "description": "Performance review: complexity, blocking calls, N+1, allocations."
+      },
+      {
+        "name": "security",
+        "model": "opus",
+        "prompt_file": "prompts/react/security.md",
+        "description": "Security review: OWASP, secrets, redaction, deserialization, authz."
+      },
+      {
+        "name": "best-practices",
+        "model": "sonnet",
+        "prompt_file": "prompts/react/best-practices.md",
+        "description": "Logic bugs and react project-convention violations."
+      }
+    ]
+  }
+}

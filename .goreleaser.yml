@@ -1,0 +1,126 @@
+# goreleaser configuration for inforge.
+#
+# Builds three binaries from a single repository:
+#   - inforge                  the CLI
+#   - pulumi-resource-neon     Pulumi provider plugin (Neon)
+#   - pulumi-resource-infisical Pulumi provider plugin (Infisical)
+#
+# The two provider binaries must keep the `pulumi-resource-<name>` naming
+# convention exactly — Pulumi locates plugins by that filename.
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: inforge
+    main: ./cmd/inforge
+    binary: inforge
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+  - id: pulumi-resource-neon
+    main: ./providers/neon/cmd/pulumi-resource-neon
+    binary: pulumi-resource-neon
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+  - id: pulumi-resource-infisical
+    main: ./providers/infisical/cmd/pulumi-resource-infisical
+    binary: pulumi-resource-infisical
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+# One archive per binary so consumers download only what they need:
+# `inforge plugins install neon` pulls the Neon provider archive alone,
+# never the whole release. A fourth archive publishes every binary in raw,
+# uncompressed form for curl-and-run usage.
+archives:
+  - id: inforge
+    ids:
+      - inforge
+    name_template: >-
+      inforge_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+  - id: pulumi-resource-neon
+    ids:
+      - pulumi-resource-neon
+    name_template: >-
+      pulumi-resource-neon_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+  - id: pulumi-resource-infisical
+    ids:
+      - pulumi-resource-infisical
+    name_template: >-
+      pulumi-resource-infisical_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+  # Raw, uncompressed binaries — download a single os/arch binary and run it
+  # directly, no extraction step.
+  - id: raw
+    ids:
+      - inforge
+      - pulumi-resource-neon
+      - pulumi-resource-infisical
+    formats:
+      - binary
+    name_template: >-
+      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: wardnet
+    name: inforge
