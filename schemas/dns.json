@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dns.json",
+  "title": "DNS resource",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["provider", "compute", "subdomain"],
+  "properties": {
+    "provider": { "type": "string", "minLength": 1 },
+    "compute": { "type": "string", "minLength": 1 },
+    "subdomain": { "type": "string", "minLength": 1 },
+    "proxied": { "type": "boolean" }
+  }
+}

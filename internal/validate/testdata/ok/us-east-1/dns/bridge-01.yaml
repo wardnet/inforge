@@ -1,0 +1,4 @@
+provider: cloudflare
+compute: bridge-01
+subdomain: bridge
+proxied: false

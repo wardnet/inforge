@@ -1,0 +1,23 @@
+base_domain: example.com
+
+regions:
+  - name: us-east-1
+    providers:
+      hetzner:
+        location: ash
+
+providers:
+  hetzner:
+    apiToken: test-token
+  cloudflare:
+    apiToken: test-token
+    zoneId: test-zone
+  neon:
+    apiKey: test-key
+  infisical:
+    clientId: test-id
+    clientSecret: test-secret
+
+ssh:
+  authorizedKeys: ssh-ed25519 AAAA...authorized
+  deployPublicKey: ssh-ed25519 AAAA...deploy

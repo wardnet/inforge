@@ -1,0 +1,21 @@
+# base_domain intentionally omitted -> variables.yaml should FAIL.
+
+regions:
+  - name: us-east-1
+    providers:
+      hetzner:
+        location: ash
+
+providers:
+  hetzner:
+    apiToken: test-token
+  cloudflare:
+    apiToken: test-token
+  neon:
+    apiKey: test-key
+  infisical:
+    clientId: test-id
+
+ssh:
+  authorizedKeys: ssh-ed25519 AAAA...authorized
+  deployPublicKey: ssh-ed25519 AAAA...deploy

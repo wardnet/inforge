@@ -1,0 +1,8 @@
+# schema failures: 'image' is required and missing; 'memory' is not an allowed
+# property (additionalProperties: false).
+name: broken
+container: bridge
+provider: hetzner
+network: ingress-01
+size: SMALL
+memory: 4

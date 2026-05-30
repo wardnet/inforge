@@ -28,7 +28,8 @@ providers/infisical/cmd/pulumi-resource-infisical/ # Pulumi provider plugin — 
 .github/dependabot.yml                             # gomod + github-actions, 5-day cooldown
 ```
 
-- Module path: `github.com/wardnet/inforge`. Go directive: `go 1.23`.
+- Module path: `github.com/wardnet/inforge`. Go directive: `go 1.25.8` (floored by the Pulumi SDK;
+  CI/release build on Go 1.26).
 - The two `pulumi-resource-*` binaries are Pulumi plugins, **not** user commands. They are installed
   automatically by `inforge plugins install`, which downloads only the providers a project needs from
   the matching GitHub release. Users never invoke them directly.

@@ -1,0 +1,10 @@
+# schema-valid but several semantic failures: dangling network FK, unknown
+# size, and a cloud_init file that does not exist.
+name: bridge
+container: bridge
+provider: hetzner
+network: ghost-01
+size: HUGE
+image: ubuntu-24.04
+cloud_init: missing.cloud-init.sh
+instance_count: 1
