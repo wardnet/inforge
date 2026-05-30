@@ -1,0 +1,7 @@
+# private network missing its required parent -> FAIL.
+name: private
+instance: 1
+container: ingress
+provider: hetzner
+type: private
+cidr: 10.9.0.0/24

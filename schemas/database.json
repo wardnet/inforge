@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "database.json",
+  "title": "Database resource",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "container", "provider", "engine", "database", "role"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "container": { "type": "string", "minLength": 1 },
+    "provider": { "type": "string", "minLength": 1 },
+    "engine": { "type": "string", "enum": ["postgresql"] },
+    "branch": { "type": "string", "minLength": 1 },
+    "database": { "type": "string", "minLength": 1 },
+    "role": { "type": "string", "minLength": 1 }
+  }
+}

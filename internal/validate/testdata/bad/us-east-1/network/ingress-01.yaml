@@ -1,0 +1,7 @@
+name: ingress
+instance: 1
+container: ingress
+provider: hetzner
+type: public
+cidr: not-a-cidr
+subnet_cidr: 10.0.0.0/24

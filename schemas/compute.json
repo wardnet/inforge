@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compute.json",
+  "title": "Compute resource",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "container", "provider", "network", "size", "image"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "kind": { "type": "string", "enum": ["vm", "cluster"] },
+    "container": { "type": "string", "minLength": 1 },
+    "provider": { "type": "string", "minLength": 1 },
+    "network": { "type": "string", "minLength": 1 },
+    "size": { "type": "string", "minLength": 1 },
+    "image": { "type": "string", "minLength": 1 },
+    "cloud_init": { "type": "string", "minLength": 1 },
+    "instance_count": { "type": "integer", "minimum": 1 }
+  }
+}

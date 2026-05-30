@@ -1,0 +1,7 @@
+# provider not defined in variables.yaml providers -> FAIL.
+name: bridge
+container: bridge
+provider: mystery
+engine: postgresql
+database: bridge
+role: app

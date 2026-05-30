@@ -1,0 +1,5 @@
+# compute FK does not resolve to any expanded compute specKey -> FAIL.
+provider: cloudflare
+compute: bridge-09
+subdomain: bridge
+proxied: false
