@@ -1,29 +1,32 @@
 {
-    "permissions": {
-      "allow": [
-        "Read(**/.agents/CODE-MAP.md)",
-        "Edit(**/.agents/CODE-MAP.md)",
-        "Write(./.agents/memories/**)",
-        "Bash(git checkout *)",
-        "Bash(git hash-object *)",
-        "Bash(*/pre-pr-review/scripts/detect-parent.sh*)",
-        "Bash(*/pre-pr-review/scripts/capture-diff.sh *)",
-        "Bash(*/pre-pr-review/scripts/list-changed.sh *)",
-        "Bash(*/pre-pr-review/scripts/find-convention-docs.sh*)"
-      ]
-    },
-    "hooks": {
-      "PermissionRequest": [
-        {
-          "matcher": "ExitPlanMode",
-          "hooks": [
-            {
-              "type": "command",
-              "command": "plannotator",
-              "timeout": 3600
-            }
-          ]
-        }
-      ]
-    }
+  "enabledPlugins": {
+    "gopls-lsp@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": [
+      "Read(**/.agents/CODE-MAP.md)",
+      "Edit(**/.agents/CODE-MAP.md)",
+      "Write(./.agents/memories/**)",
+      "Bash(git checkout *)",
+      "Bash(git hash-object *)",
+      "Bash(*/pre-pr-review/scripts/detect-parent.sh*)",
+      "Bash(*/pre-pr-review/scripts/capture-diff.sh *)",
+      "Bash(*/pre-pr-review/scripts/list-changed.sh *)",
+      "Bash(*/pre-pr-review/scripts/find-convention-docs.sh*)"
+    ]
+  },
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "plannotator",
+            "timeout": 3600
+          }
+        ]
+      }
+    ]
   }
+}
