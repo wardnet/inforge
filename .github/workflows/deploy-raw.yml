@@ -1,0 +1,91 @@
+# Reusable workflow for `raw` service delivery.
+#
+# A service repo calls this with its service name and target environment. It
+# reads the inforge-generated deploy descriptor (deploy/<environment>.yaml,
+# service -> {host_dns, folder, unit}), packages the build output as a gzip, and
+# SSHes it onto the host using the deploy key, then restarts the inforge-managed
+# systemd unit. inforge owns the unit; this workflow only swaps the payload.
+name: deploy-raw
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: Service name (matches a target in the deploy descriptor)
+        required: true
+        type: string
+      environment:
+        description: Target environment (e.g. prd)
+        required: true
+        type: string
+      artifact_path:
+        description: Directory whose contents are delivered to the host
+        required: false
+        default: dist
+        type: string
+      descriptor_path:
+        description: Path to the inforge deploy descriptor for the environment
+        required: false
+        default: ""
+        type: string
+    secrets:
+      deploy_ssh_key:
+        description: Private SSH deploy key matching the on-host deployPublicKey
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve deploy target
+        id: target
+        run: |
+          set -euo pipefail
+          descriptor="${{ inputs.descriptor_path }}"
+          if [ -z "$descriptor" ]; then
+            descriptor="deploy/${{ inputs.environment }}.yaml"
+          fi
+          if [ ! -f "$descriptor" ]; then
+            echo "deploy descriptor not found: $descriptor" >&2
+            exit 1
+          fi
+          query='.targets[] | select(.service == "${{ inputs.service }}")'
+          host=$(yq -r "$query | .host_dns" "$descriptor")
+          folder=$(yq -r "$query | .folder" "$descriptor")
+          unit=$(yq -r "$query | .unit" "$descriptor")
+          if [ -z "$host" ] || [ "$host" = "null" ]; then
+            echo "service '${{ inputs.service }}' not found in $descriptor" >&2
+            exit 1
+          fi
+          echo "host=$host"     >> "$GITHUB_OUTPUT"
+          echo "folder=$folder" >> "$GITHUB_OUTPUT"
+          echo "unit=$unit"     >> "$GITHUB_OUTPUT"
+
+      - name: Package payload
+        run: tar -czf payload.tgz -C "${{ inputs.artifact_path }}" .
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "${{ secrets.deploy_ssh_key }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ steps.target.outputs.host }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Upload and restart
+        run: |
+          set -euo pipefail
+          host="${{ steps.target.outputs.host }}"
+          folder="${{ steps.target.outputs.folder }}"
+          unit="${{ steps.target.outputs.unit }}"
+          scp -i ~/.ssh/deploy_key payload.tgz "deploy@${host}:/tmp/payload.tgz"
+          ssh -i ~/.ssh/deploy_key "deploy@${host}" "\
+            sudo mkdir -p '${folder}' && \
+            sudo tar -xzf /tmp/payload.tgz -C '${folder}' && \
+            rm -f /tmp/payload.tgz && \
+            sudo systemctl restart '${unit}'"
