@@ -33,8 +33,14 @@ type registry struct {
 	ssh         types.SSHConfig
 	regionTable regions.Table
 
+	hetznerProviderOnce sync.Once
+	hetznerProvider     *hcloud.Provider
+
 	hetznerNetOnce sync.Once
 	hetznerNet     *hetzner.HetznerNetwork
+
+	hetznerCompOnce sync.Once
+	hetznerComp     *hetzner.HetznerCompute
 }
 
 // BuildRegistry constructs a ProviderRegistry from the resolved (merged)
@@ -50,21 +56,28 @@ func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, ssh ty
 	}
 }
 
+// hetznerProv lazily creates the shared hcloud.Provider for the Hetzner
+// provider implementations. Subsequent calls return the cached instance.
+func (r *registry) hetznerProv() *hcloud.Provider {
+	r.hetznerProviderOnce.Do(func() {
+		if r.ctx == nil {
+			return
+		}
+		token := providerCfgString(r.config, "hetzner", "apiToken")
+		p, _ := hcloud.NewProvider(r.ctx, "hcloud", &hcloud.ProviderArgs{
+			Token: pulumi.String(token),
+		})
+		r.hetznerProvider = p
+	})
+	return r.hetznerProvider
+}
+
 func (r *registry) Network(name string) (types.NetworkProvider, error) {
 	switch name {
 	case "hetzner":
 		r.hetznerNetOnce.Do(func() {
 			overrides := hetzner.ExtractRegionConfigs(r.regionTable)
-			if r.ctx == nil {
-				// No Pulumi context (e.g. unit tests): create without a provider.
-				r.hetznerNet = hetzner.New(nil, overrides)
-				return
-			}
-			token := providerCfgString(r.config, "hetzner", "apiToken")
-			p, _ := hcloud.NewProvider(r.ctx, "hcloud", &hcloud.ProviderArgs{
-				Token: pulumi.String(token),
-			})
-			r.hetznerNet = hetzner.New(p, overrides)
+			r.hetznerNet = hetzner.New(r.hetznerProv(), overrides)
 		})
 		return r.hetznerNet, nil
 	default:
@@ -72,8 +85,22 @@ func (r *registry) Network(name string) (types.NetworkProvider, error) {
 	}
 }
 
-func (*registry) Compute(name string) (types.ComputeProvider, error) {
-	return nil, unknownProvider(name)
+func (r *registry) Compute(name string) (types.ComputeProvider, error) {
+	switch name {
+	case "hetzner":
+		r.hetznerCompOnce.Do(func() {
+			overrides := hetzner.ExtractRegionConfigs(r.regionTable)
+			r.hetznerComp = hetzner.NewCompute(
+				r.ssh.AuthorizedKeys,
+				r.ssh.DeployPublicKey,
+				r.hetznerProv(),
+				overrides,
+			)
+		})
+		return r.hetznerComp, nil
+	default:
+		return nil, unknownProvider(name)
+	}
 }
 
 func (*registry) DNS(name string) (types.DnsProvider, error) {
@@ -89,7 +116,7 @@ func (*registry) Secrets(name string) (types.SecretsBackendProvider, error) {
 }
 
 func (*registry) ManifestContributors() []types.ComputeInstanceManifestContributor {
-	return nil
+	return []types.ComputeInstanceManifestContributor{}
 }
 
 func unknownProvider(name string) error {

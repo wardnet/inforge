@@ -19,9 +19,11 @@ func TestRegistryUnknownProvider(t *testing.T) {
 	require.NoError(t, err)
 	assert.IsType(t, (*hetzner.HetznerNetwork)(nil), np)
 
-	// Unknown providers still error.
-	_, err = r.Compute("hetzner")
-	assert.Error(t, err)
+	// "hetzner" is now a known compute provider — must succeed.
+	cp, err := r.Compute("hetzner")
+	require.NoError(t, err)
+	assert.IsType(t, (*hetzner.HetznerCompute)(nil), cp)
+
 	_, err = r.DNS("cloudflare")
 	assert.Error(t, err)
 	_, err = r.Database("neon")
@@ -34,7 +36,7 @@ func TestRegistryUnknownProvider(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown provider: "unknown-cloud"`)
 
-	assert.Nil(t, r.ManifestContributors())
+	assert.Empty(t, r.ManifestContributors())
 }
 
 func TestMergeProviders(t *testing.T) {
