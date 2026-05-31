@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/types"
+	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
 )
 
@@ -24,8 +25,11 @@ func TestRegistryUnknownProvider(t *testing.T) {
 	require.NoError(t, err)
 	assert.IsType(t, (*hetzner.HetznerCompute)(nil), cp)
 
-	_, err = r.DNS("cloudflare")
-	assert.Error(t, err)
+	// "cloudflare" is now a known DNS provider — must succeed.
+	dp, err := r.DNS("cloudflare")
+	require.NoError(t, err)
+	assert.IsType(t, (*cfprovider.CloudflareDns)(nil), dp)
+
 	_, err = r.Database("neon")
 	assert.Error(t, err)
 	_, err = r.Secrets("infisical")
