@@ -1,3 +1,6 @@
+name: bridge
+instance: 1
+container: core
 provider: cloudflare
 compute: bridge-01
 subdomain: bridge
