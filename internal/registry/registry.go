@@ -16,6 +16,7 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
+	"github.com/wardnet/inforge/providers/neon"
 )
 
 // ProviderRegistry resolves provider names to provider implementations for one
@@ -49,6 +50,9 @@ type registry struct {
 
 	cfDnsOnce sync.Once
 	cfDns     *cfprovider.CloudflareDns
+
+	neonDbOnce sync.Once
+	neonDb     *neon.NeonDatabaseAdapter
 }
 
 // BuildRegistry constructs a ProviderRegistry from the resolved (merged)
@@ -138,8 +142,17 @@ func (r *registry) DNS(name string) (types.DnsProvider, error) {
 	}
 }
 
-func (*registry) Database(name string) (types.DatabaseProvider, error) {
-	return nil, unknownProvider(name)
+func (r *registry) Database(name string) (types.DatabaseProvider, error) {
+	switch name {
+	case "neon":
+		r.neonDbOnce.Do(func() {
+			apiKey := providerCfgString(r.config, "neon", "apiKey")
+			r.neonDb = neon.New(apiKey)
+		})
+		return r.neonDb, nil
+	default:
+		return nil, unknownProvider(name)
+	}
 }
 
 func (*registry) Secrets(name string) (types.SecretsBackendProvider, error) {

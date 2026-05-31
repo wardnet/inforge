@@ -8,6 +8,7 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
+	"github.com/wardnet/inforge/providers/neon"
 )
 
 func TestRegistryUnknownProvider(t *testing.T) {
@@ -30,8 +31,15 @@ func TestRegistryUnknownProvider(t *testing.T) {
 	require.NoError(t, err)
 	assert.IsType(t, (*cfprovider.CloudflareDns)(nil), dp)
 
-	_, err = r.Database("neon")
-	assert.Error(t, err)
+	// "neon" is now a known database provider — must succeed.
+	dbp, err := r.Database("neon")
+	require.NoError(t, err)
+	assert.IsType(t, (*neon.NeonDatabaseAdapter)(nil), dbp)
+
+	_, err = r.Database("unknown-db")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown provider: "unknown-db"`)
+
 	_, err = r.Secrets("infisical")
 	assert.Error(t, err)
 
