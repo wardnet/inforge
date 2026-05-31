@@ -9,8 +9,8 @@
     "name": { "type": "string", "minLength": 1 },
     "instance": { "type": "integer", "minimum": 1 },
     "container": { "type": "string", "minLength": 1 },
-    "provider": { "type": "string", "minLength": 1 },
-    "type": { "type": "string", "enum": ["public", "private"] },
+    "provider": { "type": "string", "enum": ["hetzner"] },
+    "type": { "type": "string", "enum": ["public", "private"], "default": "private" },
     "cidr": { "type": "string", "minLength": 1 },
     "subnet_cidr": { "type": "string", "minLength": 1 },
     "parent": { "type": "string", "minLength": 1 }

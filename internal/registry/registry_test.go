@@ -6,15 +6,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/types"
+	"github.com/wardnet/inforge/providers/hetzner"
 )
 
-func TestStubRegistryUnknownProvider(t *testing.T) {
-	r := BuildRegistry(map[string]map[string]any{"hetzner": {"apiToken": "x"}}, types.SSHConfig{})
+func TestRegistryUnknownProvider(t *testing.T) {
+	// nil ctx + nil regionTable: providers are built lazily, so construction is
+	// not triggered during this test. Only the "unknown provider" paths are hit.
+	r := BuildRegistry(nil, map[string]map[string]any{"hetzner": {"apiToken": "x"}}, types.SSHConfig{}, nil)
 
-	_, err := r.Network("hetzner")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `unknown provider: "hetzner"`)
+	// "hetzner" is now a known network provider — must succeed.
+	np, err := r.Network("hetzner")
+	require.NoError(t, err)
+	assert.IsType(t, (*hetzner.HetznerNetwork)(nil), np)
 
+	// Unknown providers still error.
 	_, err = r.Compute("hetzner")
 	assert.Error(t, err)
 	_, err = r.DNS("cloudflare")
@@ -23,6 +28,11 @@ func TestStubRegistryUnknownProvider(t *testing.T) {
 	assert.Error(t, err)
 	_, err = r.Secrets("infisical")
 	assert.Error(t, err)
+
+	// Unknown network provider still errors.
+	_, err = r.Network("unknown-cloud")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown provider: "unknown-cloud"`)
 
 	assert.Nil(t, r.ManifestContributors())
 }
