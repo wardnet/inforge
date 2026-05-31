@@ -36,13 +36,15 @@ type ComputeSpec struct {
 	InstanceCount int    `yaml:"instance_count"`       // default 1; expands into specKeys name-01..name-NN
 }
 
-// DnsSpec is one DNS record. Its identity (name/container) is derived from the
-// compute it points at, so those fields are not declared here.
+// DnsSpec is one DNS record.
 type DnsSpec struct {
+	Name      string `yaml:"name"`
+	Instance  int    `yaml:"instance"`
+	Container string `yaml:"container"`
 	Provider  string `yaml:"provider"`
 	Compute   string `yaml:"compute"` // FK -> an expanded compute specKey
 	Subdomain string `yaml:"subdomain"`
-	Proxied   bool   `yaml:"proxied"` // default false
+	Proxied   bool   `yaml:"proxied"`
 }
 
 // DatabaseSpec is one managed database resource.

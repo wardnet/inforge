@@ -9,10 +9,12 @@ import (
 	"maps"
 	"sync"
 
+	cf "github.com/pulumi/pulumi-cloudflare/sdk/v6/go/cloudflare"
 	hcloud "github.com/pulumi/pulumi-hcloud/sdk/go/hcloud"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/types"
+	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
 )
 
@@ -41,6 +43,12 @@ type registry struct {
 
 	hetznerCompOnce sync.Once
 	hetznerComp     *hetzner.HetznerCompute
+
+	cfProviderOnce sync.Once
+	cfProvider     *cf.Provider
+
+	cfDnsOnce sync.Once
+	cfDns     *cfprovider.CloudflareDns
 }
 
 // BuildRegistry constructs a ProviderRegistry from the resolved (merged)
@@ -103,8 +111,31 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 	}
 }
 
-func (*registry) DNS(name string) (types.DnsProvider, error) {
-	return nil, unknownProvider(name)
+func (r *registry) cfProv() *cf.Provider {
+	r.cfProviderOnce.Do(func() {
+		if r.ctx == nil {
+			return
+		}
+		token := providerCfgString(r.config, "cloudflare", "apiToken")
+		p, _ := cf.NewProvider(r.ctx, "cloudflare", &cf.ProviderArgs{
+			ApiToken: pulumi.StringPtr(token),
+		})
+		r.cfProvider = p
+	})
+	return r.cfProvider
+}
+
+func (r *registry) DNS(name string) (types.DnsProvider, error) {
+	switch name {
+	case "cloudflare":
+		r.cfDnsOnce.Do(func() {
+			zoneID := providerCfgString(r.config, "cloudflare", "zoneId")
+			r.cfDns = cfprovider.New(zoneID, r.cfProv())
+		})
+		return r.cfDns, nil
+	default:
+		return nil, unknownProvider(name)
+	}
 }
 
 func (*registry) Database(name string) (types.DatabaseProvider, error) {
