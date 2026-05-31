@@ -1,15 +1,19 @@
 // Package registry maps a provider name (e.g. "hetzner") to the implementation
-// satisfying a provider interface. Real providers land in later PRs; this phase
-// ships a stub that returns "unknown provider" for every lookup, plus the
-// MergeProviders helper used to fold per-region overrides onto the global
-// provider config.
+// satisfying a provider interface. Real providers are constructed lazily on
+// first use and memoised via sync.Once so that a provider object is created at
+// most once per BuildRegistry call.
 package registry
 
 import (
 	"fmt"
 	"maps"
+	"sync"
 
+	hcloud "github.com/pulumi/pulumi-hcloud/sdk/go/hcloud"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/types"
+	"github.com/wardnet/inforge/providers/hetzner"
 )
 
 // ProviderRegistry resolves provider names to provider implementations for one
@@ -23,56 +27,84 @@ type ProviderRegistry interface {
 	ManifestContributors() []types.ComputeInstanceManifestContributor
 }
 
-// stubRegistry is the phase-1 registry: it holds the resolved provider config
-// and SSH material but registers no providers, so every lookup is an error.
-//
-// When real providers are added, each lookup will construct (and memoise) the
-// underlying Pulumi provider and adapter on first use. The intended pattern is
-// a per-provider sync.Once guarding a cached value, e.g.:
-//
-//	var once sync.Once
-//	var hcloud *hcloud.Provider
-//	once.Do(func() { hcloud = newHcloud(r.config["hetzner"]) })
-//
-// so that a provider object is created at most once per BuildRegistry call and
-// shared across every resource that names it.
-type stubRegistry struct {
-	config map[string]map[string]any
-	ssh    types.SSHConfig
+type registry struct {
+	ctx         *pulumi.Context
+	config      map[string]map[string]any
+	ssh         types.SSHConfig
+	regionTable regions.Table
+
+	hetznerNetOnce sync.Once
+	hetznerNet     *hetzner.HetznerNetwork
 }
 
 // BuildRegistry constructs a ProviderRegistry from the resolved (merged)
-// provider config and SSH material for one region.
-func BuildRegistry(config map[string]map[string]any, ssh types.SSHConfig) ProviderRegistry {
-	return &stubRegistry{config: config, ssh: ssh}
+// provider config, SSH material, and region table for one region. ctx is stored
+// and used lazily when provider objects are first constructed — it must be the
+// context passed to the Pulumi program's run function.
+func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, ssh types.SSHConfig, regionTable regions.Table) ProviderRegistry {
+	return &registry{
+		ctx:         ctx,
+		config:      config,
+		ssh:         ssh,
+		regionTable: regionTable,
+	}
 }
 
-func (*stubRegistry) Network(name string) (types.NetworkProvider, error) {
+func (r *registry) Network(name string) (types.NetworkProvider, error) {
+	switch name {
+	case "hetzner":
+		r.hetznerNetOnce.Do(func() {
+			overrides := hetzner.ExtractRegionConfigs(r.regionTable)
+			if r.ctx == nil {
+				// No Pulumi context (e.g. unit tests): create without a provider.
+				r.hetznerNet = hetzner.New(nil, overrides)
+				return
+			}
+			token := providerCfgString(r.config, "hetzner", "apiToken")
+			p, _ := hcloud.NewProvider(r.ctx, "hcloud", &hcloud.ProviderArgs{
+				Token: pulumi.String(token),
+			})
+			r.hetznerNet = hetzner.New(p, overrides)
+		})
+		return r.hetznerNet, nil
+	default:
+		return nil, unknownProvider(name)
+	}
+}
+
+func (*registry) Compute(name string) (types.ComputeProvider, error) {
 	return nil, unknownProvider(name)
 }
 
-func (*stubRegistry) Compute(name string) (types.ComputeProvider, error) {
+func (*registry) DNS(name string) (types.DnsProvider, error) {
 	return nil, unknownProvider(name)
 }
 
-func (*stubRegistry) DNS(name string) (types.DnsProvider, error) {
+func (*registry) Database(name string) (types.DatabaseProvider, error) {
 	return nil, unknownProvider(name)
 }
 
-func (*stubRegistry) Database(name string) (types.DatabaseProvider, error) {
+func (*registry) Secrets(name string) (types.SecretsBackendProvider, error) {
 	return nil, unknownProvider(name)
 }
 
-func (*stubRegistry) Secrets(name string) (types.SecretsBackendProvider, error) {
-	return nil, unknownProvider(name)
-}
-
-func (*stubRegistry) ManifestContributors() []types.ComputeInstanceManifestContributor {
+func (*registry) ManifestContributors() []types.ComputeInstanceManifestContributor {
 	return nil
 }
 
 func unknownProvider(name string) error {
 	return fmt.Errorf("unknown provider: %q", name)
+}
+
+// providerCfgString returns the string value for key in cfg[provider], or ""
+// if the provider or key is absent or the value is not a string.
+func providerCfgString(cfg map[string]map[string]any, provider, key string) string {
+	if v, ok := cfg[provider][key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // MergeProviders folds per-region provider overrides onto the global provider
