@@ -8,6 +8,7 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
+	"github.com/wardnet/inforge/providers/infisical"
 	"github.com/wardnet/inforge/providers/neon"
 )
 
@@ -40,15 +41,33 @@ func TestRegistryUnknownProvider(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown provider: "unknown-db"`)
 
-	_, err = r.Secrets("infisical")
-	assert.Error(t, err)
+	// "infisical" is a known secrets provider — must succeed.
+	sp, err := r.Secrets("infisical")
+	require.NoError(t, err)
+	assert.IsType(t, (*infisical.InfisicalSecretsAdapter)(nil), sp)
+
+	// Unknown secrets provider errors.
+	_, err = r.Secrets("unknown-secrets")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown provider: "unknown-secrets"`)
 
 	// Unknown network provider still errors.
 	_, err = r.Network("unknown-cloud")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown provider: "unknown-cloud"`)
 
+	// No infisical key in config → no manifest contributors.
 	assert.Empty(t, r.ManifestContributors())
+}
+
+func TestManifestContributorsWithInfisical(t *testing.T) {
+	cfg := map[string]map[string]any{
+		"infisical": {"clientId": "cid", "clientSecret": "csec", "siteUrl": "https://app.infisical.com"},
+	}
+	r := BuildRegistry(nil, cfg, types.SSHConfig{}, nil)
+	contributors := r.ManifestContributors()
+	require.Len(t, contributors, 1)
+	assert.IsType(t, (*infisical.InfisicalSecretsAdapter)(nil), contributors[0])
 }
 
 func TestMergeProviders(t *testing.T) {

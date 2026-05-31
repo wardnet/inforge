@@ -16,6 +16,7 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
+	"github.com/wardnet/inforge/providers/infisical"
 	"github.com/wardnet/inforge/providers/neon"
 )
 
@@ -53,6 +54,9 @@ type registry struct {
 
 	neonDbOnce sync.Once
 	neonDb     *neon.NeonDatabaseAdapter
+
+	infisicalOnce    sync.Once
+	infisicalSecrets *infisical.InfisicalSecretsAdapter
 }
 
 // BuildRegistry constructs a ProviderRegistry from the resolved (merged)
@@ -155,12 +159,33 @@ func (r *registry) Database(name string) (types.DatabaseProvider, error) {
 	}
 }
 
-func (*registry) Secrets(name string) (types.SecretsBackendProvider, error) {
-	return nil, unknownProvider(name)
+func (r *registry) Secrets(name string) (types.SecretsBackendProvider, error) {
+	switch name {
+	case "infisical":
+		return r.infisicalAdapter(), nil
+	default:
+		return nil, unknownProvider(name)
+	}
 }
 
-func (*registry) ManifestContributors() []types.ComputeInstanceManifestContributor {
-	return []types.ComputeInstanceManifestContributor{}
+func (r *registry) ManifestContributors() []types.ComputeInstanceManifestContributor {
+	if _, ok := r.config["infisical"]; !ok {
+		return []types.ComputeInstanceManifestContributor{}
+	}
+	return []types.ComputeInstanceManifestContributor{r.infisicalAdapter()}
+}
+
+// infisicalAdapter lazily creates the shared InfisicalSecretsAdapter.
+// Subsequent calls return the cached instance.
+func (r *registry) infisicalAdapter() *infisical.InfisicalSecretsAdapter {
+	r.infisicalOnce.Do(func() {
+		clientId := providerCfgString(r.config, "infisical", "clientId")
+		clientSecret := providerCfgString(r.config, "infisical", "clientSecret")
+		bootstrapSecretEnc := providerCfgString(r.config, "infisical", "bootstrapSecretEnc")
+		siteUrl := providerCfgString(r.config, "infisical", "siteUrl")
+		r.infisicalSecrets = infisical.New(clientId, clientSecret, bootstrapSecretEnc, siteUrl)
+	})
+	return r.infisicalSecrets
 }
 
 func unknownProvider(name string) error {
