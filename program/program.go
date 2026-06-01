@@ -1,12 +1,7 @@
-// Command program is the Pulumi program that turns an environment's resolved
-// resources into a deployment. It mirrors the TypeScript toolkit's index.ts,
-// adapted to the improved model: bootstrap-free manifest assembly, service
-// awareness, and per-region iteration.
-//
-// This phase ships it as a compiling stub. Real providers land in later PRs, so
-// at preview every provider lookup returns "unknown provider" — which is the
-// expected behaviour until the compute-provider PR wires real implementations.
-package main
+// Package program is the Pulumi program that turns an environment's resolved
+// resources into a deployment. It is used as an inline program via the
+// Automation API in the inforge CLI.
+package program
 
 import (
 	"fmt"
@@ -23,11 +18,9 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 )
 
-func main() {
-	pulumi.Run(run)
-}
-
-func run(ctx *pulumi.Context) error {
+// Run is the Pulumi program entry point, passed to the Automation API as an
+// inline program source.
+func Run(ctx *pulumi.Context) error {
 	cfg := config.New(ctx, "")
 	env := cfg.Require("environment")
 	dir := "./resources"
@@ -48,8 +41,6 @@ func run(ctx *pulumi.Context) error {
 		return err
 	}
 
-	// The deploy descriptor is a pure function of resolved resources; surface it
-	// as a stack output for the deployment workflow.
 	desc, err := service.BuildDeployDescriptor(env, vars.BaseDomain, byRegion, regionTable)
 	if err != nil {
 		return err
@@ -157,9 +148,6 @@ func run(ctx *pulumi.Context) error {
 	return nil
 }
 
-// assembleManifest builds a compute's manifest from the registry's contributors.
-// Secrets, if any, are encrypted to a freshly minted key K (the bootstrap
-// trigger lives in the manifest data, not a flag).
 func assembleManifest(reg registry.ProviderRegistry, spec types.ComputeSpec, res types.Resources, env, region, slug string) (manifest.Result, error) {
 	base := manifest.Base{
 		Version:   1,
@@ -181,8 +169,6 @@ func assembleManifest(reg registry.ProviderRegistry, spec types.ComputeSpec, res
 	return manifest.Generate(base, contributions, mat.Recipient)
 }
 
-// subdomainFor returns the DNS subdomain for a compute instance, falling back
-// to the compute name when no DNS record targets it.
 func subdomainFor(key, name string, dns []types.DnsSpec) string {
 	for _, d := range dns {
 		if d.Compute == key {

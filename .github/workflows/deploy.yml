@@ -1,0 +1,45 @@
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Stack name / environment to deploy (e.g. prd)
+        type: string
+        required: true
+      stack_config:
+        description: Path to the stack config file (e.g. inforge.prd.yaml)
+        type: string
+        required: true
+    secrets:
+      HCLOUD_TOKEN:
+        required: false
+      CLOUDFLARE_API_TOKEN:
+        required: false
+      INFISICAL_CLIENT_ID:
+        required: false
+      INFISICAL_CLIENT_SECRET:
+        required: false
+
+jobs:
+  deploy:
+    name: deploy / ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: wardnet/inforge/.github/actions/install@v1
+
+      - name: inforge deploy
+        run: |
+          inforge deploy --yes \
+            --stack  "${{ inputs.environment }}" \
+            --stack-config "${{ inputs.stack_config }}"
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}

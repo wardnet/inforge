@@ -1,0 +1,44 @@
+name: Install inforge
+description: Download and install the inforge binary and Pulumi provider plugins
+
+inputs:
+  version:
+    description: inforge version to install (omit or set to "latest" for the latest release)
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve version
+      id: ver
+      shell: bash
+      run: |
+        if [[ "${{ inputs.version }}" == "latest" ]]; then
+          VERSION=$(curl -fsSL https://api.github.com/repos/wardnet/inforge/releases/latest \
+            | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+        else
+          VERSION="${{ inputs.version }}"
+          VERSION="${VERSION#v}"
+        fi
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Download inforge
+      shell: bash
+      run: |
+        VERSION="${{ steps.ver.outputs.version }}"
+        OS="${{ runner.os }}"
+        ARCH="${{ runner.arch }}"
+        case "${ARCH}" in
+          X64)   ARCH="amd64" ;;
+          ARM64) ARCH="arm64" ;;
+        esac
+        OS="${OS,,}"
+        ARCHIVE="inforge_${VERSION}_${OS}_${ARCH}.tar.gz"
+        URL="https://github.com/wardnet/inforge/releases/download/v${VERSION}/${ARCHIVE}"
+        curl -fsSL "${URL}" | tar -xz inforge
+        chmod +x inforge
+        echo "$PWD" >> "$GITHUB_PATH"
+
+    - name: Install provider plugins
+      shell: bash
+      run: inforge plugins install
