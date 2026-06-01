@@ -70,7 +70,7 @@ const config: Config = {
         {
           title: 'Docs',
           items: [
-            { label: 'Getting Started', to: '/getting-started/intro' },
+            { label: 'Getting Started', to: '/' },
             { label: 'CLI Reference', to: '/cli/validate' },
             { label: 'Resource Reference', to: '/resources/network' },
           ],
