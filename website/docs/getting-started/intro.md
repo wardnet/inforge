@@ -30,7 +30,7 @@ multi-provider infrastructure model with built-in secret bootstrapping for VMs.
 
 ## Quick links
 
-- [Installation](./installation)
-- [Quick Start](./quick-start)
-- [Project Layout](./project-layout)
+- [Installation](/getting-started/installation)
+- [Quick Start](/getting-started/quick-start)
+- [Project Layout](/getting-started/project-layout)
 - [Resource Reference](/resources/network)
