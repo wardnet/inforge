@@ -33,6 +33,24 @@ Downloads the latest `inforge` binary and runs `inforge plugins install`. Accept
 | `reconcile.yml` | `workflow_call` + schedule | Detect and fix drift |
 | `service-release.yml` | `workflow_call` | Release service code to a provisioned VM |
 
+## Required permissions
+
+:::caution
+The reusable workflows post comments to pull requests and write deployment statuses.
+Your calling workflows **must** declare `permissions` explicitly — otherwise GitHub
+blocks the run at startup when the repository's default token permission is `read`.
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+```
+
+Add this block at the **workflow level** (not inside a job) in any caller that triggers
+on `pull_request`. See [GitHub docs on default permissions](https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token)
+for background.
+:::
+
 ## Typical consumer setup
 
 In your infrastructure repo, create three workflow files:
@@ -41,7 +59,11 @@ In your infrastructure repo, create three workflow files:
 name: PR Checks
 on:
   pull_request:
-    paths: ["resources/**"]
+    paths: ["resources/**", "inforge*.yaml"]
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   validate:
@@ -66,7 +88,11 @@ name: Deploy
 on:
   push:
     branches: [main]
-    paths: ["resources/**"]
+    paths: ["resources/**", "inforge*.yaml"]
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
   deploy:
@@ -88,6 +114,11 @@ on:
   schedule:
     - cron: "0 4 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
 
 jobs:
   reconcile:
