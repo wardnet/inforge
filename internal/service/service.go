@@ -51,17 +51,17 @@ func Unit(spec types.ServiceSpec) string {
 // payload (the host DNS name), the folder to extract it into, and the unit to
 // restart.
 type DeployTarget struct {
-	Service string `yaml:"service"`
-	HostDNS string `yaml:"host_dns"`
-	Folder  string `yaml:"folder"`
-	Unit    string `yaml:"unit"`
+	Service string `yaml:"service"  json:"service"`
+	HostDNS string `yaml:"host_dns" json:"host_dns"`
+	Folder  string `yaml:"folder"   json:"folder"`
+	Unit    string `yaml:"unit"     json:"unit"`
 }
 
 // DeployDescriptor is the per-environment set of deploy targets, derived purely
 // from resolved resources.
 type DeployDescriptor struct {
-	Environment string         `yaml:"environment"`
-	Targets     []DeployTarget `yaml:"targets"`
+	Environment string         `yaml:"environment" json:"environment"`
+	Targets     []DeployTarget `yaml:"targets"     json:"targets"`
 }
 
 // BuildDeployDescriptor derives the deploy descriptor for an environment from
