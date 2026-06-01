@@ -2,21 +2,41 @@
 
 [![CI](https://github.com/wardnet/inforge/actions/workflows/ci.yml/badge.svg)](https://github.com/wardnet/inforge/actions/workflows/ci.yml)
 [![Release](https://github.com/wardnet/inforge/actions/workflows/release.yml/badge.svg)](https://github.com/wardnet/inforge/actions/workflows/release.yml)
+[![Docs](https://img.shields.io/badge/docs-wardnet.github.io%2Finforge-blue)](https://wardnet.github.io/inforge/)
 
-Inforge is a golang toolchain that turns declarative infrastructure definitions into real deployments using Pulumi and GitHub Actions. It enforces an opinionated structure by environment and region, enabling consistent multi-region, multi-provider infrastructure across multiple cloud providers.
+**inforge** turns declarative YAML resource definitions into real cloud deployments using Pulumi and GitHub Actions. It enforces an opinionated multi-region, multi-provider infrastructure model with built-in VM secret bootstrapping.
+
+📖 **Full documentation:** [wardnet.github.io/inforge](https://wardnet.github.io/inforge/)
+
+## Quick install
+
+```bash
+# macOS (Apple Silicon)
+curl -L https://github.com/wardnet/inforge/releases/latest/download/inforge_latest_darwin_arm64.tar.gz \
+  | tar -xz inforge && chmod +x inforge && sudo mv inforge /usr/local/bin/
+
+inforge plugins install
+```
+
+See [Installation](https://wardnet.github.io/inforge/getting-started/installation) for all platforms.
 
 ## Binaries
 
-This repository builds three statically-linked, fully self-contained binaries — no Go runtime or shared libraries are required to run them:
+This repository builds three statically-linked, fully self-contained binaries:
 
 | Binary | Purpose |
-|---|---|
-| `inforge` | The CLI you invoke directly. |
-| `pulumi-resource-neon` | Pulumi resource provider plugin for Neon. |
-| `pulumi-resource-infisical` | Pulumi resource provider plugin for Infisical. |
+|--------|---------|
+| `inforge` | The CLI you invoke directly |
+| `pulumi-resource-neon` | Pulumi provider plugin for Neon PostgreSQL |
+| `pulumi-resource-infisical` | Pulumi provider plugin for Infisical secrets |
 
-> **Note:** `pulumi-resource-neon` and `pulumi-resource-infisical` are Pulumi provider plugins, not user-facing commands. They are installed automatically by `inforge plugins install`, which downloads only the providers a project needs from the matching GitHub release. You never invoke them directly.
+The provider plugins are installed automatically by `inforge plugins install` — you never invoke them directly.
 
-## Installation
+## In GitHub Actions
 
-Each [release](https://github.com/wardnet/inforge/releases) publishes per-binary archives (`tar.gz` / `zip`) and raw, uncompressed binaries for every supported `os`/`arch`, alongside a `checksums.txt`. Download the `inforge` binary for your platform and run it — nothing else to install.
+```yaml
+- uses: wardnet/inforge/.github/actions/install@v1
+```
+
+Then call the reusable workflows for validate/preview/deploy/reconcile.
+See [GitHub Actions: Overview](https://wardnet.github.io/inforge/github-actions/overview).

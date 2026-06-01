@@ -1,5 +1,25 @@
 {
   "agents": {
+    "go": [
+      {
+        "name": "performance",
+        "model": "sonnet",
+        "prompt_file": "prompts/go/performance.md",
+        "description": "Performance review: goroutine leaks, allocation pressure, N+1, HTTP client reuse."
+      },
+      {
+        "name": "security",
+        "model": "opus",
+        "prompt_file": "prompts/go/security.md",
+        "description": "Security review: injection, secrets, CI/CD supply chain, bootstrap trust, SSRF."
+      },
+      {
+        "name": "best-practices",
+        "model": "sonnet",
+        "prompt_file": "prompts/go/best-practices.md",
+        "description": "Logic bugs, error handling, Go/Cobra idioms, workflow correctness, convention violations."
+      }
+    ],
     "kotlin-spring": [
       {
         "name": "performance",

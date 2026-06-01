@@ -28,18 +28,66 @@ jobs:
     environment: ${{ inputs.environment }}
     permissions:
       contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v6
 
       - uses: wardnet/inforge/.github/actions/install@v1
 
       - name: inforge preview
+        id: preview
         run: |
           inforge preview \
             --stack  "${{ inputs.environment }}" \
-            --stack-config "${{ inputs.stack_config }}"
+            --stack-config "${{ inputs.stack_config }}" \
+            --output json \
+            --allow-multiple \
+            > /tmp/preview.json 2>/tmp/preview-human.txt
         env:
           HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
           INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+
+      - name: Render HTML report
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          ENV="${{ inputs.environment }}"
+          STATUS="${{ job.status }}"
+          ICON=$([[ "$STATUS" == "success" ]] && echo "✅" || echo "❌")
+
+          # Parse summary counts from JSON output (graceful fallback if missing)
+          CREATE=$(jq -r '.summary.create // 0' /tmp/preview.json 2>/dev/null || echo 0)
+          UPDATE=$(jq -r '.summary.update // 0' /tmp/preview.json 2>/dev/null || echo 0)
+          DELETE=$(jq -r '.summary.delete // 0' /tmp/preview.json 2>/dev/null || echo 0)
+          SAME=$(jq -r '.summary.same // 0' /tmp/preview.json 2>/dev/null || echo 0)
+
+          HUMAN=$(cat /tmp/preview-human.txt 2>/dev/null || echo "No output captured.")
+
+          HTML="<h3>${ICON} inforge preview — <code>${ENV}</code></h3>
+          <table>
+          <tr><th>➕ Create</th><th>✏️ Update</th><th>🗑️ Delete</th><th>= Same</th></tr>
+          <tr>
+            <td style='color:green;font-weight:bold'>${CREATE}</td>
+            <td style='color:orange;font-weight:bold'>${UPDATE}</td>
+            <td style='color:red;font-weight:bold'>${DELETE}</td>
+            <td>${SAME}</td>
+          </tr>
+          </table>
+          <details><summary>Full output</summary>
+
+          <pre>${HUMAN}</pre>
+          </details>"
+
+          # Write to job summary
+          echo "$HTML" >> "$GITHUB_STEP_SUMMARY"
+
+          # Post as PR comment
+          if [[ -n "$PR_NUMBER" ]]; then
+            gh pr comment "$PR_NUMBER" \
+              --repo "${{ github.repository }}" \
+              --body "$HTML"
+          fi

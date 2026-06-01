@@ -1,14 +1,22 @@
 
 # --- inforge bootstrap (appended) -------------------------------------------
-# Runs once at first boot. If a bootstrap.yaml is present, the manifest contains
-# secrets that were SOPS/age-encrypted to the minted key K. This step redeems
-# the one-time token with the escrow for K, decrypts the secret fields, then
-# re-encrypts them to the host's own SSH key so K is never needed again.
+# Runs once at first boot. If bootstrap.yaml is present, the manifest contains
+# secrets encrypted with SOPS/age to key K. This step redeems the one-time
+# token with the escrow service for K, decrypts the manifest secret fields,
+# then re-encrypts them to the host's own SSH key so K is never needed again.
 set -euo pipefail
 
 BOOTSTRAP_FILE=/etc/wardnet/bootstrap.yaml
 MANIFEST_FILE=/etc/wardnet/manifest.yaml
 AGE_KEY_FILE=/root/.config/sops/age/keys.txt
+
+# Write the bootstrap doc provisioned at VM creation time, if any.
+bootstrap_content='{{bootstrap_doc}}'
+if [ -n "$bootstrap_content" ]; then
+  mkdir -p "$(dirname "$BOOTSTRAP_FILE")"
+  printf '%s\n' "$bootstrap_content" > "$BOOTSTRAP_FILE"
+  chmod 600 "$BOOTSTRAP_FILE"
+fi
 
 # No bootstrap.yaml => the manifest has no secrets; nothing to do.
 [ -f "$BOOTSTRAP_FILE" ] || exit 0
@@ -17,11 +25,12 @@ escrow_url=$(yq -r '.escrow_url' "$BOOTSTRAP_FILE")
 token=$(yq -r '.token' "$BOOTSTRAP_FILE")
 tenant=$(yq -r '.tenant' "$BOOTSTRAP_FILE")
 
-# Redeem the one-time token for the age identity K (scoped to this tenant).
+# Redeem the one-time token for the age identity K (one redemption only).
+# The repository field scopes the lookup so tokens can't cross repo boundaries.
 mkdir -p "$(dirname "$AGE_KEY_FILE")"
-curl -fsSL -X POST "$escrow_url/redeem" \
-  --data-urlencode "token=$token" \
-  --data-urlencode "tenant=$tenant" > "$AGE_KEY_FILE"
+curl -fsSL -X POST "$escrow_url/bootstrap" \
+  -H "Content-Type: application/json" \
+  --data "{\"token\":\"$token\",\"repository\":\"$tenant\"}" | jq -r '.key' > "$AGE_KEY_FILE"
 chmod 600 "$AGE_KEY_FILE"
 
 # Decrypt in place with K, then re-key the SOPS data key to the host SSH key

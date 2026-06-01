@@ -1,0 +1,7 @@
+name = "inforge-escrow-worker"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "BOOTSTRAP_KV"
+id = "c85f00e86229403181d67a6f994175e7"

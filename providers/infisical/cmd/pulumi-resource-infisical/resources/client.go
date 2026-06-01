@@ -41,7 +41,7 @@ func infisicalDo(ctx context.Context, method, url, token string, body any) ([]by
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("infisical: read response: %w", err)
 	}

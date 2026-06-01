@@ -22,6 +22,10 @@ type Vars struct {
 	DeployPublicKey string
 	Instance        int
 	Manifest        string
+	// BootstrapDoc is the YAML content of bootstrap.yaml written to the VM at
+	// first boot when the manifest contains secret values. Empty when the
+	// manifest has no secrets (no bootstrap needed).
+	BootstrapDoc string
 }
 
 // placeholders maps template tokens to their replacement values.
@@ -31,6 +35,7 @@ func (v Vars) placeholders() *strings.Replacer {
 		"{{deploy_public_key}}", v.DeployPublicKey,
 		"{{instance}}", strconv.Itoa(v.Instance),
 		"{{manifest}}", v.Manifest,
+		"{{bootstrap_doc}}", v.BootstrapDoc,
 	)
 }
 
@@ -47,8 +52,8 @@ func Assemble(absolutePath string, vars Vars) (string, error) {
 // Render substitutes the placeholders in a cloud-init template string and
 // appends the bootstrap step. It is the pure core of Assemble.
 func Render(template string, vars Vars) string {
-	rendered := vars.placeholders().Replace(template)
-	return rendered + "\n" + BootstrapScript()
+	r := vars.placeholders()
+	return r.Replace(template) + "\n" + r.Replace(BootstrapScript())
 }
 
 // BootstrapScript returns the embedded first-boot bootstrap step.

@@ -1,0 +1,78 @@
+name: Service Release
+
+# Reusable workflow for releasing a service to a target environment.
+# Service repos call this after building their artifact:
+#
+#   uses: wardnet/inforge/.github/workflows/service-release.yml@v1
+#   with:
+#     service: api-server
+#     environment: qa
+#   secrets:
+#     deploy_ssh_key: ${{ secrets.DEPLOY_SSH_KEY }}
+#
+# Reads deployments/inforge.yaml (platform + service list) and
+# deployments/<service>.yaml (per-env artifact path) from the calling repo.
+# Resolves the deploy target (host, folder, unit) from the infra Pulumi stack
+# at runtime — no descriptor file needs to be committed anywhere.
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: Service name (must match deployments/<service>.yaml)
+        required: true
+        type: string
+      environment:
+        description: Target environment (e.g. qa, prd)
+        required: true
+        type: string
+      stack_config:
+        description: Path to the infra stack config file (default: inforge.<env>.yaml)
+        required: false
+        default: ""
+        type: string
+      deploy_dir:
+        description: Path to the deployments directory (default: ./deployments)
+        required: false
+        default: ./deployments
+        type: string
+      dry_run:
+        description: Resolve and print the deploy target without delivering
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      deploy_ssh_key:
+        description: Private SSH deploy key for the target host
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: release / ${{ inputs.service }} → ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: wardnet/inforge/.github/actions/install@v1
+
+      - name: Write SSH deploy key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.deploy_ssh_key }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: inforge release
+        env:
+          INFORGE_DEPLOY_KEY: ~/.ssh/deploy_key
+        run: |
+          set -euo pipefail
+          inforge release \
+            --service    "${{ inputs.service }}" \
+            --env        "${{ inputs.environment }}" \
+            --deploy-dir "${{ inputs.deploy_dir }}" \
+            ${{ inputs.stack_config != '' && format('--stack-config "{0}"', inputs.stack_config) || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }}

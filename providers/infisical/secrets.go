@@ -163,6 +163,12 @@ func (a *InfisicalSecretsAdapter) ContributeToManifest(
 ) (types.ManifestContribution, error) {
 	for _, s := range resources.Secrets {
 		if s.Container == spec.Container && s.Provider == "infisical" {
+			if a.bootstrapSecretEnc == "" {
+				return types.ManifestContribution{}, fmt.Errorf(
+					"infisical: bootstrapSecretEnc is empty for container %q — cannot write credentials into manifest",
+					s.Container,
+				)
+			}
 			return types.ManifestContribution{
 				"secrets": map[string]any{
 					"provider":    "infisical",

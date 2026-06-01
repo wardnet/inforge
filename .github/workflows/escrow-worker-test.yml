@@ -1,0 +1,77 @@
+name: Test Escrow Worker
+
+# PUT /token validates the OIDC token ref claim is refs/heads/main.
+# Always dispatch this workflow from the main branch or it will 401.
+
+on:
+  workflow_dispatch:
+    inputs:
+      worker_url:
+        description: "Worker base URL (falls back to CLOUDFLARE_WORKER_URL repo variable)"
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate one-time test token
+        id: gen
+        run: |
+          set -euo pipefail
+          printf "test_token=ci-test-%s\n" \
+            "$(openssl rand -hex 8)" >> "$GITHUB_OUTPUT"
+
+      - name: "PUT /token — store key"
+        env:
+          WORKER_URL: ${{ inputs.worker_url || vars.CLOUDFLARE_WORKER_URL }}
+          TEST_TOKEN: ${{ steps.gen.outputs.test_token }}
+        run: |
+          set -euo pipefail
+          # Fetch the OIDC token inline so it is never persisted to step outputs.
+          OIDC_TOKEN=$(curl -fsSL \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=inforge-escrow-worker" \
+            | jq -r '.value')
+          [ -n "${OIDC_TOKEN}" ] || { echo "Failed to fetch OIDC token"; exit 1; }
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X PUT "${WORKER_URL}/token" \
+            -H "Authorization: Bearer ${OIDC_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-raw "{\"token\":\"${TEST_TOKEN}\",\"key\":\"ci-test-key\"}")
+          echo "PUT /token → ${STATUS}"
+          [ "${STATUS}" = "200" ]
+
+      - name: "POST /bootstrap — retrieve key"
+        env:
+          WORKER_URL: ${{ inputs.worker_url || vars.CLOUDFLARE_WORKER_URL }}
+          TEST_TOKEN: ${{ steps.gen.outputs.test_token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST "${WORKER_URL}/bootstrap" \
+            -H "Content-Type: application/json" \
+            --data-raw "{\"token\":\"${TEST_TOKEN}\",\"repository\":\"${GITHUB_REPOSITORY}\"}")
+          BODY=$(echo "${RESPONSE}" | head -1)
+          STATUS=$(echo "${RESPONSE}" | tail -1)
+          echo "POST /bootstrap → ${STATUS}: ${BODY}"
+          [ "${STATUS}" = "200" ]
+          echo "${BODY}" | jq -e '.key == "ci-test-key"'
+
+      - name: "POST /bootstrap again — verify token is burned"
+        env:
+          WORKER_URL: ${{ inputs.worker_url || vars.CLOUDFLARE_WORKER_URL }}
+          TEST_TOKEN: ${{ steps.gen.outputs.test_token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${WORKER_URL}/bootstrap" \
+            -H "Content-Type: application/json" \
+            --data-raw "{\"token\":\"${TEST_TOKEN}\",\"repository\":\"${GITHUB_REPOSITORY}\"}")
+          echo "POST /bootstrap (second attempt) → ${STATUS} (expect 404)"
+          [ "${STATUS}" = "404" ]

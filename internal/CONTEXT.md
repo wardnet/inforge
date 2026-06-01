@@ -93,9 +93,11 @@ The one-time first-boot step a VM performs when its manifest has secret values: 
 the escrow service, decrypt, and re-encrypt the values to the host's SSH key.
 
 **Escrow service**:
-The external, multi-tenant key-escrow inforge integrates with (owned in `wardnet-infrastructure`).
-inforge mints key `K` + one-time token `T`, registers `K` under `T`, and the VM redeems `T`→`K`.
-inforge ships no escrow code.
+The multi-tenant key-escrow inforge owns and operates as a Cloudflare Worker (`escrow-worker/`).
+inforge mints key `K` + one-time token `T`, registers `K` under `T` via the escrow, and the VM
+redeems `T`→`K` at first boot. Open to any GitHub Actions workflow; the `repository` claim in
+the GitHub OIDC token becomes the tenant, enforcing cross-repo isolation. No consumer needs to
+host their own escrow.
 
 **Tenant**:
 The escrow isolation boundary = the **repo** (`owner/repo`). Keys provisioned by one repo cannot be

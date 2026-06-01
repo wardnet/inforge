@@ -5,6 +5,7 @@ package program
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
@@ -26,6 +27,22 @@ func Run(ctx *pulumi.Context) error {
 	dir := "./resources"
 	if d := cfg.Get("dir"); d != "" {
 		dir = d
+	}
+
+	// Escrow config — required only when a manifest has secret values.
+	// escrow_url and oidc_token can be set via stack config or the inforge CLI.
+	// tenant defaults to the GITHUB_REPOSITORY env var (set automatically by
+	// GitHub Actions).
+	escrowURL := cfg.Get("escrow_url")
+	oidcToken := cfg.Get("oidc_token")
+	tenant := cfg.Get("tenant")
+	if tenant == "" {
+		tenant = os.Getenv("GITHUB_REPOSITORY")
+	}
+
+	var escrowClient bootstrap.EscrowClient
+	if escrowURL != "" && oidcToken != "" {
+		escrowClient = bootstrap.NewHTTPEscrowClient(escrowURL, oidcToken, nil)
 	}
 
 	vars, err := loader.LoadVariables(env, dir)
@@ -82,10 +99,27 @@ func Run(ctx *pulumi.Context) error {
 		}
 
 		for _, spec := range res.Compute {
-			man, err := assembleManifest(reg, spec, res, env, region, slug)
+			man, mat, err := assembleManifest(reg, spec, res, env, region, slug)
 			if err != nil {
 				return err
 			}
+
+			var bootstrapDoc string
+			if man.BootstrapNeeded {
+				if escrowClient == nil {
+					return fmt.Errorf("compute %s/%s has secret values but escrow is not configured (set escrow_url and oidc_token)", region, spec.Name)
+				}
+				doc, regErr := bootstrap.Register(escrowClient, escrowURL, tenant, mat)
+				if regErr != nil {
+					return fmt.Errorf("register bootstrap key for %s/%s: %w", region, spec.Name, regErr)
+				}
+				docBytes, marshalErr := doc.Marshal()
+				if marshalErr != nil {
+					return fmt.Errorf("marshal bootstrap doc for %s/%s: %w", region, spec.Name, marshalErr)
+				}
+				bootstrapDoc = string(docBytes)
+			}
+
 			cp, err := reg.Compute(spec.Provider)
 			if err != nil {
 				return err
@@ -93,7 +127,7 @@ func Run(ctx *pulumi.Context) error {
 			for i := 1; i <= spec.InstanceCount; i++ {
 				key := naming.SpecKey(spec.Name, i)
 				domain := fmt.Sprintf("%s.%s.%s", subdomainFor(key, spec.Name, res.DNS), slug, vars.BaseDomain)
-				out, err := cp.Create(ctx, spec, networkOutputs[region][spec.Network], env, region, domain, man.Manifest)
+				out, err := cp.Create(ctx, spec, networkOutputs[region][spec.Network], env, region, domain, man.Manifest, bootstrapDoc)
 				if err != nil {
 					return err
 				}
@@ -148,7 +182,7 @@ func Run(ctx *pulumi.Context) error {
 	return nil
 }
 
-func assembleManifest(reg registry.ProviderRegistry, spec types.ComputeSpec, res types.Resources, env, region, slug string) (manifest.Result, error) {
+func assembleManifest(reg registry.ProviderRegistry, spec types.ComputeSpec, res types.Resources, env, region, slug string) (manifest.Result, bootstrap.Material, error) {
 	base := manifest.Base{
 		Version:   1,
 		Region:    region,
@@ -158,15 +192,28 @@ func assembleManifest(reg registry.ProviderRegistry, spec types.ComputeSpec, res
 	for _, c := range reg.ManifestContributors() {
 		contribution, err := c.ContributeToManifest(spec, res, env, region)
 		if err != nil {
-			return manifest.Result{}, err
+			return manifest.Result{}, bootstrap.Material{}, err
 		}
 		contributions = append(contributions, contribution)
 	}
+
+	// Probe without a real recipient: if there are no secret values, Generate
+	// returns early without touching the recipient, saving a Mint() call.
+	probe, err := manifest.Generate(base, contributions, "")
+	if err != nil {
+		return manifest.Result{}, bootstrap.Material{}, err
+	}
+	if !probe.BootstrapNeeded {
+		return probe, bootstrap.Material{}, nil
+	}
+
+	// Secrets are present: mint a fresh age key and re-generate with it.
 	mat, err := bootstrap.Mint()
 	if err != nil {
-		return manifest.Result{}, err
+		return manifest.Result{}, bootstrap.Material{}, err
 	}
-	return manifest.Generate(base, contributions, mat.Recipient)
+	result, err := manifest.Generate(base, contributions, mat.Recipient)
+	return result, mat, err
 }
 
 func subdomainFor(key, name string, dns []types.DnsSpec) string {

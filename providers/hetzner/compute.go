@@ -63,7 +63,7 @@ func (h *HetznerCompute) Create(
 	ctx *pulumi.Context,
 	spec types.ComputeSpec,
 	network types.NetworkOutputs,
-	env, abstractRegion, domain, manifest string,
+	env, abstractRegion, domain, manifest, bootstrapDoc string,
 ) (types.ComputeOutputs, error) {
 	if spec.Provider != "hetzner" {
 		return types.ComputeOutputs{}, fmt.Errorf("hetzner provider received spec with provider=%q", spec.Provider)
@@ -132,6 +132,7 @@ func (h *HetznerCompute) Create(
 			DeployPublicKey: h.deployPublicKey,
 			Instance:        instance,
 			Manifest:        manifest,
+			BootstrapDoc:    bootstrapDoc,
 		})
 		if ciErr != nil {
 			return types.ComputeOutputs{}, fmt.Errorf("assemble cloud-init for %s: %w", key, ciErr)
