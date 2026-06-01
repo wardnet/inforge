@@ -41,7 +41,7 @@ func neonDo(ctx context.Context, method, url, apiKey string, body any) ([]byte, 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("neon: read response: %w", err)
 	}

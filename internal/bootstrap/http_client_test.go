@@ -1,0 +1,52 @@
+package bootstrap
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestHTTPEscrowClientRegister(t *testing.T) {
+	var gotToken, gotKey string
+	var gotAuth string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPut, r.Method)
+		assert.Equal(t, "/token", r.URL.Path)
+		gotAuth = r.Header.Get("Authorization")
+
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		var payload map[string]string
+		require.NoError(t, json.Unmarshal(body, &payload))
+		gotToken = payload["token"]
+		gotKey = payload["key"]
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewHTTPEscrowClient(srv.URL, "test-oidc-jwt", nil)
+	err := c.Register("tok123", "age1key", "wardnet/my-repo")
+	require.NoError(t, err)
+
+	assert.Equal(t, "Bearer test-oidc-jwt", gotAuth)
+	assert.Equal(t, "tok123", gotToken)
+	assert.Equal(t, "age1key", gotKey)
+}
+
+func TestHTTPEscrowClientRegisterError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := NewHTTPEscrowClient(srv.URL, "bad-token", nil)
+	err := c.Register("tok", "key", "tenant")
+	assert.ErrorContains(t, err, "status 401")
+}

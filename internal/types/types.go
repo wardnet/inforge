@@ -111,9 +111,10 @@ type NetworkProvider interface {
 }
 
 // ComputeProvider creates one compute instance, wiring in its network, the
-// host domain, and the assembled manifest.
+// host domain, the assembled manifest, and the bootstrap document (empty when
+// the manifest has no secrets).
 type ComputeProvider interface {
-	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest string) (ComputeOutputs, error)
+	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest, bootstrapDoc string) (ComputeOutputs, error)
 }
 
 // DnsProvider creates a DNS record pointing at a compute instance.

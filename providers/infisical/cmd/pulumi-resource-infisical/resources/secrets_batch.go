@@ -54,6 +54,9 @@ func (*InfisicalSecretsBatch) Create(
 			fmt.Errorf("infisical: parse secretsJson: %w", err)
 	}
 
+	// N+1: one HTTP round-trip per secret key (POST + possible PATCH on 409).
+	// Infisical has no public batch upsert endpoint at time of writing; revisit
+	// if one is added to their API.
 	for key, value := range secrets {
 		if err := upsertSecret(ctx, req.Inputs.SiteUrl, token, req.Inputs.WorkspaceId, req.Inputs.EnvSlug, key, value); err != nil {
 			return infer.CreateResponse[InfisicalSecretsBatchState]{}, err

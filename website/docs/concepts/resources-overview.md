@@ -1,0 +1,52 @@
+---
+sidebar_position: 2
+---
+
+# Resources Overview
+
+inforge defines six resource types. Each resource is a single YAML file under
+`resources/<env>/<region>/<type>/`. All files are validated against embedded JSON schemas.
+
+## Resource types
+
+| Type | Directory | Description |
+|------|-----------|-------------|
+| [Network](../resources/network) | `network/` | VPC / network (Hetzner) |
+| [Compute](../resources/compute) | `compute/` | Virtual machine |
+| [DNS](../resources/dns) | `dns/` | DNS record (Cloudflare) |
+| [Database](../resources/database) | `database/` | Managed PostgreSQL (Neon) |
+| [Secrets](../resources/secrets) | `secrets/` | Secret references (Infisical) |
+| [Service](../resources/service) | `services/` | Application hosted on a VM |
+
+## Common fields
+
+Every resource has these required fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Resource name. Combined with `instance` to form the specKey. |
+| `container` | string | Logical grouping label (e.g. `bridge`, `ingress`). Used in URNs and tags. |
+| `provider` | string | Provider name (`hetzner`, `cloudflare`, `neon`, `infisical`). |
+
+:::info Container vs container runtime
+`container` is a grouping label, **not** a Docker/OCI container. Do not confuse it with
+a service delivery `type: container` (a reserved delivery mode for future pull-based deployments).
+:::
+
+## specKey
+
+A resource instance's identity is its **specKey**: `<name>-<NN>` zero-padded (e.g. `bridge-01`).
+
+For a Compute with `name: bridge` and `instance_count: 2`, inforge expands it into `bridge-01`
+and `bridge-02`. Other resources reference compute instances using their specKey as a foreign key.
+
+## Validation
+
+Run validation before every PR:
+
+```bash
+inforge validate prd
+```
+
+This checks every YAML file against the embedded JSON schemas, reports each file
+that fails, and exits non-zero if any file is invalid.

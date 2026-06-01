@@ -138,7 +138,7 @@ func TestComputeCreateReturnsPublicIP(t *testing.T) {
 			InstanceCount: 1,
 		}
 
-		out, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "")
+		out, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", "")
 		if err != nil {
 			return err
 		}
@@ -170,11 +170,11 @@ func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 
 		// Two consecutive Create calls for the same spec must succeed with
 		// different internal keys (bridge-01, bridge-02).
-		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "")
+		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", "")
 		if err != nil {
 			return err
 		}
-		_, err = h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "")
+		_, err = h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", "")
 		return err
 	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
 
@@ -192,7 +192,7 @@ func TestComputeCreateUnknownSizeReturnsError(t *testing.T) {
 			Name: "bridge", Container: "vpc", Provider: "hetzner",
 			Network: "vpc-01", Size: "XLARGE", Image: "ubuntu-24.04", InstanceCount: 1,
 		}
-		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "")
+		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", "")
 		if err == nil {
 			t.Error("expected error for unknown size, got nil")
 		}
