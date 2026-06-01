@@ -35,16 +35,18 @@ resources/
 Each YAML file under a resource type directory contains exactly one resource spec. The filename
 is used as a display hint but the identity of the resource is its `name` + `instance` fields.
 
-## deploy/
+## deployments/ (service repos only)
 
-inforge writes deploy descriptors here after a successful `deploy`:
+Service repos — not infra repos — contain a `deployments/` directory used by `inforge release`:
 
 ```
-deploy/
-└── <env>.yaml               # per-service host DNS + folder + systemd unit
+deployments/
+├── inforge.yaml             # platform repo + service list
+└── <service>.yaml           # per-environment artifact path for each service
 ```
 
-The `deploy-raw` reusable workflow reads these files to know where to push service payloads.
+`inforge release` reads these files to find the artifact and then resolves the target host,
+folder, and systemd unit live from the Pulumi stack at release time.
 
 ## .pulumi/ (or state backend)
 

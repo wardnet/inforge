@@ -65,7 +65,7 @@ SSH keys placed on every provisioned VM:
 
 - `authorizedKeys` — added to `/home/ubuntu/.ssh/authorized_keys` and the user's
   authorized_keys. Allows human access.
-- `deployPublicKey` — the deploy user's public key. Used by the `deploy-raw`
+- `deployPublicKey` — the deploy user's public key. Used by the `service-release`
   workflow to push service payloads via SCP.
 
 ## Example

@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+sidebar_label: "inforge.<env>.yaml"
 ---
 
 # inforge.&lt;env&gt;.yaml

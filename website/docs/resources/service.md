@@ -6,7 +6,7 @@ sidebar_position: 6
 
 A **Service** resource defines an application hosted on a Compute VM. inforge provisions
 the host-side scaffolding (folder + systemd unit); the service repo deploys code separately
-via the `deploy-raw` reusable workflow.
+via the `service-release` reusable workflow.
 
 ## Schema
 
@@ -54,20 +54,11 @@ For a service named `api` hosted on `bridge-01`:
 | `/etc/wardnet/manifest.yaml` | Service manifest (may be SOPS-encrypted) |
 | `/etc/wardnet/bootstrap.yaml` | One-time bootstrap doc (deleted after first boot) |
 
-## Deploy descriptor
+## Releasing code
 
-After a successful deploy, inforge writes a deploy descriptor to `deploy/<env>.yaml`:
-
-```yaml
-environment: prd
-targets:
-  - service: api
-    host_dns: bridge.use1.example.com
-    folder: /srv/wardnet/api
-    unit: wardnet-api.service
-```
-
-The `deploy-raw` workflow uses this to push code updates.
+The `service-release` workflow resolves the deploy target (host DNS, folder, unit) live
+from the Pulumi stack at release time. No descriptor file needs to be committed anywhere.
+See [`service-release.yml`](/github-actions/service-release) for the full setup.
 
 ## Example
 

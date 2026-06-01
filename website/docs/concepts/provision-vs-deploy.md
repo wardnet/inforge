@@ -23,7 +23,7 @@ is never touched during provisioning.
 
 **Deployment** delivers a service's payload to the provisioned host:
 
-- The service repo's CI calls the `deploy-raw` reusable workflow
+- The service repo's CI calls the `service-release` reusable workflow
 - A gzip of the service's build artifacts is pushed via SCP
 - The inforge-managed unit is restarted via SSH
 
@@ -39,20 +39,12 @@ without triggering a code redeploy.
 - **Parallel operations**: multiple services can deploy simultaneously while infrastructure
   changes are serialised through Pulumi
 
-## The deploy descriptor
+## Target resolution
 
-After a successful `inforge deploy`, a **deploy descriptor** is written to `deploy/<env>.yaml`:
-
-```yaml
-environment: prd
-targets:
-  - service: api
-    host_dns: bridge.use1.example.com
-    folder: /srv/wardnet/api
-    unit: wardnet-api.service
-```
-
-The `deploy-raw` workflow reads this file to know where to push payloads.
+`service-release` resolves the deploy target (host DNS, folder, systemd unit) live from
+the Pulumi stack in the platform repo at release time. No descriptor file needs to be
+committed or kept in sync. The service repo only needs a `deployments/` directory that
+names the platform repo and the artifact path per environment.
 
 ## Delivery types
 

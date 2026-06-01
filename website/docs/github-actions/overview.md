@@ -31,7 +31,7 @@ Downloads the latest `inforge` binary and runs `inforge plugins install`. Accept
 | `preview.yml` | `workflow_call` | Preview infrastructure changes |
 | `deploy.yml` | `workflow_call` | Deploy infrastructure changes |
 | `reconcile.yml` | `workflow_call` + schedule | Detect and fix drift |
-| `deploy-raw.yml` | `workflow_call` | Push service code to a provisioned VM |
+| `service-release.yml` | `workflow_call` | Release service code to a provisioned VM |
 
 ## Typical consumer setup
 
