@@ -11,15 +11,6 @@ on:
         description: Path to the stack config file (e.g. inforge.prd.yaml)
         type: string
         required: true
-    secrets:
-      HCLOUD_TOKEN:
-        required: false
-      CLOUDFLARE_API_TOKEN:
-        required: false
-      INFISICAL_CLIENT_ID:
-        required: false
-      INFISICAL_CLIENT_SECRET:
-        required: false
 
 jobs:
   deploy:
@@ -44,10 +35,15 @@ jobs:
             --allow-multiple \
             > /tmp/deploy.json 2>/tmp/deploy-human.txt
         env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
           HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
           INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          SSH_AUTHORIZED_KEYS: ${{ secrets.SSH_AUTHORIZED_KEYS }}
+          DEPLOY_PUBLIC_KEY: ${{ secrets.DEPLOY_PUBLIC_KEY }}
 
       - name: Render HTML report
         if: always()
