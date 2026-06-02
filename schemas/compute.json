@@ -14,6 +14,29 @@
     "size": { "type": "string", "minLength": 1 },
     "image": { "type": "string", "enum": ["ubuntu-24.04", "ubuntu-26.04"] },
     "cloud_init": { "type": "string", "minLength": 1 },
-    "instance_count": { "type": "integer", "minimum": 1 }
+    "instance_count": { "type": "integer", "minimum": 1 },
+    "firewall": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inbound": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["proto", "port"],
+            "properties": {
+              "proto": { "type": "string", "enum": ["tcp", "udp", "icmp"] },
+              "port": {
+                "oneOf": [
+                  { "type": "integer", "minimum": 1, "maximum": 65535 },
+                  { "type": "string", "minLength": 1 }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

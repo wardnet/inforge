@@ -58,11 +58,12 @@ func TestEnsureFirewallIdempotency(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, nil)
 
-		fw1, err := h.ensureFirewall(ctx, "bridge", "us-east-1", "prod")
+		bridgeSpec := types.ComputeSpec{Name: "bridge", Container: "vpc", Provider: "hetzner"}
+		fw1, err := h.ensureFirewall(ctx, bridgeSpec, "us-east-1", "prod")
 		if err != nil {
 			return err
 		}
-		fw2, err := h.ensureFirewall(ctx, "bridge", "us-east-1", "prod")
+		fw2, err := h.ensureFirewall(ctx, bridgeSpec, "us-east-1", "prod")
 		if err != nil {
 			return err
 		}
@@ -70,13 +71,78 @@ func TestEnsureFirewallIdempotency(t *testing.T) {
 			t.Error("ensureFirewall returned different objects for the same key")
 		}
 
-		fw3, err := h.ensureFirewall(ctx, "db", "us-east-1", "prod")
+		dbSpec := types.ComputeSpec{Name: "db", Container: "vpc", Provider: "hetzner"}
+		fw3, err := h.ensureFirewall(ctx, dbSpec, "us-east-1", "prod")
 		if err != nil {
 			return err
 		}
 		if fw1 == fw3 {
 			t.Error("ensureFirewall returned the same object for different keys")
 		}
+		return nil
+	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
+
+	require.NoError(t, err)
+}
+
+func TestEnsureFirewallCustomRules(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, nil)
+
+		spec := types.ComputeSpec{
+			Name:      "bridge",
+			Container: "vpc",
+			Provider:  "hetzner",
+			Firewall: &types.FirewallSpec{
+				Inbound: []types.FirewallRule{
+					{Proto: "tcp", Port: "80"},
+					{Proto: "tcp", Port: "443"},
+				},
+			},
+		}
+		fw, err := h.ensureFirewall(ctx, spec, "us-east-1", "prod")
+		if err != nil {
+			return err
+		}
+		if fw == nil {
+			t.Error("expected non-nil firewall")
+		}
+		return nil
+	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
+
+	require.NoError(t, err)
+}
+
+func TestComputeCreateWithCustomFirewall(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, nil)
+
+		net := types.NetworkOutputs{
+			NetworkID: pulumi.String("99").ToStringOutput(),
+			SubnetID:  pulumi.String("12345").ToStringOutput(),
+		}
+		spec := types.ComputeSpec{
+			Name:          "bridge",
+			Kind:          "vm",
+			Container:     "vpc",
+			Provider:      "hetzner",
+			Network:       "vpc-01",
+			Size:          "SMALL",
+			Image:         "ubuntu-24.04",
+			InstanceCount: 1,
+			Firewall: &types.FirewallSpec{
+				Inbound: []types.FirewallRule{
+					{Proto: "tcp", Port: "80"},
+					{Proto: "tcp", Port: "443"},
+				},
+			},
+		}
+
+		out, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", "")
+		if err != nil {
+			return err
+		}
+		_ = out.PublicIP
 		return nil
 	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
 

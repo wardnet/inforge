@@ -84,7 +84,7 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, err
 	}
 
-	fw, err := h.ensureFirewall(ctx, spec.Container, abstractRegion, env)
+	fw, err := h.ensureFirewall(ctx, spec, abstractRegion, env)
 	if err != nil {
 		return types.ComputeOutputs{}, fmt.Errorf("ensure firewall: %w", err)
 	}
@@ -148,10 +148,19 @@ func (h *HetznerCompute) Create(
 	return types.ComputeOutputs{PublicIP: server.Ipv4Address}, nil
 }
 
-// ensureFirewall returns the hcloud.Firewall for {container}-{abstractRegion},
-// creating it if it does not yet exist. It is safe to call concurrently.
-func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, container, abstractRegion, env string) (*hcloud.Firewall, error) {
-	key := fmt.Sprintf("%s-%s", container, abstractRegion)
+// defaultInboundRules are the inbound rules applied when a compute spec does
+// not declare explicit firewall rules: SSH only.
+var defaultInboundRules = []types.FirewallRule{
+	{Proto: "tcp", Port: "22"},
+}
+
+// ensureFirewall returns the hcloud.Firewall for {specName}-{abstractRegion},
+// creating it if it does not yet exist. When spec.Firewall is set its inbound
+// rules are used; otherwise the built-in defaults apply. SSH (22) is always
+// included as the first inbound rule regardless of what the spec declares. It
+// is safe to call concurrently.
+func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeSpec, abstractRegion, env string) (*hcloud.Firewall, error) {
+	key := fmt.Sprintf("%s-%s", spec.Name, abstractRegion)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -160,55 +169,49 @@ func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, container, abstract
 		return fw, nil
 	}
 
-	urn := tags.ContainerTag(abstractRegion, env, container)
+	inbound := defaultInboundRules
+	if spec.Firewall != nil {
+		// Always prepend SSH so management access is never locked out.
+		ssh := types.FirewallRule{Proto: "tcp", Port: "22"}
+		inbound = append([]types.FirewallRule{ssh}, spec.Firewall.Inbound...)
+	}
+
+	rules := make(hcloud.FirewallRuleArray, 0, len(inbound)+3)
+	for _, r := range inbound {
+		rule := &hcloud.FirewallRuleArgs{
+			Direction: pulumi.String("in"),
+			Protocol:  pulumi.String(r.Proto),
+			SourceIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
+		}
+		if r.Proto != "icmp" {
+			rule.Port = pulumi.StringPtr(string(r.Port))
+		}
+		rules = append(rules, rule)
+	}
+	// Outbound: always allow all TCP, UDP, ICMP.
+	rules = append(rules,
+		&hcloud.FirewallRuleArgs{
+			Direction:      pulumi.String("out"),
+			Protocol:       pulumi.String("tcp"),
+			DestinationIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
+		},
+		&hcloud.FirewallRuleArgs{
+			Direction:      pulumi.String("out"),
+			Protocol:       pulumi.String("udp"),
+			DestinationIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
+		},
+		&hcloud.FirewallRuleArgs{
+			Direction:      pulumi.String("out"),
+			Protocol:       pulumi.String("icmp"),
+			DestinationIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
+		},
+	)
+
+	urn := tags.ContainerTag(abstractRegion, env, spec.Container)
 	fw, err := hcloud.NewFirewall(ctx, key, &hcloud.FirewallArgs{
-		Name: pulumi.String(key),
-		Labels: pulumi.StringMap{
-			"urn": pulumi.String(urn),
-		},
-		Rules: hcloud.FirewallRuleArray{
-			// Inbound: SSH, HTTP, HTTPS, DNS-over-TLS
-			&hcloud.FirewallRuleArgs{
-				Direction: pulumi.String("in"),
-				Protocol:  pulumi.String("tcp"),
-				Port:      pulumi.String("22"),
-				SourceIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
-			},
-			&hcloud.FirewallRuleArgs{
-				Direction: pulumi.String("in"),
-				Protocol:  pulumi.String("tcp"),
-				Port:      pulumi.String("80"),
-				SourceIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
-			},
-			&hcloud.FirewallRuleArgs{
-				Direction: pulumi.String("in"),
-				Protocol:  pulumi.String("tcp"),
-				Port:      pulumi.String("443"),
-				SourceIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
-			},
-			&hcloud.FirewallRuleArgs{
-				Direction: pulumi.String("in"),
-				Protocol:  pulumi.String("tcp"),
-				Port:      pulumi.String("853"),
-				SourceIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
-			},
-			// Outbound: all TCP, UDP, ICMP
-			&hcloud.FirewallRuleArgs{
-				Direction:      pulumi.String("out"),
-				Protocol:       pulumi.String("tcp"),
-				DestinationIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
-			},
-			&hcloud.FirewallRuleArgs{
-				Direction:      pulumi.String("out"),
-				Protocol:       pulumi.String("udp"),
-				DestinationIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
-			},
-			&hcloud.FirewallRuleArgs{
-				Direction:      pulumi.String("out"),
-				Protocol:       pulumi.String("icmp"),
-				DestinationIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
-			},
-		},
+		Name:   pulumi.String(key),
+		Labels: pulumi.StringMap{"urn": pulumi.String(urn)},
+		Rules:  rules,
 	}, h.providerOpts()...)
 	if err != nil {
 		return nil, fmt.Errorf("create firewall %s: %w", key, err)
