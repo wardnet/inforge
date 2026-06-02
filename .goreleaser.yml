@@ -9,8 +9,6 @@
 # convention exactly — Pulumi locates plugins by that filename.
 version: 2
 
-parallelism: 1
-
 before:
   hooks:
     - go mod tidy
@@ -108,3 +106,7 @@ release:
   github:
     owner: wardnet
     name: inforge
+  # When a draft release already exists for the tag, goreleaser uses its body
+  # as the release description and appends the auto-generated changelog.
+  # Workflow: create a draft release on GitHub with your notes → push the tag.
+  replace_existing_draft: true
