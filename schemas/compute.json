@@ -37,6 +37,14 @@
           }
         }
       }
+    },
+    "deploy_user": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 }
+      }
     }
   }
 }

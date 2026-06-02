@@ -127,9 +127,14 @@ func (h *HetznerCompute) Create(
 	}
 
 	if spec.CloudInit != "" {
+		var deployUserName string
+		if spec.DeployUser != nil {
+			deployUserName = spec.DeployUser.Name
+		}
 		userData, ciErr := cloudinit.Assemble(spec.CloudInit, cloudinit.Vars{
 			Domain:          domain,
 			DeployPublicKey: h.deployPublicKey,
+			DeployUser:      deployUserName,
 			Instance:        instance,
 			Manifest:        manifest,
 			BootstrapDoc:    bootstrapDoc,

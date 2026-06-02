@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/deployment"
@@ -176,12 +177,24 @@ func deliver(ctx context.Context, target service.DeployTarget, artifactPath, ssh
 		return fmt.Errorf("upload payload: %w\n%s", err, out)
 	}
 
-	// Extract and restart.
+	// Build the remote command. When a service user is declared, ensure the
+	// no-login system user exists before extracting the payload.
 	fmt.Printf("deploying to %s and restarting %s...\n", target.Folder, target.Unit)
-	remoteCmd := fmt.Sprintf(
-		"sudo mkdir -p %s && sudo tar -xzf /tmp/inforge-payload.tgz -C %s && rm -f /tmp/inforge-payload.tgz && sudo systemctl restart %s",
-		target.Folder, target.Folder, target.Unit,
+	var steps []string
+	if target.User != "" {
+		steps = append(steps, fmt.Sprintf(
+			"sudo useradd --system --shell /usr/sbin/nologin %s 2>/dev/null || true",
+			target.User,
+		))
+	}
+	steps = append(steps,
+		fmt.Sprintf("sudo mkdir -p %s", target.Folder),
+		fmt.Sprintf("sudo tar -xzf /tmp/inforge-payload.tgz -C %s", target.Folder),
+		"rm -f /tmp/inforge-payload.tgz",
+		fmt.Sprintf("sudo systemctl restart %s", target.Unit),
 	)
+	remoteCmd := strings.Join(steps, " && ")
+
 	sshRunArgs := append(sshArgs, fmt.Sprintf("deploy@%s", host), remoteCmd)
 	if out, err := exec.CommandContext(ctx, "ssh", sshRunArgs...).CombinedOutput(); err != nil {
 		return fmt.Errorf("remote deploy: %w\n%s", err, out)
