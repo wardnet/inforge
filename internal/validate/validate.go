@@ -123,7 +123,7 @@ func ValidateResources(env, dir string) error {
 	if err != nil {
 		return err
 	}
-	vars, err := loader.LoadVariables(env, dir)
+	vars, err := loader.LoadVariablesLenient(env, dir)
 	if err != nil {
 		return err
 	}

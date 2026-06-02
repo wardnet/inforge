@@ -19,7 +19,7 @@ func TestSubstituteEnvVarsPresent(t *testing.T) {
 			"plain",
 			"prefix-${INFORGE_TEST_TOKEN}",
 		},
-	})
+	}, false)
 	require.NoError(t, err)
 	m := out.(map[string]any)
 	assert.Equal(t, "sekret", m["token"])
@@ -27,9 +27,15 @@ func TestSubstituteEnvVarsPresent(t *testing.T) {
 }
 
 func TestSubstituteEnvVarsMissing(t *testing.T) {
-	_, err := substituteEnvVars("${INFORGE_DEFINITELY_UNSET_VAR}")
+	_, err := substituteEnvVars("${INFORGE_DEFINITELY_UNSET_VAR}", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required env var")
+}
+
+func TestSubstituteEnvVarsLenient(t *testing.T) {
+	out, err := substituteEnvVars("${INFORGE_DEFINITELY_UNSET_VAR}", true)
+	require.NoError(t, err)
+	assert.Equal(t, "", out)
 }
 
 func TestLoadVariables(t *testing.T) {

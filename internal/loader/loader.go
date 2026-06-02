@@ -27,16 +27,17 @@ func envDir(env, dir string) string {
 }
 
 // substituteEnvVars walks a decoded YAML value and replaces ${NAME} in every
-// string with the corresponding environment variable, erroring if any
-// referenced variable is unset or empty.
-func substituteEnvVars(v any) (any, error) {
+// string with the corresponding environment variable. When lenient is false,
+// an unset or empty variable is an error; when true, the reference is replaced
+// with an empty string so structural validation can proceed without credentials.
+func substituteEnvVars(v any, lenient bool) (any, error) {
 	switch t := v.(type) {
 	case string:
 		var subErr error
 		out := envVarPattern.ReplaceAllStringFunc(t, func(m string) string {
 			key := strings.TrimSuffix(strings.TrimPrefix(m, "${"), "}")
 			val := os.Getenv(key)
-			if val == "" {
+			if val == "" && !lenient {
 				subErr = fmt.Errorf("missing required env var: %s", key)
 			}
 			return val
@@ -47,7 +48,7 @@ func substituteEnvVars(v any) (any, error) {
 		return out, nil
 	case []any:
 		for i, e := range t {
-			ne, err := substituteEnvVars(e)
+			ne, err := substituteEnvVars(e, lenient)
 			if err != nil {
 				return nil, err
 			}
@@ -56,7 +57,7 @@ func substituteEnvVars(v any) (any, error) {
 		return t, nil
 	case map[string]any:
 		for k, e := range t {
-			ne, err := substituteEnvVars(e)
+			ne, err := substituteEnvVars(e, lenient)
 			if err != nil {
 				return nil, err
 			}
@@ -68,9 +69,7 @@ func substituteEnvVars(v any) (any, error) {
 	}
 }
 
-// LoadVariables reads and parses <dir>/<env>/variables.yaml, substituting
-// ${ENV_VAR} references.
-func LoadVariables(env, dir string) (types.EnvironmentVariables, error) {
+func loadVariables(env, dir string, lenient bool) (types.EnvironmentVariables, error) {
 	var vars types.EnvironmentVariables
 	path := filepath.Join(envDir(env, dir), "variables.yaml")
 	b, err := os.ReadFile(path)
@@ -81,7 +80,7 @@ func LoadVariables(env, dir string) (types.EnvironmentVariables, error) {
 	if err := yaml.Unmarshal(b, &raw); err != nil {
 		return vars, fmt.Errorf("parse variables: %w", err)
 	}
-	subbed, err := substituteEnvVars(raw)
+	subbed, err := substituteEnvVars(raw, lenient)
 	if err != nil {
 		return vars, fmt.Errorf("%s: %w", path, err)
 	}
@@ -93,6 +92,20 @@ func LoadVariables(env, dir string) (types.EnvironmentVariables, error) {
 		return vars, fmt.Errorf("decode variables: %w", err)
 	}
 	return vars, nil
+}
+
+// LoadVariables reads and parses <dir>/<env>/variables.yaml, substituting
+// ${ENV_VAR} references. Missing variables are an error; use LoadVariablesLenient
+// for contexts where credentials are not available (e.g. schema validation).
+func LoadVariables(env, dir string) (types.EnvironmentVariables, error) {
+	return loadVariables(env, dir, false)
+}
+
+// LoadVariablesLenient is like LoadVariables but silently replaces missing env
+// vars with an empty string rather than returning an error. Use this for
+// structural validation that doesn't require actual credential values.
+func LoadVariablesLenient(env, dir string) (types.EnvironmentVariables, error) {
+	return loadVariables(env, dir, true)
 }
 
 // LoadRegionTable returns the region table for an environment: the per-env
