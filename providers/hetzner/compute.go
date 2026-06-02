@@ -149,12 +149,9 @@ func (h *HetznerCompute) Create(
 }
 
 // defaultInboundRules are the inbound rules applied when a compute spec does
-// not declare explicit firewall rules: SSH, HTTP, HTTPS, DNS-over-TLS.
+// not declare explicit firewall rules: SSH only.
 var defaultInboundRules = []types.FirewallRule{
 	{Proto: "tcp", Port: "22"},
-	{Proto: "tcp", Port: "80"},
-	{Proto: "tcp", Port: "443"},
-	{Proto: "tcp", Port: "853"},
 }
 
 // ensureFirewall returns the hcloud.Firewall for {specName}-{abstractRegion},

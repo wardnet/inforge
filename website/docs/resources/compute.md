@@ -85,7 +85,7 @@ inforge appends the bootstrap step automatically to every cloud-init script.
 
 ## Firewall rules
 
-When `firewall` is omitted, inforge applies built-in defaults: SSH (22), HTTP (80), HTTPS (443), and DNS-over-TLS (853) inbound, with all outbound traffic allowed.
+When `firewall` is omitted, inforge allows only SSH (22) inbound. All other inbound ports must be declared explicitly. Outbound traffic is always fully allowed.
 
 When `firewall` is present, only the declared `inbound` rules are applied — **plus SSH (22), which is always permitted** to preserve management access. Outbound traffic is always fully allowed regardless of what is declared.
 
