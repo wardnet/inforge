@@ -44,6 +44,20 @@ The report is displayed both in the workflow summary and as a PR comment:
 | `environment` | string | Yes | Stack name / environment (e.g. `prd`) |
 | `stack_config` | string | Yes | Path to the stack config file |
 
+## Required permissions
+
+The workflow posts a comment on the PR. The **calling** workflow must grant
+`pull-requests: write` at the workflow level, otherwise GitHub blocks the run at startup:
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+```
+
+If your repository's default token permission is already set to `read-write`, this is
+still good practice to keep explicit.
+
 ## Secrets (pass via `secrets: inherit`)
 
 | Secret | Description |

@@ -28,6 +28,10 @@ with:
 
 ## Required permissions
 
+The workflow posts a comment on the PR. The **calling** workflow must declare these
+permissions at the **workflow level** — not inside the job — otherwise GitHub blocks
+the run at startup when the repository's default token permission is `read`:
+
 ```yaml
 permissions:
   contents: read
