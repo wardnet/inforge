@@ -66,9 +66,10 @@ type ComputeSpec struct {
 	Network       string        `yaml:"network"` // FK -> network specKey
 	Size          string        `yaml:"size"`    // resolved against the size table
 	Image         string        `yaml:"image"`
-	CloudInit     string        `yaml:"cloud_init,omitempty"` // path relative to the compute dir
-	InstanceCount int           `yaml:"instance_count"`       // default 1; expands into specKeys name-01..name-NN
-	Firewall      *FirewallSpec `yaml:"firewall,omitempty"`
+	CloudInit     string          `yaml:"cloud_init,omitempty"` // path relative to the compute dir
+	InstanceCount int             `yaml:"instance_count"`       // default 1; expands into specKeys name-01..name-NN
+	Firewall      *FirewallSpec   `yaml:"firewall,omitempty"`
+	DeployUser    *DeployUserSpec `yaml:"deploy_user,omitempty"`
 }
 
 // DnsSpec is one DNS record.
@@ -107,6 +108,12 @@ type SecretsSpec struct {
 	Secrets   map[string]SecretsEntry `yaml:"secrets"`
 }
 
+// DeployUserSpec configures the deploy user provisioned on a compute instance
+// at VM-init time. The SSH key material comes from SSHConfig.DeployPublicKey.
+type DeployUserSpec struct {
+	Name string `yaml:"name"`
+}
+
 // ServiceSpec is one service resource — a workload hosted on a compute.
 type ServiceSpec struct {
 	Name      string `yaml:"name"`
@@ -114,6 +121,7 @@ type ServiceSpec struct {
 	Provider  string `yaml:"provider"`
 	Host      string `yaml:"host"` // FK -> an expanded compute specKey whose kind=vm
 	Type      string `yaml:"type"` // "raw" (built) | "container" (reserved)
+	User      string `yaml:"user,omitempty"` // no-login system user the service runs as; raw only
 }
 
 // NetworkOutputs are the values a NetworkProvider returns after creating a

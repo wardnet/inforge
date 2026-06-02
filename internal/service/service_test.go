@@ -15,6 +15,13 @@ func TestUnit(t *testing.T) {
 	assert.Contains(t, unit, "WorkingDirectory=/srv/wardnet/api")
 	assert.Contains(t, unit, "ExecStart=/srv/wardnet/api/run")
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
+	assert.NotContains(t, unit, "User=", "no User= directive when spec.User is empty")
+}
+
+func TestUnitWithUser(t *testing.T) {
+	unit := Unit(types.ServiceSpec{Name: "api", User: "wardnet"})
+	assert.Contains(t, unit, "User=wardnet")
+	assert.Contains(t, unit, "WantedBy=multi-user.target")
 }
 
 func TestFolderAndUnitName(t *testing.T) {
@@ -51,6 +58,25 @@ func TestBuildDeployDescriptor(t *testing.T) {
 
 	worker := byName["worker"]
 	assert.Equal(t, "bridge.use1.example.com", worker.HostDNS, "falls back to the compute name as subdomain")
+}
+
+func TestBuildDeployDescriptorPropagatesUser(t *testing.T) {
+	byRegion := map[string]types.Resources{
+		"us-east-1": {
+			Service: []types.ServiceSpec{
+				{Name: "api", Host: "bridge-01", Type: "raw", User: "wardnet"},
+				{Name: "worker", Host: "bridge-01", Type: "raw"},
+			},
+		},
+	}
+	desc, err := BuildDeployDescriptor("prd", "example.com", byRegion, regions.DefaultTable())
+	require.NoError(t, err)
+	byName := map[string]DeployTarget{}
+	for _, tgt := range desc.Targets {
+		byName[tgt.Service] = tgt
+	}
+	assert.Equal(t, "wardnet", byName["api"].User)
+	assert.Empty(t, byName["worker"].User)
 }
 
 func TestBuildDeployDescriptorUnknownRegion(t *testing.T) {

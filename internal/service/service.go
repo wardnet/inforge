@@ -24,37 +24,46 @@ func UnitName(name string) string {
 	return "wardnet-" + name + ".service"
 }
 
-// unitTemplate is the inforge-managed systemd unit. inforge owns this unit
-// (start/restart/update); deployment only swaps the payload and restarts it.
-const unitTemplate = `[Unit]
-Description=wardnet %[1]s
+const unitHead = `[Unit]
+Description=wardnet %s
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%[2]s
-ExecStart=%[2]s/run
-User=wardnet
-Restart=on-failure
+WorkingDirectory=%s
+ExecStart=%s/run
+`
+
+const unitTail = `Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 `
 
-// Unit renders the systemd unit file for a service.
+// Unit renders the systemd unit file for a service. When spec.User is set a
+// User= directive is included; otherwise the unit inherits the invoking user.
 func Unit(spec types.ServiceSpec) string {
-	return fmt.Sprintf(unitTemplate, spec.Name, Folder(spec.Name))
+	folder := Folder(spec.Name)
+	head := fmt.Sprintf(unitHead, spec.Name, folder, folder)
+	if spec.User != "" {
+		return head + "User=" + spec.User + "\n" + unitTail
+	}
+	return head + unitTail
 }
 
 // DeployTarget is one service's deployment coordinates: where to push the
-// payload (the host DNS name), the folder to extract it into, and the unit to
-// restart.
+// payload (the host DNS name), the folder to extract it into, the unit to
+// restart, and the optional no-login system user the service runs as.
 type DeployTarget struct {
 	Service string `yaml:"service"  json:"service"`
 	HostDNS string `yaml:"host_dns" json:"host_dns"`
 	Folder  string `yaml:"folder"   json:"folder"`
 	Unit    string `yaml:"unit"     json:"unit"`
+	// User is the no-login system user the service runs as. Empty when the
+	// service spec declares no user. The deliver step creates this user on
+	// first deploy when non-empty.
+	User string `yaml:"user,omitempty" json:"user,omitempty"`
 }
 
 // DeployDescriptor is the per-environment set of deploy targets, derived purely
@@ -82,6 +91,7 @@ func BuildDeployDescriptor(env, baseDomain string, byRegion map[string]types.Res
 				HostDNS: hostDNS,
 				Folder:  Folder(svc.Name),
 				Unit:    UnitName(svc.Name),
+				User:    svc.User,
 			})
 		}
 	}

@@ -16,6 +16,7 @@ container: bridge        # required
 provider: ""             # optional — services have no provider (host-managed)
 host: bridge-01          # required — specKey of the Compute VM that hosts this service
 type: raw                # required — delivery type
+user: wardnet            # optional — no-login system user the service runs as (raw only)
 ```
 
 ## Fields
@@ -27,6 +28,7 @@ type: raw                # required — delivery type
 | `provider` | string | No | Unused for services; omit or leave empty. |
 | `host` | string | Yes | specKey of the Compute VM that hosts this service. |
 | `type` | string | Yes | Delivery type. Currently only `raw` (SSH-push) is supported. `container` is reserved. |
+| `user` | string | No | No-login system user the service runs as (`raw` only). When set, inforge emits `User=<name>` in the systemd unit and creates the user via SSH on first deploy. When absent, no user is created. |
 
 ## Delivery types
 
@@ -60,11 +62,22 @@ The `service-release` workflow resolves the deploy target (host DNS, folder, uni
 from the Pulumi stack at release time. No descriptor file needs to be committed anywhere.
 See [`service-release.yml`](/github-actions/service-release) for the full setup.
 
+## Service user
+
+When `user` is set, inforge:
+
+1. Emits `User=<name>` in the inforge-managed systemd unit so the service process runs as that account.
+2. Runs `useradd --system --shell /usr/sbin/nologin <name>` via SSH on first deploy (idempotent — safe to re-run).
+
+The user is a no-login system account. This field is only meaningful for `type: raw` services;
+container services manage their user inside the image.
+
 ## Example
 
-```yaml title="resources/prd/services/api-01.yaml"
+```yaml title="resources/prd/us-east-1/service/api.yaml"
 name: api
 container: bridge
 host: bridge-01
 type: raw
+user: wardnet
 ```

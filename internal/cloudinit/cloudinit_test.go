@@ -13,6 +13,7 @@ const template = `#!/bin/bash
 host {{domain}}
 instance {{instance}}
 key {{deploy_public_key}}
+user {{deploy_user}}
 manifest:
 {{manifest}}
 `
@@ -21,6 +22,7 @@ func TestRender(t *testing.T) {
 	out := Render(template, Vars{
 		Domain:          "bridge.use1.example.com",
 		DeployPublicKey: "ssh-ed25519 AAAA",
+		DeployUser:      "deploy",
 		Instance:        2,
 		Manifest:        "version: 1",
 	})
@@ -28,9 +30,21 @@ func TestRender(t *testing.T) {
 	assert.Contains(t, out, "host bridge.use1.example.com")
 	assert.Contains(t, out, "instance 2")
 	assert.Contains(t, out, "key ssh-ed25519 AAAA")
+	assert.Contains(t, out, "user deploy")
 	assert.Contains(t, out, "version: 1")
 	assert.NotContains(t, out, "{{", "all placeholders should be substituted")
 	assert.Contains(t, out, "inforge bootstrap", "the bootstrap step should be appended")
+	assert.Contains(t, out, "inforge user provisioning", "the provision step should be appended")
+}
+
+func TestRenderNoDeployUser(t *testing.T) {
+	out := Render(template, Vars{
+		Domain:   "bridge.use1.example.com",
+		Instance: 1,
+	})
+	// DEPLOY_USER is empty; provision script should be present but do nothing.
+	assert.Contains(t, out, "inforge user provisioning")
+	assert.NotContains(t, out, "{{", "all placeholders should be substituted")
 }
 
 func TestAssemble(t *testing.T) {
@@ -49,4 +63,8 @@ func TestAssemble(t *testing.T) {
 
 func TestBootstrapScriptNonEmpty(t *testing.T) {
 	assert.Contains(t, BootstrapScript(), "BOOTSTRAP_FILE=")
+}
+
+func TestProvisionScriptNonEmpty(t *testing.T) {
+	assert.Contains(t, ProvisionScript(), "DEPLOY_USER=")
 }

@@ -19,6 +19,8 @@ size: SMALL              # required — resolved against the size table
 image: ubuntu-24.04      # required — canonical OS image name
 cloud_init: bridge-01.cloud-init.sh   # optional — path relative to this file's directory
 kind: vm                 # optional — "vm" (default) | "cluster" (reserved)
+deploy_user:             # optional — SSH deploy account provisioned at VM-init time
+  name: deploy
 firewall:                # optional — declarative inbound rules; omit to use defaults
   inbound:
     - proto: tcp
@@ -40,6 +42,7 @@ firewall:                # optional — declarative inbound rules; omit to use d
 | `image` | string | Yes | OS image. See [supported images](#supported-images). |
 | `cloud_init` | string | No | Path to a cloud-init script, relative to the compute YAML file. |
 | `kind` | string | No | `vm` (default; built) or `cluster` (k8s; reserved). |
+| `deploy_user` | object | No | Deploy user provisioned at VM-init time. See [Deploy user](#deploy-user). |
 | `firewall` | object | No | Declarative inbound firewall rules. See [Firewall rules](#firewall-rules). |
 
 ## Size table
@@ -69,6 +72,25 @@ Override by placing `sizes.yaml` in `resources/<env>/`. The file **replaces** th
 | `ubuntu-22.04` | Ubuntu 22.04 LTS |
 | `debian-12` | Debian 12 |
 
+## Deploy user
+
+When `deploy_user` is set, inforge provisions the named account at VM-init time by appending a
+first-boot step to the cloud-init script. The step creates a login-shell user, installs the
+authorized key from `ssh.deployPublicKey` in `variables.yaml`, and grants passwordless sudo.
+
+```yaml
+deploy_user:
+  name: deploy
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Username for the SSH deploy account. |
+
+The SSH key material is not set here — it comes from [`ssh.deployPublicKey`](/configuration/variables-yaml#ssh)
+in `variables.yaml`. This keeps the key in one env-level location so rotating it only requires
+updating `variables.yaml` and re-running `inforge deploy`.
+
 ## Cloud-init templates
 
 Cloud-init scripts support these placeholders:
@@ -76,12 +98,14 @@ Cloud-init scripts support these placeholders:
 | Placeholder | Description |
 |------------|-------------|
 | `{{domain}}` | Fully-qualified domain for this VM instance |
-| `{{deploy_public_key}}` | Deploy user's SSH public key |
+| `{{deploy_public_key}}` | Deploy user's SSH public key (from `ssh.deployPublicKey`) |
+| `{{deploy_user}}` | Deploy user name (from `deploy_user.name`; empty if not declared) |
 | `{{instance}}` | Instance number (integer) |
 | `{{manifest}}` | Assembled service manifest (YAML, possibly SOPS-encrypted) |
 | `{{bootstrap_doc}}` | Content of `bootstrap.yaml` (empty if no secrets) |
 
-inforge appends the bootstrap step automatically to every cloud-init script.
+inforge appends two first-boot steps automatically to every cloud-init script: user provisioning
+(creates the deploy user when declared) and the secret bootstrap step.
 
 ## Firewall rules
 
@@ -122,18 +146,23 @@ network: ingress-01
 size: SMALL
 image: ubuntu-24.04
 cloud_init: bridge-01.cloud-init.sh
+deploy_user:
+  name: deploy
 ```
 
 ```bash title="resources/prd/us-east-1/compute/bridge-01.cloud-init.sh"
 #!/bin/bash
 set -euo pipefail
 
-# Install inforge-managed service
-mkdir -p /srv/wardnet/bridge
+# Write the service manifest (inforge substitutes {{manifest}} at provision time).
+mkdir -p /etc/wardnet
 cat > /etc/wardnet/manifest.yaml << 'EOF'
 {{manifest}}
 EOF
 ```
+
+inforge appends the deploy-user provisioning step and the secret bootstrap step automatically
+— no need to write `useradd` or key-installation logic in your cloud-init template.
 
 ## Outputs
 
