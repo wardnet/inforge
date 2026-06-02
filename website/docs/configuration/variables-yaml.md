@@ -63,10 +63,12 @@ Credentials should be empty strings — supply them via environment variables.
 
 SSH keys placed on every provisioned VM:
 
-- `authorizedKeys` — added to `/home/ubuntu/.ssh/authorized_keys` and the user's
-  authorized_keys. Allows human access.
-- `deployPublicKey` — the deploy user's public key. Used by the `service-release`
-  workflow to push service payloads via SCP.
+- `authorizedKeys` — added to the VM's authorized_keys for human (admin) access.
+- `deployPublicKey` — the SSH public key installed for the deploy user. When a compute
+  resource declares a [`deploy_user`](/resources/compute#deploy-user), inforge provisions
+  that account at VM-init time and installs this key into its `authorized_keys`. The
+  username itself is set per-compute in `deploy_user.name`; the key material lives here
+  so that rotating it only requires updating `variables.yaml` and re-running `inforge deploy`.
 
 ## Example
 
