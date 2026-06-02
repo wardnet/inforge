@@ -33,7 +33,7 @@ jobs:
             --stack-config "${{ inputs.stack_config }}" \
             --output json \
             --allow-multiple \
-            > /tmp/deploy.json 2>/tmp/deploy-human.txt
+            > /tmp/deploy.json 2> >(tee /tmp/deploy-human.txt >&2)
         env:
           PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

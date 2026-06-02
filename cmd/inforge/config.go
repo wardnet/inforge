@@ -69,7 +69,9 @@ func r2ToS3URL(raw string) (string, error) {
 		}
 	}
 	endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", accountID)
-	return fmt.Sprintf("s3://%s?endpoint=%s&s3ForcePathStyle=true", bucket, url.QueryEscape(endpoint)), nil
+	// region=auto is R2's pseudo-region; the AWS SDK requires a region even
+	// though R2 does not use one.
+	return fmt.Sprintf("s3://%s?region=auto&endpoint=%s&s3ForcePathStyle=true", bucket, url.QueryEscape(endpoint)), nil
 }
 
 type stackConfig struct {
