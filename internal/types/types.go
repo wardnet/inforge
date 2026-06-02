@@ -7,7 +7,12 @@
 // plugin packages and satisfy the interfaces declared here.
 package types
 
-import "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+import (
+	"fmt"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"gopkg.in/yaml.v3"
+)
 
 // NetworkSpec is one network resource. A network is either public (no parent)
 // or private (carved out of a parent network's CIDR).
@@ -22,18 +27,48 @@ type NetworkSpec struct {
 	Parent     string `yaml:"parent,omitempty"`
 }
 
+// Port is a firewall port or port range (e.g. "80", "8000-9000"). It unmarshals
+// from both YAML integers and strings so users can write `port: 80` without quotes.
+type Port string
+
+// UnmarshalYAML accepts both integer and string nodes so `port: 80` and
+// `port: "8000-9000"` are both valid.
+func (p *Port) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Tag {
+	case "!!int", "!!str":
+		*p = Port(value.Value)
+		return nil
+	default:
+		return fmt.Errorf("firewall port must be an integer or string, got %s", value.Tag)
+	}
+}
+
+// FirewallRule is one inbound firewall rule.
+type FirewallRule struct {
+	Proto string `yaml:"proto"` // "tcp" | "udp" | "icmp"
+	Port  Port   `yaml:"port"`
+}
+
+// FirewallSpec declares the inbound firewall rules for a compute resource.
+// SSH (22) is always permitted regardless of what is declared here.
+// If absent, inforge applies its built-in defaults (22, 80, 443, 853).
+type FirewallSpec struct {
+	Inbound []FirewallRule `yaml:"inbound"`
+}
+
 // ComputeSpec is one compute resource — a host runtime. Its cpus/memory are
 // resolved from the size table (see internal/sizes), not declared here.
 type ComputeSpec struct {
-	Name          string `yaml:"name"`
-	Kind          string `yaml:"kind"` // "vm" (default; only supported kind) | "cluster" (reserved)
-	Container     string `yaml:"container"`
-	Provider      string `yaml:"provider"`
-	Network       string `yaml:"network"` // FK -> network specKey
-	Size          string `yaml:"size"`    // resolved against the size table
-	Image         string `yaml:"image"`
-	CloudInit     string `yaml:"cloud_init,omitempty"` // path relative to the compute dir
-	InstanceCount int    `yaml:"instance_count"`       // default 1; expands into specKeys name-01..name-NN
+	Name          string        `yaml:"name"`
+	Kind          string        `yaml:"kind"` // "vm" (default; only supported kind) | "cluster" (reserved)
+	Container     string        `yaml:"container"`
+	Provider      string        `yaml:"provider"`
+	Network       string        `yaml:"network"` // FK -> network specKey
+	Size          string        `yaml:"size"`    // resolved against the size table
+	Image         string        `yaml:"image"`
+	CloudInit     string        `yaml:"cloud_init,omitempty"` // path relative to the compute dir
+	InstanceCount int           `yaml:"instance_count"`       // default 1; expands into specKeys name-01..name-NN
+	Firewall      *FirewallSpec `yaml:"firewall,omitempty"`
 }
 
 // DnsSpec is one DNS record.
