@@ -27,12 +27,12 @@ on:
         required: true
         type: string
       stack_config:
-        description: Path to the infra stack config file (default: inforge.<env>.yaml)
+        description: "Path to the infra stack config file (default: inforge.<env>.yaml)"
         required: false
         default: ""
         type: string
       deploy_dir:
-        description: Path to the deployments directory (default: ./deployments)
+        description: "Path to the deployments directory (default: ./deployments)"
         required: false
         default: ./deployments
         type: string
