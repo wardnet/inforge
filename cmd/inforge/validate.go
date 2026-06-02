@@ -16,7 +16,6 @@ func newValidateCmd(dir *string) *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if err := validate.ValidateResources(args[0], *dir); err != nil {
-				fmt.Println("\nvalidation failed")
 				return err
 			}
 			fmt.Println("\nall resource files are valid")
