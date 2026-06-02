@@ -9,6 +9,8 @@
 # convention exactly — Pulumi locates plugins by that filename.
 version: 2
 
+parallelism: 1
+
 before:
   hooks:
     - go mod tidy
@@ -21,8 +23,6 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
-      - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -36,8 +36,6 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
-      - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -51,8 +49,6 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
-      - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -69,30 +65,18 @@ archives:
       - inforge
     name_template: >-
       inforge_{{ .Version }}_{{ .Os }}_{{ .Arch }}
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
 
   - id: pulumi-resource-neon
     ids:
       - pulumi-resource-neon
     name_template: >-
       pulumi-resource-neon_{{ .Version }}_{{ .Os }}_{{ .Arch }}
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
 
   - id: pulumi-resource-infisical
     ids:
       - pulumi-resource-infisical
     name_template: >-
       pulumi-resource-infisical_{{ .Version }}_{{ .Os }}_{{ .Arch }}
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
 
   # Raw, uncompressed binaries — download a single os/arch binary and run it
   # directly, no extraction step.
