@@ -1,4 +1,4 @@
-name = "inforge-escrow-worker"
+name = "inforge-key-broker"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
