@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/spf13/cobra"
@@ -93,11 +94,14 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 	}
 
 	// Human mode: stream structured per-resource output.
+	// The buffered channel decouples the Pulumi engine's blocking event sends
+	// from the consumer goroutine so a slow writer never stalls the engine.
 	ch := output.NewEventChannel()
-	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		output.Stream(ch, os.Stdout)
-		close(done)
 	}()
 
 	fmt.Fprintf(os.Stdout, "Deploying (%s):\n\n", stackName)
@@ -105,7 +109,7 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 		optup.EventStreams(ch),
 		optup.ErrorProgressStreams(os.Stderr),
 	)
-	<-done
+	wg.Wait()
 
 	if upErr != nil {
 		return fmt.Errorf("deploy: %w", upErr)
