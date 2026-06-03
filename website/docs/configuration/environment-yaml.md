@@ -42,7 +42,7 @@ config:
 ```yaml title="inforge.prd.yaml"
 config:
   environment: prd
-  inforge:broker_url: https://inforge-key-broker.workers.dev
+  inforge:broker_url: https://key-broker.inforge.wardnet.network
   inforge:oidc_token: ""
   hcloud:token: ""
   cloudflare:apiToken: ""
