@@ -24,6 +24,19 @@ func TestGenerateNoSecrets(t *testing.T) {
 	assert.Contains(t, res.Manifest, "log_level: info")
 }
 
+func TestGenerateProbeWithSecrets(t *testing.T) {
+	base := Base{Version: 1, Region: "us-east-1", Namespace: "urn:use1:wardnet:prd:bridge"}
+	contrib := types.ManifestContribution{
+		"log_level":   "info",
+		"db_password": Secret("supersecret"),
+	}
+
+	res, err := Generate(base, []types.ManifestContribution{contrib}, "")
+	require.NoError(t, err)
+	assert.True(t, res.BootstrapNeeded, "secrets present => bootstrap needed even on probe")
+	assert.Empty(t, res.Manifest, "probe must not attempt encryption with empty recipient")
+}
+
 func TestGenerateWithSecretsEncryptsAndRoundTrips(t *testing.T) {
 	mat, err := bootstrap.Mint()
 	require.NoError(t, err)

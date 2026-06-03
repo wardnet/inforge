@@ -70,6 +70,12 @@ func Generate(base Base, contributions []types.ManifestContribution, recipient s
 	if len(secretKeys) == 0 {
 		return Result{Manifest: string(plain), BootstrapNeeded: false}, nil
 	}
+	// Empty recipient signals a probe call (caller just wants to know whether
+	// bootstrapping is needed, without paying for a Mint()). Return early so
+	// the caller can decide whether to mint a real key and call again.
+	if recipient == "" {
+		return Result{BootstrapNeeded: true}, nil
+	}
 
 	enc, err := bootstrap.EncryptYAML(plain, recipient, encryptedRegex(secretKeys))
 	if err != nil {
