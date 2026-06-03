@@ -104,7 +104,7 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 		output.Stream(ch, os.Stdout)
 	}()
 
-	fmt.Fprintf(os.Stdout, "Deploying (%s):\n\n", stackName)
+	_, _ = fmt.Fprintf(os.Stdout, "Deploying (%s):\n\n", stackName)
 	_, upErr := s.Up(ctx,
 		optup.EventStreams(ch),
 		optup.ErrorProgressStreams(os.Stderr),

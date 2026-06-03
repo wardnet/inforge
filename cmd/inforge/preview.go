@@ -87,7 +87,7 @@ func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, for
 		output.Stream(ch, os.Stdout)
 	}()
 
-	fmt.Fprintf(os.Stdout, "Previewing (%s):\n\n", stackName)
+	_, _ = fmt.Fprintf(os.Stdout, "Previewing (%s):\n\n", stackName)
 	_, previewErr := s.Preview(ctx,
 		optpreview.EventStreams(ch),
 		optpreview.ErrorProgressStreams(os.Stderr),

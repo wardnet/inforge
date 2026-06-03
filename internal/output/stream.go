@@ -31,7 +31,7 @@ func NewEventChannel() chan events.EngineEvent {
 func Stream(ch <-chan events.EngineEvent, w io.Writer) {
 	for ev := range ch {
 		if ev.Error != nil {
-			fmt.Fprintf(w, "  error: %v\n", ev.Error)
+			_, _ = fmt.Fprintf(w, "  error: %v\n", ev.Error)
 			continue
 		}
 		dispatch(ev.EngineEvent, w)
@@ -45,7 +45,7 @@ func dispatch(ev apitype.EngineEvent, w io.Writer) {
 		if isSystemResource(pre.Metadata.Type) || pre.Metadata.Op == apitype.OpSame {
 			return
 		}
-		fmt.Fprintf(w, "  %s %-36s  %s\n",
+		_, _ = fmt.Fprintf(w, "  %s %-36s  %s\n",
 			opSymbol(pre.Metadata.Op),
 			shortType(pre.Metadata.Type),
 			urnName(pre.Metadata.URN),
@@ -60,7 +60,7 @@ func dispatch(ev apitype.EngineEvent, w io.Writer) {
 		case "error", "warning", "info#err":
 			msg := strings.TrimSpace(diag.Message)
 			if msg != "" {
-				fmt.Fprintf(w, "      %s: %s\n", diag.Severity, msg)
+				_, _ = fmt.Fprintf(w, "      %s: %s\n", diag.Severity, msg)
 			}
 		}
 
@@ -70,7 +70,7 @@ func dispatch(ev apitype.EngineEvent, w io.Writer) {
 		// they are not silently lost.
 		msg := strings.TrimSpace(ev.StdoutEvent.Message)
 		if msg != "" {
-			fmt.Fprintf(w, "  %s\n", msg)
+			_, _ = fmt.Fprintf(w, "  %s\n", msg)
 		}
 
 	case ev.SummaryEvent != nil:
@@ -78,20 +78,10 @@ func dispatch(ev apitype.EngineEvent, w io.Writer) {
 	}
 }
 
-// opPriority defines the display order for the summary: creates first, then
-// updates, deletions, and replacements. Unknown ops sort last.
-var opPriority = map[apitype.OpType]int{
-	apitype.OpCreate:            0,
-	apitype.OpUpdate:            1,
-	apitype.OpDelete:            2,
-	apitype.OpCreateReplacement: 3,
-	apitype.OpDeleteReplaced:    4,
-}
-
 func printSummary(sum *apitype.SummaryEvent, w io.Writer) {
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 	if len(sum.ResourceChanges) == 0 {
-		fmt.Fprintln(w, "No changes.")
+		_, _ = fmt.Fprintln(w, "No changes.")
 		return
 	}
 
@@ -108,14 +98,14 @@ func printSummary(sum *apitype.SummaryEvent, w io.Writer) {
 	}
 	for _, op := range ordered {
 		if count, ok := sum.ResourceChanges[op]; ok && count > 0 {
-			fmt.Fprintf(w, "  %d %s\n", count, opLabel(op))
+			_, _ = fmt.Fprintf(w, "  %d %s\n", count, opLabel(op))
 			seen[op] = true
 		}
 	}
 	// Any OpType not in the known list (future additions) falls through here.
 	for op, count := range sum.ResourceChanges {
 		if !seen[op] && op != apitype.OpSame && count > 0 {
-			fmt.Fprintf(w, "  %d %s\n", count, opLabel(op))
+			_, _ = fmt.Fprintf(w, "  %d %s\n", count, opLabel(op))
 		}
 	}
 }
