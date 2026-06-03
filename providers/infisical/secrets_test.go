@@ -7,6 +7,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -33,7 +34,7 @@ func (m *infisicalMocks) NewResource(args pulumi.MockResourceArgs) (string, reso
 // returns the same workspace resource on repeated calls.
 func TestEnsureWorkspaceIdempotent(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("cid", "csec", "enc", "")
+		adapter := New("cid", "csec", "")
 
 		first, err := adapter.ensureWorkspace(ctx, "mycontainer", "us-east-1")
 		if err != nil {
@@ -57,7 +58,7 @@ func TestEnsureWorkspaceIdempotent(t *testing.T) {
 // (container, region) pairs produce separate workspace resources.
 func TestEnsureWorkspaceDifferentRegionsAreIndependent(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("cid", "csec", "enc", "")
+		adapter := New("cid", "csec", "")
 
 		east, err := adapter.ensureWorkspace(ctx, "mycontainer", "us-east-1")
 		if err != nil {
@@ -80,7 +81,7 @@ func TestEnsureWorkspaceDifferentRegionsAreIndependent(t *testing.T) {
 // returns a non-empty contribution when the compute spec's container has an
 // Infisical SecretsSpec.
 func TestContributeToManifestMatchingSpec(t *testing.T) {
-	adapter := New("client-id", "client-secret", "enc-secret", "https://app.infisical.com")
+	adapter := New("client-id", "client-secret", "https://app.infisical.com")
 
 	computeSpec := types.ComputeSpec{Container: "myapp"}
 	resources := types.Resources{
@@ -102,7 +103,7 @@ func TestContributeToManifestMatchingSpec(t *testing.T) {
 // TestContributeToManifestNoMatch verifies that an empty contribution is
 // returned when no SecretsSpec matches the compute container.
 func TestContributeToManifestNoMatch(t *testing.T) {
-	adapter := New("cid", "csec", "enc", "")
+	adapter := New("cid", "csec", "")
 
 	computeSpec := types.ComputeSpec{Container: "other"}
 	resources := types.Resources{
@@ -116,10 +117,11 @@ func TestContributeToManifestNoMatch(t *testing.T) {
 	assert.Empty(t, contrib)
 }
 
-// TestContributeToManifestEmptyBootstrapSecretEncErrors verifies that an empty
-// bootstrapSecretEnc is rejected rather than written into the manifest.
-func TestContributeToManifestEmptyBootstrapSecretEncErrors(t *testing.T) {
-	adapter := New("cid", "csec", "", "") // empty bootstrapSecretEnc
+// TestContributeToManifestSecretWrapped verifies that client_secret in the
+// manifest contribution is wrapped as a manifest.Secret so the SOPS/age
+// encryption flow marks it for encryption.
+func TestContributeToManifestSecretWrapped(t *testing.T) {
+	adapter := New("cid", "csec", "")
 
 	computeSpec := types.ComputeSpec{Container: "myapp"}
 	resources := types.Resources{
@@ -128,6 +130,11 @@ func TestContributeToManifestEmptyBootstrapSecretEncErrors(t *testing.T) {
 		},
 	}
 
-	_, err := adapter.ContributeToManifest(computeSpec, resources, "prd", "us-east-1")
-	assert.Error(t, err, "expected error when bootstrapSecretEnc is empty")
+	contrib, err := adapter.ContributeToManifest(computeSpec, resources, "prd", "us-east-1")
+	require.NoError(t, err)
+
+	secrets := contrib["secrets"].(map[string]any)
+	auth := secrets["auth"].(map[string]any)
+	_, isSecret := auth["client_secret"].(manifest.SecretValue)
+	assert.True(t, isSecret, "client_secret must be wrapped as manifest.Secret for SOPS encryption")
 }
