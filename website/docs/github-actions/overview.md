@@ -141,7 +141,7 @@ Set these secrets in your repository (Settings → Secrets → Actions):
 ## Bootstrap permissions
 
 For VMs with secret values, the deploy workflow needs OIDC permission to call the
-escrow service:
+key broker service:
 
 ```yaml
 permissions:

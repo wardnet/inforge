@@ -17,8 +17,8 @@ backend:
   url: file://.pulumi     # used for "file" and "s3" types
   branch: pulumi-state    # used for "git-branch" type
 
-escrow:
-  url: https://inforge-escrow-worker.workers.dev
+broker:
+  url: https://inforge-key-broker.workers.dev
 ```
 
 ## Fields
@@ -80,16 +80,16 @@ backend:
 Requires `CLOUDFLARE_ACCOUNT_ID` environment variable. R2 credentials are provided via
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (R2 API token).
 
-### `escrow.url`
+### `broker.url`
 
-The URL of the inforge escrow service. Defaults to the centrally-operated inforge escrow.
+The URL of the inforge key broker service. Defaults to the centrally-operated inforge key broker.
 
 ```yaml
-escrow:
-  url: https://inforge-escrow-worker.workers.dev
+broker:
+  url: https://inforge-key-broker.workers.dev
 ```
 
-This value is also set per-stack in `inforge.<env>.yaml` as `inforge:escrow_url` so it
+This value is also set per-stack in `inforge.<env>.yaml` as `inforge:broker_url` so it
 is passed into the Pulumi program at deploy time.
 
 ## Minimal example
@@ -99,6 +99,6 @@ name: my-infra
 backend:
   type: file
   url: file://.pulumi
-escrow:
-  url: https://inforge-escrow-worker.workers.dev
+broker:
+  url: https://inforge-key-broker.workers.dev
 ```

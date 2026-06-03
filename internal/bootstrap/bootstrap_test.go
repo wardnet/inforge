@@ -42,14 +42,14 @@ func TestEncryptYAMLOnlyEncryptsMatchingKeys(t *testing.T) {
 	assert.Equal(t, "hunter2", out["password"])
 }
 
-// fakeEscrow records what was registered.
-type fakeEscrow struct {
+// fakeBroker records what was registered.
+type fakeBroker struct {
 	token, key, tenant string
 	ttlSeconds         int
 	called             bool
 }
 
-func (f *fakeEscrow) Register(token, key, tenant string, ttlSeconds int) error {
+func (f *fakeBroker) Register(token, key, tenant string, ttlSeconds int) error {
 	f.token, f.key, f.tenant, f.ttlSeconds, f.called = token, key, tenant, ttlSeconds, true
 	return nil
 }
@@ -58,17 +58,17 @@ func TestRegisterBuildsBootstrapDoc(t *testing.T) {
 	m, err := Mint()
 	require.NoError(t, err)
 
-	fe := &fakeEscrow{}
-	doc, err := Register(fe, "https://escrow.example", "wardnet/inforge", m, 600)
+	fe := &fakeBroker{}
+	doc, err := Register(fe, "https://broker.example", "wardnet/inforge", m, 600)
 	require.NoError(t, err)
 
 	require.True(t, fe.called)
 	assert.Equal(t, m.Token, fe.token)
-	assert.Equal(t, m.Identity.String(), fe.key, "the age identity K is what is escrowed")
+	assert.Equal(t, m.Identity.String(), fe.key, "the age identity K is what is registered with the key broker")
 	assert.Equal(t, "wardnet/inforge", fe.tenant)
 	assert.Equal(t, 600, fe.ttlSeconds)
 
-	assert.Equal(t, "https://escrow.example", doc.EscrowURL)
+	assert.Equal(t, "https://broker.example", doc.BrokerURL)
 	assert.Equal(t, m.Token, doc.Token)
 	assert.Equal(t, "wardnet/inforge", doc.Tenant)
 
@@ -76,7 +76,7 @@ func TestRegisterBuildsBootstrapDoc(t *testing.T) {
 	b, err := doc.Marshal()
 	require.NoError(t, err)
 	out := string(b)
-	assert.Contains(t, out, "escrow_url: https://escrow.example")
+	assert.Contains(t, out, "broker_url: https://broker.example")
 	assert.Contains(t, out, "token: "+m.Token)
 	assert.Contains(t, out, "tenant: wardnet/inforge")
 	assert.NotContains(t, out, m.Identity.String(), "K must not appear in bootstrap.yaml")

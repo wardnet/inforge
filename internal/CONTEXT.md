@@ -90,17 +90,17 @@ flag — is what makes a VM require bootstrapping; secret fields are stored SOPS
 
 **Bootstrap**:
 The one-time first-boot step a VM performs when its manifest has secret values: fetch the key from
-the escrow service, decrypt, and re-encrypt the values to the host's SSH key.
+the key broker, decrypt, and re-encrypt the values to the host's SSH key.
 
-**Escrow service**:
-The multi-tenant key-escrow inforge owns and operates as a Cloudflare Worker (`escrow-worker/`).
-inforge mints key `K` + one-time token `T`, registers `K` under `T` via the escrow, and the VM
+**Key Broker**:
+The multi-tenant key broker inforge owns and operates as a Cloudflare Worker (`key-broker/`).
+inforge mints key `K` + one-time token `T`, registers `K` under `T` via the key broker, and the VM
 redeems `T`→`K` at first boot. Open to any GitHub Actions workflow; the `repository` claim in
 the GitHub OIDC token becomes the tenant, enforcing cross-repo isolation. No consumer needs to
-host their own escrow.
+host their own key broker.
 
 **Tenant**:
-The escrow isolation boundary = the **repo** (`owner/repo`). Keys provisioned by one repo cannot be
+The key broker isolation boundary = the **repo** (`owner/repo`). Keys provisioned by one repo cannot be
 redeemed by another; environments within a repo share the tenant.
 
 ### Provisioning vs deployment
@@ -139,6 +139,6 @@ resources, that the deployment workflow consumes.
 > **Dev:** The secrets file has `source: ref:database/bridge.connectionUrl`. The VM needs that secret
 > at boot?
 > **Expert:** The secrets backend contributes it to `bridge`'s manifest as a secret value. Because a
-> secret value is present, the VM bootstraps: it redeems its token with the escrow for the key,
+> secret value is present, the VM bootstraps: it redeems its token with the key broker for the key,
 > decrypts, and re-encrypts to its own SSH key. Provision set all that up — actually shipping the
 > service binary is a separate deployment.
