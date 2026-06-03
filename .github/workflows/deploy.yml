@@ -30,7 +30,7 @@ jobs:
         id: oidc
         run: |
           TOKEN=$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=inforge-key-broker.workers.dev" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=key-broker.inforge.wardnet.network" \
             | jq -r '.value')
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 

@@ -34,7 +34,7 @@ backend:
   type: file
   url: file://.pulumi
 broker:
-  url: https://inforge-key-broker.workers.dev
+  url: https://key-broker.inforge.wardnet.network
 ```
 
 See [inforge.yaml reference](/configuration/inforge-yaml) for all backend types (file, git-branch, s3, r2).
@@ -44,7 +44,7 @@ See [inforge.yaml reference](/configuration/inforge-yaml) for all backend types 
 ```yaml
 config:
   environment: prd
-  inforge:broker_url: https://inforge-key-broker.workers.dev
+  inforge:broker_url: https://key-broker.inforge.wardnet.network
   inforge:oidc_token: ""   # set at deploy time via OIDC
   hcloud:token: ""         # set via HCLOUD_TOKEN env var
   cloudflare:apiToken: ""  # set via CLOUDFLARE_API_TOKEN env var

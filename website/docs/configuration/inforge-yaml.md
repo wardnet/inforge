@@ -18,7 +18,7 @@ backend:
   branch: pulumi-state    # used for "git-branch" type
 
 broker:
-  url: https://inforge-key-broker.workers.dev
+  url: https://key-broker.inforge.wardnet.network
 ```
 
 ## Fields
@@ -86,7 +86,7 @@ The URL of the inforge key broker service. Defaults to the centrally-operated in
 
 ```yaml
 broker:
-  url: https://inforge-key-broker.workers.dev
+  url: https://key-broker.inforge.wardnet.network
 ```
 
 This value is also set per-stack in `inforge.<env>.yaml` as `inforge:broker_url` so it
@@ -100,5 +100,5 @@ backend:
   type: file
   url: file://.pulumi
 broker:
-  url: https://inforge-key-broker.workers.dev
+  url: https://key-broker.inforge.wardnet.network
 ```
