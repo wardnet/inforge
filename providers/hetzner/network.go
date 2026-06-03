@@ -100,6 +100,10 @@ func (h *HetznerNetwork) ensureContainer(ctx *pulumi.Context, container, abstrac
 		return net, nil
 	}
 
+	// Label schema: project/env/region/container discrete keys.
+	// Resources previously deployed with the old single "urn" key will show a
+	// label diff on the next Pulumi run; this is an in-place metadata update
+	// with no impact on resource connectivity or state.
 	opts := h.providerOpts()
 	net, err := hcloud.NewNetwork(ctx, key, &hcloud.NetworkArgs{
 		Name:    pulumi.String(key),

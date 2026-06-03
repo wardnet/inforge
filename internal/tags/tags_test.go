@@ -10,7 +10,7 @@ func TestContainerTag(t *testing.T) {
 	assert.Equal(t, "urn:use1:wardnet:prd:bridge", ContainerTag("use1", "prd", "bridge"))
 }
 
-func TestCloudfareTags(t *testing.T) {
+func TestCloudflareTags(t *testing.T) {
 	t.Run("with container", func(t *testing.T) {
 		got := CloudflareTags("myproject", "prd", "us-east-1", "bridge")
 		assert.Equal(t, []string{
