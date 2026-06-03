@@ -9,10 +9,11 @@ import (
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/spf13/cobra"
+	"github.com/wardnet/inforge/internal/output"
 )
 
 func newDeployCmd(configPath *string) *cobra.Command {
-	var stack, stackConfig, output string
+	var stack, stackConfig, format string
 	var yes, allowMultiple bool
 
 	cmd := &cobra.Command{
@@ -21,13 +22,13 @@ func newDeployCmd(configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDeploy(cmd.Context(), stack, stackConfig, *configPath, output, yes, allowMultiple)
+			return runDeploy(cmd.Context(), stack, stackConfig, *configPath, format, yes, allowMultiple)
 		},
 	}
 
 	cmd.Flags().StringVarP(&stack, "stack", "s", "", "stack name / environment (required)")
 	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to stack config (default: inforge.<stack>.yaml)")
-	cmd.Flags().StringVarP(&output, "output", "o", "", "output format: '' (default human) or 'json'")
+	cmd.Flags().StringVarP(&format, "output", "o", "", "output format: '' (default human) or 'json'")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "auto-approve without prompt")
 	cmd.Flags().BoolVar(&allowMultiple, "allow-multiple", false, "allow running when multiple environments have changes")
 	if err := cmd.MarkFlagRequired("stack"); err != nil {
@@ -36,7 +37,7 @@ func newDeployCmd(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, output string, yes, allowMultiple bool) error {
+func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, format string, yes, allowMultiple bool) error {
 	if !yes {
 		fmt.Printf("Deploy stack %q? Type 'yes' to confirm: ", stackName)
 		scanner := bufio.NewScanner(os.Stdin)
@@ -69,26 +70,19 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, outp
 		return fmt.Errorf("set stack config: %w", err)
 	}
 
-	// When emitting machine-readable JSON, route Pulumi progress to stderr so
-	// stdout carries only the JSON summary (> /tmp/deploy.json in CI).
-	progressOut := os.Stdout
-	if output == "json" {
-		progressOut = os.Stderr
-	}
-	result, err := s.Up(ctx,
-		optup.ProgressStreams(progressOut),
-		optup.ErrorProgressStreams(os.Stderr),
-	)
-	if err != nil {
-		return fmt.Errorf("deploy: %w", err)
-	}
-
-	// Push state to the git-branch backend after a successful apply.
-	if pushErr := pushState(); pushErr != nil {
-		return fmt.Errorf("push state: %w", pushErr)
-	}
-
-	if output == "json" {
+	if format == "json" {
+		// JSON mode: route Pulumi progress to stderr so stdout carries only the
+		// JSON summary (> /tmp/deploy.json in CI).
+		result, upErr := s.Up(ctx,
+			optup.ProgressStreams(os.Stderr),
+			optup.ErrorProgressStreams(os.Stderr),
+		)
+		if upErr != nil {
+			return fmt.Errorf("deploy: %w", upErr)
+		}
+		if pushErr := pushState(); pushErr != nil {
+			return fmt.Errorf("push state: %w", pushErr)
+		}
 		counts := make(map[string]int)
 		if result.Summary.ResourceChanges != nil {
 			for op, n := range *result.Summary.ResourceChanges {
@@ -97,5 +91,24 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, outp
 		}
 		return printChangeSummaryJSON(stackName, counts)
 	}
-	return nil
+
+	// Human mode: stream structured per-resource output.
+	ch := output.NewEventChannel()
+	done := make(chan struct{})
+	go func() {
+		output.Stream(ch, os.Stdout)
+		close(done)
+	}()
+
+	fmt.Fprintf(os.Stdout, "Deploying (%s):\n\n", stackName)
+	_, upErr := s.Up(ctx,
+		optup.EventStreams(ch),
+		optup.ErrorProgressStreams(os.Stderr),
+	)
+	<-done
+
+	if upErr != nil {
+		return fmt.Errorf("deploy: %w", upErr)
+	}
+	return pushState()
 }

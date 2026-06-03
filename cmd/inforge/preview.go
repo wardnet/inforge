@@ -8,10 +8,11 @@ import (
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optpreview"
 	"github.com/spf13/cobra"
+	"github.com/wardnet/inforge/internal/output"
 )
 
 func newPreviewCmd(configPath *string) *cobra.Command {
-	var stack, stackConfig, output string
+	var stack, stackConfig, format string
 	var allowMultiple bool
 
 	cmd := &cobra.Command{
@@ -20,13 +21,13 @@ func newPreviewCmd(configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runPreview(cmd.Context(), stack, stackConfig, *configPath, output, allowMultiple)
+			return runPreview(cmd.Context(), stack, stackConfig, *configPath, format, allowMultiple)
 		},
 	}
 
 	cmd.Flags().StringVarP(&stack, "stack", "s", "", "stack name / environment (required)")
 	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to stack config (default: inforge.<stack>.yaml)")
-	cmd.Flags().StringVarP(&output, "output", "o", "", "output format: '' (default human) or 'json'")
+	cmd.Flags().StringVarP(&format, "output", "o", "", "output format: '' (default human) or 'json'")
 	cmd.Flags().BoolVar(&allowMultiple, "allow-multiple", false, "allow running when multiple environments have changes")
 	if err := cmd.MarkFlagRequired("stack"); err != nil {
 		panic(err)
@@ -34,7 +35,7 @@ func newPreviewCmd(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, output string, allowMultiple bool) error {
+func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, format string, allowMultiple bool) error {
 	projCfg, err := loadProjectConfig(configPath)
 	if err != nil {
 		return err
@@ -57,26 +58,40 @@ func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, out
 		return fmt.Errorf("set stack config: %w", err)
 	}
 
-	// When emitting machine-readable JSON, route Pulumi progress to stderr so
-	// stdout carries only the JSON summary (> /tmp/preview.json in CI).
-	progressOut := os.Stdout
-	if output == "json" {
-		progressOut = os.Stderr
-	}
-	result, err := s.Preview(ctx,
-		optpreview.ProgressStreams(progressOut),
-		optpreview.ErrorProgressStreams(os.Stderr),
-	)
-	if err != nil {
-		return fmt.Errorf("preview: %w", err)
-	}
-
-	if output == "json" {
+	if format == "json" {
+		// JSON mode: route Pulumi progress to stderr so stdout carries only the
+		// JSON summary (> /tmp/preview.json in CI).
+		result, previewErr := s.Preview(ctx,
+			optpreview.ProgressStreams(os.Stderr),
+			optpreview.ErrorProgressStreams(os.Stderr),
+		)
+		if previewErr != nil {
+			return fmt.Errorf("preview: %w", previewErr)
+		}
 		counts := make(map[string]int, len(result.ChangeSummary))
 		for op, n := range result.ChangeSummary {
 			counts[string(op)] = n
 		}
 		return printChangeSummaryJSON(stackName, counts)
+	}
+
+	// Human mode: stream structured per-resource output.
+	ch := output.NewEventChannel()
+	done := make(chan struct{})
+	go func() {
+		output.Stream(ch, os.Stdout)
+		close(done)
+	}()
+
+	fmt.Fprintf(os.Stdout, "Previewing (%s):\n\n", stackName)
+	_, previewErr := s.Preview(ctx,
+		optpreview.EventStreams(ch),
+		optpreview.ErrorProgressStreams(os.Stderr),
+	)
+	<-done
+
+	if previewErr != nil {
+		return fmt.Errorf("preview: %w", previewErr)
 	}
 	return nil
 }
