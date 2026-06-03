@@ -33,6 +33,9 @@ type ProviderRegistry interface {
 
 type registry struct {
 	ctx         *pulumi.Context
+	project     string
+	env         string
+	region      string
 	config      map[string]map[string]any
 	ssh         types.SSHConfig
 	regionTable regions.Table
@@ -60,12 +63,16 @@ type registry struct {
 }
 
 // BuildRegistry constructs a ProviderRegistry from the resolved (merged)
-// provider config, SSH material, and region table for one region. ctx is stored
-// and used lazily when provider objects are first constructed — it must be the
-// context passed to the Pulumi program's run function.
-func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, ssh types.SSHConfig, regionTable regions.Table) ProviderRegistry {
+// provider config, SSH material, and region table for one region. project,
+// env, and region are used to label cloud resources. ctx is stored and used
+// lazily when provider objects are first constructed — it must be the context
+// passed to the Pulumi program's run function.
+func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, ssh types.SSHConfig, regionTable regions.Table, project, env, region string) ProviderRegistry {
 	return &registry{
 		ctx:         ctx,
+		project:     project,
+		env:         env,
+		region:      region,
 		config:      config,
 		ssh:         ssh,
 		regionTable: regionTable,
@@ -93,7 +100,7 @@ func (r *registry) Network(name string) (types.NetworkProvider, error) {
 	case "hetzner":
 		r.hetznerNetOnce.Do(func() {
 			overrides := hetzner.ExtractRegionConfigs(r.regionTable)
-			r.hetznerNet = hetzner.New(r.hetznerProv(), overrides)
+			r.hetznerNet = hetzner.New(r.hetznerProv(), r.project, overrides)
 		})
 		return r.hetznerNet, nil
 	default:
@@ -110,6 +117,7 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 				r.ssh.AuthorizedKeys,
 				r.ssh.DeployPublicKey,
 				r.hetznerProv(),
+				r.project,
 				overrides,
 			)
 		})
@@ -138,7 +146,7 @@ func (r *registry) DNS(name string) (types.DnsProvider, error) {
 	case "cloudflare":
 		r.cfDnsOnce.Do(func() {
 			zoneID := providerCfgString(r.config, "cloudflare", "zoneId")
-			r.cfDns = cfprovider.New(zoneID, r.cfProv())
+			r.cfDns = cfprovider.New(zoneID, r.project, r.env, r.region, r.cfProv())
 		})
 		return r.cfDns, nil
 	default:

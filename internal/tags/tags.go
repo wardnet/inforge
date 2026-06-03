@@ -1,29 +1,44 @@
-// Package tags builds the URN namespace and tag set applied to resources. The
+// Package tags builds the URN namespace and label set applied to resources. The
 // region slug is supplied by the caller (resolved from the region table) so
 // this package stays decoupled from the per-environment region table.
 package tags
 
 import "fmt"
 
-// TagSet is the set of tags applied to a resource. namespace is a URN; env and
-// region echo the deployment coordinates.
-type TagSet struct {
-	Namespace string
-	Env       string
-	Region    string
-}
-
-// BuildTags builds the tag set for a resource. slug is the region slug, region
-// is the abstract region name.
-func BuildTags(slug, env, region, container, resourceType, name string) TagSet {
-	return TagSet{
-		Namespace: fmt.Sprintf("urn:%s:wardnet:%s:%s:%s:%s", slug, env, container, resourceType, name),
-		Env:       env,
-		Region:    region,
-	}
-}
-
 // ContainerTag returns the URN identifying a container within an environment.
+// Used as the service manifest namespace.
 func ContainerTag(slug, env, container string) string {
 	return fmt.Sprintf("urn:%s:wardnet:%s:%s", slug, env, container)
+}
+
+// HetznerLabels returns the discrete labels to apply to a Hetzner resource.
+// All values conform to Hetzner's label value constraint ([a-zA-Z0-9._-]).
+// container may be empty for resources not scoped to a specific container
+// (e.g. SSH keys), in which case the container key is omitted.
+func HetznerLabels(project, env, region, container string) map[string]string {
+	m := map[string]string{
+		"project": project,
+		"env":     env,
+		"region":  region,
+	}
+	if container != "" {
+		m["container"] = container
+	}
+	return m
+}
+
+// CloudflareTags returns the tags to apply to a Cloudflare DNS record.
+// Tags use the "key:value" string format supported by the Cloudflare API.
+// container may be empty for resources not scoped to a specific container,
+// in which case the container tag is omitted.
+func CloudflareTags(project, env, region, container string) []string {
+	t := []string{
+		fmt.Sprintf("project:%s", project),
+		fmt.Sprintf("env:%s", env),
+		fmt.Sprintf("region:%s", region),
+	}
+	if container != "" {
+		t = append(t, fmt.Sprintf("container:%s", container))
+	}
+	return t
 }

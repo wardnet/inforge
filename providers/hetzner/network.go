@@ -18,6 +18,7 @@ import (
 // the same container + region.
 type HetznerNetwork struct {
 	provider *hcloud.Provider
+	project  string
 	mu       sync.Mutex
 	// containers caches created hcloud.Network objects keyed by
 	// "{container}-{abstractRegion}" to avoid creating duplicates.
@@ -27,14 +28,16 @@ type HetznerNetwork struct {
 	regions map[string]RegionConfig
 }
 
-// New creates a HetznerNetwork provider. regionOverrides is the output of
+// New creates a HetznerNetwork provider. project is the inforge project name
+// used to label cloud resources. regionOverrides is the output of
 // ExtractRegionConfigs and may be nil (DefaultRegionConfigs are used instead).
-func New(provider *hcloud.Provider, regionOverrides map[string]RegionConfig) *HetznerNetwork {
+func New(provider *hcloud.Provider, project string, regionOverrides map[string]RegionConfig) *HetznerNetwork {
 	if regionOverrides == nil {
 		regionOverrides = map[string]RegionConfig{}
 	}
 	return &HetznerNetwork{
 		provider:   provider,
+		project:    project,
 		containers: map[string]*hcloud.Network{},
 		regions:    regionOverrides,
 	}
@@ -97,12 +100,15 @@ func (h *HetznerNetwork) ensureContainer(ctx *pulumi.Context, container, abstrac
 		return net, nil
 	}
 
-	urn := tags.ContainerTag(abstractRegion, env, container)
+	// Label schema: project/env/region/container discrete keys.
+	// Resources previously deployed with the old single "urn" key will show a
+	// label diff on the next Pulumi run; this is an in-place metadata update
+	// with no impact on resource connectivity or state.
 	opts := h.providerOpts()
 	net, err := hcloud.NewNetwork(ctx, key, &hcloud.NetworkArgs{
 		Name:    pulumi.String(key),
 		IpRange: pulumi.String(cidr),
-		Labels:  pulumi.StringMap{"urn": pulumi.String(urn)},
+		Labels:  toStringMap(tags.HetznerLabels(h.project, env, abstractRegion, container)),
 	}, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create hcloud network %s: %w", key, err)
@@ -119,4 +125,13 @@ func (h *HetznerNetwork) providerOpts() []pulumi.ResourceOption {
 		return nil
 	}
 	return []pulumi.ResourceOption{pulumi.Provider(h.provider)}
+}
+
+// toStringMap converts a map[string]string to pulumi.StringMap.
+func toStringMap(m map[string]string) pulumi.StringMap {
+	out := make(pulumi.StringMap, len(m))
+	for k, v := range m {
+		out[k] = pulumi.String(v)
+	}
+	return out
 }
