@@ -56,7 +56,7 @@ func (m *computeMocks) NewResource(args pulumi.MockResourceArgs) (string, resour
 
 func TestEnsureFirewallIdempotency(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
 
 		bridgeSpec := types.ComputeSpec{Name: "bridge", Container: "vpc", Provider: "hetzner"}
 		fw1, err := h.ensureFirewall(ctx, bridgeSpec, "us-east-1", "prod")
@@ -87,7 +87,7 @@ func TestEnsureFirewallIdempotency(t *testing.T) {
 
 func TestEnsureFirewallCustomRules(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
 
 		spec := types.ComputeSpec{
 			Name:      "bridge",
@@ -115,7 +115,7 @@ func TestEnsureFirewallCustomRules(t *testing.T) {
 
 func TestComputeCreateWithCustomFirewall(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
 
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
@@ -153,13 +153,13 @@ func TestComputeCreateWithCustomFirewall(t *testing.T) {
 
 func TestEnsureSshKeysIdempotency(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
 
-		keys1, err := h.ensureSshKeys(ctx, "us-east-1")
+		keys1, err := h.ensureSshKeys(ctx, "us-east-1", "prod")
 		if err != nil {
 			return err
 		}
-		keys2, err := h.ensureSshKeys(ctx, "us-east-1")
+		keys2, err := h.ensureSshKeys(ctx, "us-east-1", "prod")
 		if err != nil {
 			return err
 		}
@@ -167,7 +167,7 @@ func TestEnsureSshKeysIdempotency(t *testing.T) {
 			t.Error("ensureSshKeys returned different objects for the same region")
 		}
 
-		keys3, err := h.ensureSshKeys(ctx, "eu-central-1")
+		keys3, err := h.ensureSshKeys(ctx, "eu-central-1", "prod")
 		if err != nil {
 			return err
 		}
@@ -184,7 +184,7 @@ func TestEnsureSshKeysIdempotency(t *testing.T) {
 
 func TestComputeCreateReturnsPublicIP(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
 
 		// Synthesise a NetworkOutputs with a known subnet ID.
 		subnetID := pulumi.String("12345").ToStringOutput()
@@ -217,7 +217,7 @@ func TestComputeCreateReturnsPublicIP(t *testing.T) {
 
 func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
 
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
@@ -249,7 +249,7 @@ func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 
 func TestComputeCreateUnknownSizeReturnsError(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
 			SubnetID:  pulumi.String("12345").ToStringOutput(),

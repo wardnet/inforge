@@ -28,6 +28,7 @@ type HetznerCompute struct {
 	sshAuthorizedKeys string
 	deployPublicKey   string
 	provider          *hcloud.Provider
+	project           string
 	mu                sync.Mutex
 	firewalls         map[string]*hcloud.Firewall
 	sshKeys           map[string][]*hcloud.SshKey
@@ -37,10 +38,10 @@ type HetznerCompute struct {
 	regions          map[string]RegionConfig
 }
 
-// NewCompute creates a HetznerCompute provider. regionOverrides is the output
-// of ExtractRegionConfigs and may be nil (DefaultRegionConfigs are used
-// instead).
-func NewCompute(sshAuthorizedKeys, deployPublicKey string, provider *hcloud.Provider, regionOverrides map[string]RegionConfig) *HetznerCompute {
+// NewCompute creates a HetznerCompute provider. project is the inforge project
+// name used to label cloud resources. regionOverrides is the output of
+// ExtractRegionConfigs and may be nil (DefaultRegionConfigs are used instead).
+func NewCompute(sshAuthorizedKeys, deployPublicKey string, provider *hcloud.Provider, project string, regionOverrides map[string]RegionConfig) *HetznerCompute {
 	if regionOverrides == nil {
 		regionOverrides = map[string]RegionConfig{}
 	}
@@ -48,6 +49,7 @@ func NewCompute(sshAuthorizedKeys, deployPublicKey string, provider *hcloud.Prov
 		sshAuthorizedKeys: sshAuthorizedKeys,
 		deployPublicKey:   deployPublicKey,
 		provider:          provider,
+		project:           project,
 		firewalls:         map[string]*hcloud.Firewall{},
 		sshKeys:           map[string][]*hcloud.SshKey{},
 		instanceCounters:  map[string]int{},
@@ -89,7 +91,7 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, fmt.Errorf("ensure firewall: %w", err)
 	}
 
-	sshKeyList, err := h.ensureSshKeys(ctx, abstractRegion)
+	sshKeyList, err := h.ensureSshKeys(ctx, abstractRegion, env)
 	if err != nil {
 		return types.ComputeOutputs{}, fmt.Errorf("ensure ssh keys: %w", err)
 	}
@@ -121,9 +123,7 @@ func (h *HetznerCompute) Create(
 				SubnetId: network.SubnetID.ToStringPtrOutput(),
 			},
 		},
-		Labels: pulumi.StringMap{
-			"urn": pulumi.String(tags.ContainerTag(abstractRegion, env, spec.Container)),
-		},
+		Labels: toStringMap(tags.HetznerLabels(h.project, env, abstractRegion, spec.Container)),
 	}
 
 	if spec.CloudInit != "" {
@@ -212,10 +212,9 @@ func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeS
 		},
 	)
 
-	urn := tags.ContainerTag(abstractRegion, env, spec.Container)
 	fw, err := hcloud.NewFirewall(ctx, key, &hcloud.FirewallArgs{
 		Name:   pulumi.String(key),
-		Labels: pulumi.StringMap{"urn": pulumi.String(urn)},
+		Labels: toStringMap(tags.HetznerLabels(h.project, env, abstractRegion, spec.Container)),
 		Rules:  rules,
 	}, h.providerOpts()...)
 	if err != nil {
@@ -229,7 +228,7 @@ func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeS
 // ensureSshKeys returns the [user, deploy] SSH key pair for abstractRegion,
 // creating them if they do not yet exist. It is safe to call concurrently.
 // Index 0 is the user authorized-keys key; index 1 is the deploy public key.
-func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, abstractRegion string) ([]*hcloud.SshKey, error) {
+func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, abstractRegion, env string) ([]*hcloud.SshKey, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -237,10 +236,14 @@ func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, abstractRegion strin
 		return keys, nil
 	}
 
+	// SSH keys are region-scoped, not container-scoped: omit container label.
+	keyLabels := toStringMap(tags.HetznerLabels(h.project, env, abstractRegion, ""))
+
 	userKeyName := fmt.Sprintf("user-%s", abstractRegion)
 	userKey, err := hcloud.NewSshKey(ctx, userKeyName, &hcloud.SshKeyArgs{
 		Name:      pulumi.String(userKeyName),
 		PublicKey: pulumi.String(h.sshAuthorizedKeys),
+		Labels:    keyLabels,
 	}, h.providerOpts()...)
 	if err != nil {
 		return nil, fmt.Errorf("create user ssh key %s: %w", userKeyName, err)
@@ -250,6 +253,7 @@ func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, abstractRegion strin
 	deployKey, err := hcloud.NewSshKey(ctx, deployKeyName, &hcloud.SshKeyArgs{
 		Name:      pulumi.String(deployKeyName),
 		PublicKey: pulumi.String(h.deployPublicKey),
+		Labels:    keyLabels,
 	}, h.providerOpts()...)
 	if err != nil {
 		return nil, fmt.Errorf("create deploy ssh key %s: %w", deployKeyName, err)

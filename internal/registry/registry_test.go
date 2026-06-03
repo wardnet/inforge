@@ -15,7 +15,7 @@ import (
 func TestRegistryUnknownProvider(t *testing.T) {
 	// nil ctx + nil regionTable: providers are built lazily, so construction is
 	// not triggered during this test. Only the "unknown provider" paths are hit.
-	r := BuildRegistry(nil, map[string]map[string]any{"hetzner": {"apiToken": "x"}}, types.SSHConfig{}, nil)
+	r := BuildRegistry(nil, map[string]map[string]any{"hetzner": {"apiToken": "x"}}, types.SSHConfig{}, nil, "test-project")
 
 	// "hetzner" is now a known network provider — must succeed.
 	np, err := r.Network("hetzner")
@@ -64,7 +64,7 @@ func TestManifestContributorsWithInfisical(t *testing.T) {
 	cfg := map[string]map[string]any{
 		"infisical": {"clientId": "cid", "clientSecret": "csec", "siteUrl": "https://app.infisical.com"},
 	}
-	r := BuildRegistry(nil, cfg, types.SSHConfig{}, nil)
+	r := BuildRegistry(nil, cfg, types.SSHConfig{}, nil, "test-project")
 	contributors := r.ManifestContributors()
 	require.Len(t, contributors, 1)
 	assert.IsType(t, (*infisical.InfisicalSecretsAdapter)(nil), contributors[0])

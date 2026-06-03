@@ -80,7 +80,7 @@ func (m *testMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.
 
 func TestEnsureContainerIdempotency(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := New(nil, nil)
+		h := New(nil, "test-project", nil)
 
 		net1, err := h.ensureContainer(ctx, "vpc", "us-east-1", "prod", "10.0.0.0/8")
 		if err != nil {
