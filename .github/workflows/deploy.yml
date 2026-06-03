@@ -20,10 +20,19 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      id-token: write
     steps:
       - uses: actions/checkout@v6
 
       - uses: wardnet/inforge/.github/actions/install@v1
+
+      - name: Get OIDC token
+        id: oidc
+        run: |
+          TOKEN=$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=inforge-escrow-worker.workers.dev" \
+            | jq -r '.value')
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: inforge deploy
         id: deploy
@@ -35,6 +44,8 @@ jobs:
             --allow-multiple \
             > /tmp/deploy.json 2> >(tee /tmp/deploy-human.txt >&2)
         env:
+          INFORGE_OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          INFORGE_ESCROW_TTL_SECONDS: "600"
           PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}

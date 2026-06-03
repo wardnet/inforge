@@ -27,10 +27,15 @@ func NewHTTPEscrowClient(baseURL, oidcToken string, client *http.Client) *HTTPEs
 	return &HTTPEscrowClient{baseURL: baseURL, oidcToken: oidcToken, client: client}
 }
 
-// Register stores key K under token T with the escrow worker. The tenant is
-// derived from the repository claim inside oidcToken; it is not sent separately.
-func (c *HTTPEscrowClient) Register(token, key, _ string) error {
-	body, err := json.Marshal(map[string]string{"token": token, "key": key})
+// Register stores key K under token T with the escrow worker with the given
+// TTL. The tenant is derived from the repository claim inside oidcToken; it is
+// not sent separately.
+func (c *HTTPEscrowClient) Register(token, key, _ string, ttlSeconds int) error {
+	body, err := json.Marshal(map[string]any{
+		"token":       token,
+		"key":         key,
+		"ttl_seconds": ttlSeconds,
+	})
 	if err != nil {
 		return fmt.Errorf("marshal escrow request: %w", err)
 	}

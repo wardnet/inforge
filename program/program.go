@@ -6,6 +6,7 @@ package program
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
@@ -30,14 +31,31 @@ func Run(ctx *pulumi.Context) error {
 	}
 
 	// Escrow config — required only when a manifest has secret values.
-	// escrow_url and oidc_token can be set via stack config or the inforge CLI.
-	// tenant defaults to the GITHUB_REPOSITORY env var (set automatically by
-	// GitHub Actions).
+	// oidc_token falls back to INFORGE_OIDC_TOKEN so CI workflows can inject it
+	// without writing a short-lived value into the stack config file.
+	// tenant defaults to GITHUB_REPOSITORY (set automatically by GitHub Actions).
+	// escrow_ttl_seconds falls back to INFORGE_ESCROW_TTL_SECONDS; default 600.
+	// Set it to a short value (e.g. 60) in preview jobs so the throwaway key
+	// expires quickly.
 	escrowURL := cfg.Get("escrow_url")
 	oidcToken := cfg.Get("oidc_token")
+	if oidcToken == "" {
+		oidcToken = os.Getenv("INFORGE_OIDC_TOKEN")
+	}
 	tenant := cfg.Get("tenant")
 	if tenant == "" {
 		tenant = os.Getenv("GITHUB_REPOSITORY")
+	}
+	escrowTTL := 600
+	if v := cfg.Get("escrow_ttl_seconds"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			escrowTTL = n
+		}
+	}
+	if v := os.Getenv("INFORGE_ESCROW_TTL_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			escrowTTL = n
+		}
 	}
 
 	var escrowClient bootstrap.EscrowClient
@@ -109,7 +127,7 @@ func Run(ctx *pulumi.Context) error {
 				if escrowClient == nil {
 					return fmt.Errorf("compute %s/%s has secret values but escrow is not configured (set escrow_url and oidc_token)", region, spec.Name)
 				}
-				doc, regErr := bootstrap.Register(escrowClient, escrowURL, tenant, mat)
+				doc, regErr := bootstrap.Register(escrowClient, escrowURL, tenant, mat, escrowTTL)
 				if regErr != nil {
 					return fmt.Errorf("register bootstrap key for %s/%s: %w", region, spec.Name, regErr)
 				}

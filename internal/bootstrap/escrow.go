@@ -11,9 +11,10 @@ import (
 // escrow implementation; this interface is satisfied by an external client and
 // faked in tests.
 type EscrowClient interface {
-	// Register stores key (the age identity K) under token T for tenant, so a
-	// single redemption of token returns key.
-	Register(token, key, tenant string) error
+	// Register stores key (the age identity K) under token T for tenant with
+	// the given TTL. After ttlSeconds the escrow drops the entry; a single
+	// redemption before expiry also removes it.
+	Register(token, key, tenant string, ttlSeconds int) error
 }
 
 // Doc is the bootstrap.yaml written beside an encrypted manifest. A VM reads it
@@ -27,8 +28,8 @@ type Doc struct {
 
 // Register registers K with the escrow under tenant and returns the
 // bootstrap.yaml document the VM will consume. It does not write the file.
-func Register(client EscrowClient, escrowURL, tenant string, m Material) (Doc, error) {
-	if err := client.Register(m.Token, m.Identity.String(), tenant); err != nil {
+func Register(client EscrowClient, escrowURL, tenant string, m Material, ttlSeconds int) (Doc, error) {
+	if err := client.Register(m.Token, m.Identity.String(), tenant, ttlSeconds); err != nil {
 		return Doc{}, fmt.Errorf("register key with escrow: %w", err)
 	}
 	return Doc{EscrowURL: escrowURL, Token: m.Token, Tenant: tenant}, nil

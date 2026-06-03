@@ -45,11 +45,12 @@ func TestEncryptYAMLOnlyEncryptsMatchingKeys(t *testing.T) {
 // fakeEscrow records what was registered.
 type fakeEscrow struct {
 	token, key, tenant string
+	ttlSeconds         int
 	called             bool
 }
 
-func (f *fakeEscrow) Register(token, key, tenant string) error {
-	f.token, f.key, f.tenant, f.called = token, key, tenant, true
+func (f *fakeEscrow) Register(token, key, tenant string, ttlSeconds int) error {
+	f.token, f.key, f.tenant, f.ttlSeconds, f.called = token, key, tenant, ttlSeconds, true
 	return nil
 }
 
@@ -58,13 +59,14 @@ func TestRegisterBuildsBootstrapDoc(t *testing.T) {
 	require.NoError(t, err)
 
 	fe := &fakeEscrow{}
-	doc, err := Register(fe, "https://escrow.example", "wardnet/inforge", m)
+	doc, err := Register(fe, "https://escrow.example", "wardnet/inforge", m, 600)
 	require.NoError(t, err)
 
 	require.True(t, fe.called)
 	assert.Equal(t, m.Token, fe.token)
 	assert.Equal(t, m.Identity.String(), fe.key, "the age identity K is what is escrowed")
 	assert.Equal(t, "wardnet/inforge", fe.tenant)
+	assert.Equal(t, 600, fe.ttlSeconds)
 
 	assert.Equal(t, "https://escrow.example", doc.EscrowURL)
 	assert.Equal(t, m.Token, doc.Token)
