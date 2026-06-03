@@ -2,10 +2,12 @@ package resources
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/pulumi/pulumi-go-provider/infer"
 )
@@ -123,7 +125,7 @@ func adoptOrCreateWorkspace(ctx context.Context, siteURL, token, name string) (s
 }
 
 func createWorkspace(ctx context.Context, siteURL, token, name string) (string, error) {
-	orgId, err := getOrgId(ctx, siteURL, token)
+	orgId, err := orgIdFromToken(token)
 	if err != nil {
 		return "", err
 	}
@@ -152,26 +154,26 @@ func createWorkspace(ctx context.Context, siteURL, token, name string) (string, 
 	return resp.Workspace.Id, nil
 }
 
-func getOrgId(ctx context.Context, siteURL, token string) (string, error) {
-	url := siteURL + "/api/v2/organizations"
-	data, status, err := infisicalDo(ctx, http.MethodGet, url, token, nil)
+// orgIdFromToken extracts the organization ID from the JWT payload of an
+// Infisical universal-auth access token, avoiding a separate API call to the
+// organizations endpoint which is not available on all Infisical deployments.
+func orgIdFromToken(token string) (string, error) {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) != 3 {
+		return "", fmt.Errorf("infisical: malformed JWT token")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("infisical: decode JWT payload: %w", err)
 	}
-	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("infisical: list organizations failed (HTTP %d): %s", status, data)
+	var claims struct {
+		OrganizationId string `json:"organizationId"`
 	}
-
-	var resp struct {
-		Organizations []struct {
-			Id string `json:"id"`
-		} `json:"organizations"`
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("infisical: parse JWT claims: %w", err)
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("infisical: parse organizations response: %w", err)
+	if claims.OrganizationId == "" {
+		return "", fmt.Errorf("infisical: no organizationId in JWT claims")
 	}
-	if len(resp.Organizations) == 0 {
-		return "", fmt.Errorf("infisical: no organizations found for this service account")
-	}
-	return resp.Organizations[0].Id, nil
+	return claims.OrganizationId, nil
 }
