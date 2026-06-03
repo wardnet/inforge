@@ -14,7 +14,7 @@ multi-provider infrastructure model with built-in secret bootstrapping for VMs.
 1. **Validates** your resource definitions against JSON schemas
 2. **Previews** what Pulumi would create, update, or destroy
 3. **Deploys** your infrastructure via the Pulumi Automation API
-4. **Bootstraps** VM secrets — minting an age key, registering it with the inforge escrow,
+4. **Bootstraps** VM secrets — minting an age key, registering it with the inforge key broker,
    and writing a one-time `bootstrap.yaml` the VM consumes at first boot
 5. **Provides reusable GitHub Actions** so consumer repos get preview/deploy/reconcile
    workflows with a single `uses:` line

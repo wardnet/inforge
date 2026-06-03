@@ -5,7 +5,7 @@ sidebar_position: 5
 # Secrets
 
 A **Secrets** resource declares a set of secret values to materialise into a VM's manifest.
-The presence of any secret value triggers VM bootstrapping (see [Bootstrap & Escrow](../concepts/bootstrap-escrow)).
+The presence of any secret value triggers VM bootstrapping (see [Bootstrap & Key Broker](../concepts/bootstrap-key-broker)).
 
 ## Schema
 
@@ -65,8 +65,8 @@ When a manifest contains secret values, inforge:
 
 1. Mints a fresh age key K
 2. Encrypts the secret fields in the manifest with SOPS/age using K as the recipient
-3. Registers K with the escrow under a one-time token T
-4. Writes `bootstrap.yaml` to the VM with the escrow URL and T
+3. Registers K with the key broker under a one-time token T
+4. Writes `bootstrap.yaml` to the VM with the broker URL and T
 
 At first boot, the VM redeems T for K, decrypts the manifest, and re-encrypts to
 its own SSH key. K is then discarded.

@@ -40,7 +40,7 @@ When a manifest contains secret values, `deploy` automatically:
 
 1. Mints a fresh age key K and one-time token T
 2. Fetches a GitHub Actions OIDC token (from `inforge:oidc_token` stack config)
-3. Calls `PUT /token` on the escrow service
+3. Calls `PUT /token` on the key broker service
 4. Writes `bootstrap.yaml` to the VM via cloud-init
 
 The workflow must have `id-token: write` permission for this to work.

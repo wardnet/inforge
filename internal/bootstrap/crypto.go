@@ -1,9 +1,9 @@
 // Package bootstrap holds the provider-agnostic machinery for first-boot secret
 // bootstrapping: minting the age key K and one-time token T, encrypting secret
-// manifest fields with SOPS/age, registering K with the external escrow under a
+// manifest fields with SOPS/age, registering K with the external key broker under a
 // repo-scoped tenant, and building the bootstrap.yaml a VM reads at first boot.
 //
-// inforge integrates with, but does not implement, the escrow service (see
+// inforge integrates with, but does not implement, the key broker service (see
 // docs/adr/0006). VM creation is stubbed this phase; these helpers are exercised
 // by unit tests.
 package bootstrap
@@ -23,7 +23,7 @@ import (
 )
 
 // Material is the freshly minted bootstrap secret: the age identity K (kept by
-// the escrow, redeemed at first boot) and the one-time token T (written into
+// the key broker, redeemed at first boot) and the one-time token T (written into
 // bootstrap.yaml). Recipient is K's public half, used to encrypt secrets.
 type Material struct {
 	Identity  *age.X25519Identity

@@ -37,7 +37,7 @@ Same as [preview.yml](./preview).
 ## Bootstrap
 
 If the stack has secret values, the deploy workflow fetches a GitHub Actions OIDC token
-and passes it as `inforge:oidc_token` to authenticate the escrow call. This is handled
+and passes it as `inforge:oidc_token` to authenticate the key broker call. This is handled
 automatically — the `id-token: write` permission is set in the workflow.
 
 ## State management

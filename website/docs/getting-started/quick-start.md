@@ -33,8 +33,8 @@ name: my-infra
 backend:
   type: file
   url: file://.pulumi
-escrow:
-  url: https://inforge-escrow-worker.workers.dev
+broker:
+  url: https://inforge-key-broker.workers.dev
 ```
 
 See [inforge.yaml reference](/configuration/inforge-yaml) for all backend types (file, git-branch, s3, r2).
@@ -44,7 +44,7 @@ See [inforge.yaml reference](/configuration/inforge-yaml) for all backend types 
 ```yaml
 config:
   environment: prd
-  inforge:escrow_url: https://inforge-escrow-worker.workers.dev
+  inforge:broker_url: https://inforge-key-broker.workers.dev
   inforge:oidc_token: ""   # set at deploy time via OIDC
   hcloud:token: ""         # set via HCLOUD_TOKEN env var
   cloudflare:apiToken: ""  # set via CLOUDFLARE_API_TOKEN env var
@@ -106,4 +106,4 @@ inforge deploy --stack prd --stack-config inforge.prd.yaml --yes
 
 - Read the [Resource Reference](/resources/network) for all resource types and fields
 - Set up [GitHub Actions](/github-actions/overview) for automated preview and deploy
-- Learn how [secret bootstrapping works](/concepts/bootstrap-escrow)
+- Learn how [secret bootstrapping works](/concepts/bootstrap-key-broker)

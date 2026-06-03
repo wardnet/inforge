@@ -21,6 +21,6 @@ implemented.
   `ComputeProvider`, `DnsProvider`, `DatabaseProvider`, `SecretsBackendProvider`) and a
   `ProviderRegistry`. Each provider context satisfies one or more of these. At this phase the
   registry is a stub that returns `unknown provider` for every lookup.
-- **Toolkit ↔ external escrow**: the Toolkit *integrates* with an external, multi-tenant bootstrap
-  escrow service (owned in `wardnet-infrastructure`) for first-boot secret decryption; it does not
-  implement it. See [ADR-0006](./docs/adr/0006-bootstrap-escrow-and-sops-age.md).
+- **Toolkit ↔ key broker**: the Toolkit *integrates* with an external, multi-tenant bootstrap
+  key broker (owned in `wardnet-infrastructure`) for first-boot secret decryption; it does not
+  implement it. See [ADR-0006](./docs/adr/0006-bootstrap-key-broker-and-sops-age.md).

@@ -2,7 +2,7 @@
 sidebar_position: 3
 ---
 
-# Bootstrap & Escrow
+# Bootstrap & Key Broker
 
 inforge provides a secure mechanism for delivering secret values to VMs at first boot, without
 ever placing unencrypted secrets in the repo or on the cloud provider's control plane.
@@ -15,8 +15,8 @@ ever placing unencrypted secrets in the repo or on the cloud provider's control 
 │                                                              │
 │  1. Mint age key K + one-time token T                        │
 │  2. Encrypt manifest secret fields with K (SOPS/age)         │
-│  3. Register K under T with the escrow service               │
-│  4. Write bootstrap.yaml (escrow URL + T) to VM via cloud-init│
+│  3. Register K under T with the key broker service           │
+│  4. Write bootstrap.yaml (broker URL + T) to VM via cloud-init│
 │  5. Provision VM                                             │
 └─────────────────────────────────────────────────────────────┘
                               │
@@ -24,16 +24,16 @@ ever placing unencrypted secrets in the repo or on the cloud provider's control 
 ┌─────────────────────────────────────────────────────────────┐
 │  VM bootstrap script                                         │
 │                                                              │
-│  1. POST /bootstrap {token: T} → escrow returns K           │
+│  1. POST /bootstrap {token: T} → key broker returns K       │
 │  2. Decrypt manifest with K                                  │
 │  3. Re-encrypt manifest to host SSH key (no K needed again)  │
 │  4. Delete bootstrap.yaml and K                              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## The escrow service
+## The key broker service
 
-The inforge escrow is a Cloudflare Worker (`escrow-worker/`) operated by the inforge project.
+The inforge key broker is a Cloudflare Worker (`key-broker/`) operated by the inforge project.
 
 **Endpoints:**
 
@@ -49,19 +49,19 @@ preventing cross-repo key theft.
 
 ## Tenant isolation
 
-The escrow isolates keys by tenant (`owner/repo`). A VM can only redeem tokens registered by
+The key broker isolates keys by tenant (`owner/repo`). A VM can only redeem tokens registered by
 its own tenant. Environments within the same repo share the tenant.
 
 ## When bootstrap runs
 
 Bootstrap only happens when the assembled manifest contains **secret values** — manifest fields
 marked via the `secrets` backend. If no secret values are present, no bootstrap.yaml is written
-and the VM boots without the escrow flow.
+and the VM boots without the key broker flow.
 
-## Using the escrow in GitHub Actions
+## Using the key broker in GitHub Actions
 
 The `deploy` workflow requires `id-token: write` permission and passes the OIDC token to
-inforge as the `inforge:oidc_token` stack config value. inforge creates the `HTTPEscrowClient`
+inforge as the `inforge:oidc_token` stack config value. inforge creates the `HTTPKeyBrokerClient`
 and calls `PUT /token` before provisioning each VM.
 
 ```yaml

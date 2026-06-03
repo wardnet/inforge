@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/internal/validate"
 )
@@ -81,27 +82,23 @@ func newInfisicalSecretsBatchResource(
 // per (container, region) key; concurrent callers for the same key wait and
 // reuse the same resource via a mutex-protected map.
 type InfisicalSecretsAdapter struct {
-	clientId           string
-	clientSecret       string
-	bootstrapSecretEnc string
-	siteUrl            string
-	mu                 sync.Mutex
-	workspaces         map[string]pulumi.StringOutput
+	clientId     string
+	clientSecret string
+	siteUrl      string
+	mu           sync.Mutex
+	workspaces   map[string]pulumi.StringOutput
 }
 
 // New returns an InfisicalSecretsAdapter configured with the given credentials.
-// bootstrapSecretEnc is part of the deferred bootstrap flow — accept it even
-// when empty, but do not use it to make API calls in this phase.
-func New(clientId, clientSecret, bootstrapSecretEnc, siteUrl string) *InfisicalSecretsAdapter {
+func New(clientId, clientSecret, siteUrl string) *InfisicalSecretsAdapter {
 	if siteUrl == "" {
 		siteUrl = "https://app.infisical.com"
 	}
 	return &InfisicalSecretsAdapter{
-		clientId:           clientId,
-		clientSecret:       clientSecret,
-		bootstrapSecretEnc: bootstrapSecretEnc,
-		siteUrl:            siteUrl,
-		workspaces:         map[string]pulumi.StringOutput{},
+		clientId:     clientId,
+		clientSecret: clientSecret,
+		siteUrl:      siteUrl,
+		workspaces:   map[string]pulumi.StringOutput{},
 	}
 }
 
@@ -163,12 +160,10 @@ func (a *InfisicalSecretsAdapter) ContributeToManifest(
 ) (types.ManifestContribution, error) {
 	for _, s := range resources.Secrets {
 		if s.Container == spec.Container && s.Provider == "infisical" {
-			if a.bootstrapSecretEnc == "" {
-				return types.ManifestContribution{}, fmt.Errorf(
-					"infisical: bootstrapSecretEnc is empty for container %q — cannot write credentials into manifest",
-					s.Container,
-				)
-			}
+			// client_secret is marked as a manifest secret so it is SOPS/age-encrypted
+			// with the per-VM key K before being embedded in cloud-init. The VM
+			// redeems the one-time token from the key broker to obtain K, decrypts the
+			// manifest, and uses the plaintext credential to authenticate to Infisical.
 			return types.ManifestContribution{
 				"secrets": map[string]any{
 					"provider":    "infisical",
@@ -176,9 +171,9 @@ func (a *InfisicalSecretsAdapter) ContributeToManifest(
 					"project":     s.Container,
 					"environment": envToSlug(env),
 					"auth": map[string]any{
-						"method":            "universal-auth",
-						"client_id":         a.clientId,
-						"client_secret_enc": a.bootstrapSecretEnc,
+						"method":     "universal-auth",
+						"client_id":  a.clientId,
+						"client_secret": manifest.Secret(a.clientSecret),
 					},
 				},
 			}, nil
