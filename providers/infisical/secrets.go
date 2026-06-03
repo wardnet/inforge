@@ -162,7 +162,7 @@ func (a *InfisicalSecretsAdapter) ContributeToManifest(
 		if s.Container == spec.Container && s.Provider == "infisical" {
 			// client_secret is marked as a manifest secret so it is SOPS/age-encrypted
 			// with the per-VM key K before being embedded in cloud-init. The VM
-			// redeems the one-time token from the escrow to obtain K, decrypts the
+			// redeems the one-time token from the key broker to obtain K, decrypts the
 			// manifest, and uses the plaintext credential to authenticate to Infisical.
 			return types.ManifestContribution{
 				"secrets": map[string]any{
