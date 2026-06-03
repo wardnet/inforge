@@ -26,3 +26,19 @@ func HetznerLabels(project, env, region, container string) map[string]string {
 	}
 	return m
 }
+
+// CloudflareTags returns the tags to apply to a Cloudflare DNS record.
+// Tags use the "key:value" string format supported by the Cloudflare API.
+// container may be empty for resources not scoped to a specific container,
+// in which case the container tag is omitted.
+func CloudflareTags(project, env, region, container string) []string {
+	t := []string{
+		fmt.Sprintf("project:%s", project),
+		fmt.Sprintf("env:%s", env),
+		fmt.Sprintf("region:%s", region),
+	}
+	if container != "" {
+		t = append(t, fmt.Sprintf("container:%s", container))
+	}
+	return t
+}
