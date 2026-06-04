@@ -1,0 +1,6 @@
+base_domain: example.com
+regions:
+  - name: us-east-1
+providers:
+  hetzner: {}
+  cloudflare: {}

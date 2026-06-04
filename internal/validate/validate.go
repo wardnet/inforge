@@ -215,6 +215,9 @@ func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, region
 		for i := 1; i <= f.spec.InstanceCount; i++ {
 			ctx.computeKind[naming.SpecKey(f.spec.Name, i)] = f.spec.Kind
 		}
+		if f.spec.InstanceCount == 1 {
+			ctx.computeKind[f.spec.Name] = f.spec.Kind
+		}
 	}
 	for _, f := range databaseFiles {
 		ctx.databaseNames[f.spec.Name] = true

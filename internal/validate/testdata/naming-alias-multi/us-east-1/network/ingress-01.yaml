@@ -1,0 +1,7 @@
+name: ingress
+container: core
+provider: hetzner
+cidr: 10.0.0.0/16
+subnets:
+  - name: public
+    cidr: 10.0.0.0/24
