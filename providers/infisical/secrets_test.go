@@ -1,6 +1,7 @@
 package infisical
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
@@ -8,8 +9,85 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/manifest"
+	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/types"
 )
+
+// --- naming-convention tests --------------------------------------------------
+
+// capturedCall records the Pulumi logical name and inputs of a registered resource.
+type capturedCall struct {
+	logicalName string
+	inputs      resource.PropertyMap
+}
+
+// namingMocks captures every RegisterResource call keyed by Pulumi type token.
+type namingMocks struct {
+	mu       sync.Mutex
+	captured map[string]capturedCall
+}
+
+func newNamingMocks() *namingMocks {
+	return &namingMocks{captured: map[string]capturedCall{}}
+}
+
+func (m *namingMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	return resource.PropertyMap{}, nil
+}
+
+func (m *namingMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
+	m.mu.Lock()
+	m.captured[args.TypeToken] = capturedCall{logicalName: args.Name, inputs: args.Inputs}
+	m.mu.Unlock()
+
+	outputs := resource.PropertyMap{}
+	if args.TypeToken == infisicalWorkspaceType {
+		outputs["workspaceId"] = resource.NewStringProperty("ws-test-id")
+	}
+	return args.Name + "-id", outputs, nil
+}
+
+// TestWorkspaceNamePassedToAPIMatchesNamingConvention verifies that the name
+// field sent to the Infisical API matches the full naming convention
+// (wardnet-<env>-<regionSlug>-container-<container>), not just the raw
+// container name.
+func TestWorkspaceNamePassedToAPIMatchesNamingConvention(t *testing.T) {
+	mocks := newNamingMocks()
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		adapter := New("cid", "csec", "", "use1")
+		_, err := adapter.ensureWorkspace(ctx, "bridge", "prd")
+		return err
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	want := naming.Resource("prd", "use1", "container", "bridge")
+	got := mocks.captured[infisicalWorkspaceType].inputs["name"].StringValue()
+	assert.Equal(t, want, got,
+		"name sent to Infisical API must follow naming convention, not be the raw container name")
+}
+
+// TestSecretsBatchNameMatchesNamingConvention verifies that the Pulumi logical
+// name of an Infisical secrets batch follows
+// wardnet-<env>-<regionSlug>-secrets-<specName>.
+func TestSecretsBatchNameMatchesNamingConvention(t *testing.T) {
+	mocks := newNamingMocks()
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		adapter := New("cid", "csec", "", "use1")
+		spec := types.SecretsSpec{
+			Name:      "bridge",
+			Container: "bridge",
+			Provider:  "infisical",
+			Secrets:   map[string]types.SecretsEntry{"MY_SECRET": {Source: "gha:MY_SECRET"}},
+		}
+		return adapter.Create(ctx, spec, "prd", "us-east-1", types.AllOutputs{})
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	want := naming.Resource("prd", "use1", "secrets", "bridge")
+	got := mocks.captured[infisicalSecretsBatchType].logicalName
+	assert.Equal(t, want, got,
+		"Infisical secrets batch Pulumi logical name must follow naming convention")
+}
 
 // Compile-time assertions: InfisicalSecretsAdapter satisfies both interfaces.
 var _ types.SecretsBackendProvider = (*InfisicalSecretsAdapter)(nil)

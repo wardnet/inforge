@@ -142,7 +142,7 @@ func (n *NeonDatabaseAdapter) ensureContainer(
 	}
 
 	projectName := naming.Resource(env, n.slug, "container", container)
-	res, err := newNeonProjectResource(ctx, projectName, container, neonRegion, n.apiKey)
+	res, err := newNeonProjectResource(ctx, projectName, projectName, neonRegion, n.apiKey)
 	if err != nil {
 		return nil, fmt.Errorf("create neon project %q: %w", projectName, err)
 	}

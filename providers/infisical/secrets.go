@@ -201,8 +201,7 @@ func (a *InfisicalSecretsAdapter) ensureWorkspace(
 	}
 
 	wsName := naming.Resource(env, a.slug, "container", container)
-	// workspaceName is what shows in the Infisical UI — keep the container name.
-	wsRes, err := newInfisicalWorkspaceResource(ctx, wsName, container, a.clientId, a.clientSecret, a.siteUrl)
+	wsRes, err := newInfisicalWorkspaceResource(ctx, wsName, wsName, a.clientId, a.clientSecret, a.siteUrl)
 	if err != nil {
 		return pulumi.StringOutput{}, fmt.Errorf("create infisical workspace %q: %w", wsName, err)
 	}
