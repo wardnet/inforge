@@ -245,21 +245,13 @@ func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, env string) ([]*hclo
 	keyLabels := toStringMap(tags.HetznerLabels(h.project, env, h.slug, ""))
 
 	userKeyName := naming.GlobalResource(env, "key", "user")
-	userKey, err := hcloud.NewSshKey(ctx, userKeyName, &hcloud.SshKeyArgs{
-		Name:      pulumi.String(userKeyName),
-		PublicKey: pulumi.String(h.sshAuthorizedKeys),
-		Labels:    keyLabels,
-	}, h.providerOpts()...)
+	userKey, err := h.newOrImportSshKey(ctx, userKeyName, h.sshAuthorizedKeys, keyLabels)
 	if err != nil {
 		return nil, fmt.Errorf("create user ssh key %s: %w", userKeyName, err)
 	}
 
 	deployKeyName := naming.GlobalResource(env, "key", "deploy")
-	deployKey, err := hcloud.NewSshKey(ctx, deployKeyName, &hcloud.SshKeyArgs{
-		Name:      pulumi.String(deployKeyName),
-		PublicKey: pulumi.String(h.deployPublicKey),
-		Labels:    keyLabels,
-	}, h.providerOpts()...)
+	deployKey, err := h.newOrImportSshKey(ctx, deployKeyName, h.deployPublicKey, keyLabels)
 	if err != nil {
 		return nil, fmt.Errorf("create deploy ssh key %s: %w", deployKeyName, err)
 	}
@@ -267,6 +259,22 @@ func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, env string) ([]*hclo
 	keys := []*hcloud.SshKey{userKey, deployKey}
 	h.sshKeys[env] = keys
 	return keys, nil
+}
+
+// newOrImportSshKey creates an SSH key in Hetzner, importing the existing one
+// if a key with the same name is already present (adopt-or-create, idempotent).
+func (h *HetznerCompute) newOrImportSshKey(ctx *pulumi.Context, name, publicKey string, labels pulumi.StringMap) (*hcloud.SshKey, error) {
+	opts := h.providerOpts()
+	if h.provider != nil {
+		if existing, err := hcloud.LookupSshKey(ctx, &hcloud.LookupSshKeyArgs{Name: &name}, pulumi.Provider(h.provider)); err == nil && existing != nil && existing.Id != nil {
+			opts = append(opts, pulumi.Import(pulumi.ID(strconv.Itoa(*existing.Id))))
+		}
+	}
+	return hcloud.NewSshKey(ctx, name, &hcloud.SshKeyArgs{
+		Name:      pulumi.String(name),
+		PublicKey: pulumi.String(publicKey),
+		Labels:    labels,
+	}, opts...)
 }
 
 // providerOpts returns the Pulumi provider resource option when a provider is
