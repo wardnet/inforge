@@ -111,7 +111,7 @@ func New(clientId, clientSecret, siteUrl, slug string) *InfisicalSecretsAdapter 
 func (a *InfisicalSecretsAdapter) Create(
 	ctx *pulumi.Context, spec types.SecretsSpec, env, region string, all types.AllOutputs,
 ) error {
-	workspaceId, err := a.ensureWorkspace(ctx, spec.Container, region)
+	workspaceId, err := a.ensureWorkspace(ctx, spec.Container, env)
 	if err != nil {
 		return fmt.Errorf("ensure infisical workspace for container %q in %s: %w", spec.Container, region, err)
 	}
