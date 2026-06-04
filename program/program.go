@@ -88,6 +88,7 @@ func Run(ctx *pulumi.Context) error {
 		registries[re.Name] = registry.BuildRegistry(ctx, merged, vars.SSH, regionTable, ctx.Project(), env, re.Name)
 	}
 
+	// networkOutputs: region → specName+"/"+subnetName → NetworkOutputs
 	networkOutputs := map[string]map[string]types.NetworkOutputs{}
 	computeOutputs := map[string]map[string]types.ComputeOutputs{}
 	databaseOutputs := map[string]map[string]types.DatabaseOutputs{}
@@ -109,11 +110,13 @@ func Run(ctx *pulumi.Context) error {
 			if err != nil {
 				return err
 			}
-			out, err := np.Create(ctx, spec, env, region)
+			subnetMap, err := np.Create(ctx, spec, env, region)
 			if err != nil {
 				return err
 			}
-			networkOutputs[region][naming.SpecKey(spec.Name, spec.Instance)] = out
+			for subnetName, out := range subnetMap {
+				networkOutputs[region][spec.Name+"/"+subnetName] = out
+			}
 		}
 
 		for _, spec := range res.Compute {
@@ -138,6 +141,11 @@ func Run(ctx *pulumi.Context) error {
 				bootstrapDoc = string(docBytes)
 			}
 
+			netOut, err := resolveNetworkOutput(spec, res.Network, networkOutputs[region])
+			if err != nil {
+				return fmt.Errorf("compute %s/%s: %w", region, spec.Name, err)
+			}
+
 			cp, err := reg.Compute(spec.Provider)
 			if err != nil {
 				return err
@@ -145,7 +153,7 @@ func Run(ctx *pulumi.Context) error {
 			for i := 1; i <= spec.InstanceCount; i++ {
 				key := naming.SpecKey(spec.Name, i)
 				domain := fmt.Sprintf("%s.%s.%s", subdomainFor(key, spec.Name, res.DNS), slug, vars.BaseDomain)
-				out, err := cp.Create(ctx, spec, networkOutputs[region][spec.Network], env, region, domain, man.Manifest, bootstrapDoc)
+				out, err := cp.Create(ctx, spec, netOut, env, region, domain, man.Manifest, bootstrapDoc)
 				if err != nil {
 					return err
 				}
@@ -181,23 +189,51 @@ func Run(ctx *pulumi.Context) error {
 		region := re.Name
 		reg := registries[region]
 		res := byRegion[region]
-		slug, err := regionTable.Slug(region)
-		if err != nil {
-			return err
-		}
 		for _, spec := range res.DNS {
 			dp, err := reg.DNS(spec.Provider)
 			if err != nil {
 				return err
 			}
-			recordName := fmt.Sprintf("%s.%s", spec.Subdomain, slug)
-			if err := dp.Create(ctx, spec, computeOutputs[region][spec.Compute], recordName); err != nil {
+			if err := dp.Create(ctx, spec, computeOutputs[region][spec.Compute]); err != nil {
 				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+// resolveNetworkOutput returns the NetworkOutputs for the subnet a compute spec
+// should attach to. If spec.Subnet is set, it is used as the subnet name;
+// otherwise the first subnet of the network spec (by declaration order) is
+// used, which is deterministic.
+func resolveNetworkOutput(spec types.ComputeSpec, networks []types.NetworkSpec, netOuts map[string]types.NetworkOutputs) (types.NetworkOutputs, error) {
+	// Find the network spec by name.
+	var netSpec *types.NetworkSpec
+	for i := range networks {
+		if networks[i].Name == spec.Network {
+			netSpec = &networks[i]
+			break
+		}
+	}
+	if netSpec == nil {
+		return types.NetworkOutputs{}, fmt.Errorf("network %q not found", spec.Network)
+	}
+
+	subnetName := spec.Subnet
+	if subnetName == "" {
+		if len(netSpec.Subnets) == 0 {
+			return types.NetworkOutputs{}, fmt.Errorf("network %q has no subnets", spec.Network)
+		}
+		subnetName = netSpec.Subnets[0].Name
+	}
+
+	key := spec.Network + "/" + subnetName
+	out, ok := netOuts[key]
+	if !ok {
+		return types.NetworkOutputs{}, fmt.Errorf("network output %q not found", key)
+	}
+	return out, nil
 }
 
 func assembleManifest(reg registry.ProviderRegistry, spec types.ComputeSpec, res types.Resources, env, region, slug string) (manifest.Result, bootstrap.Material, error) {

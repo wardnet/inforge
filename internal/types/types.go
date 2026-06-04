@@ -14,17 +14,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// NetworkSpec is one network resource. A network is either public (no parent)
-// or private (carved out of a parent network's CIDR).
+// SubnetSpec is one subnet within a NetworkSpec.
+type SubnetSpec struct {
+	Name string `yaml:"name"`
+	CIDR string `yaml:"cidr"`
+}
+
+// NetworkSpec is one network resource.
 type NetworkSpec struct {
-	Name       string `yaml:"name"`
-	Instance   int    `yaml:"instance"`
-	Container  string `yaml:"container"`
-	Provider   string `yaml:"provider"`
-	Type       string `yaml:"type"` // "public" (default) | "private"
-	CIDR       string `yaml:"cidr"`
-	SubnetCIDR string `yaml:"subnet_cidr,omitempty"`
-	Parent     string `yaml:"parent,omitempty"`
+	Name      string       `yaml:"name"`
+	Container string       `yaml:"container"`
+	Provider  string       `yaml:"provider"`
+	CIDR      string       `yaml:"cidr"`
+	Subnets   []SubnetSpec `yaml:"subnets"`
 }
 
 // Port is a firewall port or port range (e.g. "80", "8000-9000"). It unmarshals
@@ -63,8 +65,9 @@ type ComputeSpec struct {
 	Kind          string        `yaml:"kind"` // "vm" (default; only supported kind) | "cluster" (reserved)
 	Container     string        `yaml:"container"`
 	Provider      string        `yaml:"provider"`
-	Network       string        `yaml:"network"` // FK -> network specKey
-	Size          string        `yaml:"size"`    // resolved against the size table
+	Network       string        `yaml:"network"`          // FK -> network spec name
+	Subnet        string        `yaml:"subnet,omitempty"` // optional FK -> subnet name within the network
+	Size          string        `yaml:"size"`             // resolved against the size table
 	Image         string        `yaml:"image"`
 	CloudInit     string          `yaml:"cloud_init,omitempty"` // path relative to the compute dir
 	InstanceCount int             `yaml:"instance_count"`       // default 1; expands into specKeys name-01..name-NN
@@ -75,7 +78,6 @@ type ComputeSpec struct {
 // DnsSpec is one DNS record.
 type DnsSpec struct {
 	Name      string `yaml:"name"`
-	Instance  int    `yaml:"instance"`
 	Container string `yaml:"container"`
 	Provider  string `yaml:"provider"`
 	Compute   string `yaml:"compute"` // FK -> an expanded compute specKey
@@ -148,9 +150,10 @@ type AllOutputs struct {
 	Database map[string]map[string]DatabaseOutputs
 }
 
-// NetworkProvider creates a network for one spec in one region.
+// NetworkProvider creates a network for one spec in one region. Returns a map
+// from subnet name to its outputs so callers can look up a specific subnet.
 type NetworkProvider interface {
-	Create(ctx *pulumi.Context, spec NetworkSpec, env, abstractRegion string) (NetworkOutputs, error)
+	Create(ctx *pulumi.Context, spec NetworkSpec, env, abstractRegion string) (map[string]NetworkOutputs, error)
 }
 
 // ComputeProvider creates one compute instance, wiring in its network, the
@@ -162,7 +165,7 @@ type ComputeProvider interface {
 
 // DnsProvider creates a DNS record pointing at a compute instance.
 type DnsProvider interface {
-	Create(ctx *pulumi.Context, spec DnsSpec, compute ComputeOutputs, recordName string) error
+	Create(ctx *pulumi.Context, spec DnsSpec, compute ComputeOutputs) error
 }
 
 // DatabaseProvider creates a managed database.

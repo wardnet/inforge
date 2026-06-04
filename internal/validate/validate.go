@@ -209,7 +209,7 @@ func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, region
 		databaseNames: map[string]bool{},
 	}
 	for _, f := range networkFiles {
-		ctx.networks[naming.SpecKey(f.spec.Name, f.spec.Instance)] = f.spec
+		ctx.networks[f.spec.Name] = f.spec
 	}
 	for _, f := range computeFiles {
 		for i := 1; i <= f.spec.InstanceCount; i++ {
@@ -377,35 +377,12 @@ func checkNetwork(s types.NetworkSpec, ctx regionContext) (errs, warns []string)
 	if err != nil {
 		errs = append(errs, err.Error())
 	}
-	if s.SubnetCIDR != "" {
-		subnet, serr := parseCIDR("subnet_cidr", s.SubnetCIDR)
+	for i, sub := range s.Subnets {
+		subnet, serr := parseCIDR(fmt.Sprintf("subnets[%d].cidr", i), sub.CIDR)
 		if serr != nil {
 			errs = append(errs, serr.Error())
 		} else if cidr != nil && !cidrContains(cidr, subnet) {
-			errs = append(errs, fmt.Sprintf("subnet_cidr: %q is not within cidr %q", s.SubnetCIDR, s.CIDR))
-		}
-	}
-
-	switch s.Type {
-	case "public":
-		if s.Parent != "" {
-			errs = append(errs, "parent: must be empty for a public network")
-		}
-	case "private":
-		if s.Parent == "" {
-			errs = append(errs, "parent: required for a private network")
-			break
-		}
-		parent, ok := ctx.networks[s.Parent]
-		if !ok {
-			errs = append(errs, fmt.Sprintf("parent: network %q not found", s.Parent))
-			break
-		}
-		if cidr != nil {
-			parentCIDR, perr := parseCIDR("parent.cidr", parent.CIDR)
-			if perr == nil && !cidrContains(parentCIDR, cidr) {
-				errs = append(errs, fmt.Sprintf("cidr: %q is not within parent %q cidr %q", s.CIDR, s.Parent, parent.CIDR))
-			}
+			errs = append(errs, fmt.Sprintf("subnets[%d].cidr: %q is not within cidr %q", i, sub.CIDR, s.CIDR))
 		}
 	}
 	return errs, warns

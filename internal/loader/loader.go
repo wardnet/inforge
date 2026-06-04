@@ -252,12 +252,8 @@ func applyDefaults(res *types.Resources, computeDir string) {
 	}
 }
 
-// NormalizeNetwork applies network defaults (type defaults to "public").
-func NormalizeNetwork(n *types.NetworkSpec) {
-	if n.Type == "" {
-		n.Type = "public"
-	}
-}
+// NormalizeNetwork is a no-op placeholder retained for the applyDefaults call.
+func NormalizeNetwork(_ *types.NetworkSpec) {}
 
 // NormalizeCompute applies compute defaults (kind=vm, instance_count=1) and
 // resolves a relative cloud_init path against computeDir.

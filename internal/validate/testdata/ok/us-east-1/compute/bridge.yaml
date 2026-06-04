@@ -1,7 +1,7 @@
 name: bridge
 container: bridge
 provider: hetzner
-network: ingress-01
+network: ingress
 size: SMALL
 image: ubuntu-24.04
 cloud_init: bridge.cloud-init.sh

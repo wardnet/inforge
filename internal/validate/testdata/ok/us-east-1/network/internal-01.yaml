@@ -1,7 +1,7 @@
 name: internal
-instance: 1
 container: ingress
 provider: hetzner
-type: private
-parent: ingress-01
 cidr: 10.0.1.0/24
+subnets:
+  - name: main
+    cidr: 10.0.1.0/26

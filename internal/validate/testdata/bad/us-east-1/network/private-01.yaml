@@ -1,7 +1,8 @@
-# private network missing its required parent -> FAIL.
+# subnet CIDR is outside the network CIDR -> FAIL.
 name: private
-instance: 1
 container: ingress
 provider: hetzner
-type: private
 cidr: 10.9.0.0/24
+subnets:
+  - name: main
+    cidr: 10.8.0.0/24

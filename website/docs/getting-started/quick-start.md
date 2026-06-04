@@ -17,11 +17,11 @@ my-infra/
         ├── variables.yaml    # regions, providers, SSH config
         ├── us-east-1/
         │   ├── network/
-        │   │   └── ingress-01.yaml
+        │   │   └── ingress.yaml
         │   ├── compute/
-        │   │   └── bridge-01.yaml
+        │   │   └── bridge.yaml
         │   └── dns/
-        │       └── bridge-01.yaml
+        │       └── bridge.yaml
         └── services/
             └── api-01.yaml
 ```
@@ -73,15 +73,14 @@ providers:
 
 ## 5. Write a compute resource
 
-```yaml title="resources/prd/us-east-1/compute/bridge-01.yaml"
+```yaml title="resources/prd/us-east-1/compute/bridge.yaml"
 name: bridge
-instance: 1
 container: bridge
 provider: hetzner
-network: ingress-01
+network: ingress
 size: SMALL
 image: ubuntu-24.04
-cloud_init: bridge-01.cloud-init.sh
+cloud_init: bridge.cloud-init.sh
 ```
 
 ## 6. Validate
