@@ -1,0 +1,7 @@
+name: bridge
+container: core
+provider: hetzner
+network: ingress
+size: SMALL
+image: ubuntu-24.04
+instance_count: 2

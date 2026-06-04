@@ -200,7 +200,7 @@ func (a *InfisicalSecretsAdapter) ensureWorkspace(
 		return ws, nil
 	}
 
-	wsName := naming.Resource(env, a.slug, "workspace", container)
+	wsName := naming.Resource(env, a.slug, "container", container)
 	// workspaceName is what shows in the Infisical UI — keep the container name.
 	wsRes, err := newInfisicalWorkspaceResource(ctx, wsName, container, a.clientId, a.clientSecret, a.siteUrl)
 	if err != nil {
