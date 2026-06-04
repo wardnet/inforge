@@ -30,17 +30,17 @@ func (m *infisicalMocks) NewResource(args pulumi.MockResourceArgs) (string, reso
 	return args.Name + "-id", outputs, nil
 }
 
-// TestEnsureWorkspaceIdempotent verifies that the same (container, region) pair
+// TestEnsureWorkspaceIdempotent verifies that the same (container, env) pair
 // returns the same workspace resource on repeated calls.
 func TestEnsureWorkspaceIdempotent(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("cid", "csec", "")
+		adapter := New("cid", "csec", "", "use1")
 
-		first, err := adapter.ensureWorkspace(ctx, "mycontainer", "us-east-1")
+		first, err := adapter.ensureWorkspace(ctx, "mycontainer", "prd")
 		if err != nil {
 			return err
 		}
-		second, err := adapter.ensureWorkspace(ctx, "mycontainer", "us-east-1")
+		second, err := adapter.ensureWorkspace(ctx, "mycontainer", "prd")
 		if err != nil {
 			return err
 		}
@@ -54,23 +54,23 @@ func TestEnsureWorkspaceIdempotent(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestEnsureWorkspaceDifferentRegionsAreIndependent verifies that distinct
-// (container, region) pairs produce separate workspace resources.
-func TestEnsureWorkspaceDifferentRegionsAreIndependent(t *testing.T) {
+// TestEnsureWorkspaceDifferentEnvsAreIndependent verifies that distinct
+// (container, env) pairs produce separate workspace resources.
+func TestEnsureWorkspaceDifferentEnvsAreIndependent(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("cid", "csec", "")
+		adapter := New("cid", "csec", "", "use1")
 
-		east, err := adapter.ensureWorkspace(ctx, "mycontainer", "us-east-1")
+		prd, err := adapter.ensureWorkspace(ctx, "mycontainer", "prd")
 		if err != nil {
 			return err
 		}
-		west, err := adapter.ensureWorkspace(ctx, "mycontainer", "eu-west-1")
+		stg, err := adapter.ensureWorkspace(ctx, "mycontainer", "stg")
 		if err != nil {
 			return err
 		}
 
-		if east == west {
-			t.Error("ensureWorkspace returned the same output for different regions")
+		if prd == stg {
+			t.Error("ensureWorkspace returned the same output for different envs")
 		}
 		return nil
 	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
@@ -81,7 +81,7 @@ func TestEnsureWorkspaceDifferentRegionsAreIndependent(t *testing.T) {
 // returns a non-empty contribution when the compute spec's container has an
 // Infisical SecretsSpec.
 func TestContributeToManifestMatchingSpec(t *testing.T) {
-	adapter := New("client-id", "client-secret", "https://app.infisical.com")
+	adapter := New("client-id", "client-secret", "https://app.infisical.com", "use1")
 
 	computeSpec := types.ComputeSpec{Container: "myapp"}
 	resources := types.Resources{
@@ -103,7 +103,7 @@ func TestContributeToManifestMatchingSpec(t *testing.T) {
 // TestContributeToManifestNoMatch verifies that an empty contribution is
 // returned when no SecretsSpec matches the compute container.
 func TestContributeToManifestNoMatch(t *testing.T) {
-	adapter := New("cid", "csec", "")
+	adapter := New("cid", "csec", "", "use1")
 
 	computeSpec := types.ComputeSpec{Container: "other"}
 	resources := types.Resources{
@@ -121,7 +121,7 @@ func TestContributeToManifestNoMatch(t *testing.T) {
 // manifest contribution is wrapped as a manifest.Secret so the SOPS/age
 // encryption flow marks it for encryption.
 func TestContributeToManifestSecretWrapped(t *testing.T) {
-	adapter := New("cid", "csec", "")
+	adapter := New("cid", "csec", "", "use1")
 
 	computeSpec := types.ComputeSpec{Container: "myapp"}
 	resources := types.Resources{

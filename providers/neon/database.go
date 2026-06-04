@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -78,14 +79,19 @@ func newNeonDatabaseResource(
 // deduplicated via a mutex-protected map, mirroring HetznerNetwork.
 type NeonDatabaseAdapter struct {
 	apiKey     string
+	project    string
+	slug       string
 	mu         sync.Mutex
 	containers map[string]*neonProjectResource // key → project resource
 }
 
-// New returns a NeonDatabaseAdapter configured with the given Neon API key.
-func New(apiKey string) *NeonDatabaseAdapter {
+// New returns a NeonDatabaseAdapter configured with the given Neon API key,
+// inforge project name, and region slug.
+func New(apiKey, project, slug string) *NeonDatabaseAdapter {
 	return &NeonDatabaseAdapter{
 		apiKey:     apiKey,
+		project:    project,
+		slug:       slug,
 		containers: map[string]*neonProjectResource{},
 	}
 }
@@ -100,7 +106,7 @@ func (n *NeonDatabaseAdapter) Create(
 		return types.DatabaseOutputs{}, err
 	}
 
-	proj, err := n.ensureContainer(ctx, spec.Container, neonRegion)
+	proj, err := n.ensureContainer(ctx, spec.Container, env, neonRegion)
 	if err != nil {
 		return types.DatabaseOutputs{}, fmt.Errorf("ensure neon project for container %q in %s: %w", spec.Container, neonRegion, err)
 	}
@@ -110,9 +116,10 @@ func (n *NeonDatabaseAdapter) Create(
 		branch = "main"
 	}
 
-	dbRes, err := newNeonDatabaseResource(ctx, spec.Name, proj.ProjectId, branch, spec.Database, spec.Role, n.apiKey)
+	dbName := naming.Resource(env, n.slug, "db", spec.Name)
+	dbRes, err := newNeonDatabaseResource(ctx, dbName, proj.ProjectId, branch, spec.Database, spec.Role, n.apiKey)
 	if err != nil {
-		return types.DatabaseOutputs{}, fmt.Errorf("create neon database %q: %w", spec.Name, err)
+		return types.DatabaseOutputs{}, fmt.Errorf("create neon database %q: %w", dbName, err)
 	}
 
 	return types.DatabaseOutputs{ConnectionURL: dbRes.ConnectionUrl}, nil
@@ -123,7 +130,7 @@ func (n *NeonDatabaseAdapter) Create(
 // the RegisterResource call so that concurrent callers for the same key wait and
 // reuse the same resource, matching the HetznerNetwork pattern.
 func (n *NeonDatabaseAdapter) ensureContainer(
-	ctx *pulumi.Context, container, neonRegion string,
+	ctx *pulumi.Context, container, env, neonRegion string,
 ) (*neonProjectResource, error) {
 	key := fmt.Sprintf("%s-%s", container, neonRegion)
 
@@ -134,9 +141,10 @@ func (n *NeonDatabaseAdapter) ensureContainer(
 		return proj, nil
 	}
 
-	res, err := newNeonProjectResource(ctx, key, container, neonRegion, n.apiKey)
+	projectName := naming.Resource(env, n.slug, "project", container)
+	res, err := newNeonProjectResource(ctx, projectName, container, neonRegion, n.apiKey)
 	if err != nil {
-		return nil, fmt.Errorf("create neon project %q: %w", key, err)
+		return nil, fmt.Errorf("create neon project %q: %w", projectName, err)
 	}
 
 	n.containers[key] = res

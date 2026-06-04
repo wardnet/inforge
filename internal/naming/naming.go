@@ -1,6 +1,6 @@
 // Package naming builds the canonical identifiers for resources: the specKey
-// (a resource instance's foreign-key identity) and the fully-qualified display
-// name used by providers.
+// (a resource instance's foreign-key identity) and the fully-qualified resource
+// names used by providers.
 package naming
 
 import "fmt"
@@ -15,8 +15,19 @@ func SpecKey(name string, instance int) string {
 	return fmt.Sprintf("%s-%02d", name, instance)
 }
 
-// DisplayName returns the fully-qualified resource name,
-// "wardnet-<env>-<resourceType>-<slug>-<specKey>".
-func DisplayName(env, resourceType, locationSlug, name string, instance int) string {
-	return fmt.Sprintf("%s-%s-%s-%s-%s", usage, env, resourceType, locationSlug, SpecKey(name, instance))
+// Resource returns wardnet-<env>-<regionSlug>-<type>-<name>.
+func Resource(env, regionSlug, resourceType, name string) string {
+	return fmt.Sprintf("%s-%s-%s-%s-%s", usage, env, regionSlug, resourceType, name)
+}
+
+// ResourceInstance returns wardnet-<env>-<regionSlug>-<type>-<name>-<NN>.
+// Only for resources with instance_count (servers).
+func ResourceInstance(env, regionSlug, resourceType, name string, instance int) string {
+	return fmt.Sprintf("%s-%s-%s-%s-%s-%02d", usage, env, regionSlug, resourceType, name, instance)
+}
+
+// GlobalResource returns wardnet-<env>-<type>-<name> (no region).
+// For env-scoped resources like SSH keys.
+func GlobalResource(env, resourceType, name string) string {
+	return fmt.Sprintf("%s-%s-%s-%s", usage, env, resourceType, name)
 }
