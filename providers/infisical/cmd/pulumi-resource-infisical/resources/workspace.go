@@ -2,12 +2,10 @@ package resources
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/pulumi/pulumi-go-provider/infer"
 )
@@ -71,7 +69,7 @@ func (*InfisicalWorkspace) Read(
 		return infer.ReadResponse[InfisicalWorkspaceArgs, InfisicalWorkspaceState]{}, nil
 	}
 
-	url := req.State.SiteUrl + "/api/v1/workspace/" + req.ID
+	url := req.State.SiteUrl + "/api/v1/projects/" + req.ID
 	_, status, err := infisicalDo(ctx, http.MethodGet, url, token, nil)
 	if err != nil {
 		return infer.ReadResponse[InfisicalWorkspaceArgs, InfisicalWorkspaceState]{}, err
@@ -94,30 +92,30 @@ func (*InfisicalWorkspace) Delete(
 	return infer.DeleteResponse{}, nil
 }
 
-// adoptOrCreateWorkspace returns the ID of an Infisical workspace matching name,
+// adoptOrCreateWorkspace returns the ID of an Infisical project matching name,
 // creating it if it does not already exist.
 func adoptOrCreateWorkspace(ctx context.Context, siteURL, token, name string) (string, error) {
-	listURL := siteURL + "/api/v1/workspace"
+	listURL := siteURL + "/api/v1/projects"
 	data, status, err := infisicalDo(ctx, http.MethodGet, listURL, token, nil)
 	if err != nil {
 		return "", err
 	}
 	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("infisical: list workspaces failed (HTTP %d): %s", status, data)
+		return "", fmt.Errorf("infisical: list projects failed (HTTP %d): %s", status, data)
 	}
 
 	var list struct {
-		Workspaces []struct {
+		Projects []struct {
 			Id   string `json:"id"`
 			Name string `json:"name"`
-		} `json:"workspaces"`
+		} `json:"projects"`
 	}
 	if err := json.Unmarshal(data, &list); err != nil {
-		return "", fmt.Errorf("infisical: parse workspaces list: %w", err)
+		return "", fmt.Errorf("infisical: parse projects list: %w", err)
 	}
-	for _, w := range list.Workspaces {
-		if w.Name == name {
-			return w.Id, nil
+	for _, p := range list.Projects {
+		if p.Name == name {
+			return p.Id, nil
 		}
 	}
 
@@ -125,55 +123,25 @@ func adoptOrCreateWorkspace(ctx context.Context, siteURL, token, name string) (s
 }
 
 func createWorkspace(ctx context.Context, siteURL, token, name string) (string, error) {
-	orgId, err := orgIdFromToken(token)
-	if err != nil {
-		return "", err
-	}
-
-	url := siteURL + "/api/v1/workspace"
+	url := siteURL + "/api/v1/projects"
 	body := map[string]any{
-		"workspaceName":  name,
-		"organizationId": orgId,
+		"projectName": name,
 	}
 	data, status, err := infisicalDo(ctx, http.MethodPost, url, token, body)
 	if err != nil {
 		return "", err
 	}
 	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("infisical: create workspace %q failed (HTTP %d): %s", name, status, data)
+		return "", fmt.Errorf("infisical: create project %q failed (HTTP %d): %s", name, status, data)
 	}
 
 	var resp struct {
-		Workspace struct {
+		Project struct {
 			Id string `json:"id"`
-		} `json:"workspace"`
+		} `json:"project"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("infisical: parse create workspace response: %w", err)
+		return "", fmt.Errorf("infisical: parse create project response: %w", err)
 	}
-	return resp.Workspace.Id, nil
-}
-
-// orgIdFromToken extracts the organization ID from the JWT payload of an
-// Infisical universal-auth access token, avoiding a separate API call to the
-// organizations endpoint which is not available on all Infisical deployments.
-func orgIdFromToken(token string) (string, error) {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) != 3 {
-		return "", fmt.Errorf("infisical: malformed JWT token")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", fmt.Errorf("infisical: decode JWT payload: %w", err)
-	}
-	var claims struct {
-		OrganizationId string `json:"organizationId"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", fmt.Errorf("infisical: parse JWT claims: %w", err)
-	}
-	if claims.OrganizationId == "" {
-		return "", fmt.Errorf("infisical: no organizationId in JWT claims")
-	}
-	return claims.OrganizationId, nil
+	return resp.Project.Id, nil
 }

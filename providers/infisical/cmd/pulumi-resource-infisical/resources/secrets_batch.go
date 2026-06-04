@@ -84,22 +84,21 @@ func (*InfisicalSecretsBatch) Delete(
 	return infer.DeleteResponse{}, nil
 }
 
-// upsertSecret writes key=value into the workspace+environment, patching on conflict (HTTP 409).
+// upsertSecret writes key=value into the project+environment, patching on conflict (HTTP 400).
 func upsertSecret(ctx context.Context, siteURL, token, workspaceId, envSlug, key, value string) error {
-	url := siteURL + "/api/v3/secrets/raw/" + key
+	url := siteURL + "/api/v4/secrets/" + key
 	body := map[string]any{
-		"workspaceId": workspaceId,
+		"projectId":   workspaceId,
 		"environment": envSlug,
 		"secretValue": value,
-		"type":        "shared",
 	}
 	data, status, err := infisicalDo(ctx, http.MethodPost, url, token, body)
 	if err != nil {
 		return err
 	}
-	if status == http.StatusConflict {
+	if status == http.StatusBadRequest {
 		patchBody := map[string]any{
-			"workspaceId": workspaceId,
+			"projectId":   workspaceId,
 			"environment": envSlug,
 			"secretValue": value,
 		}
