@@ -1,7 +1,11 @@
 package hetzner
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 	"sync"
 
@@ -27,6 +31,7 @@ var shapes = map[string]string{
 type HetznerCompute struct {
 	sshAuthorizedKeys string
 	deployPublicKey   string
+	apiToken          string
 	provider          *hcloud.Provider
 	project           string
 	slug              string
@@ -44,13 +49,14 @@ type HetznerCompute struct {
 // name used to label cloud resources. slug is the region slug used for resource
 // naming. regionOverrides is the output of ExtractRegionConfigs and may be nil
 // (DefaultRegionConfigs are used instead).
-func NewCompute(sshAuthorizedKeys, deployPublicKey string, provider *hcloud.Provider, project, slug string, regionOverrides map[string]RegionConfig) *HetznerCompute {
+func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *hcloud.Provider, project, slug string, regionOverrides map[string]RegionConfig) *HetznerCompute {
 	if regionOverrides == nil {
 		regionOverrides = map[string]RegionConfig{}
 	}
 	return &HetznerCompute{
 		sshAuthorizedKeys: sshAuthorizedKeys,
 		deployPublicKey:   deployPublicKey,
+		apiToken:          apiToken,
 		provider:          provider,
 		project:           project,
 		slug:              slug,
@@ -263,18 +269,54 @@ func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, env string) ([]*hclo
 
 // newOrImportSshKey creates an SSH key in Hetzner, importing the existing one
 // if a key with the same name is already present (adopt-or-create, idempotent).
+// It uses a direct hcloud API call rather than Pulumi's LookupSshKey invoke,
+// which logs engine-level errors on 404 and fails the stack even when caught.
 func (h *HetznerCompute) newOrImportSshKey(ctx *pulumi.Context, name, publicKey string, labels pulumi.StringMap) (*hcloud.SshKey, error) {
 	opts := h.providerOpts()
-	if h.provider != nil {
-		if existing, err := hcloud.LookupSshKey(ctx, &hcloud.LookupSshKeyArgs{Name: &name}, pulumi.Provider(h.provider)); err == nil && existing != nil && existing.Id != nil {
-			opts = append(opts, pulumi.Import(pulumi.ID(strconv.Itoa(*existing.Id))))
-		}
+	if id, err := h.lookupSshKeyID(name); err == nil && id != 0 {
+		opts = append(opts, pulumi.Import(pulumi.ID(strconv.Itoa(id))))
 	}
 	return hcloud.NewSshKey(ctx, name, &hcloud.SshKeyArgs{
 		Name:      pulumi.String(name),
 		PublicKey: pulumi.String(publicKey),
 		Labels:    labels,
 	}, opts...)
+}
+
+// lookupSshKeyID queries the hcloud API directly for an SSH key by name and
+// returns its numeric ID, or 0 if not found. Errors are treated as not-found
+// so a missing or misconfigured token falls back to create rather than failing.
+func (h *HetznerCompute) lookupSshKeyID(name string) (int, error) {
+	if h.apiToken == "" {
+		return 0, nil
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		"https://api.hetzner.cloud/v1/ssh_keys?name="+name, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+h.apiToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		SSHKeys []struct {
+			ID int `json:"id"`
+		} `json:"ssh_keys"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, err
+	}
+	if len(result.SSHKeys) == 0 {
+		return 0, nil
+	}
+	return result.SSHKeys[0].ID, nil
 }
 
 // providerOpts returns the Pulumi provider resource option when a provider is

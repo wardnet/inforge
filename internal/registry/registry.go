@@ -119,6 +119,7 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 			r.hetznerComp = hetzner.NewCompute(
 				r.ssh.AuthorizedKeys,
 				r.ssh.DeployPublicKey,
+				providerCfgString(r.config, "hetzner", "apiToken"),
 				r.hetznerProv(),
 				r.project,
 				r.slug,
