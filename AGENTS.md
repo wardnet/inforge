@@ -34,6 +34,31 @@ providers/infisical/cmd/pulumi-resource-infisical/ # Pulumi provider plugin — 
   automatically by `inforge plugins install`, which downloads only the providers a project needs from
   the matching GitHub release. Users never invoke them directly.
 
+## Resource naming convention
+
+All cloud resource names follow `wardnet-<env>-<regionSlug>-<type>-<name>[-<NN>]`.
+
+| Token | Example | Source |
+|---|---|---|
+| `wardnet` | fixed | `naming.usage` const |
+| `env` | `prd` | environment name |
+| `regionSlug` | `use1` | `regions.Table.Slug(region)` |
+| `type` | `vm`, `fw`, `net`, `subnet`, `db`, `project`, `secrets`, `workspace`, `record` | resource type token |
+| `name` | `bridge` | spec name |
+| `NN` | `01` | instance index (servers only) |
+
+SSH keys are env-scoped (no region): `wardnet-<env>-key-user` / `wardnet-<env>-key-deploy`.
+
+Three functions in `internal/naming` build these names:
+
+```go
+naming.Resource(env, slug, "vm", "bridge")              // wardnet-prd-use1-vm-bridge
+naming.ResourceInstance(env, slug, "vm", "bridge", 1)   // wardnet-prd-use1-vm-bridge-01
+naming.GlobalResource(env, "key", "user")               // wardnet-prd-key-user
+```
+
+`naming.SpecKey(name, instance)` produces `bridge-01` etc. and is used as an internal map key / foreign key in compute and DNS specs — it is NOT a cloud resource name.
+
 ## Conventions
 
 - **Provider binary names are load-bearing.** Pulumi locates plugins by the exact filename

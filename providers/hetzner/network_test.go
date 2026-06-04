@@ -80,13 +80,13 @@ func (m *testMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.
 
 func TestEnsureContainerIdempotency(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := New(nil, "test-project", nil)
+		h := New(nil, "test-project", "use1", nil)
 
-		net1, err := h.ensureContainer(ctx, "vpc", "us-east-1", "prod", "10.0.0.0/8")
+		net1, err := h.ensureContainer(ctx, "vpc", "prod", "10.0.0.0/8")
 		if err != nil {
 			return err
 		}
-		net2, err := h.ensureContainer(ctx, "vpc", "us-east-1", "prod", "10.0.0.0/8")
+		net2, err := h.ensureContainer(ctx, "vpc", "prod", "10.0.0.0/8")
 		if err != nil {
 			return err
 		}
@@ -94,8 +94,8 @@ func TestEnsureContainerIdempotency(t *testing.T) {
 		if net1 != net2 {
 			t.Error("ensureContainer returned different objects for the same key")
 		}
-		// Different key must produce a distinct object.
-		net3, err := h.ensureContainer(ctx, "db", "us-east-1", "prod", "10.1.0.0/16")
+		// Different container must produce a distinct object.
+		net3, err := h.ensureContainer(ctx, "db", "prod", "10.1.0.0/16")
 		if err != nil {
 			return err
 		}

@@ -29,9 +29,11 @@ type HetznerCompute struct {
 	deployPublicKey   string
 	provider          *hcloud.Provider
 	project           string
+	slug              string
 	mu                sync.Mutex
 	firewalls         map[string]*hcloud.Firewall
-	sshKeys           map[string][]*hcloud.SshKey
+	// sshKeys is keyed by env since SSH keys are env-scoped (not region-scoped).
+	sshKeys          map[string][]*hcloud.SshKey
 	// instanceCounters tracks how many servers have been created for each
 	// spec name so that Create assigns each call its unique specKey suffix.
 	instanceCounters map[string]int
@@ -39,9 +41,10 @@ type HetznerCompute struct {
 }
 
 // NewCompute creates a HetznerCompute provider. project is the inforge project
-// name used to label cloud resources. regionOverrides is the output of
-// ExtractRegionConfigs and may be nil (DefaultRegionConfigs are used instead).
-func NewCompute(sshAuthorizedKeys, deployPublicKey string, provider *hcloud.Provider, project string, regionOverrides map[string]RegionConfig) *HetznerCompute {
+// name used to label cloud resources. slug is the region slug used for resource
+// naming. regionOverrides is the output of ExtractRegionConfigs and may be nil
+// (DefaultRegionConfigs are used instead).
+func NewCompute(sshAuthorizedKeys, deployPublicKey string, provider *hcloud.Provider, project, slug string, regionOverrides map[string]RegionConfig) *HetznerCompute {
 	if regionOverrides == nil {
 		regionOverrides = map[string]RegionConfig{}
 	}
@@ -50,6 +53,7 @@ func NewCompute(sshAuthorizedKeys, deployPublicKey string, provider *hcloud.Prov
 		deployPublicKey:   deployPublicKey,
 		provider:          provider,
 		project:           project,
+		slug:              slug,
 		firewalls:         map[string]*hcloud.Firewall{},
 		sshKeys:           map[string][]*hcloud.SshKey{},
 		instanceCounters:  map[string]int{},
@@ -86,12 +90,12 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, err
 	}
 
-	fw, err := h.ensureFirewall(ctx, spec, abstractRegion, env)
+	fw, err := h.ensureFirewall(ctx, spec, env)
 	if err != nil {
 		return types.ComputeOutputs{}, fmt.Errorf("ensure firewall: %w", err)
 	}
 
-	sshKeyList, err := h.ensureSshKeys(ctx, abstractRegion, env)
+	sshKeyList, err := h.ensureSshKeys(ctx, env)
 	if err != nil {
 		return types.ComputeOutputs{}, fmt.Errorf("ensure ssh keys: %w", err)
 	}
@@ -102,10 +106,10 @@ func (h *HetznerCompute) Create(
 	instance := h.instanceCounters[spec.Name]
 	h.mu.Unlock()
 
-	key := naming.SpecKey(spec.Name, instance)
+	serverName := naming.ResourceInstance(env, h.slug, "vm", spec.Name, instance)
 
 	args := &hcloud.ServerArgs{
-		Name:       pulumi.String(key),
+		Name:       pulumi.String(serverName),
 		ServerType: pulumi.String(serverType),
 		Image:      pulumi.String(resolvedImage),
 		Location:   pulumi.String(regionCfg.Location),
@@ -123,7 +127,7 @@ func (h *HetznerCompute) Create(
 				SubnetId: network.SubnetID.ToStringPtrOutput(),
 			},
 		},
-		Labels: toStringMap(tags.HetznerLabels(h.project, env, abstractRegion, spec.Container)),
+		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container)),
 	}
 
 	if spec.CloudInit != "" {
@@ -140,14 +144,14 @@ func (h *HetznerCompute) Create(
 			BootstrapDoc:    bootstrapDoc,
 		})
 		if ciErr != nil {
-			return types.ComputeOutputs{}, fmt.Errorf("assemble cloud-init for %s: %w", key, ciErr)
+			return types.ComputeOutputs{}, fmt.Errorf("assemble cloud-init for %s: %w", serverName, ciErr)
 		}
 		args.UserData = pulumi.StringPtr(userData)
 	}
 
-	server, err := hcloud.NewServer(ctx, key, args, h.providerOpts()...)
+	server, err := hcloud.NewServer(ctx, serverName, args, h.providerOpts()...)
 	if err != nil {
-		return types.ComputeOutputs{}, fmt.Errorf("create server %s: %w", key, err)
+		return types.ComputeOutputs{}, fmt.Errorf("create server %s: %w", serverName, err)
 	}
 
 	return types.ComputeOutputs{PublicIP: server.Ipv4Address}, nil
@@ -159,18 +163,18 @@ var defaultInboundRules = []types.FirewallRule{
 	{Proto: "tcp", Port: "22"},
 }
 
-// ensureFirewall returns the hcloud.Firewall for {specName}-{abstractRegion},
-// creating it if it does not yet exist. When spec.Firewall is set its inbound
-// rules are used; otherwise the built-in defaults apply. SSH (22) is always
-// included as the first inbound rule regardless of what the spec declares. It
-// is safe to call concurrently.
-func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeSpec, abstractRegion, env string) (*hcloud.Firewall, error) {
-	key := fmt.Sprintf("%s-%s", spec.Name, abstractRegion)
+// ensureFirewall returns the hcloud.Firewall for the spec name, creating it if
+// it does not yet exist. When spec.Firewall is set its inbound rules are used;
+// otherwise the built-in defaults apply. SSH (22) is always included as the
+// first inbound rule regardless of what the spec declares. It is safe to call
+// concurrently.
+func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeSpec, env string) (*hcloud.Firewall, error) {
+	fwName := naming.Resource(env, h.slug, "fw", spec.Name)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if fw, ok := h.firewalls[key]; ok {
+	if fw, ok := h.firewalls[fwName]; ok {
 		return fw, nil
 	}
 
@@ -212,34 +216,35 @@ func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeS
 		},
 	)
 
-	fw, err := hcloud.NewFirewall(ctx, key, &hcloud.FirewallArgs{
-		Name:   pulumi.String(key),
-		Labels: toStringMap(tags.HetznerLabels(h.project, env, abstractRegion, spec.Container)),
+	fw, err := hcloud.NewFirewall(ctx, fwName, &hcloud.FirewallArgs{
+		Name:   pulumi.String(fwName),
+		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container)),
 		Rules:  rules,
 	}, h.providerOpts()...)
 	if err != nil {
-		return nil, fmt.Errorf("create firewall %s: %w", key, err)
+		return nil, fmt.Errorf("create firewall %s: %w", fwName, err)
 	}
 
-	h.firewalls[key] = fw
+	h.firewalls[fwName] = fw
 	return fw, nil
 }
 
-// ensureSshKeys returns the [user, deploy] SSH key pair for abstractRegion,
-// creating them if they do not yet exist. It is safe to call concurrently.
-// Index 0 is the user authorized-keys key; index 1 is the deploy public key.
-func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, abstractRegion, env string) ([]*hcloud.SshKey, error) {
+// ensureSshKeys returns the [user, deploy] SSH key pair for env, creating them
+// if they do not yet exist. SSH keys are env-scoped (not region-scoped). It is
+// safe to call concurrently. Index 0 is the user authorized-keys key; index 1
+// is the deploy public key.
+func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, env string) ([]*hcloud.SshKey, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if keys, ok := h.sshKeys[abstractRegion]; ok {
+	if keys, ok := h.sshKeys[env]; ok {
 		return keys, nil
 	}
 
-	// SSH keys are region-scoped, not container-scoped: omit container label.
-	keyLabels := toStringMap(tags.HetznerLabels(h.project, env, abstractRegion, ""))
+	// SSH keys are env-scoped, not container-scoped: omit container label.
+	keyLabels := toStringMap(tags.HetznerLabels(h.project, env, h.slug, ""))
 
-	userKeyName := fmt.Sprintf("user-%s", abstractRegion)
+	userKeyName := naming.GlobalResource(env, "key", "user")
 	userKey, err := hcloud.NewSshKey(ctx, userKeyName, &hcloud.SshKeyArgs{
 		Name:      pulumi.String(userKeyName),
 		PublicKey: pulumi.String(h.sshAuthorizedKeys),
@@ -249,7 +254,7 @@ func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, abstractRegion, env 
 		return nil, fmt.Errorf("create user ssh key %s: %w", userKeyName, err)
 	}
 
-	deployKeyName := fmt.Sprintf("deploy-%s", abstractRegion)
+	deployKeyName := naming.GlobalResource(env, "key", "deploy")
 	deployKey, err := hcloud.NewSshKey(ctx, deployKeyName, &hcloud.SshKeyArgs{
 		Name:      pulumi.String(deployKeyName),
 		PublicKey: pulumi.String(h.deployPublicKey),
@@ -260,7 +265,7 @@ func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, abstractRegion, env 
 	}
 
 	keys := []*hcloud.SshKey{userKey, deployKey}
-	h.sshKeys[abstractRegion] = keys
+	h.sshKeys[env] = keys
 	return keys, nil
 }
 

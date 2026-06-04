@@ -19,9 +19,10 @@ import (
 type HetznerNetwork struct {
 	provider *hcloud.Provider
 	project  string
+	slug     string
 	mu       sync.Mutex
-	// containers caches created hcloud.Network objects keyed by
-	// "{container}-{abstractRegion}" to avoid creating duplicates.
+	// containers caches created hcloud.Network objects keyed by container name
+	// to avoid creating duplicates.
 	containers map[string]*hcloud.Network
 	// regions is built from project overrides (regions.yaml) and used by
 	// ResolveRegion as the first lookup tier before DefaultRegionConfigs.
@@ -29,41 +30,38 @@ type HetznerNetwork struct {
 }
 
 // New creates a HetznerNetwork provider. project is the inforge project name
-// used to label cloud resources. regionOverrides is the output of
-// ExtractRegionConfigs and may be nil (DefaultRegionConfigs are used instead).
-func New(provider *hcloud.Provider, project string, regionOverrides map[string]RegionConfig) *HetznerNetwork {
+// used to label cloud resources. slug is the region slug used for resource
+// naming. regionOverrides is the output of ExtractRegionConfigs and may be nil
+// (DefaultRegionConfigs are used instead).
+func New(provider *hcloud.Provider, project, slug string, regionOverrides map[string]RegionConfig) *HetznerNetwork {
 	if regionOverrides == nil {
 		regionOverrides = map[string]RegionConfig{}
 	}
 	return &HetznerNetwork{
 		provider:   provider,
 		project:    project,
+		slug:       slug,
 		containers: map[string]*hcloud.Network{},
 		regions:    regionOverrides,
 	}
 }
 
-// Create provisions a Hetzner Network + Subnet for the given spec. It is safe
-// to call concurrently: containers for the same {container, abstractRegion}
-// pair are deduplicated via a mutex-protected map.
-func (h *HetznerNetwork) Create(ctx *pulumi.Context, spec types.NetworkSpec, env, abstractRegion string) (types.NetworkOutputs, error) {
+// Create provisions a Hetzner Network + Subnets for the given spec. It is safe
+// to call concurrently: containers for the same container name are deduplicated
+// via a mutex-protected map. Returns a map from subnet name to NetworkOutputs.
+func (h *HetznerNetwork) Create(ctx *pulumi.Context, spec types.NetworkSpec, env, abstractRegion string) (map[string]types.NetworkOutputs, error) {
 	if spec.Provider != "hetzner" {
-		return types.NetworkOutputs{}, fmt.Errorf("hetzner provider received spec with provider=%q", spec.Provider)
+		return nil, fmt.Errorf("hetzner provider received spec with provider=%q", spec.Provider)
 	}
 
 	regionCfg, err := ResolveRegion(abstractRegion, h.regions)
 	if err != nil {
-		return types.NetworkOutputs{}, err
+		return nil, err
 	}
 
-	net, err := h.ensureContainer(ctx, spec.Container, abstractRegion, env, spec.CIDR)
+	net, err := h.ensureContainer(ctx, spec.Container, env, spec.CIDR)
 	if err != nil {
-		return types.NetworkOutputs{}, fmt.Errorf("ensure container network: %w", err)
-	}
-
-	subnetCIDR := spec.SubnetCIDR
-	if subnetCIDR == "" {
-		subnetCIDR = spec.CIDR
+		return nil, fmt.Errorf("ensure container network: %w", err)
 	}
 
 	// Convert the string Pulumi resource ID to int for NetworkSubnetArgs.
@@ -71,50 +69,49 @@ func (h *HetznerNetwork) Create(ctx *pulumi.Context, spec types.NetworkSpec, env
 		return strconv.Atoi(string(id))
 	}).(pulumi.IntOutput)
 
-	subnetName := fmt.Sprintf("%s-%s", naming.SpecKey(spec.Name, spec.Instance), abstractRegion)
-	subnet, err := hcloud.NewNetworkSubnet(ctx, subnetName, &hcloud.NetworkSubnetArgs{
-		NetworkId:   networkIntID,
-		Type:        pulumi.String("cloud"),
-		NetworkZone: pulumi.String(regionCfg.NetworkZone),
-		IpRange:     pulumi.String(subnetCIDR),
-	}, h.providerOpts()...)
-	if err != nil {
-		return types.NetworkOutputs{}, fmt.Errorf("create subnet %s: %w", subnetName, err)
+	result := make(map[string]types.NetworkOutputs, len(spec.Subnets))
+	for _, sub := range spec.Subnets {
+		subnetName := naming.Resource(env, h.slug, "subnet", sub.Name)
+		subnet, err := hcloud.NewNetworkSubnet(ctx, subnetName, &hcloud.NetworkSubnetArgs{
+			NetworkId:   networkIntID,
+			Type:        pulumi.String("cloud"),
+			NetworkZone: pulumi.String(regionCfg.NetworkZone),
+			IpRange:     pulumi.String(sub.CIDR),
+		}, h.providerOpts()...)
+		if err != nil {
+			return nil, fmt.Errorf("create subnet %s: %w", subnetName, err)
+		}
+		result[sub.Name] = types.NetworkOutputs{
+			NetworkID: net.ID().ToStringOutput(),
+			SubnetID:  subnet.ID().ToStringOutput(),
+		}
 	}
 
-	return types.NetworkOutputs{
-		NetworkID: net.ID().ToStringOutput(),
-		SubnetID:  subnet.ID().ToStringOutput(),
-	}, nil
+	return result, nil
 }
 
-// ensureContainer returns the hcloud.Network for {container}-{abstractRegion},
-// creating it if it does not yet exist. It is safe to call concurrently.
-func (h *HetznerNetwork) ensureContainer(ctx *pulumi.Context, container, abstractRegion, env, cidr string) (*hcloud.Network, error) {
-	key := fmt.Sprintf("%s-%s", container, abstractRegion)
-
+// ensureContainer returns the hcloud.Network for the container, creating it if
+// it does not yet exist. It is safe to call concurrently.
+func (h *HetznerNetwork) ensureContainer(ctx *pulumi.Context, container, env, cidr string) (*hcloud.Network, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if net, ok := h.containers[key]; ok {
+	if net, ok := h.containers[container]; ok {
 		return net, nil
 	}
 
-	// Label schema: project/env/region/container discrete keys.
-	// Resources previously deployed with the old single "urn" key will show a
-	// label diff on the next Pulumi run; this is an in-place metadata update
-	// with no impact on resource connectivity or state.
+	netName := naming.Resource(env, h.slug, "net", container)
 	opts := h.providerOpts()
-	net, err := hcloud.NewNetwork(ctx, key, &hcloud.NetworkArgs{
-		Name:    pulumi.String(key),
+	net, err := hcloud.NewNetwork(ctx, netName, &hcloud.NetworkArgs{
+		Name:    pulumi.String(netName),
 		IpRange: pulumi.String(cidr),
-		Labels:  toStringMap(tags.HetznerLabels(h.project, env, abstractRegion, container)),
+		Labels:  toStringMap(tags.HetznerLabels(h.project, env, h.slug, container)),
 	}, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("create hcloud network %s: %w", key, err)
+		return nil, fmt.Errorf("create hcloud network %s: %w", netName, err)
 	}
 
-	h.containers[key] = net
+	h.containers[container] = net
 	return net, nil
 }
 

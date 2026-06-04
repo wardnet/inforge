@@ -4,10 +4,9 @@
   "title": "DNS resource",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "instance", "container", "provider", "compute", "subdomain", "proxied"],
+  "required": ["name", "container", "provider", "compute", "subdomain", "proxied"],
   "properties": {
     "name":      { "type": "string" },
-    "instance":  { "type": "integer", "minimum": 1 },
     "container": { "type": "string" },
     "provider":  { "type": "string", "enum": ["cloudflare"] },
     "compute":   { "type": "string", "description": "specKey of the target ComputeSpec, e.g. bridge-01" },

@@ -56,14 +56,14 @@ func (m *computeMocks) NewResource(args pulumi.MockResourceArgs) (string, resour
 
 func TestEnsureFirewallIdempotency(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", "use1", nil)
 
 		bridgeSpec := types.ComputeSpec{Name: "bridge", Container: "vpc", Provider: "hetzner"}
-		fw1, err := h.ensureFirewall(ctx, bridgeSpec, "us-east-1", "prod")
+		fw1, err := h.ensureFirewall(ctx, bridgeSpec, "prod")
 		if err != nil {
 			return err
 		}
-		fw2, err := h.ensureFirewall(ctx, bridgeSpec, "us-east-1", "prod")
+		fw2, err := h.ensureFirewall(ctx, bridgeSpec, "prod")
 		if err != nil {
 			return err
 		}
@@ -72,7 +72,7 @@ func TestEnsureFirewallIdempotency(t *testing.T) {
 		}
 
 		dbSpec := types.ComputeSpec{Name: "db", Container: "vpc", Provider: "hetzner"}
-		fw3, err := h.ensureFirewall(ctx, dbSpec, "us-east-1", "prod")
+		fw3, err := h.ensureFirewall(ctx, dbSpec, "prod")
 		if err != nil {
 			return err
 		}
@@ -87,7 +87,7 @@ func TestEnsureFirewallIdempotency(t *testing.T) {
 
 func TestEnsureFirewallCustomRules(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", "use1", nil)
 
 		spec := types.ComputeSpec{
 			Name:      "bridge",
@@ -100,7 +100,7 @@ func TestEnsureFirewallCustomRules(t *testing.T) {
 				},
 			},
 		}
-		fw, err := h.ensureFirewall(ctx, spec, "us-east-1", "prod")
+		fw, err := h.ensureFirewall(ctx, spec, "prod")
 		if err != nil {
 			return err
 		}
@@ -115,7 +115,7 @@ func TestEnsureFirewallCustomRules(t *testing.T) {
 
 func TestComputeCreateWithCustomFirewall(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", "use1", nil)
 
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
@@ -126,7 +126,7 @@ func TestComputeCreateWithCustomFirewall(t *testing.T) {
 			Kind:          "vm",
 			Container:     "vpc",
 			Provider:      "hetzner",
-			Network:       "vpc-01",
+			Network:       "vpc",
 			Size:          "SMALL",
 			Image:         "ubuntu-24.04",
 			InstanceCount: 1,
@@ -153,26 +153,28 @@ func TestComputeCreateWithCustomFirewall(t *testing.T) {
 
 func TestEnsureSshKeysIdempotency(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", "use1", nil)
 
-		keys1, err := h.ensureSshKeys(ctx, "us-east-1", "prod")
+		// SSH keys are env-scoped: same env must return the same keys.
+		keys1, err := h.ensureSshKeys(ctx, "prod")
 		if err != nil {
 			return err
 		}
-		keys2, err := h.ensureSshKeys(ctx, "us-east-1", "prod")
+		keys2, err := h.ensureSshKeys(ctx, "prod")
 		if err != nil {
 			return err
 		}
 		if keys1[0] != keys2[0] || keys1[1] != keys2[1] {
-			t.Error("ensureSshKeys returned different objects for the same region")
+			t.Error("ensureSshKeys returned different objects for the same env")
 		}
 
-		keys3, err := h.ensureSshKeys(ctx, "eu-central-1", "prod")
+		// Different env must produce distinct keys.
+		keys3, err := h.ensureSshKeys(ctx, "stg")
 		if err != nil {
 			return err
 		}
 		if keys1[0] == keys3[0] {
-			t.Error("ensureSshKeys returned the same objects for different regions")
+			t.Error("ensureSshKeys returned the same objects for different envs")
 		}
 		return nil
 	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
@@ -184,7 +186,7 @@ func TestEnsureSshKeysIdempotency(t *testing.T) {
 
 func TestComputeCreateReturnsPublicIP(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", "use1", nil)
 
 		// Synthesise a NetworkOutputs with a known subnet ID.
 		subnetID := pulumi.String("12345").ToStringOutput()
@@ -198,7 +200,7 @@ func TestComputeCreateReturnsPublicIP(t *testing.T) {
 			Kind:          "vm",
 			Container:     "vpc",
 			Provider:      "hetzner",
-			Network:       "vpc-01",
+			Network:       "vpc",
 			Size:          "SMALL",
 			Image:         "ubuntu-24.04",
 			InstanceCount: 1,
@@ -217,7 +219,7 @@ func TestComputeCreateReturnsPublicIP(t *testing.T) {
 
 func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", "use1", nil)
 
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
@@ -228,7 +230,7 @@ func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 			Kind:          "vm",
 			Container:     "vpc",
 			Provider:      "hetzner",
-			Network:       "vpc-01",
+			Network:       "vpc",
 			Size:          "SMALL",
 			Image:         "ubuntu-24.04",
 			InstanceCount: 2,
@@ -249,14 +251,14 @@ func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 
 func TestComputeCreateUnknownSizeReturnsError(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", nil, "test-project", "use1", nil)
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
 			SubnetID:  pulumi.String("12345").ToStringOutput(),
 		}
 		spec := types.ComputeSpec{
 			Name: "bridge", Container: "vpc", Provider: "hetzner",
-			Network: "vpc-01", Size: "XLARGE", Image: "ubuntu-24.04", InstanceCount: 1,
+			Network: "vpc", Size: "XLARGE", Image: "ubuntu-24.04", InstanceCount: 1,
 		}
 		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", "")
 		if err == nil {

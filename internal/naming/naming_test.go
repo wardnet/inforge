@@ -20,10 +20,26 @@ func TestSpecKey(t *testing.T) {
 	}
 }
 
-func TestDisplayName(t *testing.T) {
-	got := DisplayName("prd", "compute", "use1", "bridge", 1)
-	want := "wardnet-prd-compute-use1-bridge-01"
+func TestResource(t *testing.T) {
+	got := Resource("prd", "use1", "vm", "bridge")
+	want := "wardnet-prd-use1-vm-bridge"
 	if got != want {
-		t.Errorf("DisplayName = %q, want %q", got, want)
+		t.Errorf("Resource = %q, want %q", got, want)
+	}
+}
+
+func TestResourceInstance(t *testing.T) {
+	got := ResourceInstance("prd", "use1", "vm", "bridge", 1)
+	want := "wardnet-prd-use1-vm-bridge-01"
+	if got != want {
+		t.Errorf("ResourceInstance = %q, want %q", got, want)
+	}
+}
+
+func TestGlobalResource(t *testing.T) {
+	got := GlobalResource("prd", "key", "user")
+	want := "wardnet-prd-key-user"
+	if got != want {
+		t.Errorf("GlobalResource = %q, want %q", got, want)
 	}
 }

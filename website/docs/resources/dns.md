@@ -10,7 +10,6 @@ A **DNS** resource creates a DNS record in Cloudflare pointing at a Compute inst
 
 ```yaml
 name: bridge             # required
-instance: 1              # required
 container: bridge        # required
 provider: cloudflare     # required
 compute: bridge-01       # required — specKey of the Compute to point at
@@ -23,7 +22,6 @@ proxied: false           # optional — enable Cloudflare proxy (default false)
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Resource name. |
-| `instance` | int | Yes | Instance number. |
 | `container` | string | Yes | Grouping label. |
 | `provider` | string | Yes | Must be `cloudflare`. |
 | `compute` | string | Yes | specKey of the Compute this record points at. |
@@ -43,9 +41,8 @@ For a record with `subdomain: bridge` in region `us-east-1` (slug `use1`) with
 
 ## Example
 
-```yaml title="resources/prd/us-east-1/dns/bridge-01.yaml"
+```yaml title="resources/prd/us-east-1/dns/bridge.yaml"
 name: bridge
-instance: 1
 container: bridge
 provider: cloudflare
 compute: bridge-01

@@ -14,6 +14,7 @@ import (
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/wardnet/inforge/internal/manifest"
+	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/internal/validate"
 )
@@ -85,12 +86,14 @@ type InfisicalSecretsAdapter struct {
 	clientId     string
 	clientSecret string
 	siteUrl      string
+	slug         string
 	mu           sync.Mutex
 	workspaces   map[string]pulumi.StringOutput
 }
 
-// New returns an InfisicalSecretsAdapter configured with the given credentials.
-func New(clientId, clientSecret, siteUrl string) *InfisicalSecretsAdapter {
+// New returns an InfisicalSecretsAdapter configured with the given credentials
+// and region slug.
+func New(clientId, clientSecret, siteUrl, slug string) *InfisicalSecretsAdapter {
 	if siteUrl == "" {
 		siteUrl = "https://app.infisical.com"
 	}
@@ -98,6 +101,7 @@ func New(clientId, clientSecret, siteUrl string) *InfisicalSecretsAdapter {
 		clientId:     clientId,
 		clientSecret: clientSecret,
 		siteUrl:      siteUrl,
+		slug:         slug,
 		workspaces:   map[string]pulumi.StringOutput{},
 	}
 }
@@ -140,7 +144,7 @@ func (a *InfisicalSecretsAdapter) Create(
 		return string(b), nil
 	}).(pulumi.StringOutput)
 
-	batchName := fmt.Sprintf("%s-%s-%s", spec.Container, spec.Name, region)
+	batchName := naming.Resource(env, a.slug, "secrets", spec.Name)
 	_, err = newInfisicalSecretsBatchResource(
 		ctx, batchName,
 		workspaceId, envToSlug(env), a.clientId, a.clientSecret, a.siteUrl,
@@ -182,12 +186,12 @@ func (a *InfisicalSecretsAdapter) ContributeToManifest(
 	return types.ManifestContribution{}, nil
 }
 
-// ensureWorkspace returns the workspaceId output for the (container, region)
+// ensureWorkspace returns the workspaceId output for the (container, env)
 // pair, creating the InfisicalWorkspace resource on first call for that key.
 func (a *InfisicalSecretsAdapter) ensureWorkspace(
-	ctx *pulumi.Context, container, region string,
+	ctx *pulumi.Context, container, env string,
 ) (pulumi.StringOutput, error) {
-	key := fmt.Sprintf("%s-%s", container, region)
+	key := fmt.Sprintf("%s-%s", container, env)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -196,9 +200,11 @@ func (a *InfisicalSecretsAdapter) ensureWorkspace(
 		return ws, nil
 	}
 
-	wsRes, err := newInfisicalWorkspaceResource(ctx, key, container, a.clientId, a.clientSecret, a.siteUrl)
+	wsName := naming.Resource(env, a.slug, "workspace", container)
+	// workspaceName is what shows in the Infisical UI — keep the container name.
+	wsRes, err := newInfisicalWorkspaceResource(ctx, wsName, container, a.clientId, a.clientSecret, a.siteUrl)
 	if err != nil {
-		return pulumi.StringOutput{}, fmt.Errorf("create infisical workspace %q: %w", key, err)
+		return pulumi.StringOutput{}, fmt.Errorf("create infisical workspace %q: %w", wsName, err)
 	}
 
 	a.workspaces[key] = wsRes.WorkspaceId

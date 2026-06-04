@@ -60,13 +60,13 @@ func (m *dbMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Pr
 // meaning no duplicate NeonProject resources are registered.
 func TestEnsureContainerIdempotent(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("test-api-key")
+		adapter := New("test-api-key", "test-project", "use1")
 
-		first, err := adapter.ensureContainer(ctx, "mycontainer", "aws-us-east-2")
+		first, err := adapter.ensureContainer(ctx, "mycontainer", "prod", "aws-us-east-2")
 		if err != nil {
 			return err
 		}
-		second, err := adapter.ensureContainer(ctx, "mycontainer", "aws-us-east-2")
+		second, err := adapter.ensureContainer(ctx, "mycontainer", "prod", "aws-us-east-2")
 		if err != nil {
 			return err
 		}
@@ -84,20 +84,20 @@ func TestEnsureContainerIdempotent(t *testing.T) {
 // (container, region) pairs produce distinct NeonProject resources.
 func TestEnsureContainerDifferentRegionsAreIndependent(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("test-api-key")
+		adapter := New("test-api-key", "test-project", "use1")
 
-		east, err := adapter.ensureContainer(ctx, "mycontainer", "aws-us-east-2")
+		east, err := adapter.ensureContainer(ctx, "mycontainer", "prod", "aws-us-east-2")
 		if err != nil {
 			return err
 		}
-		west, err := adapter.ensureContainer(ctx, "mycontainer", "aws-eu-west-2")
+		west, err := adapter.ensureContainer(ctx, "mycontainer", "prod", "aws-eu-west-2")
 		if err != nil {
 			return err
 		}
 
-		// Pointer identity: different regions must produce distinct resources.
+		// Pointer identity: different neon regions must produce distinct resources.
 		if east == west {
-			t.Error("ensureContainer returned the same object for different regions")
+			t.Error("ensureContainer returned the same object for different neon regions")
 		}
 		return nil
 	}, pulumi.WithMocks("project", "stack", &dbMocks{}))
@@ -107,7 +107,7 @@ func TestEnsureContainerDifferentRegionsAreIndependent(t *testing.T) {
 // TestCreateSmoke verifies that Create returns a non-empty DatabaseOutputs.
 func TestCreateSmoke(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("test-api-key")
+		adapter := New("test-api-key", "test-project", "use1")
 		spec := types.DatabaseSpec{
 			Name:      "bridge",
 			Container: "mycontainer",
