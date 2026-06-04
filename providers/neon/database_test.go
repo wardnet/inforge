@@ -1,12 +1,14 @@
 package neon
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -102,6 +104,97 @@ func TestEnsureContainerDifferentRegionsAreIndependent(t *testing.T) {
 		return nil
 	}, pulumi.WithMocks("project", "stack", &dbMocks{}))
 	require.NoError(t, err)
+}
+
+// --- naming-convention tests --------------------------------------------------
+
+// namingCapture captures every RegisterResource call keyed by Pulumi type token.
+type namingCapture struct {
+	mu       sync.Mutex
+	captured map[string]struct {
+		logicalName string
+		inputs      resource.PropertyMap
+	}
+}
+
+func newNamingCapture() *namingCapture {
+	return &namingCapture{captured: map[string]struct {
+		logicalName string
+		inputs      resource.PropertyMap
+	}{}}
+}
+
+func (m *namingCapture) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	return resource.PropertyMap{}, nil
+}
+
+func (m *namingCapture) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
+	m.mu.Lock()
+	m.captured[args.TypeToken] = struct {
+		logicalName string
+		inputs      resource.PropertyMap
+	}{logicalName: args.Name, inputs: args.Inputs}
+	m.mu.Unlock()
+
+	outputs := resource.PropertyMap{}
+	switch args.TypeToken {
+	case neonProjectType:
+		outputs["projectId"] = resource.NewStringProperty("proj-test-id")
+	case neonDatabaseType:
+		outputs["branchId"] = resource.NewStringProperty("br-test-id")
+		outputs["connectionUrl"] = resource.NewStringProperty("postgresql://role:pass@host/db")
+	}
+	return args.Name + "-id", outputs, nil
+}
+
+// TestNeonProjectNamePassedToAPIMatchesNamingConvention verifies that the name
+// field sent to the Neon API follows the full naming convention
+// (wardnet-<env>-<regionSlug>-container-<container>), not just the raw
+// container name.
+func TestNeonProjectNamePassedToAPIMatchesNamingConvention(t *testing.T) {
+	mocks := newNamingCapture()
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		adapter := New("api-key", "inforge", "use1")
+		spec := types.DatabaseSpec{
+			Name:      "main",
+			Container: "bridge",
+			Provider:  "neon",
+			Database:  "appdb",
+			Role:      "app",
+		}
+		_, err := adapter.Create(ctx, spec, "prd", "us-east-1")
+		return err
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	want := naming.Resource("prd", "use1", "container", "bridge")
+	got := mocks.captured[neonProjectType].inputs["name"].StringValue()
+	assert.Equal(t, want, got,
+		"name sent to Neon API must follow naming convention, not be the raw container name")
+}
+
+// TestNeonDatabasePulumiNameMatchesNamingConvention verifies that the Pulumi
+// logical name of a NeonDatabase follows wardnet-<env>-<regionSlug>-db-<specName>.
+func TestNeonDatabasePulumiNameMatchesNamingConvention(t *testing.T) {
+	mocks := newNamingCapture()
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		adapter := New("api-key", "inforge", "use1")
+		spec := types.DatabaseSpec{
+			Name:      "main",
+			Container: "bridge",
+			Provider:  "neon",
+			Database:  "appdb",
+			Role:      "app",
+		}
+		_, err := adapter.Create(ctx, spec, "prd", "us-east-1")
+		return err
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	want := naming.Resource("prd", "use1", "db", "main")
+	got := mocks.captured[neonDatabaseType].logicalName
+	assert.Equal(t, want, got,
+		"Neon database Pulumi logical name must follow naming convention")
 }
 
 // TestCreateSmoke verifies that Create returns a non-empty DatabaseOutputs.
