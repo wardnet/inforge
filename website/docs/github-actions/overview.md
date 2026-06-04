@@ -36,18 +36,18 @@ Downloads the latest `inforge` binary and runs `inforge plugins install`. Accept
 ## Required permissions
 
 :::caution
-The reusable workflows post comments to pull requests and write deployment statuses.
-Your calling workflows **must** declare `permissions` explicitly — otherwise GitHub
-blocks the run at startup when the repository's default token permission is `read`.
+The reusable workflows declare their own `permissions` internally, but GitHub only grants what the
+**caller** explicitly allows. Your calling workflows **must** declare `permissions` at the workflow
+level — otherwise GitHub blocks the run with a permission error.
 
-```yaml
-permissions:
-  contents: read
-  pull-requests: write
-```
+| Permission | Required by |
+|------------|-------------|
+| `contents: read` | All workflows (checkout) |
+| `pull-requests: write` | `preview.yml`, `deploy.yml` (PR comment reports) |
+| `id-token: write` | `deploy.yml`, `reconcile.yml` (OIDC token for key broker) |
+| `issues: write` | `reconcile.yml` (drift issue creation) |
 
-Add this block at the **workflow level** (not inside a job) in any caller that triggers
-on `pull_request`. See [GitHub docs on default permissions](https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token)
+See [GitHub docs on default permissions](https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token)
 for background.
 :::
 
@@ -92,6 +92,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
   id-token: write
 
 jobs:
