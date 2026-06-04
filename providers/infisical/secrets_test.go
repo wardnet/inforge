@@ -49,21 +49,27 @@ func (m *namingMocks) NewResource(args pulumi.MockResourceArgs) (string, resourc
 
 // TestWorkspaceNamePassedToAPIMatchesNamingConvention verifies that the name
 // field sent to the Infisical API matches the full naming convention
-// (wardnet-<env>-<regionSlug>-container-<container>), not just the raw
-// container name.
+// (wardnet-<env>-<regionSlug>-container-<container>), using the environment
+// ("prd") not the abstract region ("us-east-1") as the env segment.
 func TestWorkspaceNamePassedToAPIMatchesNamingConvention(t *testing.T) {
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "use1")
-		_, err := adapter.ensureWorkspace(ctx, "bridge", "prd")
-		return err
+		spec := types.SecretsSpec{
+			Name:      "bridge",
+			Container: "bridge",
+			Provider:  "infisical",
+			Secrets:   map[string]types.SecretsEntry{},
+		}
+		// env="prd", region="us-east-1" — workspace name must use env, not region.
+		return adapter.Create(ctx, spec, "prd", "us-east-1", types.AllOutputs{})
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 
 	want := naming.Resource("prd", "use1", "container", "bridge")
 	got := mocks.captured[infisicalWorkspaceType].inputs["name"].StringValue()
 	assert.Equal(t, want, got,
-		"name sent to Infisical API must follow naming convention, not be the raw container name")
+		"workspace name must use env (prd) not region (us-east-1) as the env segment")
 }
 
 // TestSecretsBatchNameMatchesNamingConvention verifies that the Pulumi logical
