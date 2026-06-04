@@ -6,6 +6,7 @@ package program
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -194,7 +195,11 @@ func Run(ctx *pulumi.Context) error {
 			if err != nil {
 				return err
 			}
-			if err := dp.Create(ctx, spec, computeOutputs[region][spec.Compute]); err != nil {
+			computeOut, ok := computeOutputs[region][spec.Compute]
+			if !ok {
+				return fmt.Errorf("dns %s/%s: compute %q not found (available: %v)", region, spec.Name, spec.Compute, sortedKeys(computeOutputs[region]))
+			}
+			if err := dp.Create(ctx, spec, computeOut); err != nil {
 				return err
 			}
 		}
@@ -277,4 +282,13 @@ func subdomainFor(key, name string, dns []types.DnsSpec) string {
 		}
 	}
 	return name
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
