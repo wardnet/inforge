@@ -14,21 +14,21 @@ The Cloudflare provider implements **DNS** resources.
 
 ## Configuration
 
-Set in `variables.yaml` under `providers.cloudflare` (global) or per-region:
+Set in `variables.yaml` under `providers.cloudflare`:
 
 ```yaml
 providers:
   cloudflare:
-    apiToken: ""   # set via CLOUDFLARE_API_TOKEN
-
-regions:
-  - name: us-east-1
-    providers:
-      cloudflare:
-        zoneId: abc123def456   # Cloudflare Zone ID for this region's domain
+    apiToken: ${CLOUDFLARE_API_TOKEN}
+    zoneId: abc123def456   # Cloudflare Zone ID the DNS records are added to
+    tagRecords: false      # optional, default true — see below
 ```
 
-The `zoneId` is required per region — it identifies which DNS zone to add records to.
+- `zoneId` (required) — the Cloudflare Zone ID to add records to.
+- `tagRecords` (optional, default `true`) — whether inforge labels each DNS record with its resource
+  tags. **DNS record tags are a Cloudflare Enterprise-only feature**; on Free/Pro/Business zones the
+  API rejects them with error 9300 (`DNS record has N tags, exceeding the quota of 0`). Set
+  `tagRecords: false` on a non-Enterprise zone.
 
 ## Required env vars
 
