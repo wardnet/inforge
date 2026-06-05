@@ -10,11 +10,9 @@ import (
 func TestDefaultTableResolve(t *testing.T) {
 	tbl := DefaultTable()
 
-	s, err := tbl.Resolve("MEDIUM")
-	require.NoError(t, err)
-	assert.Equal(t, Size{CPUs: 4, Memory: 8}, s)
+	require.NoError(t, tbl.Resolve("MEDIUM"))
 
-	_, err = tbl.Resolve("HUGE")
+	err := tbl.Resolve("HUGE")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown compute size")
 }
@@ -23,15 +21,12 @@ func TestDefaultTableResolve(t *testing.T) {
 // per-env table stands alone and need not contain the default size names.
 func TestPerEnvReplacement(t *testing.T) {
 	perEnv := Table{
-		"tiny": {CPUs: 1, Memory: 1},
-		"huge": {CPUs: 16, Memory: 64},
+		"tiny": {},
+		"huge": {},
 	}
 
-	s, err := perEnv.Resolve("tiny")
-	require.NoError(t, err)
-	assert.Equal(t, Size{CPUs: 1, Memory: 1}, s)
+	require.NoError(t, perEnv.Resolve("tiny"))
 
 	// A default size is not present in a replacing table.
-	_, err = perEnv.Resolve("SMALL")
-	assert.Error(t, err)
+	assert.Error(t, perEnv.Resolve("SMALL"))
 }

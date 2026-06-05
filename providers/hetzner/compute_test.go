@@ -1,28 +1,27 @@
 package hetzner
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/wardnet/inforge/internal/images"
 	"github.com/wardnet/inforge/internal/types"
 )
 
-// ---- ResolveImage tests (pure, no Pulumi) ------------------------------------
-
-func TestResolveImageKnown(t *testing.T) {
-	got, err := ResolveImage(images.Ubuntu2404)
-	require.NoError(t, err)
-	assert.Equal(t, "ubuntu-24.04", got)
-}
-
-func TestResolveImageUnknown(t *testing.T) {
-	_, err := ResolveImage("centos-7")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "hetzner has no image for")
+// useEast1 is a complete Hetzner realization for the us-east-1 abstract region,
+// used by the Create tests below.
+func useEast1() map[string]RegionConfig {
+	return map[string]RegionConfig{
+		"us-east-1": {
+			Location:    "ash",
+			NetworkZone: "us-east",
+			ServerTypes: map[string]string{"SMALL": "cx23", "MEDIUM": "cx33", "LARGE": "cx43"},
+			Images:      map[string]string{"ubuntu-24.04": "ubuntu-24.04"},
+		},
+	}
 }
 
 // ---- Pulumi mock runtime for compute tests -----------------------------------
@@ -115,7 +114,7 @@ func TestEnsureFirewallCustomRules(t *testing.T) {
 
 func TestComputeCreateWithCustomFirewall(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", useEast1())
 
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
@@ -186,7 +185,7 @@ func TestEnsureSshKeysIdempotency(t *testing.T) {
 
 func TestComputeCreateReturnsPublicIP(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", useEast1())
 
 		// Synthesise a NetworkOutputs with a known subnet ID.
 		subnetID := pulumi.String("12345").ToStringOutput()
@@ -219,7 +218,7 @@ func TestComputeCreateReturnsPublicIP(t *testing.T) {
 
 func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", useEast1())
 
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
@@ -249,9 +248,90 @@ func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// ---- realization-driven server type + image tests ---------------------------
+
+// capturingMocks records the serverType and image passed to each created server
+// so the realization can be asserted end-to-end through Create.
+type capturingMocks struct {
+	mu          sync.Mutex
+	serverTypes []string
+	images      []string
+}
+
+func (m *capturingMocks) Call(pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	return resource.PropertyMap{}, nil
+}
+
+func (m *capturingMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
+	if args.TypeToken == "hcloud:index/firewall:Firewall" {
+		return "42", resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}, nil
+	}
+	props := resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}
+	switch args.TypeToken {
+	case "hcloud:index/server:Server":
+		props["ipv4Address"] = resource.NewStringProperty("1.2.3.4")
+		m.mu.Lock()
+		if st := args.Inputs["serverType"]; st.IsString() {
+			m.serverTypes = append(m.serverTypes, st.StringValue())
+		}
+		if img := args.Inputs["image"]; img.IsString() {
+			m.images = append(m.images, img.StringValue())
+		}
+		m.mu.Unlock()
+	case "hcloud:index/sshKey:SshKey":
+		props["publicKey"] = resource.NewStringProperty("ssh-ed25519 AAAA test")
+	}
+	return args.Name + "-id", props, nil
+}
+
+// TestComputeCreateUsesRealization proves a SMALL spec provisions the server
+// type and image id from the region's realization.
+func TestComputeCreateUsesRealization(t *testing.T) {
+	mocks := &capturingMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", useEast1())
+		net := types.NetworkOutputs{
+			NetworkID: pulumi.String("99").ToStringOutput(),
+			SubnetID:  pulumi.String("12345").ToStringOutput(),
+		}
+		spec := types.ComputeSpec{
+			Name: "bridge", Container: "vpc", Provider: "hetzner",
+			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 1,
+		}
+		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", "")
+		return err
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"cx23"}, mocks.serverTypes)
+	assert.Equal(t, []string{"ubuntu-24.04"}, mocks.images)
+}
+
+func TestComputeCreateUnknownRegionReturnsError(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", useEast1())
+		net := types.NetworkOutputs{
+			NetworkID: pulumi.String("99").ToStringOutput(),
+			SubnetID:  pulumi.String("12345").ToStringOutput(),
+		}
+		spec := types.ComputeSpec{
+			Name: "bridge", Container: "vpc", Provider: "hetzner",
+			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 1,
+		}
+		_, err := h.Create(ctx, spec, net, "prod", "eu-central-1", "bridge.euc1.example.com", "", "")
+		if err == nil {
+			t.Error("expected error for region with no realization, got nil")
+		} else {
+			assert.Contains(t, err.Error(), "no region realization")
+		}
+		return nil
+	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
+
+	require.NoError(t, err)
+}
+
 func TestComputeCreateUnknownSizeReturnsError(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", useEast1())
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
 			SubnetID:  pulumi.String("12345").ToStringOutput(),
@@ -263,6 +343,31 @@ func TestComputeCreateUnknownSizeReturnsError(t *testing.T) {
 		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", "")
 		if err == nil {
 			t.Error("expected error for unknown size, got nil")
+		} else {
+			assert.Contains(t, err.Error(), "no server type for size")
+		}
+		return nil
+	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
+
+	require.NoError(t, err)
+}
+
+func TestComputeCreateUnknownImageReturnsError(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", useEast1())
+		net := types.NetworkOutputs{
+			NetworkID: pulumi.String("99").ToStringOutput(),
+			SubnetID:  pulumi.String("12345").ToStringOutput(),
+		}
+		spec := types.ComputeSpec{
+			Name: "bridge", Container: "vpc", Provider: "hetzner",
+			Network: "vpc", Size: "SMALL", Image: "ubuntu-26.04", InstanceCount: 1,
+		}
+		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", "")
+		if err == nil {
+			t.Error("expected error for unknown image, got nil")
+		} else {
+			assert.Contains(t, err.Error(), "no image for")
 		}
 		return nil
 	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))

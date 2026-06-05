@@ -6,13 +6,12 @@ package regions
 
 import "fmt"
 
-// AbstractRegion is one entry in the region table. Providers optionally holds
-// provider-specific topology config (e.g. Hetzner location/networkZone) keyed
-// by provider name. The Slug field is always required; Providers is omitted
-// from the built-in defaults — provider packages supply their own defaults.
+// AbstractRegion is one entry in the region table. It carries only the slug —
+// no provider topology. Each provider's concrete realization of a region
+// (location, server types, images, …) lives in the provider config under
+// providers.<name>.regions in variables.yaml.
 type AbstractRegion struct {
-	Slug      string                    `yaml:"slug"`
-	Providers map[string]map[string]any `yaml:"providers,omitempty"`
+	Slug string `yaml:"slug"`
 }
 
 // Table maps an abstract region name (e.g. "us-east-1") to its slug ("use1").

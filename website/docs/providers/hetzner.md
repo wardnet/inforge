@@ -16,55 +16,66 @@ The Hetzner provider implements **Network** and **Compute** resources using
 
 ## Configuration
 
-Set in `variables.yaml` under `providers.hetzner` (global default) or `regions[].providers.hetzner`
-(per-region override):
+All Hetzner configuration lives in one block in `variables.yaml` under `providers.hetzner`: the API
+token plus one **region realization** for every abstract region the provider serves. A realization is
+the complete concretization of that region — `location`, `network_zone`, the `serverTypes` map
+(size name → server-type SKU) and the `images` map (canonical image → Hetzner image id):
 
 ```yaml
 providers:
   hetzner:
-    token: ""   # set via HCLOUD_TOKEN env var
+    apiToken: ${HCLOUD_TOKEN}      # supplied via the HCLOUD_TOKEN env var
+    regions:
+      eu-central-1:
+        location: nbg1
+        network_zone: eu-central
+        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+        images: {ubuntu-24.04: ubuntu-24.04}
 ```
 
-The `token` field is typically left empty and supplied via the `HCLOUD_TOKEN` environment variable.
+Realizations are **fully explicit per region** — there are no built-in defaults and no inheritance.
+Each region's block must list everything it needs; a `serverTypes`/`images` entry or a region absent
+from the block fails the deploy with a clear, actionable error rather than at provider-apply time. Use
+YAML anchors to de-duplicate values shared across regions.
 
-### Per-region overrides
-
-```yaml
-regions:
-  - name: us-east-1
-    providers:
-      hetzner:
-        location: ash   # Hetzner datacenter location slug
-```
+This per-region split is deliberate: Hetzner server-type availability varies by location (for example
+the Ampere ARM64 `cax*` types are not offered in `ash`), so each region pins the server types that
+location actually offers.
 
 ## Supported locations
 
-| Location slug | Datacenter |
-|--------------|------------|
-| `ash` | Ashburn, VA (US East) |
-| `hil` | Hillsboro, OR (US West) |
-| `fsn1` | Falkenstein (EU West) |
-| `nbg1` | Nuremberg (EU Central) |
-| `hel1` | Helsinki (EU North) |
-| `sin` | Singapore (AP South) |
+| Location slug | Datacenter | Network zone |
+|--------------|------------|--------------|
+| `fsn1` | Falkenstein (EU Central) | `eu-central` |
+| `nbg1` | Nuremberg (EU Central) | `eu-central` |
+| `hel1` | Helsinki (EU Central) | `eu-central` |
+| `ash` | Ashburn, VA (US East) | `us-east` |
+| `hil` | Hillsboro, OR (US West) | `us-west` |
+| `sin` | Singapore (AP Southeast) | `ap-southeast` |
 
-## Server shapes
+## Server types
 
-Hetzner servers are selected by the compute `size` field:
+The compute `size` name (`SMALL`/`MEDIUM`/`LARGE`, defined cloud-agnostically in the
+[size table](/configuration/variables-yaml)) is mapped to a concrete Hetzner **server type** by each
+region's `serverTypes`. There is no global default mapping — the size's meaning on Hetzner is whatever
+that region declares. Common choices:
 
-| Size | Hetzner type | vCPU | Memory |
-|------|-------------|------|--------|
-| `SMALL` | `cax11` | 2 | 4 GB |
-| `MEDIUM` | `cax21` | 4 | 8 GB |
-| `LARGE` | `cax31` | 8 | 16 GB |
+| Size | x86 (CX Gen3) | vCPU | Memory | ARM64 (`cax`, not in `ash`) |
+|------|---------------|------|--------|------------------------------|
+| `SMALL` | `cx23` | 2 | 4 GB | `cax11` |
+| `MEDIUM` | `cx33` | 4 | 8 GB | `cax21` |
+| `LARGE` | `cx43` | 8 | 16 GB | `cax31` |
 
-These are Ampere ARM64 servers. Override sizes in `resources/<env>/sizes.yaml`.
+The `sizes.yaml` table is just the set of valid size *names* — it carries no cpu/memory, and Hetzner
+selects purely on the `serverTypes` mapping above.
 
 ## Firewall rules
 
-inforge creates a firewall per container+region with:
+inforge creates a firewall per compute spec (per region) with:
 
-- **Inbound**: TCP 22 (SSH), 80 (HTTP), 443 (HTTPS), 853 (DNS-over-TLS)
+- **Inbound**: TCP 22 (SSH) is always allowed. Any rules a compute declares in its
+  [`firewall`](/resources/compute) block are added on top; with no `firewall` block, SSH is the only
+  inbound rule.
 - **Outbound**: all TCP, UDP, ICMP
 
 ## Required env vars

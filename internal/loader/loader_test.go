@@ -1,6 +1,7 @@
 package loader
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -76,7 +77,23 @@ func TestLoadTablesDefault(t *testing.T) {
 
 	st, err := LoadSizeTable("ok", testdataDir)
 	require.NoError(t, err)
-	sz, err := st.Resolve("SMALL")
+	require.NoError(t, st.Resolve("SMALL"))
+}
+
+// TestLoadSizeTableFromFile exercises the on-disk size table: a YAML list of
+// names that replaces the defaults wholesale.
+func TestLoadSizeTableFromFile(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "prd")
+	require.NoError(t, os.MkdirAll(envPath, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(envPath, "sizes.yaml"),
+		[]byte("- tiny\n- huge\n"), 0o644))
+
+	st, err := LoadSizeTable("prd", dir)
 	require.NoError(t, err)
-	assert.Equal(t, float64(2), sz.CPUs)
+	require.NoError(t, st.Resolve("tiny"))
+	require.NoError(t, st.Resolve("huge"))
+	// Replace, not merge: a default size is absent from the loaded table.
+	assert.Error(t, st.Resolve("SMALL"))
 }

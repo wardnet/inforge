@@ -47,21 +47,18 @@ firewall:                # optional — declarative inbound rules; omit to use d
 
 ## Size table
 
-| Size | vCPUs | Memory |
-|------|-------|--------|
-| `SMALL` | 2 | 4 GB |
-| `MEDIUM` | 4 | 8 GB |
-| `LARGE` | 8 | 16 GB |
+The size table is the cloud-agnostic set of valid `size` names — `SMALL`, `MEDIUM`, `LARGE` by
+default. It carries no cpu/memory; each provider maps a size name to a concrete machine type in its
+[region realization](/providers/hetzner#server-types).
 
-Override by placing `sizes.yaml` in `resources/<env>/`. The file **replaces** the default table.
+Override by placing `sizes.yaml` in `resources/<env>/`. The file is a YAML list of names and
+**replaces** the default table wholesale:
 
 ```yaml title="resources/prd/sizes.yaml"
-- name: SMALL
-  cpus: 2
-  memory: 4
-- name: MEDIUM
-  cpus: 4
-  memory: 16
+- SMALL
+- MEDIUM
+- LARGE
+- XLARGE
 ```
 
 ## Supported images

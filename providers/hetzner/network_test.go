@@ -7,59 +7,130 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/wardnet/inforge/internal/regions"
+	"github.com/wardnet/inforge/internal/types"
+	"gopkg.in/yaml.v3"
 )
 
 // ---- ResolveRegion tests (pure, no Pulumi) ----------------------------------
 
-func TestResolveRegionBuiltIn(t *testing.T) {
-	cfg, err := ResolveRegion("us-east-1", nil)
+func TestResolveRegionFromRealization(t *testing.T) {
+	realizations := map[string]RegionConfig{
+		"us-east-1": {Location: "ash", NetworkZone: "us-east"},
+	}
+	cfg, err := ResolveRegion("us-east-1", realizations)
 	require.NoError(t, err)
 	assert.Equal(t, "ash", cfg.Location)
 	assert.Equal(t, "us-east", cfg.NetworkZone)
 }
 
-func TestResolveRegionProjectOverrideWins(t *testing.T) {
-	overrides := map[string]RegionConfig{
-		"us-east-1": {Location: "nbg1", NetworkZone: "eu-central"},
-	}
-	cfg, err := ResolveRegion("us-east-1", overrides)
-	require.NoError(t, err)
-	assert.Equal(t, "nbg1", cfg.Location, "project override must win over default")
-}
-
 func TestResolveRegionUnknownReturnsError(t *testing.T) {
 	_, err := ResolveRegion("mars-1", nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "hetzner has no datacenter for abstract region")
+	assert.Contains(t, err.Error(), "no region realization")
 	assert.Contains(t, err.Error(), "mars-1")
 }
 
+// TestResolveRegionIncompleteRealization confirms a realization missing
+// location or network_zone fails closed at the provider boundary, rather than
+// passing an empty value through to hcloud as an opaque apply-time error.
+func TestResolveRegionIncompleteRealization(t *testing.T) {
+	_, err := ResolveRegion("us-east-1", map[string]RegionConfig{
+		"us-east-1": {NetworkZone: "us-east"}, // location omitted
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing location")
+
+	_, err = ResolveRegion("us-east-1", map[string]RegionConfig{
+		"us-east-1": {Location: "ash"}, // network_zone omitted
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing network_zone")
+}
+
+// TestExtractRegionConfigsFromYAML decodes a variables.yaml fragment exactly as
+// the loader does (yaml.Unmarshal into EnvironmentVariables) and confirms the
+// nested providers.hetzner.regions block — including serverTypes and images —
+// round-trips into the RegionConfig map, verifying the decode shape empirically.
+func TestExtractRegionConfigsFromYAML(t *testing.T) {
+	const doc = `
+base_domain: example.com
+providers:
+  hetzner:
+    apiToken: tok
+    regions:
+      eu-central-1:
+        location: nbg1
+        network_zone: eu-central
+        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+        images: {ubuntu-24.04: ubuntu-24.04}
+`
+	var vars types.EnvironmentVariables
+	require.NoError(t, yaml.Unmarshal([]byte(doc), &vars))
+
+	got := ExtractRegionConfigs(vars.Providers)
+	assert.Equal(t, RegionConfig{
+		Location:    "nbg1",
+		NetworkZone: "eu-central",
+		ServerTypes: map[string]string{"SMALL": "cx23", "MEDIUM": "cx33", "LARGE": "cx43"},
+		Images:      map[string]string{"ubuntu-24.04": "ubuntu-24.04"},
+	}, got["eu-central-1"])
+}
+
 func TestExtractRegionConfigs(t *testing.T) {
-	tbl := regions.Table{
-		"us-east-1": {
-			Slug: "use1",
-			Providers: map[string]map[string]any{
-				"hetzner": {"location": "ash", "network_zone": "us-east"},
+	tests := []struct {
+		name   string
+		config map[string]map[string]any
+		want   map[string]RegionConfig
+	}{
+		{
+			name:   "absent hetzner provider",
+			config: map[string]map[string]any{"neon": {"apiKey": "k"}},
+			want:   map[string]RegionConfig{},
+		},
+		{
+			name:   "absent regions key",
+			config: map[string]map[string]any{"hetzner": {"apiToken": "tok"}},
+			want:   map[string]RegionConfig{},
+		},
+		{
+			name: "non-string and empty entries skipped within maps",
+			config: map[string]map[string]any{"hetzner": {"regions": map[string]any{
+				"us-east-1": map[string]any{
+					"location":     "ash",
+					"network_zone": "us-east",
+					"serverTypes":  map[string]any{"SMALL": "cx23", "MEDIUM": 33, "LARGE": ""},
+					"images":       map[string]any{"ubuntu-24.04": "ubuntu-24.04"},
+				},
+			}}},
+			want: map[string]RegionConfig{
+				"us-east-1": {
+					Location:    "ash",
+					NetworkZone: "us-east",
+					ServerTypes: map[string]string{"SMALL": "cx23"},
+					Images:      map[string]string{"ubuntu-24.04": "ubuntu-24.04"},
+				},
 			},
 		},
-		"eu-central-1": {Slug: "euc1"}, // no hetzner entry
-		"custom-1": {
-			Slug: "cus1",
-			Providers: map[string]map[string]any{
-				// incomplete entry — missing network_zone
-				"hetzner": {"location": "nbg1"},
+		{
+			name: "missing maps default to empty",
+			config: map[string]map[string]any{"hetzner": {"regions": map[string]any{
+				"us-east-1": map[string]any{"location": "ash", "network_zone": "us-east"},
+			}}},
+			want: map[string]RegionConfig{
+				"us-east-1": {
+					Location:    "ash",
+					NetworkZone: "us-east",
+					ServerTypes: map[string]string{},
+					Images:      map[string]string{},
+				},
 			},
 		},
 	}
-
-	got := ExtractRegionConfigs(tbl)
-
-	assert.Equal(t, RegionConfig{Location: "ash", NetworkZone: "us-east"}, got["us-east-1"])
-	_, hasEUCentral := got["eu-central-1"]
-	assert.False(t, hasEUCentral, "entry without hetzner providers block must be skipped")
-	_, hasCustom := got["custom-1"]
-	assert.False(t, hasCustom, "incomplete entry (missing network_zone) must be skipped")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ExtractRegionConfigs(tt.config))
+		})
+	}
 }
 
 // ---- ensureContainer idempotency test (requires Pulumi mock runtime) --------

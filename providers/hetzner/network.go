@@ -24,15 +24,16 @@ type HetznerNetwork struct {
 	// containers caches created hcloud.Network objects keyed by container name
 	// to avoid creating duplicates.
 	containers map[string]*hcloud.Network
-	// regions is built from project overrides (regions.yaml) and used by
-	// ResolveRegion as the first lookup tier before DefaultRegionConfigs.
+	// regions holds the per-region realizations (from providers.hetzner.regions)
+	// and is used by ResolveRegion to look up a region's network zone.
 	regions map[string]RegionConfig
 }
 
 // New creates a HetznerNetwork provider. project is the inforge project name
 // used to label cloud resources. slug is the region slug used for resource
-// naming. regionOverrides is the output of ExtractRegionConfigs and may be nil
-// (DefaultRegionConfigs are used instead).
+// naming. regionOverrides is the output of ExtractRegionConfigs (the per-region
+// realizations) and may be nil — Create then fails closed for any region that
+// has no realization.
 func New(provider *hcloud.Provider, project, slug string, regionOverrides map[string]RegionConfig) *HetznerNetwork {
 	if regionOverrides == nil {
 		regionOverrides = map[string]RegionConfig{}

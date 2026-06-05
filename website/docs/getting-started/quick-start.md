@@ -55,25 +55,27 @@ config:
 ```yaml
 base_domain: example.com
 regions:
-  - name: us-east-1
-    providers:
-      hetzner:
-        location: ash
-      cloudflare:
-        zoneId: ""
+  - name: eu-central-1
+providers:
+  hetzner:
+    apiToken: ${HCLOUD_TOKEN}
+    regions:
+      eu-central-1:
+        location: nbg1
+        network_zone: eu-central
+        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+        images: {ubuntu-24.04: ubuntu-24.04}
+  cloudflare:
+    apiToken: ${CLOUDFLARE_API_TOKEN}
+    zoneId: ""
 ssh:
   authorizedKeys: "ssh-ed25519 AAAA... user@host"
   deployPublicKey: "ssh-ed25519 AAAA... deploy@host"
-providers:
-  hetzner:
-    token: ""   # set via HCLOUD_TOKEN
-  cloudflare:
-    apiToken: "" # set via CLOUDFLARE_API_TOKEN
 ```
 
 ## 5. Write a compute resource
 
-```yaml title="resources/prd/us-east-1/compute/bridge.yaml"
+```yaml title="resources/prd/eu-central-1/compute/bridge.yaml"
 name: bridge
 container: bridge
 provider: hetzner

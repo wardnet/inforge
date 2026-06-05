@@ -12,18 +12,10 @@ import (
 	hcloud "github.com/pulumi/pulumi-hcloud/sdk/go/hcloud"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/wardnet/inforge/internal/cloudinit"
-	"github.com/wardnet/inforge/internal/images"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/tags"
 	"github.com/wardnet/inforge/internal/types"
 )
-
-// shapes maps the canonical size names to Hetzner server type identifiers.
-var shapes = map[string]string{
-	"SMALL":  "cax11",
-	"MEDIUM": "cax21",
-	"LARGE":  "cax31",
-}
 
 // HetznerCompute implements types.ComputeProvider for Hetzner Cloud. One
 // instance is shared per registry (i.e. per region). Firewalls and SSH keys
@@ -47,8 +39,9 @@ type HetznerCompute struct {
 
 // NewCompute creates a HetznerCompute provider. project is the inforge project
 // name used to label cloud resources. slug is the region slug used for resource
-// naming. regionOverrides is the output of ExtractRegionConfigs and may be nil
-// (DefaultRegionConfigs are used instead).
+// naming. regionOverrides is the output of ExtractRegionConfigs (the per-region
+// realizations) and may be nil — Create then fails closed for any region that
+// has no realization.
 func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *hcloud.Provider, project, slug string, regionOverrides map[string]RegionConfig) *HetznerCompute {
 	if regionOverrides == nil {
 		regionOverrides = map[string]RegionConfig{}
@@ -86,14 +79,14 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, err
 	}
 
-	serverType, ok := shapes[spec.Size]
+	serverType, ok := regionCfg.ServerTypes[spec.Size]
 	if !ok {
-		return types.ComputeOutputs{}, fmt.Errorf("hetzner has no shape for size %q", spec.Size)
+		return types.ComputeOutputs{}, fmt.Errorf("hetzner has no server type for size %q in region %q — add it to providers.hetzner.regions.%s.serverTypes", spec.Size, abstractRegion, abstractRegion)
 	}
 
-	resolvedImage, err := ResolveImage(images.CanonicalImage(spec.Image))
-	if err != nil {
-		return types.ComputeOutputs{}, err
+	resolvedImage, ok := regionCfg.Images[spec.Image]
+	if !ok {
+		return types.ComputeOutputs{}, fmt.Errorf("hetzner has no image for %q in region %q — add it to providers.hetzner.regions.%s.images", spec.Image, abstractRegion, abstractRegion)
 	}
 
 	fw, err := h.ensureFirewall(ctx, spec, env)

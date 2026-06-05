@@ -149,7 +149,7 @@ func ValidateResources(env, dir string) error {
 			r.fail(regionBase, err.Error())
 		}
 
-		if err := validateRegion(r, schemaSet, regionBase, region, vars, sizeTable); err != nil {
+		if err := validateRegion(r, schemaSet, regionBase, vars, sizeTable); err != nil {
 			return err
 		}
 	}
@@ -160,7 +160,7 @@ func ValidateResources(env, dir string) error {
 	return nil
 }
 
-func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, regionBase, region string, vars types.EnvironmentVariables, sizeTable sizes.Table) error {
+func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, regionBase string, vars types.EnvironmentVariables, sizeTable sizes.Table) error {
 	networkFiles, err := readFiles[types.NetworkSpec](filepath.Join(regionBase, "network"))
 	if err != nil {
 		return err
@@ -202,7 +202,7 @@ func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, region
 	}
 
 	ctx := regionContext{
-		available:     availableProviders(vars, region),
+		available:     availableProviders(vars),
 		sizeTable:     sizeTable,
 		networks:      map[string]types.NetworkSpec{},
 		computeKind:   map[string]string{},
@@ -336,19 +336,12 @@ func flattenValidationError(ve *jsonschema.ValidationError) []string {
 	return out
 }
 
-// availableProviders returns the set of provider names available to a region:
-// the global providers plus any declared in the region's overrides.
-func availableProviders(vars types.EnvironmentVariables, region string) map[string]bool {
+// availableProviders returns the set of provider names defined in the
+// environment's provider config.
+func availableProviders(vars types.EnvironmentVariables) map[string]bool {
 	out := map[string]bool{}
 	for name := range vars.Providers {
 		out[name] = true
-	}
-	for _, re := range vars.Regions {
-		if re.Name == region {
-			for name := range re.Providers {
-				out[name] = true
-			}
-		}
 	}
 	return out
 }
@@ -400,7 +393,7 @@ func checkCompute(s types.ComputeSpec, ctx regionContext) (errs, warns []string)
 	if _, ok := ctx.networks[s.Network]; !ok {
 		errs = append(errs, fmt.Sprintf("network: %q not found", s.Network))
 	}
-	if _, err := ctx.sizeTable.Resolve(s.Size); err != nil {
+	if err := ctx.sizeTable.Resolve(s.Size); err != nil {
 		errs = append(errs, err.Error())
 	}
 	if s.CloudInit != "" {

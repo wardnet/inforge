@@ -129,7 +129,9 @@ func LoadRegionTable(env, dir string) (regions.Table, error) {
 
 // LoadSizeTable returns the size table for an environment: the per-env
 // resources/<env>/sizes.yaml if present (replacing the defaults wholesale),
-// otherwise the built-in defaults.
+// otherwise the built-in defaults. The file is a YAML list of size names, e.g.
+// `[SMALL, MEDIUM, LARGE]` — the size table is cloud-agnostic vocabulary with no
+// cpus/memory payload (a provider maps a size name to a concrete SKU).
 func LoadSizeTable(env, dir string) (sizes.Table, error) {
 	path := filepath.Join(envDir(env, dir), "sizes.yaml")
 	b, err := os.ReadFile(path)
@@ -139,9 +141,13 @@ func LoadSizeTable(env, dir string) (sizes.Table, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read sizes table: %w", err)
 	}
-	var tbl sizes.Table
-	if err := yaml.Unmarshal(b, &tbl); err != nil {
+	var names []string
+	if err := yaml.Unmarshal(b, &names); err != nil {
 		return nil, fmt.Errorf("parse sizes table: %w", err)
+	}
+	tbl := make(sizes.Table, len(names))
+	for _, n := range names {
+		tbl[n] = struct{}{}
 	}
 	return tbl, nil
 }
