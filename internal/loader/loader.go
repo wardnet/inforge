@@ -233,6 +233,9 @@ func LoadResources(env, dir string) (map[string]types.Resources, error) {
 		if res.Service, err = loadType[types.ServiceSpec](filepath.Join(base, "service")); err != nil {
 			return nil, err
 		}
+		if res.TLSTermination, err = loadType[types.TLSTerminationSpec](filepath.Join(base, "tls-termination")); err != nil {
+			return nil, err
+		}
 
 		applyDefaults(&res, computeDir)
 		out[region] = res

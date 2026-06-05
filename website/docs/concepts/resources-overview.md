@@ -4,7 +4,7 @@ sidebar_position: 2
 
 # Resources Overview
 
-inforge defines six resource types. Each resource is a single YAML file under
+inforge defines seven resource types. Each resource is a single YAML file under
 `resources/<env>/<region>/<type>/`. All files are validated against embedded JSON schemas.
 
 ## Resource types
@@ -17,6 +17,7 @@ inforge defines six resource types. Each resource is a single YAML file under
 | [Database](../resources/database) | `database/` | Managed PostgreSQL (Neon) |
 | [Secrets](../resources/secrets) | `secrets/` | Secret references (Infisical) |
 | [Service](../resources/service) | `services/` | Application hosted on a VM |
+| [TLS termination](../resources/tls-termination) | `tls-termination/` | Host-level TLS terminator (Caddy on Hetzner) |
 
 ## Common fields
 

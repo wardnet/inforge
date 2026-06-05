@@ -45,7 +45,8 @@ The fully-qualified resource name `wardnet-<env>-<resourceType>-<slug>-<specKey>
 
 **Resource**:
 One of the declarative types under a region: **Network**, **Compute**, **DNS**, **Database**,
-**Secrets**, **Service**. Each is one YAML file validated against an embedded JSON schema.
+**Secrets**, **Service**, **TLS termination**. Each is one YAML file validated against an embedded
+JSON schema.
 
 **Compute**:
 A host/runtime resource with a `kind`: `vm` (built now) or `cluster` (k8s, reserved). VM sizing is
@@ -59,8 +60,24 @@ provider maps the name to a concrete SKU; see **Region realization**). Defaults 
 
 **Service**:
 A component hosted *on* a compute (its `host` foreign key). On a `kind=vm` host its delivery `type`
-is `raw` (a gzip of files + scripts; built now) or `container` (pull-based; reserved).
+is `raw` (a gzip of files + scripts; built now) or `container` (pull-based; reserved). May declare an
+**Ingress** to be exposed for inbound traffic.
 _Avoid_: app, workload (acceptable informally), daemon.
+
+**Ingress**:
+The optional `ingress` block on a Service (`hostname`, `tls`, `port`) declaring that it is exposed for
+inbound traffic. Ingress is fed to the host's **TLS termination** resource, which writes one vhost per
+service that terminates TLS and reverse-proxies to the service's local port. A service that declares
+ingress *must* have a TLS termination resource on its host; a service that wants raw inbound traffic
+instead opens the port itself on the host firewall and declares no ingress.
+_Avoid_: confusing the per-service `ingress` field with the host-level terminator (the resource).
+
+**TLS termination**:
+A host-level resource (its own YAML type, `tls-termination/`) declaring a terminator the compute
+provider realizes on a host: it terminates inbound TLS and reverse-proxies to the services running
+there. On Hetzner this is realized by Caddy (ACME / Let's Encrypt); another provider could realize the
+same resource with a managed load balancer + ACM. Targets a host via its `compute` foreign key.
+_Avoid_: "ingress" (that is the per-service field that feeds this), "load balancer", "proxy" (unqualified).
 
 **Source DSL**:
 A Secrets `source` value: `ref:<type>/<name>.<output>` (a reference to another resource's output) or

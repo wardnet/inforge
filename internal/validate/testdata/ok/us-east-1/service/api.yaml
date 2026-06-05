@@ -3,3 +3,6 @@ container: bridge
 provider: hetzner
 host: bridge-01
 type: raw
+ingress:
+  hostname: api
+  port: 8080

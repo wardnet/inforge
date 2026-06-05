@@ -44,6 +44,7 @@ const sidebars: SidebarsConfig = {
         'resources/database',
         'resources/secrets',
         'resources/service',
+        'resources/tls-termination',
       ],
     },
     {
