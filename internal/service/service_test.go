@@ -52,12 +52,12 @@ func TestBuildDeployDescriptor(t *testing.T) {
 	}
 
 	api := byName["api"]
-	assert.Equal(t, "bridge.use1.example.com", api.HostDNS, "uses the DNS record subdomain")
+	assert.Equal(t, "bridge.prd.use1.example.com", api.HostDNS, "uses the DNS record subdomain, with env")
 	assert.Equal(t, "/srv/wardnet/api", api.Folder)
 	assert.Equal(t, "wardnet-api.service", api.Unit)
 
 	worker := byName["worker"]
-	assert.Equal(t, "bridge.use1.example.com", worker.HostDNS, "falls back to the compute name as subdomain")
+	assert.Equal(t, "bridge.prd.use1.example.com", worker.HostDNS, "falls back to the compute name as subdomain, with env")
 }
 
 func TestBuildDeployDescriptorPropagatesUser(t *testing.T) {

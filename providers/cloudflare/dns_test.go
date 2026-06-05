@@ -16,6 +16,7 @@ import (
 type recordMocks struct {
 	mu       sync.Mutex
 	tagCount []int
+	names    []string
 }
 
 func (m *recordMocks) Call(pulumi.MockCallArgs) (resource.PropertyMap, error) {
@@ -28,8 +29,13 @@ func (m *recordMocks) NewResource(args pulumi.MockResourceArgs) (string, resourc
 		if v, ok := args.Inputs["tags"]; ok && v.IsArray() {
 			n = len(v.ArrayValue())
 		}
+		name := ""
+		if v, ok := args.Inputs["name"]; ok && v.IsString() {
+			name = v.StringValue()
+		}
 		m.mu.Lock()
 		m.tagCount = append(m.tagCount, n)
+		m.names = append(m.names, name)
 		m.mu.Unlock()
 	}
 	return args.Name + "-id", args.Inputs, nil
@@ -49,6 +55,14 @@ func createRecord(t *testing.T, tagRecords bool) *recordMocks {
 	}, pulumi.WithMocks("inforge", "test", mocks))
 	require.NoError(t, err)
 	return mocks
+}
+
+// TestCreateRecordName confirms the zone-relative record name includes the
+// environment: <subdomain>.<env>.<slug> (Cloudflare appends the zone).
+func TestCreateRecordName(t *testing.T) {
+	mocks := createRecord(t, true)
+	require.Len(t, mocks.names, 1)
+	assert.Equal(t, "bridge.prd.use1", mocks.names[0])
 }
 
 // TestCreateRecordTagsEnabled confirms record tags are applied when the project

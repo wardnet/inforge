@@ -44,7 +44,7 @@ ssh:                         # required when using compute
 ### `base_domain`
 
 The root domain for DNS names. VM hostnames are assembled as
-`<subdomain>.<region-slug>.<base_domain>`.
+`<subdomain>.<env>.<region-slug>.<base_domain>` (e.g. `bridge.prd.use1.wardnet.network`).
 
 ### `regions[]`
 

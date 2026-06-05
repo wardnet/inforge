@@ -2,8 +2,6 @@
 package cloudflare
 
 import (
-	"fmt"
-
 	cf "github.com/pulumi/pulumi-cloudflare/sdk/v6/go/cloudflare"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/wardnet/inforge/internal/naming"
@@ -41,7 +39,7 @@ func New(zoneID, project, env, slug string, tagRecords bool, provider *cf.Provid
 
 // Create creates one Cloudflare A-record for the given DnsSpec.
 func (c *CloudflareDns) Create(ctx *pulumi.Context, spec types.DnsSpec, compute types.ComputeOutputs) error {
-	recordName := fmt.Sprintf("%s.%s", spec.Subdomain, c.slug)
+	recordName := naming.RecordName(c.env, c.slug, spec.Subdomain)
 	pulumiName := naming.Resource(c.env, c.slug, "record", spec.Name)
 
 	ttl := pulumi.Float64(60)

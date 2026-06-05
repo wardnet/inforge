@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/types"
 	"gopkg.in/yaml.v3"
@@ -85,7 +86,7 @@ func BuildDeployDescriptor(env, baseDomain string, byRegion map[string]types.Res
 			return DeployDescriptor{}, fmt.Errorf("region %q: %w", region, err)
 		}
 		for _, svc := range res.Service {
-			hostDNS := hostDNS(svc.Host, baseDomain, slug, res.DNS)
+			hostDNS := hostDNS(svc.Host, env, baseDomain, slug, res.DNS)
 			desc.Targets = append(desc.Targets, DeployTarget{
 				Service: svc.Name,
 				HostDNS: hostDNS,
@@ -99,9 +100,9 @@ func BuildDeployDescriptor(env, baseDomain string, byRegion map[string]types.Res
 }
 
 // hostDNS computes the fully-qualified domain for a host compute specKey:
-// "<subdomain>.<slug>.<baseDomain>", where subdomain comes from the DNS record
-// targeting that compute, falling back to the compute name.
-func hostDNS(hostKey, baseDomain, slug string, dns []types.DnsSpec) string {
+// "<subdomain>.<env>.<slug>.<baseDomain>", where subdomain comes from the DNS
+// record targeting that compute, falling back to the compute name.
+func hostDNS(hostKey, env, baseDomain, slug string, dns []types.DnsSpec) string {
 	subdomain := computeName(hostKey)
 	for _, d := range dns {
 		if d.Compute == hostKey {
@@ -109,7 +110,7 @@ func hostDNS(hostKey, baseDomain, slug string, dns []types.DnsSpec) string {
 			break
 		}
 	}
-	return fmt.Sprintf("%s.%s.%s", subdomain, slug, baseDomain)
+	return naming.RecordFQDN(env, slug, subdomain, baseDomain)
 }
 
 // computeName strips the "-NN" instance suffix from an expanded compute specKey.
