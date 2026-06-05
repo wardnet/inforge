@@ -1,0 +1,9 @@
+# ingress declared but no tls-termination resource targets the host -> FAIL.
+name: web
+container: bridge
+provider: hetzner
+host: bridge-01
+type: raw
+ingress:
+  hostname: web
+  port: 8080

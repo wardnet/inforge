@@ -100,11 +100,13 @@ func readFiles[T any](dir string) ([]fileOf[T], error) {
 // regionContext holds the foreign-key targets and tables a region's semantic
 // checks resolve against.
 type regionContext struct {
-	available     map[string]bool
-	sizeTable     sizes.Table
-	networks      map[string]types.NetworkSpec // specKey -> network
-	computeKind   map[string]string            // expanded specKey -> kind
-	databaseNames map[string]bool
+	available        map[string]bool
+	sizeTable        sizes.Table
+	networks         map[string]types.NetworkSpec // specKey -> network
+	computeKind      map[string]string            // expanded specKey -> kind
+	computeCanonical map[string]string            // any accepted compute FK form -> canonical specKey
+	databaseNames    map[string]bool
+	tlsByCompute     map[string]bool // canonical compute specKey -> has a tls-termination resource
 }
 
 // ValidateResources validates every region under <dir>/<env>/ and returns an
@@ -186,6 +188,10 @@ func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, region
 	if err != nil {
 		return err
 	}
+	tlsFiles, err := readFiles[types.TLSTerminationSpec](filepath.Join(regionBase, "tls-termination"))
+	if err != nil {
+		return err
+	}
 
 	// Apply defaults so semantic checks see normalised specs.
 	for i := range networkFiles {
@@ -202,25 +208,36 @@ func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, region
 	}
 
 	ctx := regionContext{
-		available:     availableProviders(vars),
-		sizeTable:     sizeTable,
-		networks:      map[string]types.NetworkSpec{},
-		computeKind:   map[string]string{},
-		databaseNames: map[string]bool{},
+		available:        availableProviders(vars),
+		sizeTable:        sizeTable,
+		networks:         map[string]types.NetworkSpec{},
+		computeKind:      map[string]string{},
+		computeCanonical: map[string]string{},
+		databaseNames:    map[string]bool{},
+		tlsByCompute:     map[string]bool{},
 	}
 	for _, f := range networkFiles {
 		ctx.networks[f.spec.Name] = f.spec
 	}
 	for _, f := range computeFiles {
 		for i := 1; i <= f.spec.InstanceCount; i++ {
-			ctx.computeKind[naming.SpecKey(f.spec.Name, i)] = f.spec.Kind
+			key := naming.SpecKey(f.spec.Name, i)
+			ctx.computeKind[key] = f.spec.Kind
+			ctx.computeCanonical[key] = key
 		}
 		if f.spec.InstanceCount == 1 {
+			// bridge and bridge-01 both reference the same host.
 			ctx.computeKind[f.spec.Name] = f.spec.Kind
+			ctx.computeCanonical[f.spec.Name] = naming.SpecKey(f.spec.Name, 1)
 		}
 	}
 	for _, f := range databaseFiles {
 		ctx.databaseNames[f.spec.Name] = true
+	}
+	for _, f := range tlsFiles {
+		if c, ok := ctx.computeCanonical[f.spec.Compute]; ok {
+			ctx.tlsByCompute[c] = true
+		}
 	}
 
 	validateType(r, schemaSet["network"], networkFiles, func(s types.NetworkSpec) ([]string, []string) {
@@ -240,6 +257,9 @@ func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, region
 	})
 	validateType(r, schemaSet["service"], serviceFiles, func(s types.ServiceSpec) ([]string, []string) {
 		return checkService(s, ctx)
+	})
+	validateType(r, schemaSet["tls-termination"], tlsFiles, func(s types.TLSTerminationSpec) ([]string, []string) {
+		return checkTLSTermination(s, ctx)
 	})
 	return nil
 }
@@ -266,7 +286,7 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 
 // compileSchemas compiles every embedded JSON Schema, keyed by resource type.
 func compileSchemas() (map[string]*jsonschema.Schema, error) {
-	names := []string{"network", "compute", "dns", "database", "secrets", "service"}
+	names := []string{"network", "compute", "dns", "database", "secrets", "service", "tls-termination"}
 	c := jsonschema.NewCompiler()
 	for _, n := range names {
 		b, err := schemas.FS.ReadFile(n + ".json")
@@ -465,6 +485,20 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	}
 	if s.Type == "container" {
 		warns = append(warns, "type: \"container\" is reserved and not implemented this phase")
+	}
+	if s.Ingress != nil && ok && !ctx.tlsByCompute[ctx.computeCanonical[s.Host]] {
+		errs = append(errs, fmt.Sprintf("ingress: host %q has no tls-termination resource to terminate it", s.Host))
+	}
+	return errs, warns
+}
+
+func checkTLSTermination(s types.TLSTerminationSpec, ctx regionContext) (errs, warns []string) {
+	errs = append(errs, providerErr(s.Provider, ctx.available)...)
+	kind, ok := ctx.computeKind[s.Compute]
+	if !ok {
+		errs = append(errs, fmt.Sprintf("compute: %q does not resolve to a compute instance", s.Compute))
+	} else if kind != "vm" {
+		errs = append(errs, fmt.Sprintf("compute: %q has kind %q; tls-termination requires a vm host", s.Compute, kind))
 	}
 	return errs, warns
 }

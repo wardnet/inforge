@@ -61,14 +61,14 @@ type FirewallSpec struct {
 // ComputeSpec is one compute resource — a host runtime. Its cpus/memory are
 // resolved from the size table (see internal/sizes), not declared here.
 type ComputeSpec struct {
-	Name          string        `yaml:"name"`
-	Kind          string        `yaml:"kind"` // "vm" (default; only supported kind) | "cluster" (reserved)
-	Container     string        `yaml:"container"`
-	Provider      string        `yaml:"provider"`
-	Network       string        `yaml:"network"`          // FK -> network spec name
-	Subnet        string        `yaml:"subnet,omitempty"` // optional FK -> subnet name within the network
-	Size          string        `yaml:"size"`             // resolved against the size table
-	Image         string        `yaml:"image"`
+	Name          string          `yaml:"name"`
+	Kind          string          `yaml:"kind"` // "vm" (default; only supported kind) | "cluster" (reserved)
+	Container     string          `yaml:"container"`
+	Provider      string          `yaml:"provider"`
+	Network       string          `yaml:"network"`          // FK -> network spec name
+	Subnet        string          `yaml:"subnet,omitempty"` // optional FK -> subnet name within the network
+	Size          string          `yaml:"size"`             // resolved against the size table
+	Image         string          `yaml:"image"`
 	CloudInit     string          `yaml:"cloud_init,omitempty"` // path relative to the compute dir
 	InstanceCount int             `yaml:"instance_count"`       // default 1; expands into specKeys name-01..name-NN
 	Firewall      *FirewallSpec   `yaml:"firewall,omitempty"`
@@ -116,14 +116,41 @@ type DeployUserSpec struct {
 	Name string `yaml:"name"`
 }
 
+// IngressSpec exposes a service for inbound traffic through its host's
+// tls-termination resource. Declaring ingress means "terminate TLS for this
+// host and reverse-proxy to its local port": the terminator writes one
+// per-service vhost that does exactly that. Non-TLS exposure is a firewall
+// concern, not a terminator one, so there is no opt-out — ingress always
+// implies ACME TLS. Hostname is a host label (like DnsSpec.Subdomain); the
+// env-scoped FQDN it resolves to is derived at realization time, not authored
+// here.
+type IngressSpec struct {
+	Hostname string `yaml:"hostname"` // host label, env-scoped into an FQDN at realization
+	Port     int    `yaml:"port"`     // local port the service listens on
+}
+
 // ServiceSpec is one service resource — a workload hosted on a compute.
 type ServiceSpec struct {
+	Name      string       `yaml:"name"`
+	Container string       `yaml:"container"`
+	Provider  string       `yaml:"provider"`
+	Host      string       `yaml:"host"`              // FK -> an expanded compute specKey whose kind=vm
+	Type      string       `yaml:"type"`              // "raw" (built) | "container" (reserved)
+	User      string       `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
+	Ingress   *IngressSpec `yaml:"ingress,omitempty"` // optional inbound exposure via the host's tls-termination
+}
+
+// TLSTerminationSpec declares a host-level TLS terminator — a capability the
+// compute provider realizes on a host to terminate inbound TLS and reverse-proxy
+// to the services running there. On Hetzner this is realized by Caddy (ACME /
+// Let's Encrypt); another provider could realize the same resource with a
+// managed load balancer + ACM. Per-service ingress (ServiceSpec.Ingress) feeds
+// this terminator, which writes one vhost per service.
+type TLSTerminationSpec struct {
 	Name      string `yaml:"name"`
 	Container string `yaml:"container"`
 	Provider  string `yaml:"provider"`
-	Host      string `yaml:"host"` // FK -> an expanded compute specKey whose kind=vm
-	Type      string `yaml:"type"` // "raw" (built) | "container" (reserved)
-	User      string `yaml:"user,omitempty"` // no-login system user the service runs as; raw only
+	Compute   string `yaml:"compute"` // FK -> an expanded compute specKey whose kind=vm
 }
 
 // NetworkOutputs are the values a NetworkProvider returns after creating a
@@ -214,10 +241,11 @@ type EnvironmentVariables struct {
 
 // Resources is the full set of resource specs for one region.
 type Resources struct {
-	Network  []NetworkSpec
-	Compute  []ComputeSpec
-	DNS      []DnsSpec
-	Database []DatabaseSpec
-	Secrets  []SecretsSpec
-	Service  []ServiceSpec
+	Network        []NetworkSpec
+	Compute        []ComputeSpec
+	DNS            []DnsSpec
+	Database       []DatabaseSpec
+	Secrets        []SecretsSpec
+	Service        []ServiceSpec
+	TLSTermination []TLSTerminationSpec
 }

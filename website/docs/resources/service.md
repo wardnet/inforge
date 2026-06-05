@@ -17,6 +17,9 @@ provider: ""             # optional — services have no provider (host-managed)
 host: bridge-01          # required — specKey of the Compute VM that hosts this service
 type: raw                # required — delivery type
 user: wardnet            # optional — no-login system user the service runs as (raw only)
+ingress:                 # optional — expose this service via the host's TLS terminator
+  hostname: api          #   required — host label, env-scoped into an FQDN
+  port: 8080             #   required — local port the service listens on
 ```
 
 ## Fields
@@ -29,6 +32,7 @@ user: wardnet            # optional — no-login system user the service runs as
 | `host` | string | Yes | specKey of the Compute VM that hosts this service. |
 | `type` | string | Yes | Delivery type. Currently only `raw` (SSH-push) is supported. `container` is reserved. |
 | `user` | string | No | No-login system user the service runs as (`raw` only). When set, inforge emits `User=<name>` in the systemd unit and creates the user via SSH on first deploy. When absent, no user is created. |
+| `ingress` | object | No | Exposes the service for inbound traffic via the host's [TLS termination](./tls-termination) resource. See [Ingress](#ingress) below. |
 
 ## Delivery types
 
@@ -71,6 +75,23 @@ When `user` is set, inforge:
 
 The user is a no-login system account. This field is only meaningful for `type: raw` services;
 container services manage their user inside the image.
+
+## Ingress
+
+The optional `ingress` block exposes a service for inbound traffic through its host's
+[TLS termination](./tls-termination) resource. Declaring `ingress` means "terminate TLS for this
+host and reverse-proxy to its local port": the terminator writes one vhost per service that does
+exactly that, with an ACME-issued certificate. There is no non-TLS ingress — a service that wants
+raw inbound traffic opens the port on the host firewall instead (see below).
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `hostname` | string | Yes | Host label for the service. The env-scoped FQDN it resolves to (matching the form `<hostname>.<env>.<slug>.<baseDomain>`) is derived at deploy time. |
+| `port` | int | Yes | Local port (1–65535) the service listens on; the terminator reverse-proxies to it. |
+
+A service that declares `ingress` **must** have a `tls-termination` resource on its host — validation
+fails otherwise. A service that instead wants to receive raw inbound traffic should open the port on
+the [Compute](./compute) host firewall and declare no `ingress`.
 
 ## Example
 
