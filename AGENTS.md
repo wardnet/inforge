@@ -43,7 +43,7 @@ All cloud resource names follow `wardnet-<env>-<regionSlug>-<type>-<name>[-<NN>]
 | `wardnet` | fixed | `naming.usage` const |
 | `env` | `prd` | environment name |
 | `regionSlug` | `use1` | `regions.Table.Slug(region)` |
-| `type` | `vm`, `fw`, `net`, `subnet`, `db`, `project`, `secrets`, `workspace`, `record`, `tls` | resource type token |
+| `type` | `vm`, `fw`, `net`, `subnet`, `db`, `project`, `secrets`, `workspace`, `record`, `tls`, `svc` | resource type token |
 | `name` | `bridge` | spec name |
 | `NN` | `01` | instance index (servers only) |
 

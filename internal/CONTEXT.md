@@ -145,8 +145,11 @@ redeemed by another; environments within a repo share the tenant.
 ### Provisioning vs deployment
 
 **Provision**:
-Creating a service's host-side scaffolding — its folder, metadata, and an inforge-managed systemd
-unit. Does *not* deliver service code.
+Creating a service's host-side scaffolding during `inforge deploy` — its folder, the no-login service
+user, and an inforge-managed systemd unit — written over SSH (command.remote, as the host's
+`deploy_user`). The unit is enabled but **never started** at provision time (its `ExecStart` target
+doesn't exist until code is released), and provisioning delivers *no* service code. A service host
+must declare a `deploy_user` (validated).
 
 **Deployment**:
 The separate, repo-driven step that delivers a service's payload (a gzip) and activates it, via an

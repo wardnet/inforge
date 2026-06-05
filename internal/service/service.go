@@ -25,6 +25,11 @@ func UnitName(name string) string {
 	return "wardnet-" + name + ".service"
 }
 
+// UnitPath returns the absolute on-host path of a service's systemd unit file.
+func UnitPath(name string) string {
+	return "/etc/systemd/system/" + UnitName(name)
+}
+
 const unitHead = `[Unit]
 Description=wardnet %s
 After=network.target
@@ -62,10 +67,20 @@ type DeployTarget struct {
 	Folder  string `yaml:"folder"   json:"folder"`
 	Unit    string `yaml:"unit"     json:"unit"`
 	// User is the no-login system user the service runs as. Empty when the
-	// service spec declares no user. The deliver step creates this user on
-	// first deploy when non-empty.
+	// service spec declares no user. inforge deploy creates this user when
+	// provisioning the unit.
 	User string `yaml:"user,omitempty" json:"user,omitempty"`
+	// SSHUser is the account inforge connects as over SSH to deliver the payload
+	// — the host's deploy_user. It is DISTINCT from User (the no-login account
+	// the service process runs as): they coincide only when the deploy user is
+	// literally named the same. Falls back to "deploy" when the host declares no
+	// deploy_user.
+	SSHUser string `yaml:"ssh_user" json:"ssh_user"`
 }
+
+// defaultSSHUser is the connect-as account used when a service's host declares
+// no deploy_user (preserves the historical hardcoded "deploy").
+const defaultSSHUser = "deploy"
 
 // DeployDescriptor is the per-environment set of deploy targets, derived purely
 // from resolved resources.
@@ -85,18 +100,40 @@ func BuildDeployDescriptor(env, baseDomain string, byRegion map[string]types.Res
 		if err != nil {
 			return DeployDescriptor{}, fmt.Errorf("region %q: %w", region, err)
 		}
+		canonical := naming.CanonicalComputeKeys(res.Compute)
+		deployUsers := deployUsersByHost(res.Compute)
 		for _, svc := range res.Service {
 			hostDNS := hostDNS(svc.Host, env, baseDomain, slug, res.DNS)
+			sshUser := deployUsers[canonical[svc.Host]]
+			if sshUser == "" {
+				sshUser = defaultSSHUser
+			}
 			desc.Targets = append(desc.Targets, DeployTarget{
 				Service: svc.Name,
 				HostDNS: hostDNS,
 				Folder:  Folder(svc.Name),
 				Unit:    UnitName(svc.Name),
 				User:    svc.User,
+				SSHUser: sshUser,
 			})
 		}
 	}
 	return desc, nil
+}
+
+// deployUsersByHost maps each expanded compute specKey to its deploy_user (empty
+// when the compute declares none).
+func deployUsersByHost(computes []types.ComputeSpec) map[string]string {
+	byHost := map[string]string{}
+	for _, c := range computes {
+		if c.DeployUser == nil {
+			continue
+		}
+		for i := 1; i <= c.InstanceCount; i++ {
+			byHost[naming.SpecKey(c.Name, i)] = c.DeployUser.Name
+		}
+	}
+	return byHost
 }
 
 // hostDNS computes the fully-qualified domain for a host compute specKey:
