@@ -1,6 +1,34 @@
 package naming
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/wardnet/inforge/internal/types"
+)
+
+func TestCanonicalComputeKeys(t *testing.T) {
+	canonical := CanonicalComputeKeys([]types.ComputeSpec{
+		{Name: "bridge", InstanceCount: 1},
+		{Name: "worker", InstanceCount: 2},
+	})
+
+	// Single-instance: both the bare name and the expanded key resolve.
+	if got := canonical["bridge"]; got != "bridge-01" {
+		t.Errorf(`canonical["bridge"] = %q, want "bridge-01"`, got)
+	}
+	if got := canonical["bridge-01"]; got != "bridge-01" {
+		t.Errorf(`canonical["bridge-01"] = %q, want "bridge-01"`, got)
+	}
+
+	// Multi-instance: each expanded key resolves to itself; the bare name does
+	// NOT (it would be ambiguous between instances).
+	if got := canonical["worker-02"]; got != "worker-02" {
+		t.Errorf(`canonical["worker-02"] = %q, want "worker-02"`, got)
+	}
+	if _, ok := canonical["worker"]; ok {
+		t.Error(`canonical["worker"] should not resolve for a multi-instance compute`)
+	}
+}
 
 func TestSpecKey(t *testing.T) {
 	cases := []struct {

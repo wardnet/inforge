@@ -76,7 +76,14 @@ _Avoid_: confusing the per-service `ingress` field with the host-level terminato
 A host-level resource (its own YAML type, `tls-termination/`) declaring a terminator the compute
 provider realizes on a host: it terminates inbound TLS and reverse-proxies to the services running
 there. On Hetzner this is realized by Caddy (ACME / Let's Encrypt); another provider could realize the
-same resource with a managed load balancer + ACM. Targets a host via its `compute` foreign key.
+same resource with a managed load balancer + ACM. Targets a host via its `compute` foreign key. The
+Hetzner realization (`internal/caddy` for rendering, `providers/hetzner` for transport) runs over SSH
+via `command.remote`: it connects as the host's `deploy_user`, installs Caddy + tooling, writes a base
+Caddyfile that imports per-service vhosts from `conf.d/`, and reloads. So a terminator's host **must**
+declare a `deploy_user` (validated). `internal/caddy` is a Hetzner-internal detail, not a top-level
+concept. The deploy SSH **private** key is transport-only (it authenticates the connection, encrypts
+nothing) and is a deploy-time secret injected via stack config / `INFORGE_DEPLOY_PRIVATE_KEY`, never
+committed to `variables.yaml`.
 _Avoid_: "ingress" (that is the per-service field that feeds this), "load balancer", "proxy" (unqualified).
 
 **Source DSL**:
