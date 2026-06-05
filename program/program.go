@@ -8,13 +8,16 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 
+	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 	"github.com/wardnet/inforge/internal/bootstrap"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/naming"
+	iremote "github.com/wardnet/inforge/internal/remote"
 	"github.com/wardnet/inforge/internal/registry"
 	"github.com/wardnet/inforge/internal/service"
 	"github.com/wardnet/inforge/internal/tags"
@@ -222,9 +225,110 @@ func Run(ctx *pulumi.Context) error {
 		if err := realizeTLSTermination(ctx, reg, res, computeOutputs[region], env, slug, vars.BaseDomain); err != nil {
 			return err
 		}
+		if err := provisionServices(ctx, res, computeOutputs[region], vars.SSH.DeployPrivateKey, env, slug); err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+// provisionServices writes the host-side scaffolding for each service in a
+// region over SSH: the systemd unit (service.Unit) and the service folder, plus
+// the no-login service user when one is declared. This is the raw/systemd
+// delivery path; a future container path would dispatch through a provider.
+//
+// It never starts the unit. ExecStart=<folder>/run does not exist until
+// `inforge release` delivers code, so a start here would fail and abort the
+// whole `pulumi up`. The unit is written, daemon-reloaded, and enabled (for
+// boot persistence); release performs the first real start with code present.
+// Connection details and the preview/up guard mirror realizeTLSTermination.
+func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, deployPrivateKey, env, slug string) error {
+	if len(res.Service) == 0 {
+		return nil
+	}
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	deployUserByCompute := deployUsersByHost(res.Compute)
+
+	for _, svc := range res.Service {
+		hostKey, ok := canonical[svc.Host]
+		if !ok {
+			return fmt.Errorf("service %q: host %q does not resolve to a host", svc.Name, svc.Host)
+		}
+		host, ok := computeOut[hostKey]
+		if !ok {
+			return fmt.Errorf("service %q: host %q has no compute output (available: %v)", svc.Name, hostKey, sortedKeys(computeOut))
+		}
+		deployUser := deployUserByCompute[hostKey]
+		// Enforced only at up time; during preview command.remote never connects.
+		if !ctx.DryRun() {
+			if deployUser == "" {
+				return fmt.Errorf("service %q: host %q has no deploy_user; inforge needs one to SSH and provision the unit", svc.Name, svc.Host)
+			}
+			if deployPrivateKey == "" {
+				return fmt.Errorf("service %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", svc.Name)
+			}
+		}
+		if err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// provisionService writes one service's unit + folder (+ no-login user) on its
+// host. The unit is enabled but never started here (see provisionServices).
+func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug string) error {
+	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
+	createScript := serviceProvisionScript(svc)
+	name := naming.Resource(env, slug, "svc", svc.Name)
+	if _, err := remote.NewCommand(ctx, name+"-provision", &remote.CommandArgs{
+		Connection: conn,
+		Create:     pulumi.String(createScript),
+		// Update (not replace) when the script changes: the script is idempotent
+		// and re-runs in place. Without Update, a Triggers change replaces the
+		// resource, running Create AND Delete (disable --now) on the same unit —
+		// e.g. when a later slice changes the unit's ExecStart for every service.
+		Update:   pulumi.String(createScript),
+		Delete:   pulumi.String(serviceDeprovisionScript(svc)),
+		Triggers: pulumi.Array{pulumi.String(createScript)},
+	}); err != nil {
+		return fmt.Errorf("service %q: provision unit: %w", svc.Name, err)
+	}
+	return nil
+}
+
+// serviceProvisionScript renders the host shell that writes a service's unit +
+// folder (+ no-login user), reloads systemd, and ENABLES the unit. It must never
+// emit a start/restart: ExecStart=<folder>/run does not exist until release
+// delivers code, so a start would fail the deploy. All caller-supplied values
+// interpolated into the shell are quoted.
+func serviceProvisionScript(svc types.ServiceSpec) string {
+	steps := []string{"set -euo pipefail"}
+	if svc.User != "" {
+		steps = append(steps, fmt.Sprintf(
+			"sudo useradd --system --shell /usr/sbin/nologin %s 2>/dev/null || true", iremote.Quote(svc.User)))
+	}
+	steps = append(steps,
+		// Service folder: root-owned, world-readable. The svc user gets r-x (no
+		// write); release extracts the payload into it as root.
+		fmt.Sprintf("sudo install -d -m 0755 %s", iremote.Quote(service.Folder(svc.Name))),
+		iremote.WriteFileScript(service.UnitPath(svc.Name), service.Unit(svc)),
+		"sudo systemctl daemon-reload",
+		fmt.Sprintf("sudo systemctl enable %s", iremote.Quote(service.UnitName(svc.Name))),
+	)
+	return strings.Join(steps, "\n")
+}
+
+// serviceDeprovisionScript renders the host shell run when a service resource is
+// deleted: stop+disable and remove the unit (best-effort). The folder is left
+// intact — it may hold delivered payload/data.
+func serviceDeprovisionScript(svc types.ServiceSpec) string {
+	return strings.Join([]string{
+		fmt.Sprintf("sudo systemctl disable --now %s 2>/dev/null || true", iremote.Quote(service.UnitName(svc.Name))),
+		fmt.Sprintf("sudo rm -f %s", iremote.Quote(service.UnitPath(svc.Name))),
+		"sudo systemctl daemon-reload",
+	}, "\n")
 }
 
 // realizeTLSTermination realizes each tls-termination resource in a region: it

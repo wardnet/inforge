@@ -79,6 +79,30 @@ func TestBuildDeployDescriptorPropagatesUser(t *testing.T) {
 	assert.Empty(t, byName["worker"].User)
 }
 
+func TestBuildDeployDescriptorSSHUser(t *testing.T) {
+	byRegion := map[string]types.Resources{
+		"us-east-1": {
+			Compute: []types.ComputeSpec{
+				{Name: "bridge", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deployer"}},
+				{Name: "edge", InstanceCount: 1}, // no deploy_user
+			},
+			Service: []types.ServiceSpec{
+				{Name: "api", Host: "bridge-01", Type: "raw"},  // host declares deploy_user "deployer"
+				{Name: "worker", Host: "edge-01", Type: "raw"}, // host declares none -> fallback
+			},
+		},
+	}
+	desc, err := BuildDeployDescriptor("prd", "example.com", byRegion, regions.DefaultTable())
+	require.NoError(t, err)
+	byName := map[string]DeployTarget{}
+	for _, tgt := range desc.Targets {
+		byName[tgt.Service] = tgt
+	}
+	// SSHUser (connect-as) is distinct from User (run-as).
+	assert.Equal(t, "deployer", byName["api"].SSHUser, "uses the host's deploy_user")
+	assert.Equal(t, "deploy", byName["worker"].SSHUser, "falls back to deploy when the host declares none")
+}
+
 func TestBuildDeployDescriptorUnknownRegion(t *testing.T) {
 	byRegion := map[string]types.Resources{
 		"mars-1": {Service: []types.ServiceSpec{{Name: "api", Host: "bridge-01"}}},

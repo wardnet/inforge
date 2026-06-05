@@ -51,30 +51,38 @@ Pull-based container deployment. Not yet implemented.
 
 ## Provisioned on-host files
 
-For a service named `api` hosted on `bridge-01`:
+For a service named `api` hosted on `bridge-01`, `inforge deploy` provisions:
 
 | Path | Description |
 |------|-------------|
-| `/srv/wardnet/api/` | Service payload directory |
+| `/srv/wardnet/api/` | Service folder (root-owned, world-readable; the service user gets r-x) |
 | `/etc/systemd/system/wardnet-api.service` | systemd unit (managed by inforge) |
-| `/etc/wardnet/manifest.yaml` | Service manifest (may be SOPS-encrypted) |
-| `/etc/wardnet/bootstrap.yaml` | One-time bootstrap doc (deleted after first boot) |
+
+Provisioning runs over SSH as the host's [`deploy_user`](./compute) — so a service's host **must**
+declare one (validation fails otherwise). The unit is written, `daemon-reload`ed, and **enabled**, but
+**not started**: its `ExecStart=<folder>/run` does not exist until code is released. After the first
+deploy the unit exists but fails to start until [code lands](#releasing-code) — expected.
 
 ## Releasing code
 
-The `service-release` workflow resolves the deploy target (host DNS, folder, unit) live
-from the Pulumi stack at release time. No descriptor file needs to be committed anywhere.
-See [`service-release.yml`](/github-actions/service-release) for the full setup.
+`inforge deploy` provisions the scaffolding above; `inforge release` (the `service-release`
+workflow) then delivers the payload and starts the service. Release resolves the deploy target
+(host DNS, folder, unit, SSH user) live from the Pulumi stack — no descriptor file is committed —
+then SSHes in as the host's deploy user, extracts the payload into the folder, and
+`systemctl restart`s the unit (the first restart is the service's first real start). See
+[`service-release.yml`](/github-actions/service-release) for the full setup.
 
 ## Service user
 
-When `user` is set, inforge:
+When `user` is set, `inforge deploy`:
 
 1. Emits `User=<name>` in the inforge-managed systemd unit so the service process runs as that account.
-2. Runs `useradd --system --shell /usr/sbin/nologin <name>` via SSH on first deploy (idempotent — safe to re-run).
+2. Creates the account with `useradd --system --shell /usr/sbin/nologin <name>` when provisioning the
+   unit (idempotent).
 
-The user is a no-login system account. This field is only meaningful for `type: raw` services;
-container services manage their user inside the image.
+The user is a no-login system account, **distinct from the host's `deploy_user`** (the account inforge
+connects as over SSH). This field is only meaningful for `type: raw` services; container services
+manage their user inside the image.
 
 ## Ingress
 

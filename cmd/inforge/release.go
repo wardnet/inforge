@@ -168,34 +168,33 @@ func deliver(ctx context.Context, target service.DeployTarget, artifactPath, ssh
 	}
 
 	host := target.HostDNS
+	// Connect as the host's deploy_user (resolved into the descriptor). Falls
+	// back to "deploy" for descriptors produced before SSHUser existed.
+	sshUser := target.SSHUser
+	if sshUser == "" {
+		sshUser = "deploy"
+	}
+	account := fmt.Sprintf("%s@%s", sshUser, host)
 	sshArgs := []string{"-i", sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"}
 
 	// Upload payload.
 	fmt.Printf("uploading to %s...\n", host)
-	scpArgs := append(sshArgs, payloadFile, fmt.Sprintf("deploy@%s:/tmp/inforge-payload.tgz", host))
+	scpArgs := append(sshArgs, payloadFile, account+":/tmp/inforge-payload.tgz")
 	if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil {
 		return fmt.Errorf("upload payload: %w\n%s", err, out)
 	}
 
-	// Build the remote command. When a service user is declared, ensure the
-	// no-login system user exists before extracting the payload.
+	// Extract into the service folder and restart the unit. The folder, the
+	// no-login service user, and the unit itself are provisioned by
+	// `inforge deploy`; release only delivers code and triggers the restart.
 	fmt.Printf("deploying to %s and restarting %s...\n", target.Folder, target.Unit)
-	var steps []string
-	if target.User != "" {
-		steps = append(steps, fmt.Sprintf(
-			"sudo useradd --system --shell /usr/sbin/nologin %s 2>/dev/null || true",
-			target.User,
-		))
-	}
-	steps = append(steps,
-		fmt.Sprintf("sudo mkdir -p %s", target.Folder),
+	remoteCmd := strings.Join([]string{
 		fmt.Sprintf("sudo tar -xzf /tmp/inforge-payload.tgz -C %s", target.Folder),
 		"rm -f /tmp/inforge-payload.tgz",
 		fmt.Sprintf("sudo systemctl restart %s", target.Unit),
-	)
-	remoteCmd := strings.Join(steps, " && ")
+	}, " && ")
 
-	sshRunArgs := append(sshArgs, fmt.Sprintf("deploy@%s", host), remoteCmd)
+	sshRunArgs := append(sshArgs, account, remoteCmd)
 	if out, err := exec.CommandContext(ctx, "ssh", sshRunArgs...).CombinedOutput(); err != nil {
 		return fmt.Errorf("remote deploy: %w\n%s", err, out)
 	}

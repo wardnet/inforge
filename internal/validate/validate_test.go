@@ -86,3 +86,12 @@ func TestCheckServiceIngress(t *testing.T) {
 	errs, _ = checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw"}, ctx)
 	assert.Empty(t, errs)
 }
+
+func TestCheckServiceDeployUser(t *testing.T) {
+	// A service whose host declares no deploy_user can't be provisioned over SSH.
+	ctx := baseCtx()
+	ctx.computeDeployer = map[string]bool{"bridge-01": false}
+	errs, _ := checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw"}, ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "no deploy_user")
+}

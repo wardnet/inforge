@@ -58,6 +58,12 @@ jobs:
           INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
           SSH_AUTHORIZED_KEYS: ${{ secrets.SSH_AUTHORIZED_KEYS }}
           DEPLOY_PUBLIC_KEY: ${{ secrets.DEPLOY_PUBLIC_KEY }}
+          # Private half of the deploy keypair — lets command.remote SSH each host
+          # at `pulumi up` to realize host-level resources (tls-termination, service
+          # units). Transport only; it encrypts nothing. The DEPLOY_PRIVATE_KEY
+          # secret must exist in the calling environment (inherited via secrets:
+          # inherit); without it, deploy fails on the first command.remote step.
+          INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
 
       - name: Render HTML report
         if: always()

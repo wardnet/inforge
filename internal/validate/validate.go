@@ -493,6 +493,12 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	if s.Type == "container" {
 		warns = append(warns, "type: \"container\" is reserved and not implemented this phase")
 	}
+	// inforge deploy provisions the service's unit + folder over SSH as the
+	// host's deploy_user, so a service host must declare one — caught here
+	// instead of failing at pulumi up.
+	if ok && !ctx.computeDeployer[ctx.computeCanonical[s.Host]] {
+		errs = append(errs, fmt.Sprintf("host: %q has no deploy_user; inforge provisions the service over SSH and requires one", s.Host))
+	}
 	if s.Ingress != nil && ok && !ctx.tlsByCompute[ctx.computeCanonical[s.Host]] {
 		errs = append(errs, fmt.Sprintf("ingress: host %q has no tls-termination resource to terminate it", s.Host))
 	}

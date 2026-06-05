@@ -65,3 +65,27 @@ func TestVhostsByHostNoIngressNoVhosts(t *testing.T) {
 	got := vhostsByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
 	assert.Empty(t, got)
 }
+
+// TestServiceProvisionScriptEnablesNeverStarts guards the headline constraint:
+// provisioning writes + enables the unit but must NEVER start/restart it —
+// ExecStart=<folder>/run doesn't exist until release delivers code, so a start
+// here would fail the whole deploy.
+func TestServiceProvisionScriptEnablesNeverStarts(t *testing.T) {
+	script := serviceProvisionScript(types.ServiceSpec{Name: "api", User: "svc"})
+
+	assert.Contains(t, script, "systemctl daemon-reload")
+	assert.Contains(t, script, "systemctl enable 'wardnet-api.service'")
+	assert.NotContains(t, script, "systemctl start", "provisioning must not start the unit")
+	assert.NotContains(t, script, "systemctl restart", "provisioning must not restart the unit")
+	assert.NotContains(t, script, "enable --now", "enable must not start the unit")
+
+	// Writes the unit file and creates the service folder + user.
+	assert.Contains(t, script, "/etc/systemd/system/wardnet-api.service")
+	assert.Contains(t, script, "/srv/wardnet/api")
+	assert.Contains(t, script, "useradd --system --shell /usr/sbin/nologin 'svc'")
+}
+
+func TestServiceProvisionScriptNoUser(t *testing.T) {
+	script := serviceProvisionScript(types.ServiceSpec{Name: "api"})
+	assert.NotContains(t, script, "useradd", "no user declared -> no useradd")
+}
