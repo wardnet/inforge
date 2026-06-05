@@ -29,7 +29,19 @@ compute: bridge-01       # required — specKey of the host VM the terminator ru
 | `name` | string | Yes | Resource name. |
 | `container` | string | Yes | Grouping label. |
 | `provider` | string | Yes | The provider that realizes the terminator (e.g. `hetzner` → Caddy). |
-| `compute` | string | Yes | specKey of the Compute VM the terminator runs on. Must resolve to a `kind: vm` host. |
+| `compute` | string | Yes | specKey of the Compute VM the terminator runs on. Must resolve to a `kind: vm` host that declares a [`deploy_user`](./compute) (see below). |
+
+## Realization
+
+On Hetzner the terminator is realized over SSH at deploy time: inforge connects to the host as its
+`deploy_user`, installs Caddy plus the host tooling (`jq`, `yq`, `sops`, `age`), writes a base
+Caddyfile that imports `conf.d/*.caddy`, writes one `conf.d/<service>.caddy` vhost per ingress-bearing
+service, and reloads Caddy. The install is idempotent and re-runnable: adding a service adds a vhost
+file and reloads; removing one deletes the file and reloads.
+
+Because realization happens over SSH as the deploy user, the terminator's host **must** declare a
+[`deploy_user`](./compute) — validation fails otherwise, so the gap is caught before deploy rather
+than at `pulumi up`.
 
 ## Relationship to ingress
 

@@ -6,6 +6,7 @@ require (
 	filippo.io/age v1.3.1
 	github.com/getsops/sops/v3 v3.13.1
 	github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.17.0
+	github.com/pulumi/pulumi-command/sdk v1.2.1
 	github.com/pulumi/pulumi-go-provider v1.3.2
 	github.com/pulumi/pulumi-hcloud/sdk v1.38.0
 	github.com/pulumi/pulumi/sdk/v3 v3.244.0

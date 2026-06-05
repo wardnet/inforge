@@ -105,6 +105,7 @@ type regionContext struct {
 	networks         map[string]types.NetworkSpec // specKey -> network
 	computeKind      map[string]string            // expanded specKey -> kind
 	computeCanonical map[string]string            // any accepted compute FK form -> canonical specKey
+	computeDeployer  map[string]bool              // canonical specKey -> declares a deploy_user
 	databaseNames    map[string]bool
 	tlsByCompute     map[string]bool // canonical compute specKey -> has a tls-termination resource
 }
@@ -213,24 +214,30 @@ func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, region
 		networks:         map[string]types.NetworkSpec{},
 		computeKind:      map[string]string{},
 		computeCanonical: map[string]string{},
+		computeDeployer:  map[string]bool{},
 		databaseNames:    map[string]bool{},
 		tlsByCompute:     map[string]bool{},
 	}
 	for _, f := range networkFiles {
 		ctx.networks[f.spec.Name] = f.spec
 	}
+	computeSpecs := make([]types.ComputeSpec, 0, len(computeFiles))
 	for _, f := range computeFiles {
+		computeSpecs = append(computeSpecs, f.spec)
+		hasDeployer := f.spec.DeployUser != nil && f.spec.DeployUser.Name != ""
 		for i := 1; i <= f.spec.InstanceCount; i++ {
 			key := naming.SpecKey(f.spec.Name, i)
 			ctx.computeKind[key] = f.spec.Kind
-			ctx.computeCanonical[key] = key
+			ctx.computeDeployer[key] = hasDeployer
 		}
 		if f.spec.InstanceCount == 1 {
 			// bridge and bridge-01 both reference the same host.
 			ctx.computeKind[f.spec.Name] = f.spec.Kind
-			ctx.computeCanonical[f.spec.Name] = naming.SpecKey(f.spec.Name, 1)
 		}
 	}
+	// Canonicalization (any compute FK form -> expanded specKey) is shared with
+	// the program so validation and realization agree on host identity.
+	ctx.computeCanonical = naming.CanonicalComputeKeys(computeSpecs)
 	for _, f := range databaseFiles {
 		ctx.databaseNames[f.spec.Name] = true
 	}
@@ -499,6 +506,12 @@ func checkTLSTermination(s types.TLSTerminationSpec, ctx regionContext) (errs, w
 		errs = append(errs, fmt.Sprintf("compute: %q does not resolve to a compute instance", s.Compute))
 	} else if kind != "vm" {
 		errs = append(errs, fmt.Sprintf("compute: %q has kind %q; tls-termination requires a vm host", s.Compute, kind))
+	}
+	// The terminator is realized over SSH as the host's deploy user. Without one
+	// inforge can't connect, so a config that omits it would only fail at deploy
+	// time — catch it here instead.
+	if ok && !ctx.computeDeployer[ctx.computeCanonical[s.Compute]] {
+		errs = append(errs, fmt.Sprintf("compute: %q has no deploy_user; tls-termination is realized over SSH and requires one", s.Compute))
 	}
 	return errs, warns
 }

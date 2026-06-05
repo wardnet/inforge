@@ -24,6 +24,7 @@ import (
 type ProviderRegistry interface {
 	Network(name string) (types.NetworkProvider, error)
 	Compute(name string) (types.ComputeProvider, error)
+	TLSTermination(name string) (types.TLSTerminationProvider, error)
 	DNS(name string) (types.DnsProvider, error)
 	Database(name string) (types.DatabaseProvider, error)
 	Secrets(name string) (types.SecretsBackendProvider, error)
@@ -48,6 +49,9 @@ type registry struct {
 
 	hetznerCompOnce sync.Once
 	hetznerComp     *hetzner.HetznerCompute
+
+	hetznerTLSOnce sync.Once
+	hetznerTLS     *hetzner.HetznerTLS
 
 	cfProviderOnce sync.Once
 	cfProvider     *cf.Provider
@@ -126,6 +130,21 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 			)
 		})
 		return r.hetznerComp, nil
+	default:
+		return nil, unknownProvider(name)
+	}
+}
+
+// TLSTermination resolves the provider that realizes tls-termination resources.
+// The Hetzner realization installs Caddy over SSH using the env's deploy private
+// key for transport.
+func (r *registry) TLSTermination(name string) (types.TLSTerminationProvider, error) {
+	switch name {
+	case "hetzner":
+		r.hetznerTLSOnce.Do(func() {
+			r.hetznerTLS = hetzner.NewTLS(r.ssh.DeployPrivateKey, r.slug)
+		})
+		return r.hetznerTLS, nil
 	default:
 		return nil, unknownProvider(name)
 	}

@@ -39,6 +39,7 @@ func baseCtx() regionContext {
 		available:        map[string]bool{"hetzner": true},
 		computeKind:      map[string]string{"bridge-01": "vm"},
 		computeCanonical: map[string]string{"bridge-01": "bridge-01"},
+		computeDeployer:  map[string]bool{"bridge-01": true},
 		tlsByCompute:     map[string]bool{},
 	}
 }
@@ -56,6 +57,13 @@ func TestCheckTLSTermination(t *testing.T) {
 	errs, _ = checkTLSTermination(types.TLSTerminationSpec{Provider: "nope", Compute: "bridge-01"}, ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "not defined in variables.yaml providers")
+
+	// A terminator on a host with no deploy_user can't be realized over SSH.
+	noDeployer := baseCtx()
+	noDeployer.computeDeployer = map[string]bool{"bridge-01": false}
+	errs, _ = checkTLSTermination(types.TLSTerminationSpec{Provider: "hetzner", Compute: "bridge-01"}, noDeployer)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "no deploy_user")
 }
 
 func TestCheckServiceIngress(t *testing.T) {

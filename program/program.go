@@ -68,6 +68,18 @@ func Run(ctx *pulumi.Context) error {
 	if err != nil {
 		return err
 	}
+
+	// The deploy SSH private key is a deploy-time secret used purely to SSH the
+	// host and realize host-level resources (tls-termination). It is injected
+	// here from stack config (deploy_private_key) or INFORGE_DEPLOY_PRIVATE_KEY
+	// — the same pattern as oidc_token — and never read from variables.yaml.
+	// Empty in preview, where no remote command runs.
+	deployPrivateKey := cfg.Get("deploy_private_key")
+	if deployPrivateKey == "" {
+		deployPrivateKey = os.Getenv("INFORGE_DEPLOY_PRIVATE_KEY")
+	}
+	vars.SSH.DeployPrivateKey = deployPrivateKey
+
 	regionTable, err := loader.LoadRegionTable(env, dir)
 	if err != nil {
 		return err
@@ -202,9 +214,98 @@ func Run(ctx *pulumi.Context) error {
 				return err
 			}
 		}
+
+		slug, err := regionTable.Slug(region)
+		if err != nil {
+			return err
+		}
+		if err := realizeTLSTermination(ctx, reg, res, computeOutputs[region], env, slug, vars.BaseDomain); err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+// realizeTLSTermination realizes each tls-termination resource in a region: it
+// resolves the terminator's host, collects the per-service vhosts from every
+// ingress-bearing service on that host (with FQDNs env-scoped here, so the
+// provider stays a pure installer), and asks the provider to realize it. Compute
+// FKs are resolved through the same canonicalization validation uses, so
+// `compute: bridge` and `host: bridge-01` agree on the host.
+func realizeTLSTermination(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, env, slug, baseDomain string) error {
+	if len(res.TLSTermination) == 0 {
+		return nil
+	}
+
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	deployUserByCompute := deployUsersByHost(res.Compute)
+	vhostsByCompute := vhostsByHost(res, canonical, env, slug, baseDomain)
+
+	for _, spec := range res.TLSTermination {
+		hostKey, ok := canonical[spec.Compute]
+		if !ok {
+			return fmt.Errorf("tls-termination %q: compute %q does not resolve to a host", spec.Name, spec.Compute)
+		}
+		host, ok := computeOut[hostKey]
+		if !ok {
+			return fmt.Errorf("tls-termination %q: host %q has no compute output (available: %v)", spec.Name, hostKey, sortedKeys(computeOut))
+		}
+		tp, err := reg.TLSTermination(spec.Provider)
+		if err != nil {
+			return err
+		}
+		if err := tp.Realize(ctx, spec, host, deployUserByCompute[hostKey], vhostsByCompute[hostKey], env); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deployUsersByHost maps each expanded compute specKey to its deploy user (empty
+// when the compute declares none). inforge SSHes as this user to realize
+// host-level resources.
+func deployUsersByHost(computes []types.ComputeSpec) map[string]string {
+	byHost := map[string]string{}
+	for _, c := range computes {
+		user := ""
+		if c.DeployUser != nil {
+			user = c.DeployUser.Name
+		}
+		for i := 1; i <= c.InstanceCount; i++ {
+			byHost[naming.SpecKey(c.Name, i)] = user
+		}
+	}
+	return byHost
+}
+
+// vhostsByHost derives the per-service vhosts for every ingress-bearing service,
+// grouped by the canonical specKey of the host it runs on. Each service's FQDN
+// is env-scoped here (<hostname>.<env>.<slug>.<baseDomain>) so the provider
+// receives fully-resolved names. Within a host, vhosts are sorted by service so
+// the realized resources are stable across runs. canonical resolves a service's
+// host FK to the same specKey validation uses.
+func vhostsByHost(res types.Resources, canonical map[string]string, env, slug, baseDomain string) map[string][]types.Vhost {
+	byHost := map[string][]types.Vhost{}
+	for _, svc := range res.Service {
+		if svc.Ingress == nil {
+			continue
+		}
+		hostKey, ok := canonical[svc.Host]
+		if !ok {
+			// Validation guarantees the host resolves; skip defensively.
+			continue
+		}
+		byHost[hostKey] = append(byHost[hostKey], types.Vhost{
+			Service: svc.Name,
+			FQDN:    naming.RecordFQDN(env, slug, svc.Ingress.Hostname, baseDomain),
+			Port:    svc.Ingress.Port,
+		})
+	}
+	for _, vhosts := range byHost {
+		sort.Slice(vhosts, func(i, j int) bool { return vhosts[i].Service < vhosts[j].Service })
+	}
+	return byHost
 }
 
 // resolveNetworkOutput returns the NetworkOutputs for the subnet a compute spec

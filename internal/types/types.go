@@ -153,6 +153,18 @@ type TLSTerminationSpec struct {
 	Compute   string `yaml:"compute"` // FK -> an expanded compute specKey whose kind=vm
 }
 
+// Vhost is one per-service reverse-proxy entry a TLS terminator realizes on its
+// host: an already-env-scoped FQDN that terminates TLS (ACME) and proxies to a
+// local port. The program derives these from each ingress-bearing service whose
+// host the terminator covers; the FQDN is fully resolved (env + region slug +
+// base domain) before it reaches the provider, so the provider stays a pure
+// renderer/installer and never re-derives names.
+type Vhost struct {
+	Service string // service name; the terminator writes one vhost file per service
+	FQDN    string // fully-qualified, env-scoped host name the terminator serves
+	Port    int    // local port on the host the service listens on
+}
+
 // NetworkOutputs are the values a NetworkProvider returns after creating a
 // network, consumed by the compute provider.
 type NetworkOutputs struct {
@@ -195,6 +207,21 @@ type DnsProvider interface {
 	Create(ctx *pulumi.Context, spec DnsSpec, compute ComputeOutputs) error
 }
 
+// TLSTerminationProvider realizes a tls-termination spec on its host. host
+// carries the target's public IP; deployUser is the sudo-capable account
+// inforge connects as over SSH (the host's deploy user); vhosts are the
+// per-service reverse-proxy entries, with FQDNs already env-scoped by the
+// caller. Realize installs the terminator once per host, writes one vhost per
+// service, and reloads — and must be safe to re-run as services are added.
+//
+// The signature is grounded in the Hetzner/Caddy consumer: the provider is a
+// pure installer over SSH, so it needs the host, the connection identity, and
+// the resolved vhosts — nothing more. env scopes the names of the Pulumi
+// resources it creates.
+type TLSTerminationProvider interface {
+	Realize(ctx *pulumi.Context, spec TLSTerminationSpec, host ComputeOutputs, deployUser string, vhosts []Vhost, env string) error
+}
+
 // DatabaseProvider creates a managed database.
 type DatabaseProvider interface {
 	Create(ctx *pulumi.Context, spec DatabaseSpec, env, region string) (DatabaseOutputs, error)
@@ -221,6 +248,18 @@ type ComputeInstanceManifestContributor interface {
 type SSHConfig struct {
 	AuthorizedKeys  string `yaml:"authorizedKeys"`
 	DeployPublicKey string `yaml:"deployPublicKey"`
+	// DeployPrivateKey is the private half of the deploy keypair. It is
+	// authentication/transport only: it lets inforge SSH the host (which trusts
+	// the public half via provision.sh) to realize host-level resources such as
+	// tls-termination. It encrypts nothing. Empty outside deploy (e.g. preview),
+	// where no remote command runs.
+	//
+	// It is a deploy-time secret: never read from variables.yaml (hence
+	// `yaml:"-"`), but injected by the program from stack config
+	// (deploy_private_key) or INFORGE_DEPLOY_PRIVATE_KEY — the same pattern as
+	// the OIDC token. A committed private key would violate "never commit
+	// secrets".
+	DeployPrivateKey string `yaml:"-"`
 }
 
 // RegionEntry is one entry in an environment's regions[] — an abstract region

@@ -3,10 +3,35 @@
 // names used by providers.
 package naming
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/wardnet/inforge/internal/types"
+)
 
 // usage is the fixed top-level namespace segment.
 const usage = "wardnet"
+
+// CanonicalComputeKeys maps every accepted compute foreign-key form to its
+// canonical expanded specKey. Each instance i of a compute is keyed by its
+// SpecKey (e.g. "bridge-01" -> "bridge-01"); a single-instance compute is
+// additionally keyed by its bare name ("bridge" -> "bridge-01"), so that
+// `compute: bridge` (a tls-termination FK) and `host: bridge-01` (a service FK)
+// resolve to the same host. Validation and the program both resolve compute FKs
+// through this map so the two agree on what "the host" is.
+func CanonicalComputeKeys(computes []types.ComputeSpec) map[string]string {
+	canonical := map[string]string{}
+	for _, c := range computes {
+		for i := 1; i <= c.InstanceCount; i++ {
+			key := SpecKey(c.Name, i)
+			canonical[key] = key
+		}
+		if c.InstanceCount == 1 {
+			canonical[c.Name] = SpecKey(c.Name, 1)
+		}
+	}
+	return canonical
+}
 
 // SpecKey returns a resource instance's identity, "<name>-<NN>" with the
 // instance number zero-padded to two digits (e.g. SpecKey("bridge", 1) ==
