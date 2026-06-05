@@ -150,7 +150,10 @@ func (r *registry) DNS(name string) (types.DnsProvider, error) {
 	case "cloudflare":
 		r.cfDnsOnce.Do(func() {
 			zoneID := providerCfgString(r.config, "cloudflare", "zoneId")
-			r.cfDns = cfprovider.New(zoneID, r.project, r.env, r.slug, r.cfProv())
+			// Record tagging defaults on; non-Enterprise zones must set
+			// providers.cloudflare.tagRecords: false (record tags are Enterprise-only).
+			tagRecords := providerCfgBool(r.config, "cloudflare", "tagRecords", true)
+			r.cfDns = cfprovider.New(zoneID, r.project, r.env, r.slug, tagRecords, r.cfProv())
 		})
 		return r.cfDns, nil
 	default:
@@ -212,4 +215,15 @@ func providerCfgString(cfg map[string]map[string]any, provider, key string) stri
 		}
 	}
 	return ""
+}
+
+// providerCfgBool returns the bool value for key in cfg[provider], or def if the
+// provider or key is absent or the value is not a bool.
+func providerCfgBool(cfg map[string]map[string]any, provider, key string, def bool) bool {
+	if v, ok := cfg[provider][key]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return def
 }
