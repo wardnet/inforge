@@ -152,7 +152,7 @@ func Run(ctx *pulumi.Context) error {
 			}
 			for i := 1; i <= spec.InstanceCount; i++ {
 				key := naming.SpecKey(spec.Name, i)
-				domain := fmt.Sprintf("%s.%s.%s", subdomainFor(key, spec.Name, res.DNS), slug, vars.BaseDomain)
+				domain := naming.RecordFQDN(env, slug, subdomainFor(key, spec.Name, res.DNS), vars.BaseDomain)
 				out, err := cp.Create(ctx, spec, netOut, env, region, domain, man.Manifest, bootstrapDoc)
 				if err != nil {
 					return err

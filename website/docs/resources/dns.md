@@ -25,19 +25,19 @@ proxied: false           # optional — enable Cloudflare proxy (default false)
 | `container` | string | Yes | Grouping label. |
 | `provider` | string | Yes | Must be `cloudflare`. |
 | `compute` | string | Yes | specKey of the Compute this record points at. |
-| `subdomain` | string | Yes | Left part of the hostname. Full name becomes `<subdomain>.<slug>.<baseDomain>`. |
+| `subdomain` | string | Yes | Left part of the hostname. Full name becomes `<subdomain>.<env>.<slug>.<baseDomain>`. |
 | `proxied` | bool | No | Enable Cloudflare orange-cloud proxy (default `false`). |
 
 ## Resulting hostname
 
-The DNS record name is assembled from `subdomain`, the region slug, and `base_domain`:
+The DNS record name is assembled from `subdomain`, the environment, the region slug, and `base_domain`:
 
 ```
-<subdomain>.<region-slug>.<base_domain>
+<subdomain>.<env>.<region-slug>.<base_domain>
 ```
 
-For a record with `subdomain: bridge` in region `us-east-1` (slug `use1`) with
-`base_domain: example.com`, the record is `bridge.use1.example.com`.
+For a record with `subdomain: bridge` in environment `prd`, region `us-east-1` (slug `use1`) with
+`base_domain: example.com`, the record is `bridge.prd.use1.example.com`.
 
 ## Example
 

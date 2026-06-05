@@ -31,3 +31,20 @@ func ResourceInstance(env, regionSlug, resourceType, name string, instance int) 
 func GlobalResource(env, resourceType, name string) string {
 	return fmt.Sprintf("%s-%s-%s-%s", usage, env, resourceType, name)
 }
+
+// RecordName returns the zone-relative DNS record name for a host:
+// "<subdomain>.<env>.<regionSlug>" (e.g. "bridge.prd.use1"). The DNS provider
+// appends the zone (base domain) to form the FQDN. This is the single source of
+// truth for DNS record naming — see RecordFQDN for the absolute form.
+func RecordName(env, regionSlug, subdomain string) string {
+	return fmt.Sprintf("%s.%s.%s", subdomain, env, regionSlug)
+}
+
+// RecordFQDN returns the fully-qualified domain for a host:
+// "<subdomain>.<env>.<regionSlug>.<baseDomain>" (e.g.
+// "bridge.prd.use1.wardnet.network"). It is RecordName plus the base domain, so
+// the DNS record, the VM's cloud-init domain, and the deploy descriptor's host
+// DNS all agree.
+func RecordFQDN(env, regionSlug, subdomain, baseDomain string) string {
+	return fmt.Sprintf("%s.%s", RecordName(env, regionSlug, subdomain), baseDomain)
+}

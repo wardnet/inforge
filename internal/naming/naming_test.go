@@ -43,3 +43,19 @@ func TestGlobalResource(t *testing.T) {
 		t.Errorf("GlobalResource = %q, want %q", got, want)
 	}
 }
+
+func TestRecordName(t *testing.T) {
+	got := RecordName("prd", "use1", "bridge")
+	want := "bridge.prd.use1"
+	if got != want {
+		t.Errorf("RecordName = %q, want %q", got, want)
+	}
+}
+
+func TestRecordFQDN(t *testing.T) {
+	got := RecordFQDN("prd", "use1", "bridge", "wardnet.network")
+	want := "bridge.prd.use1.wardnet.network"
+	if got != want {
+		t.Errorf("RecordFQDN = %q, want %q", got, want)
+	}
+}
