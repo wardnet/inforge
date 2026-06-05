@@ -197,10 +197,11 @@ type SSHConfig struct {
 }
 
 // RegionEntry is one entry in an environment's regions[] — an abstract region
-// this environment deploys into, with its per-region provider overrides.
+// this environment deploys into. It is a plain selector; the provider-specific
+// realization of each region lives in the provider config under
+// providers.<name>.regions.
 type RegionEntry struct {
-	Name      string                    `yaml:"name"`
-	Providers map[string]map[string]any `yaml:"providers"`
+	Name string `yaml:"name"`
 }
 
 // EnvironmentVariables is the parsed variables.yaml for one environment.

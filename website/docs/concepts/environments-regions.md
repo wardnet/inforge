@@ -48,20 +48,23 @@ Example: `wardnet-prd-compute-use1-bridge-01`
 
 ## Region table
 
-The abstract-region → slug map. Built-in defaults:
+The abstract-region → slug map, and only that — it carries no provider topology (where a region
+physically lives on a given cloud is a [region realization](/providers/hetzner) in the provider
+config). Built-in defaults:
 
 | Abstract region | Slug |
 |----------------|------|
 | us-east-1      | use1 |
-| eu-west-1      | euw1 |
-| ap-southeast-1 | apse1 |
+| us-west-1      | usw1 |
+| eu-central-1   | euc1 |
+| ap-east-1      | ape1 |
 
-Override by placing `regions.yaml` in `resources/<env>/`:
+Override by placing `regions.yaml` in `resources/<env>/` — a map of abstract region to its slug:
 
 ```yaml
-- abstract: us-east-1
+us-east-1:
   slug: use1
-- abstract: eu-central-1
+eu-central-1:
   slug: euc1
 ```
 

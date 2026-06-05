@@ -85,8 +85,7 @@ func Run(ctx *pulumi.Context) error {
 
 	registries := make(map[string]registry.ProviderRegistry, len(vars.Regions))
 	for _, re := range vars.Regions {
-		merged := registry.MergeProviders(vars.Providers, re.Providers)
-		registries[re.Name] = registry.BuildRegistry(ctx, merged, vars.SSH, regionTable, ctx.Project(), env, re.Name)
+		registries[re.Name] = registry.BuildRegistry(ctx, vars.Providers, vars.SSH, regionTable, ctx.Project(), env, re.Name)
 	}
 
 	// networkOutputs: region → specName+"/"+subnetName → NetworkOutputs

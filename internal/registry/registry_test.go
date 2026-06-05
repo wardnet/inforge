@@ -69,30 +69,3 @@ func TestManifestContributorsWithInfisical(t *testing.T) {
 	require.Len(t, contributors, 1)
 	assert.IsType(t, (*infisical.InfisicalSecretsAdapter)(nil), contributors[0])
 }
-
-func TestMergeProviders(t *testing.T) {
-	global := map[string]map[string]any{
-		"hetzner":    {"apiToken": "global-token", "project": "main"},
-		"cloudflare": {"apiToken": "cf-token"},
-	}
-	overrides := map[string]map[string]any{
-		"hetzner": {"location": "ash", "apiToken": "region-token"},
-		"neon":    {"apiKey": "neon-key"},
-	}
-
-	merged := MergeProviders(global, overrides)
-
-	// Override key wins; untouched global key is preserved.
-	assert.Equal(t, "region-token", merged["hetzner"]["apiToken"])
-	assert.Equal(t, "main", merged["hetzner"]["project"])
-	assert.Equal(t, "ash", merged["hetzner"]["location"])
-	// Provider only in global is carried through unchanged.
-	assert.Equal(t, "cf-token", merged["cloudflare"]["apiToken"])
-	// Provider only in overrides is added.
-	assert.Equal(t, "neon-key", merged["neon"]["apiKey"])
-
-	// Inputs are not mutated.
-	assert.Equal(t, "global-token", global["hetzner"]["apiToken"])
-	_, ok := global["neon"]
-	assert.False(t, ok)
-}

@@ -1,37 +1,31 @@
-// Package sizes holds the compute size → {cpus, memory} mapping (the "size
-// table"). Built-in defaults live here; a project may replace them per
-// environment with resources/<env>/sizes.yaml (see internal/loader). A compute
-// spec declares only a size name; its cpus/memory are resolved from this table.
+// Package sizes holds the set of valid compute size names (the "size table") —
+// cloud-agnostic vocabulary with no cpus/memory payload. Built-in defaults live
+// here; a project may replace them per environment with resources/<env>/sizes.yaml
+// (see internal/loader). A compute spec declares only a size name; each provider
+// maps that name to a concrete SKU via its region realization (see the provider
+// packages).
 package sizes
 
 import "fmt"
 
-// Size is the resource allotment for a compute size: virtual CPUs and memory
-// in gibibytes.
-type Size struct {
-	CPUs   float64 `yaml:"cpus"`
-	Memory float64 `yaml:"memory"`
-}
-
-// Table maps a size name (e.g. "SMALL") to its Size.
-type Table map[string]Size
+// Table is the set of valid compute size names (e.g. "SMALL").
+type Table map[string]struct{}
 
 // DefaultTable returns a fresh copy of the built-in size table. A per-env
 // sizes.yaml, when present, replaces this wholesale rather than merging.
 func DefaultTable() Table {
 	return Table{
-		"SMALL":  {CPUs: 2, Memory: 4},
-		"MEDIUM": {CPUs: 4, Memory: 8},
-		"LARGE":  {CPUs: 8, Memory: 16},
+		"SMALL":  {},
+		"MEDIUM": {},
+		"LARGE":  {},
 	}
 }
 
-// Resolve returns the Size for a size name, or an error if it is not defined in
-// the table.
-func (t Table) Resolve(name string) (Size, error) {
-	s, ok := t[name]
-	if !ok {
-		return Size{}, fmt.Errorf("unknown compute size %q — define it in resources/<env>/sizes.yaml or internal/sizes", name)
+// Resolve reports whether a size name is defined in the table, returning an
+// error if it is not.
+func (t Table) Resolve(name string) error {
+	if _, ok := t[name]; !ok {
+		return fmt.Errorf("unknown compute size %q — define it in resources/<env>/sizes.yaml or internal/sizes", name)
 	}
-	return s, nil
+	return nil
 }

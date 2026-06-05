@@ -62,20 +62,24 @@ Pulumi state directory. Location depends on the `backend.type` in `inforge.yaml`
 base_domain: example.com            # base domain for VM DNS names
 
 regions:
-  - name: us-east-1                 # abstract region name
-    providers:
-      hetzner:
-        location: ash               # provider-specific region overrides
-      cloudflare:
-        zoneId: abc123
+  - name: eu-central-1              # abstract region(s) this env deploys into
 
-providers:                          # default provider config (overridden per region)
+providers:                          # credentials + per-region realizations
   hetzner:
-    token: ""                       # set via HCLOUD_TOKEN env var
+    apiToken: ${HCLOUD_TOKEN}
+    regions:
+      eu-central-1:
+        location: nbg1
+        network_zone: eu-central
+        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+        images: {ubuntu-24.04: ubuntu-24.04}
   cloudflare:
-    apiToken: ""                    # set via CLOUDFLARE_API_TOKEN env var
+    apiToken: ${CLOUDFLARE_API_TOKEN}
+    zoneId: abc123
 
 ssh:
   authorizedKeys: "ssh-ed25519 ..."   # added to every VM's authorized_keys
   deployPublicKey: "ssh-ed25519 ..."  # deploy user's public key
 ```
+
+See [variables.yaml](/configuration/variables-yaml) for the full reference.

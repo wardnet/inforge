@@ -1,64 +1,96 @@
 // Package hetzner implements the Hetzner Cloud provider for inforge. It maps
-// abstract region names to Hetzner-specific location + networkZone pairs.
-// Built-in defaults live in DefaultRegionConfigs; projects override them via
-// the providers.hetzner block in resources/<env>/regions.yaml.
+// each abstract region an environment uses to a complete Hetzner region
+// realization — location, network zone, the server type per size, and the image
+// id per canonical image — read from the providers.hetzner.regions block of
+// variables.yaml. Realizations are fully explicit per region: there are no
+// built-in defaults and no inheritance.
 package hetzner
 
 import (
 	"fmt"
-
-	"github.com/wardnet/inforge/internal/regions"
 )
 
-// RegionConfig is Hetzner's location + networkZone pair for one abstract region.
+// RegionConfig is Hetzner's complete realization of one abstract region: its
+// location + network zone, the server type for each size name, and the provider
+// image id for each canonical image.
 type RegionConfig struct {
 	Location    string
 	NetworkZone string
+	ServerTypes map[string]string // size name -> Hetzner server type SKU
+	Images      map[string]string // canonical image -> Hetzner image id
 }
 
-// DefaultRegionConfigs provides Hetzner mappings for the built-in abstract
-// regions. Projects using custom region names, or that need to override a
-// default, add entries under providers.hetzner in resources/<env>/regions.yaml.
-var DefaultRegionConfigs = map[string]RegionConfig{
-	"us-east-1":    {Location: "ash", NetworkZone: "us-east"},
-	"eu-central-1": {Location: "hel1", NetworkZone: "eu-central"},
-	"ap-east-1":    {Location: "sin", NetworkZone: "ap-southeast"},
-}
-
-// ExtractRegionConfigs reads the providers["hetzner"] block from each entry in
-// the region table and builds a RegionConfig map. Only entries that supply both
-// "location" and "network_zone" string keys are included; entries that supply
-// neither are silently skipped (they fall back to DefaultRegionConfigs at
-// resolve time).
-func ExtractRegionConfigs(t regions.Table) map[string]RegionConfig {
-	out := make(map[string]RegionConfig, len(t))
-	for name, entry := range t {
-		hcfg, ok := entry.Providers["hetzner"]
+// ExtractRegionConfigs reads the providers.hetzner.regions block from the
+// provider config and builds a RegionConfig per abstract region. Each
+// realization supplies "location", "network_zone", "serverTypes" (a size-name →
+// SKU map) and "images" (a canonical-image → image-id map); values arrive as
+// map[string]any from yaml, so non-string and empty entries are skipped. It is
+// nil-safe and returns an empty map when the block is absent. Missing fields are
+// not validated here — ResolveRegion and compute.Create fail closed at use time.
+func ExtractRegionConfigs(config map[string]map[string]any) map[string]RegionConfig {
+	raw, ok := config["hetzner"]["regions"].(map[string]any)
+	if !ok {
+		return map[string]RegionConfig{}
+	}
+	out := make(map[string]RegionConfig, len(raw))
+	for region, v := range raw {
+		realization, ok := v.(map[string]any)
 		if !ok {
 			continue
 		}
-		loc, _ := hcfg["location"].(string)
-		zone, _ := hcfg["network_zone"].(string)
-		if loc == "" || zone == "" {
-			continue
+		loc, _ := realization["location"].(string)
+		zone, _ := realization["network_zone"].(string)
+		out[region] = RegionConfig{
+			Location:    loc,
+			NetworkZone: zone,
+			ServerTypes: extractStringMap(realization["serverTypes"]),
+			Images:      extractStringMap(realization["images"]),
 		}
-		out[name] = RegionConfig{Location: loc, NetworkZone: zone}
 	}
 	return out
 }
 
-// ResolveRegion resolves an abstract region name to a Hetzner RegionConfig.
-// Project overrides (from regions.yaml) take precedence over DefaultRegionConfigs.
-// If neither source has a mapping, a clear error is returned.
-func ResolveRegion(abstractRegion string, overrides map[string]RegionConfig) (RegionConfig, error) {
-	if cfg, ok := overrides[abstractRegion]; ok {
-		return cfg, nil
+// extractStringMap turns a yaml-decoded map[string]any into a map[string]string,
+// skipping non-string and empty values. It returns an empty map when v is not a
+// map.
+func extractStringMap(v any) map[string]string {
+	raw, ok := v.(map[string]any)
+	if !ok {
+		return map[string]string{}
 	}
-	if cfg, ok := DefaultRegionConfigs[abstractRegion]; ok {
-		return cfg, nil
+	out := make(map[string]string, len(raw))
+	for k, val := range raw {
+		if s, ok := val.(string); ok && s != "" {
+			out[k] = s
+		}
 	}
-	return RegionConfig{}, fmt.Errorf(
-		"hetzner has no datacenter for abstract region %q — add a mapping under providers.hetzner in resources/<env>/regions.yaml",
-		abstractRegion,
-	)
+	return out
+}
+
+// ResolveRegion returns the Hetzner realization for an abstract region. There is
+// no default fallback: a region absent from the realizations, or one missing its
+// location/network_zone, is an error — so an incomplete realization fails here at
+// the provider boundary with a clear message rather than as an opaque hcloud
+// error at apply time. (serverTypes/images are checked per size/image in Create.)
+func ResolveRegion(abstractRegion string, realizations map[string]RegionConfig) (RegionConfig, error) {
+	cfg, ok := realizations[abstractRegion]
+	if !ok {
+		return RegionConfig{}, fmt.Errorf(
+			"hetzner has no region realization for %q — add it under providers.hetzner.regions.%s in variables.yaml",
+			abstractRegion, abstractRegion,
+		)
+	}
+	if cfg.Location == "" {
+		return RegionConfig{}, fmt.Errorf(
+			"hetzner region realization for %q is missing location — set providers.hetzner.regions.%s.location in variables.yaml",
+			abstractRegion, abstractRegion,
+		)
+	}
+	if cfg.NetworkZone == "" {
+		return RegionConfig{}, fmt.Errorf(
+			"hetzner region realization for %q is missing network_zone — set providers.hetzner.regions.%s.network_zone in variables.yaml",
+			abstractRegion, abstractRegion,
+		)
+	}
+	return cfg, nil
 }

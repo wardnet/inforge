@@ -6,7 +6,6 @@ package registry
 
 import (
 	"fmt"
-	"maps"
 	"sync"
 
 	cf "github.com/pulumi/pulumi-cloudflare/sdk/v6/go/cloudflare"
@@ -63,11 +62,11 @@ type registry struct {
 	infisicalSecrets *infisical.InfisicalSecretsAdapter
 }
 
-// BuildRegistry constructs a ProviderRegistry from the resolved (merged)
-// provider config, SSH material, and region table for one region. project,
-// env, and region are used to label cloud resources. ctx is stored and used
-// lazily when provider objects are first constructed — it must be the context
-// passed to the Pulumi program's run function.
+// BuildRegistry constructs a ProviderRegistry from the provider config, SSH
+// material, and region table for one region. project, env, and region are used
+// to label cloud resources. ctx is stored and used lazily when provider objects
+// are first constructed — it must be the context passed to the Pulumi program's
+// run function.
 func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, ssh types.SSHConfig, regionTable regions.Table, project, env, region string) ProviderRegistry {
 	slug, _ := regionTable.Slug(region) // already validated by loader
 	return &registry{
@@ -102,8 +101,8 @@ func (r *registry) Network(name string) (types.NetworkProvider, error) {
 	switch name {
 	case "hetzner":
 		r.hetznerNetOnce.Do(func() {
-			overrides := hetzner.ExtractRegionConfigs(r.regionTable)
-			r.hetznerNet = hetzner.New(r.hetznerProv(), r.project, r.slug, overrides)
+			realizations := hetzner.ExtractRegionConfigs(r.config)
+			r.hetznerNet = hetzner.New(r.hetznerProv(), r.project, r.slug, realizations)
 		})
 		return r.hetznerNet, nil
 	default:
@@ -115,7 +114,7 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 	switch name {
 	case "hetzner":
 		r.hetznerCompOnce.Do(func() {
-			overrides := hetzner.ExtractRegionConfigs(r.regionTable)
+			realizations := hetzner.ExtractRegionConfigs(r.config)
 			r.hetznerComp = hetzner.NewCompute(
 				r.ssh.AuthorizedKeys,
 				r.ssh.DeployPublicKey,
@@ -123,7 +122,7 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 				r.hetznerProv(),
 				r.project,
 				r.slug,
-				overrides,
+				realizations,
 			)
 		})
 		return r.hetznerComp, nil
@@ -213,33 +212,4 @@ func providerCfgString(cfg map[string]map[string]any, provider, key string) stri
 		}
 	}
 	return ""
-}
-
-// MergeProviders folds per-region provider overrides onto the global provider
-// config. For each provider, the override's keys win over the global keys; a
-// provider present only in overrides is added. Inner maps are copied so neither
-// input is mutated.
-func MergeProviders(global, overrides map[string]map[string]any) map[string]map[string]any {
-	out := make(map[string]map[string]any, len(global))
-	for name, cfg := range global {
-		out[name] = copyInner(cfg)
-	}
-	for name, ov := range overrides {
-		merged := copyInner(global[name])
-		if merged == nil {
-			merged = map[string]any{}
-		}
-		maps.Copy(merged, ov)
-		out[name] = merged
-	}
-	return out
-}
-
-func copyInner(m map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]any, len(m))
-	maps.Copy(out, m)
-	return out
 }
