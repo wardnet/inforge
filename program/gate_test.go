@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/registry"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -129,7 +130,8 @@ func TestCloudInitGateMemoized(t *testing.T) {
 
 // TestProvisioningDependsOnGate: every per-host SSH step a service emits — the
 // unit provision and the descriptor/credential write — depends on the host's
-// cloud-init gate, and TLS and service provisioning share one gate per host.
+// cloud-init gate. (Gate sharing across the TLS and service paths is covered by
+// TestTLSAndServiceShareOneGate.)
 func TestProvisioningDependsOnGate(t *testing.T) {
 	mocks := newCommandMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
@@ -155,4 +157,47 @@ func TestProvisioningDependsOnGate(t *testing.T) {
 	require.Contains(t, mocks.captured, gate)
 	assert.True(t, mocks.dependsOn(svc+"-provision", gate), "unit provision must wait on the gate")
 	assert.True(t, mocks.dependsOn(svc+"-secrets", gate), "descriptor write must wait on the gate")
+}
+
+// TestTLSAndServiceShareOneGate: TLS realization and service provisioning SSH the
+// same host, so they must depend on the *same* gate resource — exactly one
+// cloud-init gate is created for the shared host across both paths.
+func TestTLSAndServiceShareOneGate(t *testing.T) {
+	mocks := newCommandMocks()
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		reg := registry.BuildRegistry(ctx,
+			map[string]map[string]any{"hetzner": {"apiToken": "x"}},
+			types.SSHConfig{DeployPrivateKey: "priv"}, nil, "proj", "prd", "us-east-1")
+		res := types.Resources{
+			Compute: []types.ComputeSpec{
+				{Name: "bridge", Provider: "hetzner", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
+			},
+			TLSTermination: []types.TLSTerminationSpec{
+				{Name: "edge", Provider: "hetzner", Compute: "bridge-01"},
+			},
+			Service: []types.ServiceSpec{
+				{Name: "ghost", Container: "ghost", Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "ghost"},
+			},
+		}
+		computeOut := map[string]types.ComputeOutputs{
+			"bridge-01": {PublicIP: pulumi.String("1.2.3.4").ToStringOutput()},
+		}
+		gates := map[string]pulumi.Resource{}
+		if err := realizeTLSTermination(ctx, reg, res, computeOut, gates, "priv", "prd", "use1", "example.com"); err != nil {
+			return err
+		}
+		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", "use1", "1.2.3")
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	mocks.mu.Lock()
+	defer mocks.mu.Unlock()
+	gateCount := 0
+	for name := range mocks.captured {
+		if strings.HasSuffix(name, "-cloudinit-ready") {
+			gateCount++
+		}
+	}
+	assert.Equal(t, 1, gateCount, "TLS and service provisioning must share one gate per host")
+	require.Contains(t, mocks.captured, gateName("prd", "use1", "bridge-01"))
 }

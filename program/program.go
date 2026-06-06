@@ -212,6 +212,9 @@ func cloudInitGate(ctx *pulumi.Context, gates map[string]pulumi.Resource, hostKe
 		return g, nil
 	}
 	conn := iremote.Connection(host.PublicIP, "root", deployPrivateKey)
+	// The gate is the one truly per-host command resource (all sibling commands are
+	// per service/terminator), so its logical name keys on the canonical host
+	// specKey — yielding a stable, unique Pulumi name, one per host.
 	name := naming.Resource(env, slug, "vm", hostKey) + "-cloudinit-ready"
 	const wait = "cloud-init status --wait"
 	gate, err := remote.NewCommand(ctx, name, &remote.CommandArgs{
