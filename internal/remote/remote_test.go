@@ -33,6 +33,26 @@ func TestWriteFileScriptQuotesPath(t *testing.T) {
 	assert.Contains(t, script, "base64 -d")
 }
 
+// TestWriteFileScriptModeSetsRestrictivePermsBeforeWrite asserts a 0600 file is
+// created with the restrictive mode before content is teed in, so a secret
+// credential is never momentarily world-readable. The mode is single-quoted.
+func TestWriteFileScriptModeSetsRestrictivePermsBeforeWrite(t *testing.T) {
+	script := WriteFileScriptMode("/etc/wardnet/services/ghost/credential.age", "ciphertext", "0600")
+
+	installIdx := strings.Index(script, "install -m '0600' /dev/null '/etc/wardnet/services/ghost/credential.age'")
+	teeIdx := strings.Index(script, "base64 -d | sudo tee")
+	assert.GreaterOrEqual(t, installIdx, 0, "must pre-create the file at 0600: %q", script)
+	assert.Less(t, installIdx, teeIdx, "chmod/install must precede the tee write")
+	assert.NotContains(t, script, "ciphertext")
+}
+
+// TestWriteFileScriptDefaultHasNoModeInstall asserts the default (no-mode)
+// variant does not pre-create the file (preserving the historical 0644 path).
+func TestWriteFileScriptDefaultHasNoModeInstall(t *testing.T) {
+	script := WriteFileScript("/etc/wardnet/services/ghost/descriptor.yaml", "version: 1")
+	assert.NotContains(t, script, "install -m")
+}
+
 func TestDeleteFileScriptQuotesPath(t *testing.T) {
 	script := DeleteFileScript(`/etc/caddy/conf.d/x;rm -rf ~.caddy`)
 	assert.True(t, strings.HasPrefix(script, "sudo rm -f '"),

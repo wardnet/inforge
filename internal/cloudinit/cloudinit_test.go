@@ -33,7 +33,6 @@ func TestRender(t *testing.T) {
 	assert.Contains(t, out, "user deploy")
 	assert.Contains(t, out, "version: 1")
 	assert.NotContains(t, out, "{{", "all placeholders should be substituted")
-	assert.Contains(t, out, "inforge bootstrap", "the bootstrap step should be appended")
 	assert.Contains(t, out, "inforge user provisioning", "the provision step should be appended")
 }
 
@@ -55,14 +54,10 @@ func TestAssemble(t *testing.T) {
 	out, err := Assemble(path, Vars{Domain: "x.example.com", Instance: 1})
 	require.NoError(t, err)
 	assert.Contains(t, out, "host x.example.com")
-	assert.Contains(t, out, "inforge bootstrap")
+	assert.Contains(t, out, "inforge user provisioning")
 
 	_, err = Assemble(filepath.Join(dir, "missing.sh"), Vars{})
 	assert.Error(t, err)
-}
-
-func TestBootstrapScriptNonEmpty(t *testing.T) {
-	assert.Contains(t, BootstrapScript(), "BOOTSTRAP_FILE=")
 }
 
 func TestProvisionScriptNonEmpty(t *testing.T) {

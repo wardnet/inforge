@@ -51,21 +51,16 @@ func TestRegistryUnknownProvider(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown provider: "unknown-secrets"`)
 
+	// "infisical" is also a known service-secrets provisioner.
+	ssp, err := r.ServiceSecretsProvisioner("infisical")
+	require.NoError(t, err)
+	assert.IsType(t, (*infisical.InfisicalSecretsAdapter)(nil), ssp)
+
+	_, err = r.ServiceSecretsProvisioner("unknown-secrets")
+	require.Error(t, err)
+
 	// Unknown network provider still errors.
 	_, err = r.Network("unknown-cloud")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown provider: "unknown-cloud"`)
-
-	// No infisical key in config → no manifest contributors.
-	assert.Empty(t, r.ManifestContributors())
-}
-
-func TestManifestContributorsWithInfisical(t *testing.T) {
-	cfg := map[string]map[string]any{
-		"infisical": {"clientId": "cid", "clientSecret": "csec", "siteUrl": "https://app.infisical.com"},
-	}
-	r := BuildRegistry(nil, cfg, types.SSHConfig{}, nil, "test-project", "test", "us-east-1")
-	contributors := r.ManifestContributors()
-	require.Len(t, contributors, 1)
-	assert.IsType(t, (*infisical.InfisicalSecretsAdapter)(nil), contributors[0])
 }

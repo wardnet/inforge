@@ -1,6 +1,8 @@
 // Package cloudinit assembles a compute instance's cloud-init script: it
 // substitutes the per-instance placeholders in a project's template and appends
-// the inforge first-boot steps (user provisioning, then secret bootstrapping).
+// the inforge first-boot user-provisioning step. Secret delivery is no longer a
+// first-boot concern — secrets are fetched at runtime by inforge-bootstrap — so
+// the former SOPS/age re-key bootstrap step has been retired.
 package cloudinit
 
 import (
@@ -10,14 +12,8 @@ import (
 	"strings"
 )
 
-// bootstrapScript is the first-boot secret-bootstrap step appended to every
-// assembled cloud-init script.
-//
-//go:embed bootstrap.sh
-var bootstrapScript string
-
 // provisionScript is the first-boot user-provisioning step appended to every
-// assembled cloud-init script before the bootstrap step.
+// assembled cloud-init script.
 //
 //go:embed provision.sh
 var provisionScript string
@@ -31,10 +27,6 @@ type Vars struct {
 	DeployUser string
 	Instance   int
 	Manifest   string
-	// BootstrapDoc is the YAML content of bootstrap.yaml written to the VM at
-	// first boot when the manifest contains secret values. Empty when the
-	// manifest has no secrets (no bootstrap needed).
-	BootstrapDoc string
 }
 
 // placeholders maps template tokens to their replacement values.
@@ -45,7 +37,6 @@ func (v Vars) placeholders() *strings.Replacer {
 		"{{deploy_user}}", v.DeployUser,
 		"{{instance}}", strconv.Itoa(v.Instance),
 		"{{manifest}}", v.Manifest,
-		"{{bootstrap_doc}}", v.BootstrapDoc,
 	)
 }
 
@@ -60,15 +51,11 @@ func Assemble(absolutePath string, vars Vars) (string, error) {
 }
 
 // Render substitutes the placeholders in a cloud-init template string and
-// appends the inforge-managed first-boot steps. It is the pure core of Assemble.
+// appends the inforge-managed first-boot user-provisioning step. It is the pure
+// core of Assemble.
 func Render(template string, vars Vars) string {
 	r := vars.placeholders()
-	return r.Replace(template) + "\n" + r.Replace(ProvisionScript()) + "\n" + r.Replace(BootstrapScript())
-}
-
-// BootstrapScript returns the embedded first-boot bootstrap step.
-func BootstrapScript() string {
-	return bootstrapScript
+	return r.Replace(template) + "\n" + r.Replace(ProvisionScript())
 }
 
 // ProvisionScript returns the embedded first-boot user-provisioning step.

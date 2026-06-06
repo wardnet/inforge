@@ -7,12 +7,13 @@ import (
 )
 
 // newProvider constructs the pulumi-go-provider server that serves
-// InfisicalWorkspace and InfisicalSecretsBatch resources.
+// InfisicalWorkspace, InfisicalSecretsBatch, and InfisicalIdentity resources.
 func newProvider() (p.Provider, error) {
 	return infer.NewProviderBuilder().
 		WithResources(
 			infer.Resource(&resources.InfisicalWorkspace{}),
 			infer.Resource(&resources.InfisicalSecretsBatch{}),
+			infer.Resource(&resources.InfisicalIdentity{}),
 		).
 		Build()
 }

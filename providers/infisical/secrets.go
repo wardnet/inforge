@@ -1,9 +1,9 @@
 // Package infisical implements the Infisical secrets provider for inforge. The
 // InfisicalSecretsAdapter creates one InfisicalWorkspace per (container, region)
-// pair — mirroring the NeonDatabaseAdapter container-dedup pattern — and one
-// InfisicalSecretsBatch resource per SecretsSpec. It also implements
-// ComputeInstanceManifestContributor so that servers know how to fetch their
-// own secrets at boot via the Infisical Universal Auth flow.
+// pair — mirroring the NeonDatabaseAdapter container-dedup pattern — and, per
+// service, writes the service's infra secrets under its scoped path and mints a
+// per-service machine identity (ProvisionService) so inforge-bootstrap fetches
+// those secrets at runtime via the Infisical Universal Auth flow.
 package infisical
 
 import (
@@ -13,7 +13,6 @@ import (
 	"sync"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
-	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/internal/validate"
@@ -23,6 +22,7 @@ import (
 const (
 	infisicalWorkspaceType    = "infisical:resources:InfisicalWorkspace"
 	infisicalSecretsBatchType = "infisical:resources:InfisicalSecretsBatch"
+	infisicalIdentityType     = "infisical:resources:InfisicalIdentity"
 )
 
 // infisicalWorkspaceResource is the output state returned by the Pulumi engine
@@ -58,7 +58,7 @@ type infisicalSecretsBatchResource struct {
 
 func newInfisicalSecretsBatchResource(
 	ctx *pulumi.Context, name string,
-	workspaceId pulumi.StringOutput, envSlug, clientId, clientSecret, siteUrl string,
+	workspaceId pulumi.StringOutput, envSlug, clientId, clientSecret, siteUrl, secretPath string,
 	secretsJson pulumi.StringOutput,
 	opts ...pulumi.ResourceOption,
 ) (*infisicalSecretsBatchResource, error) {
@@ -69,6 +69,7 @@ func newInfisicalSecretsBatchResource(
 		"clientId":     pulumi.String(clientId),
 		"clientSecret": pulumi.String(clientSecret),
 		"siteUrl":      pulumi.String(siteUrl),
+		"secretPath":   pulumi.String(secretPath),
 		"secretsJson":  secretsJson,
 	}
 	if err := ctx.RegisterResource(infisicalSecretsBatchType, name, args, res, opts...); err != nil {
@@ -77,11 +78,41 @@ func newInfisicalSecretsBatchResource(
 	return res, nil
 }
 
+// infisicalIdentityResource is the output state returned by the Pulumi engine
+// after an InfisicalIdentity is created: the minted universal-auth credentials
+// the on-host bootstrapper logs in with.
+type infisicalIdentityResource struct {
+	pulumi.CustomResourceState
+	AuthClientId     pulumi.StringOutput `pulumi:"authClientId"`
+	AuthClientSecret pulumi.StringOutput `pulumi:"authClientSecret"`
+}
+
+func newInfisicalIdentityResource(
+	ctx *pulumi.Context, name string,
+	workspaceId pulumi.StringOutput, envSlug, secretPath, clientId, clientSecret, siteUrl string,
+	opts ...pulumi.ResourceOption,
+) (*infisicalIdentityResource, error) {
+	res := &infisicalIdentityResource{}
+	args := pulumi.Map{
+		"name":         pulumi.String(name),
+		"workspaceId":  workspaceId,
+		"envSlug":      pulumi.String(envSlug),
+		"secretPath":   pulumi.String(secretPath),
+		"clientId":     pulumi.String(clientId),
+		"clientSecret": pulumi.String(clientSecret),
+		"siteUrl":      pulumi.String(siteUrl),
+	}
+	if err := ctx.RegisterResource(infisicalIdentityType, name, args, res, opts...); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 // InfisicalSecretsAdapter implements types.SecretsBackendProvider and
-// types.ComputeInstanceManifestContributor using the custom
-// pulumi-resource-infisical provider binary. One InfisicalWorkspace is created
-// per (container, region) key; concurrent callers for the same key wait and
-// reuse the same resource via a mutex-protected map.
+// types.ServiceSecretsProvisioner using the custom pulumi-resource-infisical
+// provider binary. One InfisicalWorkspace is created per (container, region)
+// key; concurrent callers for the same key wait and reuse the same resource via
+// a mutex-protected map.
 type InfisicalSecretsAdapter struct {
 	clientId     string
 	clientSecret string
@@ -107,7 +138,12 @@ func New(clientId, clientSecret, siteUrl, slug string) *InfisicalSecretsAdapter 
 }
 
 // Create provisions an InfisicalWorkspace (deduped per container+region) and an
-// InfisicalSecretsBatch that writes all resolved secrets into it.
+// InfisicalSecretsBatch that writes all resolved secrets into the workspace root.
+// It satisfies SecretsBackendProvider but is no longer called from program.Run —
+// per-service runtime delivery goes through ProvisionService, which writes under
+// /<svc>/infra. The two batch resources would share a Pulumi name only if a
+// SecretsSpec and a ServiceSpec were named identically AND both paths ran, which
+// no longer happens.
 func (a *InfisicalSecretsAdapter) Create(
 	ctx *pulumi.Context, spec types.SecretsSpec, env, region string, all types.AllOutputs,
 ) error {
@@ -147,7 +183,7 @@ func (a *InfisicalSecretsAdapter) Create(
 	batchName := naming.Resource(env, a.slug, "secrets", spec.Name)
 	_, err = newInfisicalSecretsBatchResource(
 		ctx, batchName,
-		workspaceId, envToSlug(env), a.clientId, a.clientSecret, a.siteUrl,
+		workspaceId, envToSlug(env), a.clientId, a.clientSecret, a.siteUrl, "",
 		secretsJson,
 	)
 	if err != nil {
@@ -156,34 +192,101 @@ func (a *InfisicalSecretsAdapter) Create(
 	return nil
 }
 
-// ContributeToManifest injects Infisical connection config into the cloud-init
-// manifest for a compute instance whose container has a matching SecretsSpec.
-// Returns an empty contribution if no matching spec is found.
-func (a *InfisicalSecretsAdapter) ContributeToManifest(
-	spec types.ComputeSpec, resources types.Resources, env, region string,
-) (types.ManifestContribution, error) {
-	for _, s := range resources.Secrets {
-		if s.Container == spec.Container && s.Provider == "infisical" {
-			// client_secret is marked as a manifest secret so it is SOPS/age-encrypted
-			// with the per-VM key K before being embedded in cloud-init. The VM
-			// redeems the one-time token from the key broker to obtain K, decrypts the
-			// manifest, and uses the plaintext credential to authenticate to Infisical.
-			return types.ManifestContribution{
-				"secrets": map[string]any{
-					"provider":    "infisical",
-					"url":         a.siteUrl,
-					"project":     s.Container,
-					"environment": envToSlug(env),
-					"auth": map[string]any{
-						"method":     "universal-auth",
-						"client_id":  a.clientId,
-						"client_secret": manifest.Secret(a.clientSecret),
-					},
-				},
-			}, nil
+// ProvisionService writes a service's infra secrets under "/<svc>/infra" and
+// mints a per-service machine identity scoped read-only to "/<svc>", returning
+// the bundle the program needs to write the descriptor + host-key-encrypted
+// credential. It returns a nil bundle (no error) when the service has no infra
+// secrets to deliver. Multiple services in the same container each get their own
+// path and identity (the container's secrets are broadcast to every consuming
+// service), so a leaked credential exposes only that one service's path.
+func (a *InfisicalSecretsAdapter) ProvisionService(
+	ctx *pulumi.Context, svc types.ServiceSpec, res types.Resources, env, region string, all types.AllOutputs,
+) (*types.ServiceSecretsBundle, error) {
+	entries := infraSecretEntries(svc, res)
+	if len(entries) == 0 {
+		return nil, nil
+	}
+
+	workspaceId, err := a.ensureWorkspace(ctx, svc.Container, env)
+	if err != nil {
+		return nil, fmt.Errorf("ensure infisical workspace for service %q: %w", svc.Name, err)
+	}
+
+	secretPath := "/" + svc.Name
+	infraPath := secretPath + "/infra"
+
+	keys := sortedStringKeys(entries)
+	ifaces := make([]interface{}, len(keys))
+	for i, key := range keys {
+		resolved, err := resolveRef(entries[key].Source, region, all)
+		if err != nil {
+			return nil, fmt.Errorf("resolve ref for service %q secret %q: %w", svc.Name, key, err)
+		}
+		ifaces[i] = resolved
+	}
+	secretsJson := pulumi.All(ifaces...).ApplyT(func(args []interface{}) (string, error) {
+		m := make(map[string]string, len(keys))
+		for i, key := range keys {
+			m[key] = args[i].(string)
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			return "", fmt.Errorf("marshal secrets: %w", err)
+		}
+		return string(b), nil
+	}).(pulumi.StringOutput)
+
+	batchName := naming.Resource(env, a.slug, "secrets", svc.Name)
+	if _, err := newInfisicalSecretsBatchResource(
+		ctx, batchName,
+		workspaceId, envToSlug(env), a.clientId, a.clientSecret, a.siteUrl, infraPath,
+		secretsJson,
+	); err != nil {
+		return nil, fmt.Errorf("write infra secrets for service %q: %w", svc.Name, err)
+	}
+
+	identityName := naming.Resource(env, a.slug, "identity", svc.Name)
+	idRes, err := newInfisicalIdentityResource(
+		ctx, identityName,
+		workspaceId, envToSlug(env), secretPath, a.clientId, a.clientSecret, a.siteUrl,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("provision identity for service %q: %w", svc.Name, err)
+	}
+
+	envMap := make(map[string]string, len(keys))
+	for _, key := range keys {
+		envMap[key] = "infra/" + key
+	}
+
+	return &types.ServiceSecretsBundle{
+		Project:      workspaceId,
+		ClientID:     idRes.AuthClientId,
+		ClientSecret: idRes.AuthClientSecret,
+		ProviderKind: "infisical",
+		URL:          a.siteUrl,
+		Environment:  envToSlug(env),
+		SecretPath:   secretPath,
+		Env:          envMap,
+	}, nil
+}
+
+// infraSecretEntries returns the secret entries a service consumes, merged from
+// every infisical SecretsSpec in the service's container. The map key is both the
+// vault key written under infra/ and the env var name the bootstrapper sets, so
+// all services in a container share the same secret set (broadcast semantics —
+// the schema links services to secrets only by container).
+func infraSecretEntries(svc types.ServiceSpec, res types.Resources) map[string]types.SecretsEntry {
+	out := map[string]types.SecretsEntry{}
+	for _, s := range res.Secrets {
+		if s.Container != svc.Container || s.Provider != "infisical" {
+			continue
+		}
+		for k, v := range s.Secrets {
+			out[k] = v
 		}
 	}
-	return types.ManifestContribution{}, nil
+	return out
 }
 
 // ensureWorkspace returns the workspaceId output for the (container, env)

@@ -5,7 +5,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wardnet/inforge/internal/bootstrapper"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/service"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -112,4 +114,42 @@ func TestServiceProvisionScriptDownloadsBootstrapper(t *testing.T) {
 	assert.Contains(t, script, "install -m 0755 \"$tmp\" '/usr/local/bin/inforge-bootstrap'")
 	// The raw inforge version must never be interpolated unquoted into the shell.
 	assert.NotContains(t, script, "inforge-bootstrap_1.2.3_linux")
+}
+
+// TestRenderDescriptorRoundTrips proves the descriptor inforge writes parses
+// back through the bootstrapper's own validator — the producer (this program)
+// and consumer (inforge-bootstrap) cannot drift because both use the same
+// Descriptor struct and SupportedVersion constant.
+func TestRenderDescriptorRoundTrips(t *testing.T) {
+	svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost"}
+	bundle := &types.ServiceSecretsBundle{
+		ProviderKind: "infisical",
+		URL:          "https://app.infisical.com",
+		Environment:  "prod",
+		SecretPath:   "/ghost",
+		Env:          map[string]string{"DATABASE_URL": "infra/DATABASE_URL"},
+	}
+
+	out, err := renderDescriptor(svc, bundle, "ws-123")
+	require.NoError(t, err)
+
+	d, err := bootstrapper.ParseDescriptor([]byte(out))
+	require.NoError(t, err)
+	assert.Equal(t, bootstrapper.SupportedVersion, d.Version)
+	assert.Equal(t, "ghost", d.Service)
+	assert.Equal(t, service.ExecPath("ghost"), d.Exec)
+	assert.Equal(t, "ghost", d.User)
+	assert.Equal(t, "infisical", d.Provider.Kind)
+	assert.Equal(t, "ws-123", d.Provider.Project) // project is the workspace id
+	assert.Equal(t, "prod", d.Provider.Environment)
+	assert.Equal(t, "/ghost", d.Provider.SecretPath)
+	assert.Equal(t, "infra/DATABASE_URL", d.Env["DATABASE_URL"])
+}
+
+func TestServiceSecretsProviderName(t *testing.T) {
+	res := types.Resources{
+		Secrets: []types.SecretsSpec{{Container: "ghost", Provider: "infisical"}},
+	}
+	assert.Equal(t, "infisical", serviceSecretsProviderName(types.ServiceSpec{Container: "ghost"}, res))
+	assert.Equal(t, "", serviceSecretsProviderName(types.ServiceSpec{Container: "other"}, res))
 }

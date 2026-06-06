@@ -195,11 +195,12 @@ type NetworkProvider interface {
 	Create(ctx *pulumi.Context, spec NetworkSpec, env, abstractRegion string) (map[string]NetworkOutputs, error)
 }
 
-// ComputeProvider creates one compute instance, wiring in its network, the
-// host domain, the assembled manifest, and the bootstrap document (empty when
-// the manifest has no secrets).
+// ComputeProvider creates one compute instance, wiring in its network, the host
+// domain, and the assembled (plain, secret-free) manifest. Secret delivery is no
+// longer a compute-creation concern: secrets are fetched at runtime by
+// inforge-bootstrap, so there is no bootstrap document.
 type ComputeProvider interface {
-	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest, bootstrapDoc string) (ComputeOutputs, error)
+	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest string) (ComputeOutputs, error)
 }
 
 // DnsProvider creates a DNS record pointing at a compute instance.
@@ -233,16 +234,40 @@ type SecretsBackendProvider interface {
 	Create(ctx *pulumi.Context, spec SecretsSpec, env, region string, all AllOutputs) error
 }
 
-// ManifestContribution is a set of fields a contributor adds to a service's
-// manifest. Individual values may be marked secret via manifest.Secret.
-type ManifestContribution = map[string]any
-
-// ComputeInstanceManifestContributor adds fields to a compute's manifest. The
-// trigger for VM bootstrap is the presence of secret values in the assembled
-// manifest, so this contract carries no explicit bootstrap argument.
-type ComputeInstanceManifestContributor interface {
-	ContributeToManifest(spec ComputeSpec, resources Resources, env, region string) (ManifestContribution, error)
+// ServiceSecretsBundle is everything inforge needs to deliver one service's
+// runtime secrets contract to its host: the provider coordinates and env-var ->
+// vault-key mapping for the descriptor, plus the per-service machine identity's
+// universal-auth credentials (Outputs, ClientSecret sensitive) the bootstrapper
+// logs in with. Project is the workspace ID (what the on-host fetcher sends as
+// the workspaceId query param), so it is an Output resolved at deploy time. The
+// program age-encrypts {ClientId, ClientSecret} to the host key and writes the
+// descriptor + credential; the provider that produced the bundle stays unaware
+// of hosts and SSH.
+type ServiceSecretsBundle struct {
+	Project      pulumi.StringOutput // workspace ID
+	ClientID     pulumi.StringOutput // identity universal-auth client ID
+	ClientSecret pulumi.StringOutput // identity universal-auth client secret (sensitive)
+	ProviderKind string              // e.g. "infisical"
+	URL          string              // provider site URL
+	Environment  string              // provider environment slug
+	SecretPath   string              // the service's scoped path, e.g. "/ghost"
+	// Env maps each service env var name to its vault key relative to SecretPath
+	// (e.g. "DATABASE_URL" -> "infra/DATABASE_URL").
+	Env map[string]string
 }
+
+// ServiceSecretsProvisioner provisions one service's runtime secrets: it writes
+// the service's infra secrets under its scoped path and mints a per-service
+// machine identity scoped read-only to that path, returning the bundle the
+// program needs to write the descriptor + host-key-encrypted credential. It
+// returns a nil bundle (no error) when the service has no secrets to deliver.
+type ServiceSecretsProvisioner interface {
+	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, res Resources, env, region string, all AllOutputs) (*ServiceSecretsBundle, error)
+}
+
+// ManifestContribution is a set of non-secret fields a contributor adds to a
+// compute instance's manifest.
+type ManifestContribution = map[string]any
 
 // SSHConfig holds the per-environment SSH material applied to hosts.
 type SSHConfig struct {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // infisicalDo executes an Infisical REST API call and returns the response body.
@@ -48,8 +49,15 @@ func infisicalDo(ctx context.Context, method, url, token string, body any) ([]by
 	return data, resp.StatusCode, nil
 }
 
-// authenticate obtains an Infisical access token via Universal Auth.
+// authenticate obtains an Infisical access token via Universal Auth. It refuses a
+// non-https site URL: the client secret (here the org-admin deploy credential)
+// and the returned bearer token travel on this hop, so an http:// endpoint would
+// send them in cleartext — and a misdirected request could leak them to an
+// arbitrary host.
 func authenticate(ctx context.Context, siteURL, clientID, clientSecret string) (string, error) {
+	if !strings.HasPrefix(siteURL, "https://") {
+		return "", fmt.Errorf("infisical: site URL must be https, got %q", siteURL)
+	}
 	url := siteURL + "/api/v1/auth/universal-auth/login"
 	body := map[string]any{
 		"clientId":     clientID,

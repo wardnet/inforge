@@ -4,10 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/getsops/sops/v3/decrypt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 )
 
 func TestMint(t *testing.T) {
@@ -20,26 +18,6 @@ func TestMint(t *testing.T) {
 	other, err := Mint()
 	require.NoError(t, err)
 	assert.NotEqual(t, m.Token, other.Token, "tokens must be unique")
-}
-
-func TestEncryptYAMLOnlyEncryptsMatchingKeys(t *testing.T) {
-	m, err := Mint()
-	require.NoError(t, err)
-
-	plain := []byte("password: hunter2\nlog_level: info\n")
-	enc, err := EncryptYAML(plain, m.Recipient, "^(password)$")
-	require.NoError(t, err)
-
-	assert.Contains(t, string(enc), "ENC[")
-	assert.Contains(t, string(enc), "log_level: info", "non-matching keys stay plaintext")
-	assert.NotContains(t, string(enc), "hunter2", "matching key must be encrypted")
-
-	t.Setenv("SOPS_AGE_KEY", m.Identity.String())
-	dec, err := decrypt.Data(enc, "yaml")
-	require.NoError(t, err)
-	var out map[string]any
-	require.NoError(t, yaml.Unmarshal(dec, &out))
-	assert.Equal(t, "hunter2", out["password"])
 }
 
 // fakeBroker records what was registered.
