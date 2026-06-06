@@ -218,9 +218,12 @@ type DnsProvider interface {
 // The signature is grounded in the Hetzner/Caddy consumer: the provider is a
 // pure installer over SSH, so it needs the host, the connection identity, and
 // the resolved vhosts — nothing more. env scopes the names of the Pulumi
-// resources it creates.
+// resources it creates. dependsOn carries the host's cloud-init readiness gate
+// (and any other prerequisites): the provider must make its first per-host SSH
+// command depend on it so realization never races the host's deploy_user
+// creation.
 type TLSTerminationProvider interface {
-	Realize(ctx *pulumi.Context, spec TLSTerminationSpec, host ComputeOutputs, deployUser string, vhosts []Vhost, env string) error
+	Realize(ctx *pulumi.Context, spec TLSTerminationSpec, host ComputeOutputs, deployUser string, vhosts []Vhost, env string, dependsOn []pulumi.Resource) error
 }
 
 // DatabaseProvider creates a managed database.
