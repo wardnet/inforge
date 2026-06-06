@@ -71,7 +71,7 @@ func TestVhostsByHostNoIngressNoVhosts(t *testing.T) {
 // ExecStart=<folder>/run doesn't exist until release delivers code, so a start
 // here would fail the whole deploy.
 func TestServiceProvisionScriptEnablesNeverStarts(t *testing.T) {
-	script := serviceProvisionScript(types.ServiceSpec{Name: "api", User: "svc"})
+	script := serviceProvisionScript(types.ServiceSpec{Name: "api", User: "svc"}, "1.2.3")
 
 	assert.Contains(t, script, "systemctl daemon-reload")
 	assert.Contains(t, script, "systemctl enable 'wardnet-api.service'")
@@ -86,6 +86,30 @@ func TestServiceProvisionScriptEnablesNeverStarts(t *testing.T) {
 }
 
 func TestServiceProvisionScriptNoUser(t *testing.T) {
-	script := serviceProvisionScript(types.ServiceSpec{Name: "api"})
+	script := serviceProvisionScript(types.ServiceSpec{Name: "api"}, "1.2.3")
 	assert.NotContains(t, script, "useradd", "no user declared -> no useradd")
+}
+
+// TestServiceProvisionScriptDownloadsBootstrapper guards that provisioning
+// downloads the inforge-bootstrap binary, pinned to the inforge version, with
+// host-side arch detection and the version quoted (injection-safe).
+func TestServiceProvisionScriptDownloadsBootstrapper(t *testing.T) {
+	script := serviceProvisionScript(types.ServiceSpec{Name: "api", User: "svc"}, "1.2.3")
+
+	// Version is single-quoted into a shell var, then composed with ${arch}.
+	assert.Contains(t, script, "ver='1.2.3'")
+	assert.Contains(t, script, "arch=$(uname -m)")
+	assert.Contains(t, script, "x86_64) arch=amd64")
+	assert.Contains(t, script, "aarch64) arch=arm64")
+	assert.Contains(t, script, "asset=\"inforge-bootstrap_${ver}_linux_${arch}\"")
+	assert.Contains(t, script, "releases/download/v${ver}")
+	assert.Contains(t, script, "curl -fsSL")
+	// The download must be checksum-verified before it is installed as root.
+	assert.Contains(t, script, "checksums.txt")
+	assert.Contains(t, script, "sha256sum")
+	assert.Contains(t, script, "checksum mismatch")
+	assert.Contains(t, script, "trap 'rm -f \"$tmp\" \"$sums\"' EXIT", "temp files cleaned on any exit")
+	assert.Contains(t, script, "install -m 0755 \"$tmp\" '/usr/local/bin/inforge-bootstrap'")
+	// The raw inforge version must never be interpolated unquoted into the shell.
+	assert.NotContains(t, script, "inforge-bootstrap_1.2.3_linux")
 }

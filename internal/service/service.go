@@ -30,32 +30,52 @@ func UnitPath(name string) string {
 	return "/etc/systemd/system/" + UnitName(name)
 }
 
-const unitHead = `[Unit]
+// BootstrapBin is the on-host path of the inforge-bootstrap binary, the
+// ExecStart for every service unit. inforge deploy downloads it here.
+const BootstrapBin = "/usr/local/bin/inforge-bootstrap"
+
+// DescriptorDir returns the per-service directory holding the bootstrapper's
+// inputs (descriptor.yaml + credential.age). It is the single argument passed to
+// inforge-bootstrap in the unit's ExecStart.
+func DescriptorDir(name string) string {
+	return "/etc/wardnet/services/" + name
+}
+
+// ExecPath returns the real service binary the bootstrapper execs after dropping
+// privilege — the payload `inforge release` delivers into the service folder. It
+// is what the descriptor's `exec` field is set to, kept in sync with the unit's
+// WorkingDirectory here.
+func ExecPath(name string) string {
+	return Folder(name) + "/run"
+}
+
+// unitTemplate renders the unit. The service runs as root under inforge-bootstrap
+// (no User=): the bootstrapper fetches secrets, then drops privilege to the
+// service user itself and execs ExecPath, so systemd supervises the real service
+// PID. StartLimitIntervalSec=0 disables systemd's start-rate limit so a service
+// always recovers once the vault returns (the bootstrapper bounds its own retry
+// backoff per start, then exits non-zero to let Restart=on-failure loop).
+const unitTemplate = `[Unit]
 Description=wardnet %s
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 WorkingDirectory=%s
-ExecStart=%s/run
-`
-
-const unitTail = `Restart=on-failure
+ExecStart=%s %s
+Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 `
 
-// Unit renders the systemd unit file for a service. When spec.User is set a
-// User= directive is included; otherwise the unit inherits the invoking user.
+// Unit renders the systemd unit file for a service. The unit's ExecStart is the
+// inforge-bootstrap binary pointed at the service's descriptor directory; the
+// unit runs as root (no User=) because the bootstrapper drops privilege itself.
 func Unit(spec types.ServiceSpec) string {
-	folder := Folder(spec.Name)
-	head := fmt.Sprintf(unitHead, spec.Name, folder, folder)
-	if spec.User != "" {
-		return head + "User=" + spec.User + "\n" + unitTail
-	}
-	return head + unitTail
+	return fmt.Sprintf(unitTemplate, spec.Name, Folder(spec.Name), BootstrapBin, DescriptorDir(spec.Name))
 }
 
 // DeployTarget is one service's deployment coordinates: where to push the

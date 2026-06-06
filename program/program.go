@@ -83,6 +83,19 @@ func Run(ctx *pulumi.Context) error {
 	}
 	vars.SSH.DeployPrivateKey = deployPrivateKey
 
+	// inforgeVersion pins the inforge-bootstrap release asset each host downloads
+	// during service provisioning. It is injected by the CLI (which knows its own
+	// build version) via stack config / INFORGE_VERSION — the same pattern as
+	// oidc_token/deploy_private_key — and defaults to "dev", which has no release
+	// asset and so fails service provisioning at up time with a clear error.
+	inforgeVersion := cfg.Get("inforge_version")
+	if inforgeVersion == "" {
+		inforgeVersion = os.Getenv("INFORGE_VERSION")
+	}
+	if inforgeVersion == "" {
+		inforgeVersion = "dev"
+	}
+
 	regionTable, err := loader.LoadRegionTable(env, dir)
 	if err != nil {
 		return err
@@ -225,7 +238,7 @@ func Run(ctx *pulumi.Context) error {
 		if err := realizeTLSTermination(ctx, reg, res, computeOutputs[region], env, slug, vars.BaseDomain); err != nil {
 			return err
 		}
-		if err := provisionServices(ctx, res, computeOutputs[region], vars.SSH.DeployPrivateKey, env, slug); err != nil {
+		if err := provisionServices(ctx, res, computeOutputs[region], vars.SSH.DeployPrivateKey, env, slug, inforgeVersion); err != nil {
 			return err
 		}
 	}
@@ -243,9 +256,16 @@ func Run(ctx *pulumi.Context) error {
 // whole `pulumi up`. The unit is written, daemon-reloaded, and enabled (for
 // boot persistence); release performs the first real start with code present.
 // Connection details and the preview/up guard mirror realizeTLSTermination.
-func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, deployPrivateKey, env, slug string) error {
+func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, deployPrivateKey, env, slug, inforgeVersion string) error {
 	if len(res.Service) == 0 {
 		return nil
+	}
+	// The unit's ExecStart is inforge-bootstrap, downloaded per host pinned to
+	// this inforge version. A "dev" build publishes no release asset, so fail
+	// the deploy with a clear message rather than emitting a doomed download.
+	// Enforced only at up time; preview never runs the command.
+	if !ctx.DryRun() && inforgeVersion == "dev" {
+		return fmt.Errorf("cannot provision services: inforge build is 'dev' — no inforge-bootstrap release asset to download; deploy with a released inforge binary")
 	}
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	deployUserByCompute := deployUsersByHost(res.Compute)
@@ -269,7 +289,7 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 				return fmt.Errorf("service %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", svc.Name)
 			}
 		}
-		if err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug); err != nil {
+		if err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug, inforgeVersion); err != nil {
 			return err
 		}
 	}
@@ -278,9 +298,9 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 
 // provisionService writes one service's unit + folder (+ no-login user) on its
 // host. The unit is enabled but never started here (see provisionServices).
-func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug string) error {
+func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug, inforgeVersion string) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
-	createScript := serviceProvisionScript(svc)
+	createScript := serviceProvisionScript(svc, inforgeVersion)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 	if _, err := remote.NewCommand(ctx, name+"-provision", &remote.CommandArgs{
 		Connection: conn,
@@ -298,13 +318,17 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 	return nil
 }
 
-// serviceProvisionScript renders the host shell that writes a service's unit +
-// folder (+ no-login user), reloads systemd, and ENABLES the unit. It must never
-// emit a start/restart: ExecStart=<folder>/run does not exist until release
-// delivers code, so a start would fail the deploy. All caller-supplied values
-// interpolated into the shell are quoted.
-func serviceProvisionScript(svc types.ServiceSpec) string {
-	steps := []string{"set -euo pipefail"}
+// serviceProvisionScript renders the host shell that downloads inforge-bootstrap,
+// writes a service's unit + folder (+ no-login user), reloads systemd, and
+// ENABLES the unit. It must never emit a start/restart: the bootstrapper's target
+// binary (<folder>/run) does not exist until release delivers code, so a start
+// would fail the deploy. All caller-supplied values interpolated into the shell
+// are quoted.
+func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string {
+	steps := []string{
+		"set -euo pipefail",
+		bootstrapDownloadStep(inforgeVersion),
+	}
 	if svc.User != "" {
 		steps = append(steps, fmt.Sprintf(
 			"sudo useradd --system --shell /usr/sbin/nologin %s 2>/dev/null || true", iremote.Quote(svc.User)))
@@ -318,6 +342,43 @@ func serviceProvisionScript(svc types.ServiceSpec) string {
 		fmt.Sprintf("sudo systemctl enable %s", iremote.Quote(service.UnitName(svc.Name))),
 	)
 	return strings.Join(steps, "\n")
+}
+
+// bootstrapDownloadStep renders the idempotent shell that downloads the
+// inforge-bootstrap raw release binary onto the host, verifies its checksum, and
+// installs it at service.BootstrapBin. The host arch is detected on the host
+// (uname -m → Go arch), the version is pinned to the deploying inforge build, and
+// the goreleaser raw-asset name scheme is mirrored (inforge-bootstrap_<ver>_linux_<arch>,
+// under the v<ver> release tag). The binary's sha256 is verified against the
+// release checksums.txt before it is installed as the root ExecStart for every
+// service — a tampered or truncated download must never run. curl -fsSL fails the
+// deploy clearly on a missing asset; a trap removes the temp files on any exit.
+// The version is single-quoted into a shell var so it is injection-safe while
+// still composing with the shell-side ${arch} expansion.
+func bootstrapDownloadStep(inforgeVersion string) string {
+	return strings.Join([]string{
+		"ver=" + iremote.Quote(inforgeVersion),
+		"arch=$(uname -m)",
+		"case \"$arch\" in",
+		"  x86_64) arch=amd64 ;;",
+		"  aarch64) arch=arm64 ;;",
+		"  *) echo \"unsupported host arch: $arch\" >&2; exit 1 ;;",
+		"esac",
+		"asset=\"inforge-bootstrap_${ver}_linux_${arch}\"",
+		"base=\"https://github.com/wardnet/inforge/releases/download/v${ver}\"",
+		"tmp=$(mktemp)",
+		"sums=$(mktemp)",
+		"trap 'rm -f \"$tmp\" \"$sums\"' EXIT",
+		"curl -fsSL \"${base}/${asset}\" -o \"$tmp\"",
+		"curl -fsSL \"${base}/checksums.txt\" -o \"$sums\"",
+		// Pull the expected sha256 for exactly this asset from the release
+		// checksums; an absent line (empty want) is a hard failure.
+		"want=$(awk -v f=\"$asset\" '$2==f {print $1}' \"$sums\")",
+		"[ -n \"$want\" ] || { echo \"no checksum for $asset in release\" >&2; exit 1; }",
+		"got=$(sha256sum \"$tmp\" | awk '{print $1}')",
+		"[ \"$want\" = \"$got\" ] || { echo \"checksum mismatch for $asset\" >&2; exit 1; }",
+		fmt.Sprintf("sudo install -m 0755 \"$tmp\" %s", iremote.Quote(service.BootstrapBin)),
+	}, "\n")
 }
 
 // serviceDeprovisionScript renders the host shell run when a service resource is

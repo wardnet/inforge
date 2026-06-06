@@ -13,20 +13,30 @@ func TestUnit(t *testing.T) {
 	unit := Unit(types.ServiceSpec{Name: "api"})
 	assert.Contains(t, unit, "Description=wardnet api")
 	assert.Contains(t, unit, "WorkingDirectory=/srv/wardnet/api")
-	assert.Contains(t, unit, "ExecStart=/srv/wardnet/api/run")
+	// ExecStart is the bootstrapper pointed at the service's descriptor dir, not
+	// the service binary directly — the bootstrapper execs that after dropping
+	// privilege.
+	assert.Contains(t, unit, "ExecStart=/usr/local/bin/inforge-bootstrap /etc/wardnet/services/api")
+	assert.Contains(t, unit, "StartLimitIntervalSec=0", "unlimited restarts so a service recovers when the vault returns")
+	assert.Contains(t, unit, "Restart=on-failure")
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
-	assert.NotContains(t, unit, "User=", "no User= directive when spec.User is empty")
 }
 
-func TestUnitWithUser(t *testing.T) {
+// TestUnitRunsAsRoot guards that the unit never sets User=: the unit runs as
+// root and the bootstrapper drops privilege to the service user itself.
+func TestUnitRunsAsRoot(t *testing.T) {
 	unit := Unit(types.ServiceSpec{Name: "api", User: "wardnet"})
-	assert.Contains(t, unit, "User=wardnet")
-	assert.Contains(t, unit, "WantedBy=multi-user.target")
+	assert.NotContains(t, unit, "User=", "the unit runs as root; the bootstrapper drops privilege itself")
 }
 
 func TestFolderAndUnitName(t *testing.T) {
 	assert.Equal(t, "/srv/wardnet/api", Folder("api"))
 	assert.Equal(t, "wardnet-api.service", UnitName("api"))
+}
+
+func TestDescriptorDirAndExecPath(t *testing.T) {
+	assert.Equal(t, "/etc/wardnet/services/api", DescriptorDir("api"))
+	assert.Equal(t, "/srv/wardnet/api/run", ExecPath("api"))
 }
 
 func TestBuildDeployDescriptor(t *testing.T) {
