@@ -60,10 +60,28 @@ func TestParseDescriptorRequiresFields(t *testing.T) {
 		"service": "version: 1\nexec: /x\nuser: ghost\nprovider:\n  kind: infisical\n",
 		"exec":    "version: 1\nservice: ghost\nuser: ghost\nprovider:\n  kind: infisical\n",
 		"user":    "version: 1\nservice: ghost\nexec: /x\nprovider:\n  kind: infisical\n",
-		"kind":    "version: 1\nservice: ghost\nexec: /x\nuser: ghost\nprovider:\n  url: https://x\n",
 	}
 	for missing, doc := range cases {
 		_, err := ParseDescriptor([]byte(doc))
 		assert.Error(t, err, "missing %s must error", missing)
 	}
+}
+
+// TestParseDescriptorSecretLess: a descriptor with no provider is a secret-less
+// service — valid as long as it carries no env mapping.
+func TestParseDescriptorSecretLess(t *testing.T) {
+	doc := "version: 1\nservice: ghost\nexec: /x\nuser: ghost\n"
+	d, err := ParseDescriptor([]byte(doc))
+	require.NoError(t, err)
+	assert.Equal(t, "", d.Provider.Kind)
+	assert.Empty(t, d.Env)
+}
+
+// TestParseDescriptorRejectsEnvWithoutProvider: env with no provider is a
+// producer bug — there is nothing to resolve the keys against.
+func TestParseDescriptorRejectsEnvWithoutProvider(t *testing.T) {
+	doc := "version: 1\nservice: ghost\nexec: /x\nuser: ghost\nenv:\n  DATABASE_URL: infra/DATABASE_URL\n"
+	_, err := ParseDescriptor([]byte(doc))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "provider.kind is empty")
 }

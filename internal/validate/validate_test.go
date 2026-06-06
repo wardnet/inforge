@@ -72,18 +72,18 @@ func TestCheckServiceIngress(t *testing.T) {
 	// Ingress with a terminator on the same host -> OK.
 	ctx := baseCtx()
 	ctx.tlsByCompute["bridge-01"] = true
-	errs, _ := checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", Ingress: ingress}, ctx)
+	errs, _ := checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Ingress: ingress}, ctx)
 	assert.Empty(t, errs)
 
 	// Ingress but no terminator targets the host -> FAIL.
 	ctx = baseCtx()
-	errs, _ = checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", Ingress: ingress}, ctx)
+	errs, _ = checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Ingress: ingress}, ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "no tls-termination resource")
 
 	// No ingress -> the terminator requirement does not apply.
 	ctx = baseCtx()
-	errs, _ = checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw"}, ctx)
+	errs, _ = checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc"}, ctx)
 	assert.Empty(t, errs)
 }
 
@@ -91,7 +91,16 @@ func TestCheckServiceDeployUser(t *testing.T) {
 	// A service whose host declares no deploy_user can't be provisioned over SSH.
 	ctx := baseCtx()
 	ctx.computeDeployer = map[string]bool{"bridge-01": false}
-	errs, _ := checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw"}, ctx)
+	errs, _ := checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc"}, ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "no deploy_user")
+}
+
+func TestCheckServiceUser(t *testing.T) {
+	// A service that declares no user has no account for the bootstrapper to drop
+	// privilege to before exec.
+	ctx := baseCtx()
+	errs, _ := checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw"}, ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "must declare the no-login user")
 }

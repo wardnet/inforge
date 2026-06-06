@@ -39,19 +39,26 @@ func Run(args []string, version string) error {
 		return err
 	}
 
-	credential, err := DecryptCredential(filepath.Join(dir, credentialFile), defaultHostKeyPath)
-	if err != nil {
-		return err
-	}
+	// A secret-less service (no provider) skips the decrypt + provider login +
+	// fetch entirely: there is no credential.age on disk and nothing to fetch.
+	// buildEnv with nil secrets yields the minimal base env (its Env map is empty,
+	// guaranteed by ParseDescriptor), and the service execs with that alone.
+	var secrets map[string]string
+	if desc.Provider.Kind != "" {
+		credential, err := DecryptCredential(filepath.Join(dir, credentialFile), defaultHostKeyPath)
+		if err != nil {
+			return err
+		}
 
-	fetcher, err := newFetcher(desc.Provider, credential)
-	if err != nil {
-		return err
-	}
+		fetcher, err := newFetcher(desc.Provider, credential)
+		if err != nil {
+			return err
+		}
 
-	secrets, err := FetchWithBackoff(ctx, fetcher, realClock{}, baseDelay, maxDelay, budget)
-	if err != nil {
-		return err
+		secrets, err = FetchWithBackoff(ctx, fetcher, realClock{}, baseDelay, maxDelay, budget)
+		if err != nil {
+			return err
+		}
 	}
 
 	envv, err := buildEnv(desc, secrets, user.home)

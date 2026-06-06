@@ -4,6 +4,7 @@ container: bridge
 provider: hetzner
 host: bridge-01
 type: raw
+user: web
 ingress:
   hostname: web
   port: 8080

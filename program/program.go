@@ -239,8 +239,15 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		if err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug, inforgeVersion); err != nil {
 			return err
 		}
+		// Every service gets a descriptor.yaml. A secret-bearing service also gets a
+		// host-key-encrypted credential.age; a secret-less one (no bundle) gets a
+		// static descriptor with an empty provider and no env.
 		if bundle := bundles[svc.Name]; bundle != nil {
 			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, slug); err != nil {
+				return err
+			}
+		} else {
+			if err := deliverServiceDescriptor(ctx, svc, host, deployUser, deployPrivateKey, env, slug); err != nil {
 				return err
 			}
 		}
@@ -274,7 +281,8 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 // writes the service's infra secrets under its scoped vault path and mints a
 // per-service machine identity, returning the bundles keyed by service name. A
 // service whose container has no infisical secrets yields no bundle (and gets a
-// unit but no descriptor/credential — see deliverServiceSecrets).
+// unit + a static secret-less descriptor, but no credential — see
+// deliverServiceDescriptor).
 func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, all types.AllOutputs, env, region string) (map[string]*types.ServiceSecretsBundle, error) {
 	bundles := map[string]*types.ServiceSecretsBundle{}
 	for _, svc := range res.Service {
@@ -322,13 +330,6 @@ func serviceSecretsProviderName(svc types.ServiceSpec, res types.Resources) stri
 // workspace ID, so it too is rendered inside an ApplyT on that output. Connection
 // details and the preview/up guards mirror provisionService.
 func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, slug string) error {
-	// A secret-bearing service must declare the no-login user it runs as: the
-	// descriptor requires it, and the bootstrapper fails the start without it.
-	// Catch it here at deploy time rather than letting the host reject the
-	// descriptor at first start.
-	if svc.User == "" {
-		return fmt.Errorf("service %q: a service with secrets must declare a user (the no-login account it runs as)", svc.Name)
-	}
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
@@ -400,24 +401,56 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 	return nil
 }
 
+// deliverServiceDescriptor writes a secret-less service's descriptor.yaml (0644)
+// onto its host: a single static command, with no provider, no env, no host-key
+// read, and no credential. The descriptor is fully known at plan time (no
+// workspace ID to resolve), so it needs no ApplyT. Connection details and the
+// preview/up guards mirror provisionService.
+func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug string) error {
+	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
+	name := naming.Resource(env, slug, "svc", svc.Name)
+
+	descriptor, err := renderDescriptor(svc, nil, "")
+	if err != nil {
+		return err
+	}
+	writeScript := iremote.WriteFileScript(service.DescriptorPath(svc.Name), descriptor)
+	deleteScript := iremote.DeleteFileScript(service.DescriptorPath(svc.Name))
+
+	if _, err := remote.NewCommand(ctx, name+"-secrets", &remote.CommandArgs{
+		Connection: conn,
+		Create:     pulumi.String(writeScript),
+		Update:     pulumi.String(writeScript),
+		Delete:     pulumi.String(deleteScript),
+		Triggers:   pulumi.Array{pulumi.String(writeScript)},
+	}); err != nil {
+		return fmt.Errorf("service %q: write descriptor: %w", svc.Name, err)
+	}
+	return nil
+}
+
 // renderDescriptor marshals the on-host bootstrapper descriptor for a service.
 // It builds the bootstrapper's own Descriptor struct (imported, not duplicated)
-// so the producer can never drift from the consumer's schema; project is the
-// resolved workspace ID.
+// so the producer can never drift from the consumer's schema. A nil bundle is a
+// secret-less service: the provider is left zero-valued and env nil, which the
+// bootstrapper reads as "no secrets to fetch". For a secret-bearing service,
+// project is the resolved workspace ID.
 func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle, project string) (string, error) {
 	d := bootstrapper.Descriptor{
 		Version: bootstrapper.SupportedVersion,
 		Service: svc.Name,
 		Exec:    service.ExecPath(svc.Name),
 		User:    svc.User,
-		Provider: bootstrapper.Provider{
+	}
+	if bundle != nil {
+		d.Provider = bootstrapper.Provider{
 			Kind:        bundle.ProviderKind,
 			URL:         bundle.URL,
 			Project:     project,
 			Environment: bundle.Environment,
 			SecretPath:  bundle.SecretPath,
-		},
-		Env: bundle.Env,
+		}
+		d.Env = bundle.Env
 	}
 	b, err := yaml.Marshal(d)
 	if err != nil {

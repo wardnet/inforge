@@ -493,6 +493,12 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	if s.Type == "container" {
 		warns = append(warns, "type: \"container\" is reserved and not implemented this phase")
 	}
+	// Every service must declare the no-login user it runs as: the bootstrapper
+	// drops privilege to this account before exec, so without it there is no
+	// account to drop to. Required for secret-less and secret-bearing alike.
+	if s.User == "" {
+		errs = append(errs, "user: a service must declare the no-login user it runs as")
+	}
 	// inforge deploy provisions the service's unit + folder over SSH as the
 	// host's deploy_user, so a service host must declare one — caught here
 	// instead of failing at pulumi up.

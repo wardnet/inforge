@@ -4,3 +4,4 @@ container: bridge
 provider: hetzner
 host: ghost-01
 type: raw
+user: api

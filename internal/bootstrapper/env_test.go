@@ -32,6 +32,23 @@ func TestBuildEnv(t *testing.T) {
 	assert.Contains(t, env, "STRIPE_KEY=sk_live_secret")
 }
 
+// TestBuildEnvSecretLess: a secret-less service (no env mapping, nil secrets)
+// gets only the minimal base env — the path run.go takes when there is no
+// provider, so it never touches a fetcher.
+func TestBuildEnvSecretLess(t *testing.T) {
+	d := Descriptor{User: "ghost"}
+
+	env, err := buildEnv(d, nil, "/home/ghost")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{
+		"PATH=" + minimalPATH,
+		"HOME=/home/ghost",
+		"USER=ghost",
+		"LOGNAME=ghost",
+	}, env)
+}
+
 // TestBuildEnvMissingSecretFails: a mapped var with no (or empty) secret must
 // fail the start — never exec the service with a blank secret.
 func TestBuildEnvMissingSecretFails(t *testing.T) {

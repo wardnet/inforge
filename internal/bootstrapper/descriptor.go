@@ -75,8 +75,11 @@ func ParseDescriptor(b []byte) (Descriptor, error) {
 	if d.User == "" {
 		return Descriptor{}, fmt.Errorf("descriptor: user is required")
 	}
-	if d.Provider.Kind == "" {
-		return Descriptor{}, fmt.Errorf("descriptor: provider.kind is required")
+	// provider is optional: a descriptor with no provider.kind is a secret-less
+	// service. It MUST then carry no env mapping — there is nothing to resolve the
+	// keys against — so an env without a provider is a producer bug, rejected here.
+	if d.Provider.Kind == "" && len(d.Env) > 0 {
+		return Descriptor{}, fmt.Errorf("descriptor: env is set but provider.kind is empty (a secret-less service must have no env entries)")
 	}
 	return d, nil
 }
