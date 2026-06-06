@@ -1,5 +1,9 @@
 # VM secret bootstrap uses a centralized inforge key broker plus SOPS/age re-encryption
 
+> **Superseded by [ADR-0010](0010-runtime-secret-fetch.md).** The key broker, the one-time-token
+> escrow, the SOPS/age manifest re-encryption, and the `key-broker/` Worker are all removed; services
+> fetch their own secrets at runtime with a per-service identity. Kept for historical context.
+
 Secret values in a service manifest are encrypted at provision time with SOPS/age to a key `K`.
 inforge mints `K` plus a one-time token `T`, registers `K` under `T` with the **inforge key broker
 service** (a Cloudflare Worker at `key-broker/`, operated by the inforge project), and writes

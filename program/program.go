@@ -42,10 +42,10 @@ func Run(ctx *pulumi.Context) error {
 	}
 
 	// The deploy SSH private key is a deploy-time secret used purely to SSH the
-	// host and realize host-level resources (tls-termination). It is injected
-	// here from stack config (deploy_private_key) or INFORGE_DEPLOY_PRIVATE_KEY
-	// — the same pattern as oidc_token — and never read from variables.yaml.
-	// Empty in preview, where no remote command runs.
+	// host and realize host-level resources (tls-termination, service units). It
+	// is injected here from stack config (deploy_private_key) or
+	// INFORGE_DEPLOY_PRIVATE_KEY — never read from variables.yaml. Empty in
+	// preview, where no remote command runs.
 	deployPrivateKey := cfg.Get("deploy_private_key")
 	if deployPrivateKey == "" {
 		deployPrivateKey = os.Getenv("INFORGE_DEPLOY_PRIVATE_KEY")
@@ -55,8 +55,8 @@ func Run(ctx *pulumi.Context) error {
 	// inforgeVersion pins the inforge-bootstrap release asset each host downloads
 	// during service provisioning. It is injected by the CLI (which knows its own
 	// build version) via stack config / INFORGE_VERSION — the same pattern as
-	// oidc_token/deploy_private_key — and defaults to "dev", which has no release
-	// asset and so fails service provisioning at up time with a clear error.
+	// deploy_private_key — and defaults to "dev", which has no release asset and so
+	// fails service provisioning at up time with a clear error.
 	inforgeVersion := cfg.Get("inforge_version")
 	if inforgeVersion == "" {
 		inforgeVersion = os.Getenv("INFORGE_VERSION")

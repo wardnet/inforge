@@ -34,11 +34,13 @@ secrets: inherit
 
 Same as [preview.yml](./preview).
 
-## Bootstrap
+## Secret delivery
 
-If the stack has secret values, the deploy workflow fetches a GitHub Actions OIDC token
-and passes it as `inforge:oidc_token` to authenticate the key broker call. This is handled
-automatically — the `id-token: write` permission is set in the workflow.
+For each service whose container declares secrets, the deploy writes the secrets to the provider under
+the service's scoped path, mints a per-service machine identity, and writes a secret-free descriptor
+plus a host-key-encrypted credential onto the host over SSH. The service fetches its own secrets at
+runtime via `inforge-bootstrap`; no OIDC token or key broker is involved. See
+[Secrets → How secrets reach a service](../resources/secrets#how-secrets-reach-a-service).
 
 ## State management
 

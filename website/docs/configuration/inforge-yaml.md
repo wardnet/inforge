@@ -16,9 +16,6 @@ backend:
   type: file              # required — one of: file, git-branch, s3, r2
   url: file://.pulumi     # used for "file" and "s3" types
   branch: pulumi-state    # used for "git-branch" type
-
-broker:
-  url: https://key-broker.inforge.wardnet.network
 ```
 
 ## Fields
@@ -80,18 +77,6 @@ backend:
 Requires `CLOUDFLARE_ACCOUNT_ID` environment variable. R2 credentials are provided via
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (R2 API token).
 
-### `broker.url`
-
-The URL of the inforge key broker service. Defaults to the centrally-operated inforge key broker.
-
-```yaml
-broker:
-  url: https://key-broker.inforge.wardnet.network
-```
-
-This value is also set per-stack in `inforge.<env>.yaml` as `inforge:broker_url` so it
-is passed into the Pulumi program at deploy time.
-
 ## Minimal example
 
 ```yaml
@@ -99,6 +84,4 @@ name: my-infra
 backend:
   type: file
   url: file://.pulumi
-broker:
-  url: https://key-broker.inforge.wardnet.network
 ```

@@ -98,11 +98,11 @@ Cloud-init scripts support these placeholders:
 | `{{deploy_public_key}}` | Deploy user's SSH public key (from `ssh.deployPublicKey`) |
 | `{{deploy_user}}` | Deploy user name (from `deploy_user.name`; empty if not declared) |
 | `{{instance}}` | Instance number (integer) |
-| `{{manifest}}` | Assembled service manifest (YAML, possibly SOPS-encrypted) |
-| `{{bootstrap_doc}}` | Content of `bootstrap.yaml` (empty if no secrets) |
+| `{{manifest}}` | Assembled service manifest (YAML, secret-free) |
 
-inforge appends two first-boot steps automatically to every cloud-init script: user provisioning
-(creates the deploy user when declared) and the secret bootstrap step.
+inforge appends one first-boot step automatically to every cloud-init script: user provisioning
+(creates the deploy user when declared). Secrets are not a first-boot concern — each service fetches its
+own at runtime via `inforge-bootstrap`.
 
 ## Firewall rules
 

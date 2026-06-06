@@ -30,7 +30,6 @@ const sidebars: SidebarsConfig = {
       items: [
         'concepts/environments-regions',
         'concepts/resources-overview',
-        'concepts/bootstrap-key-broker',
         'concepts/provision-vs-deploy',
       ],
     },

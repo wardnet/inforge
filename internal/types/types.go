@@ -278,9 +278,8 @@ type SSHConfig struct {
 	//
 	// It is a deploy-time secret: never read from variables.yaml (hence
 	// `yaml:"-"`), but injected by the program from stack config
-	// (deploy_private_key) or INFORGE_DEPLOY_PRIVATE_KEY — the same pattern as
-	// the OIDC token. A committed private key would violate "never commit
-	// secrets".
+	// (deploy_private_key) or INFORGE_DEPLOY_PRIVATE_KEY. A committed private key
+	// would violate "never commit secrets".
 	DeployPrivateKey string `yaml:"-"`
 }
 

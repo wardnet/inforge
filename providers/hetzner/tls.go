@@ -53,10 +53,9 @@ func (h *HetznerTLS) Realize(
 	}
 	// Both connection requirements are enforced only at up time. During preview
 	// the command.remote resources never connect (no Create on a dry run), so a
-	// missing deploy user or key is harmless and preview must still succeed —
-	// mirroring how the program leaves the key broker nil in preview. deploy_user
-	// is also validated up front (a terminator's host must declare one), so this
-	// guard is a backstop.
+	// missing deploy user or key is harmless and preview must still succeed.
+	// deploy_user is also validated up front (a terminator's host must declare
+	// one), so this guard is a backstop.
 	if !ctx.DryRun() {
 		if deployUser == "" {
 			return fmt.Errorf("tls-termination %q: host has no deploy_user; inforge needs one to SSH and realize the terminator", spec.Name)

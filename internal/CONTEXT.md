@@ -2,7 +2,7 @@
 
 The declarative-infrastructure domain of inforge: how a project's YAML resource definitions are
 loaded, validated, named, and turned into a Pulumi deployment — plus the model for hosting services
-on VMs and bootstrapping their secrets. This is the language shared by `internal/`, `program/`, and
+on VMs and delivering their secrets at runtime. This is the language shared by `internal/`, `program/`, and
 `cmd/inforge/`.
 
 ## Language
@@ -113,34 +113,32 @@ The complete concretization of one abstract region on one provider, held under
 global defaults, no inheritance (a realization is the whole truth for that region).
 _Avoid_: "region override" (it is not an override of anything), "region config".
 
-### Manifest & bootstrap
+### Manifest & secrets
 
 **Manifest**:
-The per-service document materialised onto a VM via cloud-init, describing how to run that service.
-Assembled by manifest contributors.
-
-**Manifest contributor**:
-A component that adds fields to a service's manifest (e.g. the secrets backend). It may mark
-individual values as a **secret value**.
+The per-instance, **secret-free** document materialised onto a VM via cloud-init, carrying only base
+coordinates (version, region, namespace). Secrets are no longer baked into it — they are fetched at
+runtime by `inforge-bootstrap`.
 
 **Secret value**:
-A manifest field flagged sensitive (wrapped via `manifest.Secret`). Its presence — not any separate
-flag — is what makes a VM require bootstrapping; secret fields are stored SOPS/age-encrypted.
+A secret a service consumes, declared in a Secrets resource by container. inforge never bakes secret
+values into the manifest or any other artifact; it writes them to the secrets provider under the
+service's scoped path, and the service fetches them at runtime.
 
-**Bootstrap**:
-The one-time first-boot step a VM performs when its manifest has secret values: fetch the key from
-the key broker, decrypt, and re-encrypt the values to the host's SSH key.
+**Runtime secret fetch** (`inforge-bootstrap`):
+Every inforge-managed service's systemd `ExecStart` is `inforge-bootstrap`, a small statically-linked
+Go binary. At start it reads the service's on-host `descriptor.yaml` (secret-free: provider
+coordinates + env-var → vault-key mapping), decrypts the service's `credential.age` with the host SSH
+key, logs in to the provider with that machine identity, fetches the secrets, injects them as env
+vars, drops privilege to the service's `user`, and execs the real binary. Secret values live only in
+the child process's environment — never on disk, in the journal, or in argv. A secret-less service has
+no provider and no `credential.age`, and skips the fetch entirely. See ADR-0010.
 
-**Key Broker**:
-The multi-tenant key broker inforge owns and operates as a Cloudflare Worker (`key-broker/`).
-inforge mints key `K` + one-time token `T`, registers `K` under `T` via the key broker, and the VM
-redeems `T`→`K` at first boot. Open to any GitHub Actions workflow; the `repository` claim in
-the GitHub OIDC token becomes the tenant, enforcing cross-repo isolation. No consumer needs to
-host their own key broker.
-
-**Tenant**:
-The key broker isolation boundary = the **repo** (`owner/repo`). Keys provisioned by one repo cannot be
-redeemed by another; environments within a repo share the tenant.
+**Per-service identity**:
+For each secret-bearing service, inforge mints a machine identity scoped read-only to that service's
+path (`/<service>`) and writes the container's secrets under `/<service>/infra`. The standing on-host
+secret is this rotatable identity credential, host-key-encrypted; a leak exposes only that one
+service's path.
 
 ### Provisioning vs deployment
 
@@ -181,9 +179,10 @@ resources, that the deployment workflow consumes.
 > **Expert:** Right, the region target. Its slug `use1` is what shows up in the display name and the
 > DNS subdomain. How `us-east-1` becomes a real Hetzner datacenter and server type — that's the region
 > realization under `providers.hetzner.regions`, not the target itself.
-> **Dev:** The secrets file has `source: ref:database/bridge.connectionUrl`. The VM needs that secret
-> at boot?
-> **Expert:** The secrets backend contributes it to `bridge`'s manifest as a secret value. Because a
-> secret value is present, the VM bootstraps: it redeems its token with the key broker for the key,
-> decrypts, and re-encrypts to its own SSH key. Provision set all that up — actually shipping the
-> service binary is a separate deployment.
+> **Dev:** The secrets file has `source: ref:database/bridge.connectionUrl`. How does the service get
+> that secret?
+> **Expert:** inforge writes it to the secrets provider under the service's path and mints a per-service
+> identity, then drops a secret-free `descriptor.yaml` and a host-key-encrypted `credential.age` on the
+> host. At service start, `inforge-bootstrap` decrypts the credential, fetches the secret, and execs the
+> service with it in the environment. No secret value is ever baked into the manifest. Provision set all
+> that up — actually shipping the service binary is a separate deployment.

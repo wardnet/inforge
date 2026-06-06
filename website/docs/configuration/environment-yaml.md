@@ -16,9 +16,6 @@ strings are expected to come from environment variables at run time.
 ```yaml
 config:
   environment: prd                    # the environment name (passed to the Pulumi program)
-  inforge:broker_url: https://...     # key broker service URL
-  inforge:oidc_token: ""              # set at deploy time from GitHub OIDC
-  inforge:tenant: ""                  # defaults to GITHUB_REPOSITORY env var
 
   # Provider credentials (typically set via env vars, not committed here)
   hcloud:token: ""                    # set via HCLOUD_TOKEN
@@ -33,17 +30,16 @@ config:
 | Key | Description |
 |-----|-------------|
 | `environment` | Environment name. Used by the Pulumi program to find resource files. |
-| `inforge:broker_url` | URL of the key broker service. |
-| `inforge:oidc_token` | GitHub Actions OIDC JWT. Required when manifests have secrets. Set at deploy time — never commit a real token. |
-| `inforge:tenant` | Key broker tenant (`owner/repo`). Defaults to `GITHUB_REPOSITORY` env var. |
+
+The deploy SSH private key (used to SSH each host at `pulumi up` to realize host-level resources and
+write each service's descriptor/credential) is supplied at deploy time via the
+`INFORGE_DEPLOY_PRIVATE_KEY` environment variable, not committed here.
 
 ## Example
 
 ```yaml title="inforge.prd.yaml"
 config:
   environment: prd
-  inforge:broker_url: https://key-broker.inforge.wardnet.network
-  inforge:oidc_token: ""
   hcloud:token: ""
   cloudflare:apiToken: ""
 ```

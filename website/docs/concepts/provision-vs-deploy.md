@@ -11,9 +11,9 @@ inforge separates two distinct lifecycles: **provisioning** and **deployment**.
 **Provisioning** creates a VM's host-side scaffolding:
 
 - The on-host folder `/srv/wardnet/<service>`
-- An inforge-managed systemd unit `wardnet-<service>.service`
-- The SOPS/age-encrypted manifest at `/etc/wardnet/manifest.yaml`
-- The bootstrap.yaml for first-boot secret redemption (when secrets are present)
+- An inforge-managed systemd unit `wardnet-<service>.service` whose `ExecStart` is `inforge-bootstrap`
+- The service's secret-free `descriptor.yaml` and, for a secret-bearing service, its host-key-encrypted
+  `credential.age` under `/etc/wardnet/services/<service>/` (the service fetches its secrets at runtime)
 
 Provisioning is triggered by `inforge deploy` when the Pulumi state shows changes.
 inforge **owns** the unit — it controls start, restart, and configuration. Service code

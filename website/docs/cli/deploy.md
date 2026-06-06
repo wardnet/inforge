@@ -34,16 +34,13 @@ Deploy stack "prd"? Type 'yes' to confirm:
 
 Use `--yes` in CI or scripted contexts.
 
-## Bootstrap integration
+## Secret delivery
 
-When a manifest contains secret values, `deploy` automatically:
-
-1. Mints a fresh age key K and one-time token T
-2. Fetches a GitHub Actions OIDC token (from `inforge:oidc_token` stack config)
-3. Calls `PUT /token` on the key broker service
-4. Writes `bootstrap.yaml` to the VM via cloud-init
-
-The workflow must have `id-token: write` permission for this to work.
+For each service whose container declares secrets, `deploy` writes the secrets to the provider under
+the service's scoped path, mints a per-service machine identity, and writes a secret-free
+`descriptor.yaml` plus a host-key-encrypted `credential.age` onto the host over SSH. The service fetches
+its own secrets at runtime via `inforge-bootstrap`; no secret value is baked into any artifact. See
+[Secrets → How secrets reach a service](../resources/secrets#how-secrets-reach-a-service).
 
 ## State management
 

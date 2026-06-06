@@ -4,8 +4,10 @@ sidebar_position: 5
 
 # Secrets
 
-A **Secrets** resource declares a set of secret values to materialise into a VM's manifest.
-The presence of any secret value triggers VM bootstrapping (see [Bootstrap & Key Broker](../concepts/bootstrap-key-broker)).
+A **Secrets** resource declares a set of secret values for a container. inforge writes them to the
+secrets provider under each consuming service's scoped path; the service fetches them at runtime (see
+[How secrets reach a service](#how-secrets-reach-a-service) below). Secret values are never baked into
+an artifact.
 
 ## Schema
 
@@ -59,17 +61,25 @@ source: gha:MY_SECRET_NAME
 The GitHub Actions secret `MY_SECRET_NAME` is injected as a secret value. It must be
 set as a secret in the repository or environment.
 
-## How secrets are encrypted
+## How secrets reach a service
 
-When a manifest contains secret values, inforge:
+inforge does not bake secret values into any artifact. At deploy time, for each service whose
+container declares secrets, inforge:
 
-1. Mints a fresh age key K
-2. Encrypts the secret fields in the manifest with SOPS/age using K as the recipient
-3. Registers K with the key broker under a one-time token T
-4. Writes `bootstrap.yaml` to the VM with the broker URL and T
+1. Writes the container's secrets to the secrets provider under the service's scoped path
+   (`/<service>/infra`).
+2. Mints a **per-service machine identity**, scoped read-only to that service's path.
+3. Writes two files onto the host under `/etc/wardnet/services/<service>/`:
+   - `descriptor.yaml` — a secret-free document with the provider coordinates and an env-var → vault-key
+     mapping.
+   - `credential.age` — the machine-identity credential, age-encrypted to the host's own SSH host key
+     (inforge encrypts it in memory to the host key it reads over SSH; the plaintext never lands on disk).
 
-At first boot, the VM redeems T for K, decrypts the manifest, and re-encrypts to
-its own SSH key. K is then discarded.
+At service start, `inforge-bootstrap` (the systemd `ExecStart` for every service) decrypts the
+credential with the host key, logs in to the provider, fetches the secrets, injects them as environment
+variables, drops privilege to the service's `user`, and execs the real binary. Secret *values* live
+only in the service process's environment — never on disk, in the journal, or in argv. A service whose
+container declares no secrets gets a descriptor with no provider and starts with no fetch at all.
 
 ## Example
 
