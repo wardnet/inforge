@@ -8,14 +8,12 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 	"github.com/wardnet/inforge/internal/agehost"
-	"github.com/wardnet/inforge/internal/bootstrap"
 	"github.com/wardnet/inforge/internal/bootstrapper"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
@@ -36,39 +34,6 @@ func Run(ctx *pulumi.Context) error {
 	dir := "./resources"
 	if d := cfg.Get("dir"); d != "" {
 		dir = d
-	}
-
-	// Escrow config — required only when a manifest has secret values.
-	// oidc_token falls back to INFORGE_OIDC_TOKEN so CI workflows can inject it
-	// without writing a short-lived value into the stack config file.
-	// tenant defaults to GITHUB_REPOSITORY (set automatically by GitHub Actions).
-	// broker_ttl_seconds falls back to INFORGE_BROKER_TTL_SECONDS; default 600.
-	// Set it to a short value (e.g. 60) in preview jobs so the throwaway key
-	// expires quickly.
-	brokerURL := cfg.Get("broker_url")
-	oidcToken := cfg.Get("oidc_token")
-	if oidcToken == "" {
-		oidcToken = os.Getenv("INFORGE_OIDC_TOKEN")
-	}
-	tenant := cfg.Get("tenant")
-	if tenant == "" {
-		tenant = os.Getenv("GITHUB_REPOSITORY")
-	}
-	brokerTTL := 600
-	if v := cfg.Get("broker_ttl_seconds"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			brokerTTL = n
-		}
-	}
-	if v := os.Getenv("INFORGE_BROKER_TTL_SECONDS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			brokerTTL = n
-		}
-	}
-
-	var brokerClient bootstrap.KeyBrokerClient
-	if brokerURL != "" && oidcToken != "" {
-		brokerClient = bootstrap.NewHTTPKeyBrokerClient(brokerURL, oidcToken, nil)
 	}
 
 	vars, err := loader.LoadVariables(env, dir)
@@ -152,25 +117,9 @@ func Run(ctx *pulumi.Context) error {
 		}
 
 		for _, spec := range res.Compute {
-			man, mat, err := assembleManifest(reg, spec, res, env, region, slug)
+			man, err := assembleManifest(spec, env, region, slug)
 			if err != nil {
 				return err
-			}
-
-			var bootstrapDoc string
-			if man.BootstrapNeeded {
-				if brokerClient == nil {
-					return fmt.Errorf("compute %s/%s has secret values but key broker is not configured (set broker_url and oidc_token)", region, spec.Name)
-				}
-				doc, regErr := bootstrap.Register(brokerClient, brokerURL, tenant, mat, brokerTTL)
-				if regErr != nil {
-					return fmt.Errorf("register bootstrap key for %s/%s: %w", region, spec.Name, regErr)
-				}
-				docBytes, marshalErr := doc.Marshal()
-				if marshalErr != nil {
-					return fmt.Errorf("marshal bootstrap doc for %s/%s: %w", region, spec.Name, marshalErr)
-				}
-				bootstrapDoc = string(docBytes)
 			}
 
 			netOut, err := resolveNetworkOutput(spec, res.Network, networkOutputs[region])
@@ -185,7 +134,7 @@ func Run(ctx *pulumi.Context) error {
 			for i := 1; i <= spec.InstanceCount; i++ {
 				key := naming.SpecKey(spec.Name, i)
 				domain := naming.RecordFQDN(env, slug, subdomainFor(key, spec.Name, res.DNS), vars.BaseDomain)
-				out, err := cp.Create(ctx, spec, netOut, env, region, domain, man.Manifest, bootstrapDoc)
+				out, err := cp.Create(ctx, spec, netOut, env, region, domain, man)
 				if err != nil {
 					return err
 				}
@@ -653,38 +602,16 @@ func resolveNetworkOutput(spec types.ComputeSpec, networks []types.NetworkSpec, 
 	return out, nil
 }
 
-func assembleManifest(reg registry.ProviderRegistry, spec types.ComputeSpec, res types.Resources, env, region, slug string) (manifest.Result, bootstrap.Material, error) {
+// assembleManifest builds a compute instance's plain (secret-free) manifest.
+// Secrets are no longer baked here — they are delivered to services at runtime by
+// inforge-bootstrap — so the manifest carries only the base coordinates.
+func assembleManifest(spec types.ComputeSpec, env, region, slug string) (string, error) {
 	base := manifest.Base{
 		Version:   1,
 		Region:    region,
 		Namespace: tags.ContainerTag(slug, env, spec.Container),
 	}
-	var contributions []types.ManifestContribution
-	for _, c := range reg.ManifestContributors() {
-		contribution, err := c.ContributeToManifest(spec, res, env, region)
-		if err != nil {
-			return manifest.Result{}, bootstrap.Material{}, err
-		}
-		contributions = append(contributions, contribution)
-	}
-
-	// Probe without a real recipient: if there are no secret values, Generate
-	// returns early without touching the recipient, saving a Mint() call.
-	probe, err := manifest.Generate(base, contributions, "")
-	if err != nil {
-		return manifest.Result{}, bootstrap.Material{}, err
-	}
-	if !probe.BootstrapNeeded {
-		return probe, bootstrap.Material{}, nil
-	}
-
-	// Secrets are present: mint a fresh age key and re-generate with it.
-	mat, err := bootstrap.Mint()
-	if err != nil {
-		return manifest.Result{}, bootstrap.Material{}, err
-	}
-	result, err := manifest.Generate(base, contributions, mat.Recipient)
-	return result, mat, err
+	return manifest.Generate(base, nil)
 }
 
 func subdomainFor(key, name string, dns []types.DnsSpec) string {

@@ -195,11 +195,12 @@ type NetworkProvider interface {
 	Create(ctx *pulumi.Context, spec NetworkSpec, env, abstractRegion string) (map[string]NetworkOutputs, error)
 }
 
-// ComputeProvider creates one compute instance, wiring in its network, the
-// host domain, the assembled manifest, and the bootstrap document (empty when
-// the manifest has no secrets).
+// ComputeProvider creates one compute instance, wiring in its network, the host
+// domain, and the assembled (plain, secret-free) manifest. Secret delivery is no
+// longer a compute-creation concern: secrets are fetched at runtime by
+// inforge-bootstrap, so there is no bootstrap document.
 type ComputeProvider interface {
-	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest, bootstrapDoc string) (ComputeOutputs, error)
+	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest string) (ComputeOutputs, error)
 }
 
 // DnsProvider creates a DNS record pointing at a compute instance.
@@ -264,16 +265,9 @@ type ServiceSecretsProvisioner interface {
 	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, res Resources, env, region string, all AllOutputs) (*ServiceSecretsBundle, error)
 }
 
-// ManifestContribution is a set of fields a contributor adds to a service's
-// manifest. Individual values may be marked secret via manifest.Secret.
+// ManifestContribution is a set of non-secret fields a contributor adds to a
+// compute instance's manifest.
 type ManifestContribution = map[string]any
-
-// ComputeInstanceManifestContributor adds fields to a compute's manifest. The
-// trigger for VM bootstrap is the presence of secret values in the assembled
-// manifest, so this contract carries no explicit bootstrap argument.
-type ComputeInstanceManifestContributor interface {
-	ContributeToManifest(spec ComputeSpec, resources Resources, env, region string) (ManifestContribution, error)
-}
 
 // SSHConfig holds the per-environment SSH material applied to hosts.
 type SSHConfig struct {

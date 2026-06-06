@@ -1,9 +1,9 @@
 // Package infisical implements the Infisical secrets provider for inforge. The
 // InfisicalSecretsAdapter creates one InfisicalWorkspace per (container, region)
-// pair — mirroring the NeonDatabaseAdapter container-dedup pattern — and one
-// InfisicalSecretsBatch resource per SecretsSpec. It also implements
-// ComputeInstanceManifestContributor so that servers know how to fetch their
-// own secrets at boot via the Infisical Universal Auth flow.
+// pair — mirroring the NeonDatabaseAdapter container-dedup pattern — and, per
+// service, writes the service's infra secrets under its scoped path and mints a
+// per-service machine identity (ProvisionService) so inforge-bootstrap fetches
+// those secrets at runtime via the Infisical Universal Auth flow.
 package infisical
 
 import (
@@ -13,7 +13,6 @@ import (
 	"sync"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
-	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/internal/validate"
@@ -110,10 +109,10 @@ func newInfisicalIdentityResource(
 }
 
 // InfisicalSecretsAdapter implements types.SecretsBackendProvider and
-// types.ComputeInstanceManifestContributor using the custom
-// pulumi-resource-infisical provider binary. One InfisicalWorkspace is created
-// per (container, region) key; concurrent callers for the same key wait and
-// reuse the same resource via a mutex-protected map.
+// types.ServiceSecretsProvisioner using the custom pulumi-resource-infisical
+// provider binary. One InfisicalWorkspace is created per (container, region)
+// key; concurrent callers for the same key wait and reuse the same resource via
+// a mutex-protected map.
 type InfisicalSecretsAdapter struct {
 	clientId     string
 	clientSecret string
@@ -283,36 +282,6 @@ func infraSecretEntries(svc types.ServiceSpec, res types.Resources) map[string]t
 		}
 	}
 	return out
-}
-
-// ContributeToManifest injects Infisical connection config into the cloud-init
-// manifest for a compute instance whose container has a matching SecretsSpec.
-// Returns an empty contribution if no matching spec is found.
-func (a *InfisicalSecretsAdapter) ContributeToManifest(
-	spec types.ComputeSpec, resources types.Resources, env, region string,
-) (types.ManifestContribution, error) {
-	for _, s := range resources.Secrets {
-		if s.Container == spec.Container && s.Provider == "infisical" {
-			// client_secret is marked as a manifest secret so it is SOPS/age-encrypted
-			// with the per-VM key K before being embedded in cloud-init. The VM
-			// redeems the one-time token from the key broker to obtain K, decrypts the
-			// manifest, and uses the plaintext credential to authenticate to Infisical.
-			return types.ManifestContribution{
-				"secrets": map[string]any{
-					"provider":    "infisical",
-					"url":         a.siteUrl,
-					"project":     s.Container,
-					"environment": envToSlug(env),
-					"auth": map[string]any{
-						"method":     "universal-auth",
-						"client_id":  a.clientId,
-						"client_secret": manifest.Secret(a.clientSecret),
-					},
-				},
-			}, nil
-		}
-	}
-	return types.ManifestContribution{}, nil
 }
 
 // ensureWorkspace returns the workspaceId output for the (container, env)

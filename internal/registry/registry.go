@@ -29,7 +29,6 @@ type ProviderRegistry interface {
 	Database(name string) (types.DatabaseProvider, error)
 	Secrets(name string) (types.SecretsBackendProvider, error)
 	ServiceSecretsProvisioner(name string) (types.ServiceSecretsProvisioner, error)
-	ManifestContributors() []types.ComputeInstanceManifestContributor
 }
 
 type registry struct {
@@ -210,13 +209,6 @@ func (r *registry) ServiceSecretsProvisioner(name string) (types.ServiceSecretsP
 	default:
 		return nil, unknownProvider(name)
 	}
-}
-
-func (r *registry) ManifestContributors() []types.ComputeInstanceManifestContributor {
-	if _, ok := r.config["infisical"]; !ok {
-		return []types.ComputeInstanceManifestContributor{}
-	}
-	return []types.ComputeInstanceManifestContributor{r.infisicalAdapter()}
 }
 
 // infisicalAdapter lazily creates the shared InfisicalSecretsAdapter.

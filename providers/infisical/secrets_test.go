@@ -8,7 +8,6 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/types"
 )
@@ -163,7 +162,6 @@ func TestSecretsBatchNameMatchesNamingConvention(t *testing.T) {
 
 // Compile-time assertions: InfisicalSecretsAdapter satisfies both interfaces.
 var _ types.SecretsBackendProvider = (*InfisicalSecretsAdapter)(nil)
-var _ types.ComputeInstanceManifestContributor = (*InfisicalSecretsAdapter)(nil)
 var _ types.ServiceSecretsProvisioner = (*InfisicalSecretsAdapter)(nil)
 
 // infisicalMocks is a minimal Pulumi mock monitor for secrets adapter tests.
@@ -228,64 +226,3 @@ func TestEnsureWorkspaceDifferentEnvsAreIndependent(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestContributeToManifestMatchingSpec verifies that ContributeToManifest
-// returns a non-empty contribution when the compute spec's container has an
-// Infisical SecretsSpec.
-func TestContributeToManifestMatchingSpec(t *testing.T) {
-	adapter := New("client-id", "client-secret", "https://app.infisical.com", "use1")
-
-	computeSpec := types.ComputeSpec{Container: "myapp"}
-	resources := types.Resources{
-		Secrets: []types.SecretsSpec{
-			{Container: "myapp", Provider: "infisical"},
-		},
-	}
-
-	contrib, err := adapter.ContributeToManifest(computeSpec, resources, "prd", "us-east-1")
-	require.NoError(t, err)
-	assert.NotEmpty(t, contrib, "expected a non-empty contribution for a matching spec")
-
-	secrets, ok := contrib["secrets"].(map[string]any)
-	require.True(t, ok, "expected 'secrets' key in contribution")
-	assert.Equal(t, "infisical", secrets["provider"])
-	assert.Equal(t, "prod", secrets["environment"], "prd should be mapped to prod")
-}
-
-// TestContributeToManifestNoMatch verifies that an empty contribution is
-// returned when no SecretsSpec matches the compute container.
-func TestContributeToManifestNoMatch(t *testing.T) {
-	adapter := New("cid", "csec", "", "use1")
-
-	computeSpec := types.ComputeSpec{Container: "other"}
-	resources := types.Resources{
-		Secrets: []types.SecretsSpec{
-			{Container: "myapp", Provider: "infisical"},
-		},
-	}
-
-	contrib, err := adapter.ContributeToManifest(computeSpec, resources, "dev", "us-east-1")
-	require.NoError(t, err)
-	assert.Empty(t, contrib)
-}
-
-// TestContributeToManifestSecretWrapped verifies that client_secret in the
-// manifest contribution is wrapped as a manifest.Secret so the SOPS/age
-// encryption flow marks it for encryption.
-func TestContributeToManifestSecretWrapped(t *testing.T) {
-	adapter := New("cid", "csec", "", "use1")
-
-	computeSpec := types.ComputeSpec{Container: "myapp"}
-	resources := types.Resources{
-		Secrets: []types.SecretsSpec{
-			{Container: "myapp", Provider: "infisical"},
-		},
-	}
-
-	contrib, err := adapter.ContributeToManifest(computeSpec, resources, "prd", "us-east-1")
-	require.NoError(t, err)
-
-	secrets := contrib["secrets"].(map[string]any)
-	auth := secrets["auth"].(map[string]any)
-	_, isSecret := auth["client_secret"].(manifest.SecretValue)
-	assert.True(t, isSecret, "client_secret must be wrapped as manifest.Secret for SOPS encryption")
-}
