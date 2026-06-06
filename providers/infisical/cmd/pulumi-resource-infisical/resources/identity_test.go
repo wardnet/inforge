@@ -3,6 +3,8 @@ package resources
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -97,10 +99,61 @@ func TestMintClientSecret(t *testing.T) {
 	assert.Equal(t, "secret-value", cs)
 }
 
-func TestEnsureReadPrivilegeTolerient(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+// TestEnsureReadPrivilegeToleratesConflict asserts a genuine already-exists
+// conflict (409) is fine and the slug is derived per secret path.
+func TestEnsureReadPrivilegeToleratesConflict(t *testing.T) {
+	var gotSlug string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(b, &body)
+		gotSlug, _ = body["slug"].(string)
 		w.WriteHeader(http.StatusConflict) // privilege already exists
 	}))
 	defer srv.Close()
 	require.NoError(t, ensureReadPrivilege(context.Background(), srv.URL, "tok", "ws", "id", "prod", "/ghost"))
+	assert.Equal(t, "inforge-read-ghost", gotSlug, "slug must be derived per secret path, not fixed")
+}
+
+// TestEnsureReadPrivilegeFailsLoudOnBadRequest asserts a 400 (e.g. a malformed
+// permission body) is a hard error, not silently swallowed — otherwise an
+// identity ships without a read grant and fails only as a runtime 403.
+func TestEnsureReadPrivilegeFailsLoudOnBadRequest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	require.Error(t, ensureReadPrivilege(context.Background(), srv.URL, "tok", "ws", "id", "prod", "/ghost"))
+}
+
+// TestEnsureProjectMembershipSkipsWhenMember asserts an existing membership (GET
+// 200) creates nothing.
+func TestEnsureProjectMembershipSkipsWhenMember(t *testing.T) {
+	postCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postCalled = true
+		}
+		w.WriteHeader(http.StatusOK) // GET 200 => already a member
+	}))
+	defer srv.Close()
+	require.NoError(t, ensureProjectMembership(context.Background(), srv.URL, "tok", "ws", "id"))
+	assert.False(t, postCalled, "must not create membership when one already exists")
+}
+
+// TestEnsureProjectMembershipCreatesWhenAbsent asserts a 404 GET leads to a POST.
+func TestEnsureProjectMembershipCreatesWhenAbsent(t *testing.T) {
+	postCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPost:
+			postCalled = true
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+	require.NoError(t, ensureProjectMembership(context.Background(), srv.URL, "tok", "ws", "id"))
+	assert.True(t, postCalled)
 }

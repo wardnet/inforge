@@ -319,6 +319,13 @@ func serviceSecretsProviderName(svc types.ServiceSpec, res types.Resources) stri
 // workspace ID, so it too is rendered inside an ApplyT on that output. Connection
 // details and the preview/up guards mirror provisionService.
 func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, slug string) error {
+	// A secret-bearing service must declare the no-login user it runs as: the
+	// descriptor requires it, and the bootstrapper fails the start without it.
+	// Catch it here at deploy time rather than letting the host reject the
+	// descriptor at first start.
+	if svc.User == "" {
+		return fmt.Errorf("service %q: a service with secrets must declare a user (the no-login account it runs as)", svc.Name)
+	}
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
