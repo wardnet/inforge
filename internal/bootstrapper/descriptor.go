@@ -21,10 +21,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// supportedVersion is the descriptor schema major this bootstrapper understands.
+// SupportedVersion is the descriptor schema major this bootstrapper understands.
 // A descriptor declaring any other version fails the start, so a fleet running
-// mixed bootstrapper builds never silently misreads a newer descriptor.
-const supportedVersion = 1
+// mixed bootstrapper builds never silently misreads a newer descriptor. inforge
+// (the producer) stamps this same constant into every descriptor it writes, so
+// producer and consumer can never disagree on the schema version.
+const SupportedVersion = 1
 
 // Descriptor is the versioned, secret-free on-host contract inforge writes to
 // /etc/wardnet/services/<svc>/descriptor.yaml (0644 root). It names the service,
@@ -61,8 +63,8 @@ func ParseDescriptor(b []byte) (Descriptor, error) {
 	if err := dec.Decode(&d); err != nil {
 		return Descriptor{}, fmt.Errorf("parse descriptor: %w", err)
 	}
-	if d.Version != supportedVersion {
-		return Descriptor{}, fmt.Errorf("unsupported descriptor version %d (this bootstrapper supports version %d)", d.Version, supportedVersion)
+	if d.Version != SupportedVersion {
+		return Descriptor{}, fmt.Errorf("unsupported descriptor version %d (this bootstrapper supports version %d)", d.Version, SupportedVersion)
 	}
 	if d.Service == "" {
 		return Descriptor{}, fmt.Errorf("descriptor: service is required")

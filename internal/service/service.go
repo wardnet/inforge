@@ -49,6 +49,19 @@ func ExecPath(name string) string {
 	return Folder(name) + "/run"
 }
 
+// DescriptorPath / CredentialPath are the two files inforge writes into a
+// service's DescriptorDir for the bootstrapper to read: the versioned, secret-free
+// descriptor (0644) and the host-key-encrypted provider credential (0600). The
+// filenames must match the bootstrapper's descriptorFile/credentialFile constants.
+func DescriptorPath(name string) string {
+	return DescriptorDir(name) + "/descriptor.yaml"
+}
+
+// CredentialPath returns the on-host path of a service's age-encrypted credential.
+func CredentialPath(name string) string {
+	return DescriptorDir(name) + "/credential.age"
+}
+
 // unitTemplate renders the unit. The service runs as root under inforge-bootstrap
 // (no User=): the bootstrapper fetches secrets, then drops privilege to the
 // service user itself and execs ExecPath, so systemd supervises the real service

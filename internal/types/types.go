@@ -233,6 +233,37 @@ type SecretsBackendProvider interface {
 	Create(ctx *pulumi.Context, spec SecretsSpec, env, region string, all AllOutputs) error
 }
 
+// ServiceSecretsBundle is everything inforge needs to deliver one service's
+// runtime secrets contract to its host: the provider coordinates and env-var ->
+// vault-key mapping for the descriptor, plus the per-service machine identity's
+// universal-auth credentials (Outputs, ClientSecret sensitive) the bootstrapper
+// logs in with. Project is the workspace ID (what the on-host fetcher sends as
+// the workspaceId query param), so it is an Output resolved at deploy time. The
+// program age-encrypts {ClientId, ClientSecret} to the host key and writes the
+// descriptor + credential; the provider that produced the bundle stays unaware
+// of hosts and SSH.
+type ServiceSecretsBundle struct {
+	Project      pulumi.StringOutput // workspace ID
+	ClientID     pulumi.StringOutput // identity universal-auth client ID
+	ClientSecret pulumi.StringOutput // identity universal-auth client secret (sensitive)
+	ProviderKind string              // e.g. "infisical"
+	URL          string              // provider site URL
+	Environment  string              // provider environment slug
+	SecretPath   string              // the service's scoped path, e.g. "/ghost"
+	// Env maps each service env var name to its vault key relative to SecretPath
+	// (e.g. "DATABASE_URL" -> "infra/DATABASE_URL").
+	Env map[string]string
+}
+
+// ServiceSecretsProvisioner provisions one service's runtime secrets: it writes
+// the service's infra secrets under its scoped path and mints a per-service
+// machine identity scoped read-only to that path, returning the bundle the
+// program needs to write the descriptor + host-key-encrypted credential. It
+// returns a nil bundle (no error) when the service has no secrets to deliver.
+type ServiceSecretsProvisioner interface {
+	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, res Resources, env, region string, all AllOutputs) (*ServiceSecretsBundle, error)
+}
+
 // ManifestContribution is a set of fields a contributor adds to a service's
 // manifest. Individual values may be marked secret via manifest.Secret.
 type ManifestContribution = map[string]any

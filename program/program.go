@@ -4,6 +4,7 @@
 package program
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -13,7 +14,9 @@ import (
 	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
+	"github.com/wardnet/inforge/internal/agehost"
 	"github.com/wardnet/inforge/internal/bootstrap"
+	"github.com/wardnet/inforge/internal/bootstrapper"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/naming"
@@ -22,6 +25,7 @@ import (
 	"github.com/wardnet/inforge/internal/service"
 	"github.com/wardnet/inforge/internal/tags"
 	"github.com/wardnet/inforge/internal/types"
+	"gopkg.in/yaml.v3"
 )
 
 // Run is the Pulumi program entry point, passed to the Automation API as an
@@ -200,17 +204,6 @@ func Run(ctx *pulumi.Context) error {
 			}
 			databaseOutputs[region][spec.Name] = out
 		}
-
-		for _, spec := range res.Secrets {
-			sp, err := reg.Secrets(spec.Provider)
-			if err != nil {
-				return err
-			}
-			all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs}
-			if err := sp.Create(ctx, spec, env, region, all); err != nil {
-				return err
-			}
-		}
 	}
 
 	for _, re := range vars.Regions {
@@ -238,7 +231,12 @@ func Run(ctx *pulumi.Context) error {
 		if err := realizeTLSTermination(ctx, reg, res, computeOutputs[region], env, slug, vars.BaseDomain); err != nil {
 			return err
 		}
-		if err := provisionServices(ctx, res, computeOutputs[region], vars.SSH.DeployPrivateKey, env, slug, inforgeVersion); err != nil {
+		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs}
+		bundles, err := provisionServiceSecrets(ctx, reg, res, all, env, region)
+		if err != nil {
+			return err
+		}
+		if err := provisionServices(ctx, res, computeOutputs[region], bundles, vars.SSH.DeployPrivateKey, env, slug, inforgeVersion); err != nil {
 			return err
 		}
 	}
@@ -256,7 +254,7 @@ func Run(ctx *pulumi.Context) error {
 // whole `pulumi up`. The unit is written, daemon-reloaded, and enabled (for
 // boot persistence); release performs the first real start with code present.
 // Connection details and the preview/up guard mirror realizeTLSTermination.
-func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, deployPrivateKey, env, slug, inforgeVersion string) error {
+func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, bundles map[string]*types.ServiceSecretsBundle, deployPrivateKey, env, slug, inforgeVersion string) error {
 	if len(res.Service) == 0 {
 		return nil
 	}
@@ -292,6 +290,11 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		if err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug, inforgeVersion); err != nil {
 			return err
 		}
+		if bundle := bundles[svc.Name]; bundle != nil {
+			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, slug); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -316,6 +319,150 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 		return fmt.Errorf("service %q: provision unit: %w", svc.Name, err)
 	}
 	return nil
+}
+
+// provisionServiceSecrets provisions each service's runtime secrets bundle: it
+// writes the service's infra secrets under its scoped vault path and mints a
+// per-service machine identity, returning the bundles keyed by service name. A
+// service whose container has no infisical secrets yields no bundle (and gets a
+// unit but no descriptor/credential — see deliverServiceSecrets).
+func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, all types.AllOutputs, env, region string) (map[string]*types.ServiceSecretsBundle, error) {
+	bundles := map[string]*types.ServiceSecretsBundle{}
+	for _, svc := range res.Service {
+		provName := serviceSecretsProviderName(svc, res)
+		if provName == "" {
+			continue
+		}
+		prov, err := reg.ServiceSecretsProvisioner(provName)
+		if err != nil {
+			return nil, err
+		}
+		bundle, err := prov.ProvisionService(ctx, svc, res, env, region, all)
+		if err != nil {
+			return nil, fmt.Errorf("service %q: provision secrets: %w", svc.Name, err)
+		}
+		if bundle != nil {
+			bundles[svc.Name] = bundle
+		}
+	}
+	return bundles, nil
+}
+
+// serviceSecretsProviderName returns the secrets provider a service's secrets are
+// delivered through — the provider of any SecretsSpec in the service's container —
+// or "" when the container declares no (infisical) secrets.
+func serviceSecretsProviderName(svc types.ServiceSpec, res types.Resources) string {
+	for _, s := range res.Secrets {
+		if s.Container == svc.Container && s.Provider == "infisical" {
+			return "infisical"
+		}
+	}
+	return ""
+}
+
+// deliverServiceSecrets writes a service's bootstrapper inputs onto its host: the
+// secret-free descriptor.yaml (0644) and the host-key-encrypted credential.age
+// (0600). It is a two-phase output dependency: a command reads the host SSH
+// public key (Stdout), the program age-encrypts the identity credentials to that
+// key inside an ApplyT over the pubkey + identity outputs (program-side encrypt —
+// the plaintext credential never lands on disk and the host needs no age), and a
+// second command writes both files. The descriptor's provider.project is the
+// workspace ID, so it too is rendered inside an ApplyT on that output. Connection
+// details and the preview/up guards mirror provisionService.
+func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, slug string) error {
+	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
+	name := naming.Resource(env, slug, "svc", svc.Name)
+
+	// Read the host SSH public key. It is world-readable, so no sudo is needed;
+	// its Stdout (with a trailing newline agehost.Encrypt trims) is the recipient.
+	const readHostKey = "cat /etc/ssh/ssh_host_ed25519_key.pub"
+	hostKey, err := remote.NewCommand(ctx, name+"-hostkey", &remote.CommandArgs{
+		Connection: conn,
+		Create:     pulumi.String(readHostKey),
+		Update:     pulumi.String(readHostKey),
+	})
+	if err != nil {
+		return fmt.Errorf("service %q: read host key: %w", svc.Name, err)
+	}
+
+	// descriptor.yaml depends on the workspace ID (provider.project), so render it
+	// inside an ApplyT on that output.
+	descriptor := bundle.Project.ApplyT(func(project string) (string, error) {
+		return renderDescriptor(svc, bundle, project)
+	}).(pulumi.StringOutput)
+
+	// Encrypt {client_id, client_secret} to the host key inside an ApplyT over the
+	// pubkey read AND both identity outputs, so the dependency is automatic and the
+	// ciphertext is never built against a stale/empty key. Empty inputs (preview,
+	// where Stdout is unknown) emit nothing; the write command does not run then.
+	credAge := pulumi.All(hostKey.Stdout, bundle.ClientID, bundle.ClientSecret).ApplyT(
+		func(args []interface{}) (string, error) {
+			pub, _ := args[0].(string)
+			clientID, _ := args[1].(string)
+			clientSecret, _ := args[2].(string)
+			if pub == "" || clientID == "" || clientSecret == "" {
+				return "", nil
+			}
+			plaintext, err := json.Marshal(map[string]string{
+				"client_id":     clientID,
+				"client_secret": clientSecret,
+			})
+			if err != nil {
+				return "", fmt.Errorf("marshal credential: %w", err)
+			}
+			ct, err := agehost.Encrypt(plaintext, pub)
+			if err != nil {
+				return "", fmt.Errorf("encrypt credential: %w", err)
+			}
+			return string(ct), nil
+		}).(pulumi.StringOutput)
+
+	writeScript := pulumi.All(descriptor, credAge).ApplyT(func(args []interface{}) string {
+		desc, _ := args[0].(string)
+		cred, _ := args[1].(string)
+		return iremote.WriteFileScript(service.DescriptorPath(svc.Name), desc) + "\n" +
+			iremote.WriteFileScriptMode(service.CredentialPath(svc.Name), cred, "0600")
+	}).(pulumi.StringOutput)
+
+	deleteScript := iremote.DeleteFileScript(service.DescriptorPath(svc.Name)) + "\n" +
+		iremote.DeleteFileScript(service.CredentialPath(svc.Name))
+
+	if _, err := remote.NewCommand(ctx, name+"-secrets", &remote.CommandArgs{
+		Connection: conn,
+		Create:     writeScript,
+		Update:     writeScript,
+		Delete:     pulumi.String(deleteScript),
+		Triggers:   pulumi.Array{writeScript},
+	}, pulumi.DependsOn([]pulumi.Resource{hostKey})); err != nil {
+		return fmt.Errorf("service %q: write descriptor/credential: %w", svc.Name, err)
+	}
+	return nil
+}
+
+// renderDescriptor marshals the on-host bootstrapper descriptor for a service.
+// It builds the bootstrapper's own Descriptor struct (imported, not duplicated)
+// so the producer can never drift from the consumer's schema; project is the
+// resolved workspace ID.
+func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle, project string) (string, error) {
+	d := bootstrapper.Descriptor{
+		Version: bootstrapper.SupportedVersion,
+		Service: svc.Name,
+		Exec:    service.ExecPath(svc.Name),
+		User:    svc.User,
+		Provider: bootstrapper.Provider{
+			Kind:        bundle.ProviderKind,
+			URL:         bundle.URL,
+			Project:     project,
+			Environment: bundle.Environment,
+			SecretPath:  bundle.SecretPath,
+		},
+		Env: bundle.Env,
+	}
+	b, err := yaml.Marshal(d)
+	if err != nil {
+		return "", fmt.Errorf("marshal descriptor for service %q: %w", svc.Name, err)
+	}
+	return string(b), nil
 }
 
 // serviceProvisionScript renders the host shell that downloads inforge-bootstrap,

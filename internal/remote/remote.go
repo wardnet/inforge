@@ -35,17 +35,36 @@ func Connection(host pulumi.StringInput, deployUser, deployPrivateKey string) re
 }
 
 // WriteFileScript renders a shell command that writes content to an absolute
-// path on the host, creating the parent directory. The content is base64-encoded
-// to sidestep all shell-quoting concerns (config files contain braces, globs,
-// and newlines); the host decodes it and writes via sudo. The path is POSIX
-// single-quoted — Go's %q is NOT shell-safe (a double-quoted shell string still
-// expands $(...) and backticks), and paths embed caller-supplied names, so %q
-// would be a remote-command-injection vector if a name ever carried shell
-// metacharacters.
+// path on the host with default (world-readable) permissions. See
+// WriteFileScriptMode for the quoting and encoding rationale.
 func WriteFileScript(absPath, content string) string {
+	return WriteFileScriptMode(absPath, content, "")
+}
+
+// WriteFileScriptMode renders a shell command that writes content to an absolute
+// path on the host, creating the parent directory and, when mode is non-empty,
+// chmod-ing the file to that octal mode (e.g. "0600" for a secret credential).
+// The content is base64-encoded to sidestep all shell-quoting concerns (config
+// files contain braces, globs, and newlines); the host decodes it and writes via
+// sudo. The path is POSIX single-quoted — Go's %q is NOT shell-safe (a
+// double-quoted shell string still expands $(...) and backticks), and paths
+// embed caller-supplied names, so %q would be a remote-command-injection vector
+// if a name ever carried shell metacharacters. The chmod runs before any bytes
+// are written so the file is never momentarily world-readable.
+func WriteFileScriptMode(absPath, content, mode string) string {
 	b64 := base64.StdEncoding.EncodeToString([]byte(content))
-	return fmt.Sprintf("set -euo pipefail\nsudo install -d -m 0755 %s\nprintf '%%s' %s | base64 -d | sudo tee %s >/dev/null",
-		Quote(path.Dir(absPath)), Quote(b64), Quote(absPath))
+	steps := []string{
+		"set -euo pipefail",
+		fmt.Sprintf("sudo install -d -m 0755 %s", Quote(path.Dir(absPath))),
+	}
+	if mode != "" {
+		// Create the file with the restrictive mode up front so the subsequent
+		// tee never widens it and the content is never briefly world-readable.
+		steps = append(steps, fmt.Sprintf("sudo install -m %s /dev/null %s", Quote(mode), Quote(absPath)))
+	}
+	steps = append(steps,
+		fmt.Sprintf("printf '%%s' %s | base64 -d | sudo tee %s >/dev/null", Quote(b64), Quote(absPath)))
+	return strings.Join(steps, "\n")
 }
 
 // DeleteFileScript renders the command run when a written file's resource is

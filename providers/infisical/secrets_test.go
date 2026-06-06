@@ -44,7 +44,73 @@ func (m *namingMocks) NewResource(args pulumi.MockResourceArgs) (string, resourc
 	if args.TypeToken == infisicalWorkspaceType {
 		outputs["workspaceId"] = resource.NewStringProperty("ws-test-id")
 	}
+	if args.TypeToken == infisicalIdentityType {
+		outputs["authClientId"] = resource.NewStringProperty("client-id")
+		outputs["authClientSecret"] = resource.NewStringProperty("client-secret")
+	}
 	return args.Name + "-id", outputs, nil
+}
+
+// TestProvisionServiceScopesPaths verifies a service's infra secrets are written
+// under /<svc>/infra while its identity is scoped read to /<svc>, and that the
+// bundle carries the env-var -> infra/<key> mapping the descriptor needs.
+func TestProvisionServiceScopesPaths(t *testing.T) {
+	mocks := newNamingMocks()
+	var bundle *types.ServiceSecretsBundle
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		adapter := New("cid", "csec", "", "use1")
+		res := types.Resources{
+			Secrets: []types.SecretsSpec{{
+				Name:      "ghost-secrets",
+				Container: "ghost",
+				Provider:  "infisical",
+				Secrets:   map[string]types.SecretsEntry{"DATABASE_URL": {Source: "gha:DATABASE_URL"}},
+			}},
+		}
+		svc := types.ServiceSpec{Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost"}
+		var err error
+		bundle, err = adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", types.AllOutputs{})
+		return err
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	assert.Equal(t, "/ghost/infra", mocks.captured[infisicalSecretsBatchType].inputs["secretPath"].StringValue())
+	assert.Equal(t, "/ghost", mocks.captured[infisicalIdentityType].inputs["secretPath"].StringValue())
+	require.NotNil(t, bundle)
+	assert.Equal(t, "/ghost", bundle.SecretPath)
+	assert.Equal(t, map[string]string{"DATABASE_URL": "infra/DATABASE_URL"}, bundle.Env)
+}
+
+// TestProvisionServiceNoSecretsReturnsNil verifies a service whose container has
+// no infisical secrets yields no bundle and provisions nothing.
+func TestProvisionServiceNoSecretsReturnsNil(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		adapter := New("cid", "csec", "", "use1")
+		svc := types.ServiceSpec{Name: "ghost", Container: "ghost"}
+		bundle, err := adapter.ProvisionService(ctx, svc, types.Resources{}, "prd", "us-east-1", types.AllOutputs{})
+		require.NoError(t, err)
+		assert.Nil(t, bundle)
+		return nil
+	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
+	require.NoError(t, err)
+}
+
+// TestInfraSecretEntries verifies the derivation merges only infisical
+// SecretsSpecs in the service's own container.
+func TestInfraSecretEntries(t *testing.T) {
+	res := types.Resources{
+		Secrets: []types.SecretsSpec{
+			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"A": {Source: "gha:A"}}},
+			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"B": {Source: "gha:B"}}},
+			{Container: "ghost", Provider: "other", Secrets: map[string]types.SecretsEntry{"SKIP": {Source: "gha:SKIP"}}},
+			{Container: "other", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"NOPE": {Source: "gha:NOPE"}}},
+		},
+	}
+	got := infraSecretEntries(types.ServiceSpec{Name: "ghost", Container: "ghost"}, res)
+	assert.Equal(t, map[string]types.SecretsEntry{
+		"A": {Source: "gha:A"},
+		"B": {Source: "gha:B"},
+	}, got)
 }
 
 // TestWorkspaceNamePassedToAPIMatchesNamingConvention verifies that the name
@@ -98,6 +164,7 @@ func TestSecretsBatchNameMatchesNamingConvention(t *testing.T) {
 // Compile-time assertions: InfisicalSecretsAdapter satisfies both interfaces.
 var _ types.SecretsBackendProvider = (*InfisicalSecretsAdapter)(nil)
 var _ types.ComputeInstanceManifestContributor = (*InfisicalSecretsAdapter)(nil)
+var _ types.ServiceSecretsProvisioner = (*InfisicalSecretsAdapter)(nil)
 
 // infisicalMocks is a minimal Pulumi mock monitor for secrets adapter tests.
 type infisicalMocks struct{}

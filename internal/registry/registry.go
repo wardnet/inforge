@@ -28,6 +28,7 @@ type ProviderRegistry interface {
 	DNS(name string) (types.DnsProvider, error)
 	Database(name string) (types.DatabaseProvider, error)
 	Secrets(name string) (types.SecretsBackendProvider, error)
+	ServiceSecretsProvisioner(name string) (types.ServiceSecretsProvisioner, error)
 	ManifestContributors() []types.ComputeInstanceManifestContributor
 }
 
@@ -194,6 +195,15 @@ func (r *registry) Database(name string) (types.DatabaseProvider, error) {
 }
 
 func (r *registry) Secrets(name string) (types.SecretsBackendProvider, error) {
+	switch name {
+	case "infisical":
+		return r.infisicalAdapter(), nil
+	default:
+		return nil, unknownProvider(name)
+	}
+}
+
+func (r *registry) ServiceSecretsProvisioner(name string) (types.ServiceSecretsProvisioner, error) {
 	switch name {
 	case "infisical":
 		return r.infisicalAdapter(), nil
