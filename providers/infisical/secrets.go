@@ -108,9 +108,9 @@ func newInfisicalIdentityResource(
 	return res, nil
 }
 
-// InfisicalSecretsAdapter implements types.SecretsBackendProvider and
-// types.ServiceSecretsProvisioner using the custom pulumi-resource-infisical
-// provider binary. One InfisicalWorkspace is created per (container, region)
+// InfisicalSecretsAdapter implements types.ServiceSecretsProvisioner using the
+// custom pulumi-resource-infisical provider binary. One InfisicalWorkspace is
+// created per (container, region)
 // key; concurrent callers for the same key wait and reuse the same resource via
 // a mutex-protected map.
 type InfisicalSecretsAdapter struct {
@@ -137,61 +137,6 @@ func New(clientId, clientSecret, siteUrl, slug string) *InfisicalSecretsAdapter 
 	}
 }
 
-// Create provisions an InfisicalWorkspace (deduped per container+region) and an
-// InfisicalSecretsBatch that writes all resolved secrets into the workspace root.
-// It satisfies SecretsBackendProvider but is no longer called from program.Run —
-// per-service runtime delivery goes through ProvisionService, which writes under
-// /<svc>/infra. The two batch resources would share a Pulumi name only if a
-// SecretsSpec and a ServiceSpec were named identically AND both paths ran, which
-// no longer happens.
-func (a *InfisicalSecretsAdapter) Create(
-	ctx *pulumi.Context, spec types.SecretsSpec, env, region string, all types.AllOutputs,
-) error {
-	workspaceId, err := a.ensureWorkspace(ctx, spec.Container, env)
-	if err != nil {
-		return fmt.Errorf("ensure infisical workspace for container %q in %s: %w", spec.Container, region, err)
-	}
-
-	// Sort keys for deterministic resource names and pulumi.All ordering.
-	keys := make([]string, 0, len(spec.Secrets))
-	for key := range spec.Secrets {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	ifaces := make([]interface{}, len(keys))
-	for i, key := range keys {
-		resolved, err := resolveRef(spec.Secrets[key].Source, region, all)
-		if err != nil {
-			return fmt.Errorf("resolve ref for secret %q: %w", key, err)
-		}
-		ifaces[i] = resolved
-	}
-
-	secretsJson := pulumi.All(ifaces...).ApplyT(func(args []interface{}) (string, error) {
-		m := make(map[string]string, len(keys))
-		for i, key := range keys {
-			m[key] = args[i].(string)
-		}
-		b, err := json.Marshal(m)
-		if err != nil {
-			return "", fmt.Errorf("marshal secrets: %w", err)
-		}
-		return string(b), nil
-	}).(pulumi.StringOutput)
-
-	batchName := naming.Resource(env, a.slug, "secrets", spec.Name)
-	_, err = newInfisicalSecretsBatchResource(
-		ctx, batchName,
-		workspaceId, envToSlug(env), a.clientId, a.clientSecret, a.siteUrl, "",
-		secretsJson,
-	)
-	if err != nil {
-		return fmt.Errorf("create infisical secrets batch %q: %w", batchName, err)
-	}
-	return nil
-}
-
 // ProvisionService writes a service's infra secrets under "/<svc>/infra" and
 // mints a per-service machine identity scoped read-only to "/<svc>", returning
 // the bundle the program needs to write the descriptor + host-key-encrypted
@@ -202,7 +147,10 @@ func (a *InfisicalSecretsAdapter) Create(
 func (a *InfisicalSecretsAdapter) ProvisionService(
 	ctx *pulumi.Context, svc types.ServiceSpec, res types.Resources, env, region string, all types.AllOutputs,
 ) (*types.ServiceSecretsBundle, error) {
-	entries := infraSecretEntries(svc, res)
+	entries, err := infraSecretEntries(svc, res)
+	if err != nil {
+		return nil, err
+	}
 	if len(entries) == 0 {
 		return nil, nil
 	}
@@ -275,18 +223,23 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 // every infisical SecretsSpec in the service's container. The map key is both the
 // vault key written under infra/ and the env var name the bootstrapper sets, so
 // all services in a container share the same secret set (broadcast semantics —
-// the schema links services to secrets only by container).
-func infraSecretEntries(svc types.ServiceSpec, res types.Resources) map[string]types.SecretsEntry {
+// the schema links services to secrets only by container). Two specs in the same
+// container declaring the same key is ambiguous (which value wins?), so it is an
+// error rather than a silent last-write-wins.
+func infraSecretEntries(svc types.ServiceSpec, res types.Resources) (map[string]types.SecretsEntry, error) {
 	out := map[string]types.SecretsEntry{}
 	for _, s := range res.Secrets {
 		if s.Container != svc.Container || s.Provider != "infisical" {
 			continue
 		}
 		for k, v := range s.Secrets {
+			if _, dup := out[k]; dup {
+				return nil, fmt.Errorf("service %q: secret key %q is declared by more than one secrets spec in container %q", svc.Name, k, svc.Container)
+			}
 			out[k] = v
 		}
 	}
-	return out
+	return out, nil
 }
 
 // ensureWorkspace returns the workspaceId output for the (container, env)

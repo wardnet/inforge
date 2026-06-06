@@ -27,7 +27,6 @@ type ProviderRegistry interface {
 	TLSTermination(name string) (types.TLSTerminationProvider, error)
 	DNS(name string) (types.DnsProvider, error)
 	Database(name string) (types.DatabaseProvider, error)
-	Secrets(name string) (types.SecretsBackendProvider, error)
 	ServiceSecretsProvisioner(name string) (types.ServiceSecretsProvisioner, error)
 }
 
@@ -188,15 +187,6 @@ func (r *registry) Database(name string) (types.DatabaseProvider, error) {
 			r.neonDb = neon.New(apiKey, r.project, r.slug)
 		})
 		return r.neonDb, nil
-	default:
-		return nil, unknownProvider(name)
-	}
-}
-
-func (r *registry) Secrets(name string) (types.SecretsBackendProvider, error) {
-	switch name {
-	case "infisical":
-		return r.infisicalAdapter(), nil
 	default:
 		return nil, unknownProvider(name)
 	}

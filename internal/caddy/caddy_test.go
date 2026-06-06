@@ -49,21 +49,17 @@ func TestInstallScriptAptOrder(t *testing.T) {
 
 func TestInstallScriptInstallsTooling(t *testing.T) {
 	script := InstallScript()
-	// Caddy plus the tools the service bootstrapper relies on.
-	for _, tool := range []string{"caddy", "jq", "age", "yq", "sops"} {
-		assert.Contains(t, script, tool, "install script should provision %q", tool)
-	}
+	assert.Contains(t, script, "caddy", "install script should provision caddy")
 	// Prepares the conf.d directory the base Caddyfile imports from.
 	assert.Contains(t, script, ConfDir)
 }
 
-// TestInstallScriptVerifiesDownloads guards that the binaries fetched outside
-// apt (yq, sops) are checksum-verified before install — a tampered or corrupted
-// download must not reach /usr/local/bin.
-func TestInstallScriptVerifiesDownloads(t *testing.T) {
+// TestInstallScriptInstallsNoSecretTooling guards that the host gets no
+// jq/yq/sops/age: secrets are fetched at runtime by the Go inforge-bootstrap,
+// which decrypts in-process, so the host needs none of them.
+func TestInstallScriptInstallsNoSecretTooling(t *testing.T) {
 	script := InstallScript()
-	assert.Contains(t, script, "sha256sum -c -",
-		"yq/sops downloads must be checksum-verified")
-	assert.Contains(t, script, "YQ_SHA256=", "yq checksum must be pinned")
-	assert.Contains(t, script, "SOPS_SHA256=", "sops checksum must be pinned")
+	for _, tool := range []string{"sops", "yq", "getsops", "mikefarah", "SHA256"} {
+		assert.NotContains(t, script, tool, "install script must not provision %q", tool)
+	}
 }

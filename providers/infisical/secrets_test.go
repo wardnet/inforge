@@ -105,11 +105,42 @@ func TestInfraSecretEntries(t *testing.T) {
 			{Container: "other", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"NOPE": {Source: "gha:NOPE"}}},
 		},
 	}
-	got := infraSecretEntries(types.ServiceSpec{Name: "ghost", Container: "ghost"}, res)
+	got, err := infraSecretEntries(types.ServiceSpec{Name: "ghost", Container: "ghost"}, res)
+	require.NoError(t, err)
 	assert.Equal(t, map[string]types.SecretsEntry{
 		"A": {Source: "gha:A"},
 		"B": {Source: "gha:B"},
 	}, got)
+}
+
+// TestInfraSecretEntriesRejectsDuplicateKey: the same key declared by two specs
+// in the same container is ambiguous and must error, not silently last-win.
+func TestInfraSecretEntriesRejectsDuplicateKey(t *testing.T) {
+	res := types.Resources{
+		Secrets: []types.SecretsSpec{
+			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"DUP": {Source: "gha:ONE"}}},
+			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"DUP": {Source: "gha:TWO"}}},
+		},
+	}
+	_, err := infraSecretEntries(types.ServiceSpec{Name: "ghost", Container: "ghost"}, res)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `secret key "DUP"`)
+}
+
+// bridgeServiceWithSecret is a single-service / single-secret fixture for the
+// naming tests: a service named "bridge" in container "bridge" with one infra
+// secret, so ProvisionService creates the workspace + batch + identity.
+func bridgeServiceWithSecret() (types.ServiceSpec, types.Resources) {
+	svc := types.ServiceSpec{Name: "bridge", Container: "bridge", Provider: "raw", User: "bridge"}
+	res := types.Resources{
+		Secrets: []types.SecretsSpec{{
+			Name:      "bridge",
+			Container: "bridge",
+			Provider:  "infisical",
+			Secrets:   map[string]types.SecretsEntry{"MY_SECRET": {Source: "gha:MY_SECRET"}},
+		}},
+	}
+	return svc, res
 }
 
 // TestWorkspaceNamePassedToAPIMatchesNamingConvention verifies that the name
@@ -120,14 +151,10 @@ func TestWorkspaceNamePassedToAPIMatchesNamingConvention(t *testing.T) {
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "use1")
-		spec := types.SecretsSpec{
-			Name:      "bridge",
-			Container: "bridge",
-			Provider:  "infisical",
-			Secrets:   map[string]types.SecretsEntry{},
-		}
+		svc, res := bridgeServiceWithSecret()
 		// env="prd", region="us-east-1" — workspace name must use env, not region.
-		return adapter.Create(ctx, spec, "prd", "us-east-1", types.AllOutputs{})
+		_, err := adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", types.AllOutputs{})
+		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 
@@ -144,13 +171,9 @@ func TestSecretsBatchNameMatchesNamingConvention(t *testing.T) {
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "use1")
-		spec := types.SecretsSpec{
-			Name:      "bridge",
-			Container: "bridge",
-			Provider:  "infisical",
-			Secrets:   map[string]types.SecretsEntry{"MY_SECRET": {Source: "gha:MY_SECRET"}},
-		}
-		return adapter.Create(ctx, spec, "prd", "us-east-1", types.AllOutputs{})
+		svc, res := bridgeServiceWithSecret()
+		_, err := adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", types.AllOutputs{})
+		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 
@@ -160,8 +183,7 @@ func TestSecretsBatchNameMatchesNamingConvention(t *testing.T) {
 		"Infisical secrets batch Pulumi logical name must follow naming convention")
 }
 
-// Compile-time assertions: InfisicalSecretsAdapter satisfies both interfaces.
-var _ types.SecretsBackendProvider = (*InfisicalSecretsAdapter)(nil)
+// Compile-time assertion: InfisicalSecretsAdapter satisfies the provisioner.
 var _ types.ServiceSecretsProvisioner = (*InfisicalSecretsAdapter)(nil)
 
 // infisicalMocks is a minimal Pulumi mock monitor for secrets adapter tests.

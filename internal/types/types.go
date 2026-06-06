@@ -231,12 +231,6 @@ type DatabaseProvider interface {
 	Create(ctx *pulumi.Context, spec DatabaseSpec, env, region string) (DatabaseOutputs, error)
 }
 
-// SecretsBackendProvider materialises a secrets resource into a backend,
-// resolving references against the outputs produced so far.
-type SecretsBackendProvider interface {
-	Create(ctx *pulumi.Context, spec SecretsSpec, env, region string, all AllOutputs) error
-}
-
 // ServiceSecretsBundle is everything inforge needs to deliver one service's
 // runtime secrets contract to its host: the provider coordinates and env-var ->
 // vault-key mapping for the descriptor, plus the per-service machine identity's

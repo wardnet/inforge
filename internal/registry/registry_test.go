@@ -41,17 +41,7 @@ func TestRegistryUnknownProvider(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown provider: "unknown-db"`)
 
-	// "infisical" is a known secrets provider — must succeed.
-	sp, err := r.Secrets("infisical")
-	require.NoError(t, err)
-	assert.IsType(t, (*infisical.InfisicalSecretsAdapter)(nil), sp)
-
-	// Unknown secrets provider errors.
-	_, err = r.Secrets("unknown-secrets")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `unknown provider: "unknown-secrets"`)
-
-	// "infisical" is also a known service-secrets provisioner.
+	// "infisical" is a known service-secrets provisioner — must succeed.
 	ssp, err := r.ServiceSecretsProvisioner("infisical")
 	require.NoError(t, err)
 	assert.IsType(t, (*infisical.InfisicalSecretsAdapter)(nil), ssp)
