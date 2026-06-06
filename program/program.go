@@ -298,12 +298,15 @@ func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry,
 }
 
 // serviceSecretsProviderName returns the secrets provider a service's secrets are
-// delivered through — the provider of any SecretsSpec in the service's container —
-// or "" when the container declares no (infisical) secrets.
+// delivered through — the provider of the first SecretsSpec in the service's
+// container — or "" when the container declares no secrets. It returns the
+// declared provider verbatim (not a hardcoded "infisical") so an unsupported
+// provider fails loudly at the registry lookup rather than being silently
+// skipped.
 func serviceSecretsProviderName(svc types.ServiceSpec, res types.Resources) string {
 	for _, s := range res.Secrets {
-		if s.Container == svc.Container && s.Provider == "infisical" {
-			return "infisical"
+		if s.Container == svc.Container {
+			return s.Provider
 		}
 	}
 	return ""
@@ -349,15 +352,17 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 
 	// Encrypt {client_id, client_secret} to the host key inside an ApplyT over the
 	// pubkey read AND both identity outputs, so the dependency is automatic and the
-	// ciphertext is never built against a stale/empty key. Empty inputs (preview,
-	// where Stdout is unknown) emit nothing; the write command does not run then.
+	// ciphertext is never built against a stale/empty key. In preview the pubkey
+	// Stdout is unknown, so Pulumi skips this ApplyT entirely; if it runs at up
+	// with any input empty, that is a real failure (e.g. the host key wasn't
+	// readable) and must abort the deploy rather than write an empty credential.
 	credAge := pulumi.All(hostKey.Stdout, bundle.ClientID, bundle.ClientSecret).ApplyT(
 		func(args []interface{}) (string, error) {
 			pub, _ := args[0].(string)
 			clientID, _ := args[1].(string)
 			clientSecret, _ := args[2].(string)
 			if pub == "" || clientID == "" || clientSecret == "" {
-				return "", nil
+				return "", fmt.Errorf("service %q: empty host public key or identity credential while building credential.age", svc.Name)
 			}
 			plaintext, err := json.Marshal(map[string]string{
 				"client_id":     clientID,

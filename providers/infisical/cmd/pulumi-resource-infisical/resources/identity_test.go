@@ -68,22 +68,57 @@ func TestAdoptOrCreateIdentityCreatesWhenAbsent(t *testing.T) {
 	assert.Equal(t, "id-new", id)
 }
 
-// TestEnsureUniversalAuthReadsExistingOnConflict asserts that when attach
-// conflicts (already configured), the existing clientId is fetched via GET.
-func TestEnsureUniversalAuthReadsExistingOnConflict(t *testing.T) {
+// TestEnsureUniversalAuthReadsExisting asserts that when universal auth is
+// already configured (GET 200), the existing clientId is returned without an
+// attach POST.
+func TestEnsureUniversalAuthReadsExisting(t *testing.T) {
+	postCalled := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPost:
-			w.WriteHeader(http.StatusBadRequest) // already attached
-		case http.MethodGet:
-			_, _ = w.Write([]byte(`{"identityUniversalAuth":{"clientId":"client-xyz"}}`))
+		if r.Method == http.MethodPost {
+			postCalled = true
 		}
+		_, _ = w.Write([]byte(`{"identityUniversalAuth":{"clientId":"client-xyz"}}`))
 	}))
 	defer srv.Close()
 
 	cid, err := ensureUniversalAuth(context.Background(), srv.URL, "tok", "id-1")
 	require.NoError(t, err)
 	assert.Equal(t, "client-xyz", cid)
+	assert.False(t, postCalled, "must not re-attach when universal auth already exists")
+}
+
+// TestEnsureUniversalAuthAttachesWhenAbsent asserts a 404 GET leads to an attach
+// POST whose response carries the new clientId.
+func TestEnsureUniversalAuthAttachesWhenAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPost:
+			_, _ = w.Write([]byte(`{"identityUniversalAuth":{"clientId":"client-new"}}`))
+		}
+	}))
+	defer srv.Close()
+
+	cid, err := ensureUniversalAuth(context.Background(), srv.URL, "tok", "id-1")
+	require.NoError(t, err)
+	assert.Equal(t, "client-new", cid)
+}
+
+// TestEnsureUniversalAuthFailsLoudOnReadError asserts a non-404 read error is not
+// swallowed into an attach attempt.
+func TestEnsureUniversalAuthFailsLoudOnReadError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		t.Error("must not POST after a non-404 read error")
+	}))
+	defer srv.Close()
+
+	_, err := ensureUniversalAuth(context.Background(), srv.URL, "tok", "id-1")
+	require.Error(t, err)
 }
 
 func TestMintClientSecret(t *testing.T) {

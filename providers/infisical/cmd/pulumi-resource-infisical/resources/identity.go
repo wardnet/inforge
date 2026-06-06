@@ -176,25 +176,31 @@ func adoptOrCreateIdentity(ctx context.Context, siteURL, token, orgId, name stri
 	return resp.Identity.Id, nil
 }
 
-// ensureUniversalAuth attaches universal auth to the identity and returns its
-// clientId. If universal auth is already configured (a re-run), the attach
-// conflicts and the existing clientId is fetched instead.
+// ensureUniversalAuth returns the identity's universal-auth clientId, attaching
+// universal auth first if it is not already configured. It reads before writing
+// (rather than POST-then-tolerate-conflict) so a genuine attach failure — bad
+// permissions, server error — surfaces as an error instead of silently falling
+// through to whatever the read returns.
 func ensureUniversalAuth(ctx context.Context, siteURL, token, identityId string) (string, error) {
 	uaURL := siteURL + "/api/v1/auth/universal-auth/identities/" + identityId
-	data, status, err := infisicalDo(ctx, http.MethodPost, uaURL, token, map[string]any{})
+
+	data, status, err := infisicalDo(ctx, http.MethodGet, uaURL, token, nil)
 	if err != nil {
 		return "", err
 	}
 	if status >= 200 && status < 300 {
-		return parseUniversalAuthClientId(data)
+		return parseUniversalAuthClientId(data) // already configured
 	}
-	// Already attached (conflict): read the existing universal-auth config.
-	data, status, err = infisicalDo(ctx, http.MethodGet, uaURL, token, nil)
+	if status != http.StatusNotFound {
+		return "", fmt.Errorf("infisical: read universal auth failed (HTTP %d)", status)
+	}
+
+	data, status, err = infisicalDo(ctx, http.MethodPost, uaURL, token, map[string]any{})
 	if err != nil {
 		return "", err
 	}
 	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("infisical: attach/read universal auth failed (HTTP %d): %s", status, data)
+		return "", fmt.Errorf("infisical: attach universal auth failed (HTTP %d): %s", status, data)
 	}
 	return parseUniversalAuthClientId(data)
 }

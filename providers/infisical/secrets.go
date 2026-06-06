@@ -138,7 +138,12 @@ func New(clientId, clientSecret, siteUrl, slug string) *InfisicalSecretsAdapter 
 }
 
 // Create provisions an InfisicalWorkspace (deduped per container+region) and an
-// InfisicalSecretsBatch that writes all resolved secrets into it.
+// InfisicalSecretsBatch that writes all resolved secrets into the workspace root.
+// It satisfies SecretsBackendProvider but is no longer called from program.Run —
+// per-service runtime delivery goes through ProvisionService, which writes under
+// /<svc>/infra. The two batch resources would share a Pulumi name only if a
+// SecretsSpec and a ServiceSpec were named identically AND both paths ran, which
+// no longer happens.
 func (a *InfisicalSecretsAdapter) Create(
 	ctx *pulumi.Context, spec types.SecretsSpec, env, region string, all types.AllOutputs,
 ) error {
