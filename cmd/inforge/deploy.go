@@ -54,6 +54,14 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 		return err
 	}
 
+	// Pin the inforge-bootstrap download to this CLI build. program.Run reads
+	// inforge_version (stack config) / INFORGE_VERSION; the inline program runs
+	// in this process, so the env var threads the version through. A "dev" build
+	// has no release asset and fails service provisioning with a clear error.
+	if err := os.Setenv("INFORGE_VERSION", version); err != nil {
+		return fmt.Errorf("set INFORGE_VERSION: %w", err)
+	}
+
 	if stackConfigPath == "" {
 		stackConfigPath = "inforge." + stackName + ".yaml"
 	}

@@ -1,0 +1,69 @@
+package bootstrapper
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const validDescriptor = `version: 1
+service: ghost
+exec: /srv/wardnet/ghost/run
+user: ghost
+provider:
+  kind: infisical
+  url: https://app.infisical.com
+  project: proj-123
+  environment: prod
+  secret_path: /ghost
+env:
+  DATABASE_URL: infra/DATABASE_URL
+  STRIPE_KEY: custom/STRIPE_KEY
+`
+
+func TestParseDescriptorValid(t *testing.T) {
+	d, err := ParseDescriptor([]byte(validDescriptor))
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, d.Version)
+	assert.Equal(t, "ghost", d.Service)
+	assert.Equal(t, "/srv/wardnet/ghost/run", d.Exec)
+	assert.Equal(t, "ghost", d.User)
+	assert.Equal(t, "infisical", d.Provider.Kind)
+	assert.Equal(t, "/ghost", d.Provider.SecretPath)
+	assert.Equal(t, "infra/DATABASE_URL", d.Env["DATABASE_URL"])
+	assert.Equal(t, "custom/STRIPE_KEY", d.Env["STRIPE_KEY"])
+}
+
+// TestParseDescriptorRejectsUnknownVersion is the fleet-skew safety: a descriptor
+// from a newer major must fail the start, never be misread.
+func TestParseDescriptorRejectsUnknownVersion(t *testing.T) {
+	for _, v := range []string{"version: 2", "version: 0", "version: 99"} {
+		doc := v + "\nservice: ghost\nexec: /x\nuser: ghost\nprovider:\n  kind: infisical\n"
+		_, err := ParseDescriptor([]byte(doc))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported descriptor version")
+	}
+}
+
+// TestParseDescriptorRejectsUnknownField catches operator typos in a hand-placed
+// descriptor rather than silently dropping the key.
+func TestParseDescriptorRejectsUnknownField(t *testing.T) {
+	doc := validDescriptor + "extra_typo: oops\n"
+	_, err := ParseDescriptor([]byte(doc))
+	require.Error(t, err)
+}
+
+func TestParseDescriptorRequiresFields(t *testing.T) {
+	cases := map[string]string{
+		"service": "version: 1\nexec: /x\nuser: ghost\nprovider:\n  kind: infisical\n",
+		"exec":    "version: 1\nservice: ghost\nuser: ghost\nprovider:\n  kind: infisical\n",
+		"user":    "version: 1\nservice: ghost\nexec: /x\nprovider:\n  kind: infisical\n",
+		"kind":    "version: 1\nservice: ghost\nexec: /x\nuser: ghost\nprovider:\n  url: https://x\n",
+	}
+	for missing, doc := range cases {
+		_, err := ParseDescriptor([]byte(doc))
+		assert.Error(t, err, "missing %s must error", missing)
+	}
+}

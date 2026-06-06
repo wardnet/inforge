@@ -1,12 +1,15 @@
 # goreleaser configuration for inforge.
 #
-# Builds three binaries from a single repository:
+# Builds four binaries from a single repository:
 #   - inforge                  the CLI
+#   - inforge-bootstrap        runtime secret bootstrapper (service ExecStart)
 #   - pulumi-resource-neon     Pulumi provider plugin (Neon)
 #   - pulumi-resource-infisical Pulumi provider plugin (Infisical)
 #
 # The two provider binaries must keep the `pulumi-resource-<name>` naming
-# convention exactly — Pulumi locates plugins by that filename.
+# convention exactly — Pulumi locates plugins by that filename. inforge-bootstrap
+# is downloaded onto each host by `inforge deploy` from the raw archive, pinned to
+# the deploying inforge version.
 version: 2
 
 before:
@@ -17,6 +20,19 @@ builds:
   - id: inforge
     main: ./cmd/inforge
     binary: inforge
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+  - id: inforge-bootstrap
+    main: ./cmd/inforge-bootstrap
+    binary: inforge-bootstrap
     env:
       - CGO_ENABLED=0
     goos:
@@ -81,6 +97,7 @@ archives:
   - id: raw
     ids:
       - inforge
+      - inforge-bootstrap
       - pulumi-resource-neon
       - pulumi-resource-infisical
     formats:

@@ -22,15 +22,16 @@ See [Installation](https://wardnet.github.io/inforge/getting-started/installatio
 
 ## Binaries
 
-This repository builds three statically-linked, fully self-contained binaries:
+This repository builds four statically-linked, fully self-contained binaries:
 
 | Binary | Purpose |
 |--------|---------|
 | `inforge` | The CLI you invoke directly |
+| `inforge-bootstrap` | Runtime secret bootstrapper — the systemd ExecStart for every service; fetches secrets at start, drops privilege, execs the service |
 | `pulumi-resource-neon` | Pulumi provider plugin for Neon PostgreSQL |
 | `pulumi-resource-infisical` | Pulumi provider plugin for Infisical secrets |
 
-The provider plugins are installed automatically by `inforge plugins install` — you never invoke them directly.
+The provider plugins are installed automatically by `inforge plugins install`, and `inforge-bootstrap` is downloaded onto each host by `inforge deploy` (pinned to the deploying inforge version) — you never invoke either directly.
 
 ## In GitHub Actions
 

@@ -1,8 +1,9 @@
 # inforge — agent guide
 
 Inforge is a Go toolchain that turns declarative infrastructure definitions into real deployments
-via Pulumi and GitHub Actions. This repository builds three statically-linked binaries: the `inforge`
-CLI and two Pulumi provider plugins (`pulumi-resource-neon`, `pulumi-resource-infisical`).
+via Pulumi and GitHub Actions. This repository builds four statically-linked binaries: the `inforge`
+CLI, the `inforge-bootstrap` runtime secret bootstrapper (every service's systemd ExecStart), and two
+Pulumi provider plugins (`pulumi-resource-neon`, `pulumi-resource-infisical`).
 
 ## Commands
 
@@ -12,7 +13,7 @@ go test -race ./...            # run tests (race detector on, as CI does)
 golangci-lint run ./...        # lint — must be clean before a PR
 go run ./cmd/inforge           # run the CLI locally
 
-# Release build dry-run (produces dist/ — three binaries × os/arch):
+# Release build dry-run (produces dist/ — four binaries × os/arch):
 go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 ```
 
@@ -20,6 +21,8 @@ go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 
 ```
 cmd/inforge/                                       # the inforge CLI (user-facing)
+cmd/inforge-bootstrap/                             # runtime secret bootstrapper (service ExecStart)
+internal/bootstrapper/                             # bootstrapper core (descriptor, fetch, decrypt, exec)
 providers/neon/cmd/pulumi-resource-neon/           # Pulumi provider plugin — Neon
 providers/infisical/cmd/pulumi-resource-infisical/ # Pulumi provider plugin — Infisical
 .goreleaser.yml                                    # build/release config (v2 schema)
