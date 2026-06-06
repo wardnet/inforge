@@ -146,6 +146,25 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 	assert.Equal(t, "infra/DATABASE_URL", d.Env["DATABASE_URL"])
 }
 
+// TestRenderDescriptorSecretLess: a nil bundle renders a secret-less descriptor —
+// empty provider, no env — that round-trips through the bootstrapper's parser
+// (which accepts a provider-less descriptor with no env).
+func TestRenderDescriptorSecretLess(t *testing.T) {
+	svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost"}
+
+	out, err := renderDescriptor(svc, nil, "")
+	require.NoError(t, err)
+
+	d, err := bootstrapper.ParseDescriptor([]byte(out))
+	require.NoError(t, err)
+	assert.Equal(t, bootstrapper.SupportedVersion, d.Version)
+	assert.Equal(t, "ghost", d.Service)
+	assert.Equal(t, service.ExecPath("ghost"), d.Exec)
+	assert.Equal(t, "ghost", d.User)
+	assert.Equal(t, "", d.Provider.Kind)
+	assert.Empty(t, d.Env)
+}
+
 func TestServiceSecretsProviderName(t *testing.T) {
 	res := types.Resources{
 		Secrets: []types.SecretsSpec{{Container: "ghost", Provider: "infisical"}},

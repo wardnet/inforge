@@ -46,16 +46,16 @@ func (h *HetznerTLS) Realize(
 	deployUser string,
 	vhosts []types.Vhost,
 	env string,
+	dependsOn []pulumi.Resource,
 ) error {
 	if spec.Provider != "hetzner" {
 		return fmt.Errorf("hetzner provider received tls-termination spec with provider=%q", spec.Provider)
 	}
 	// Both connection requirements are enforced only at up time. During preview
 	// the command.remote resources never connect (no Create on a dry run), so a
-	// missing deploy user or key is harmless and preview must still succeed —
-	// mirroring how the program leaves the key broker nil in preview. deploy_user
-	// is also validated up front (a terminator's host must declare one), so this
-	// guard is a backstop.
+	// missing deploy user or key is harmless and preview must still succeed.
+	// deploy_user is also validated up front (a terminator's host must declare
+	// one), so this guard is a backstop.
 	if !ctx.DryRun() {
 		if deployUser == "" {
 			return fmt.Errorf("tls-termination %q: host has no deploy_user; inforge needs one to SSH and realize the terminator", spec.Name)
@@ -70,11 +70,13 @@ func (h *HetznerTLS) Realize(
 	base := naming.Resource(env, h.slug, "tls", spec.Name)
 	caddyfileContent := caddy.Caddyfile()
 
-	// 1. Install Caddy + host tooling (jq/yq/sops/age) and prepare conf.d.
+	// 1. Install Caddy and prepare conf.d. This is the first per-host SSH command,
+	//    so it carries dependsOn (the host's cloud-init readiness gate); every
+	//    later step chains off it, so the whole realization waits on the gate.
 	install, err := remote.NewCommand(ctx, base+"-install", &remote.CommandArgs{
 		Connection: conn,
 		Create:     pulumi.String(caddy.InstallScript()),
-	})
+	}, pulumi.DependsOn(dependsOn))
 	if err != nil {
 		return fmt.Errorf("tls-termination %q: install caddy: %w", spec.Name, err)
 	}

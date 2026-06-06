@@ -18,9 +18,10 @@ implemented.
 ## Relationships
 
 - **Toolkit → providers**: the Toolkit defines provider interfaces (`NetworkProvider`,
-  `ComputeProvider`, `DnsProvider`, `DatabaseProvider`, `SecretsBackendProvider`) and a
-  `ProviderRegistry`. Each provider context satisfies one or more of these. At this phase the
-  registry is a stub that returns `unknown provider` for every lookup.
-- **Toolkit ↔ key broker**: the Toolkit *integrates* with an external, multi-tenant bootstrap
-  key broker (owned in `wardnet-infrastructure`) for first-boot secret decryption; it does not
-  implement it. See [ADR-0006](./docs/adr/0006-bootstrap-key-broker-and-sops-age.md).
+  `ComputeProvider`, `DnsProvider`, `DatabaseProvider`, `TLSTerminationProvider`,
+  `ServiceSecretsProvisioner`) and a `ProviderRegistry`. Each provider context satisfies one or more
+  of these.
+- **Toolkit ↔ secrets**: services fetch their own secrets at runtime via `inforge-bootstrap`. inforge
+  writes each service's provider coordinates and a host-key-encrypted machine-identity credential to
+  the host; it bakes no secret values and uses no key broker. See
+  [ADR-0010](./docs/adr/0010-runtime-secret-fetch.md).

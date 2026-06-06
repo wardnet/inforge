@@ -34,7 +34,7 @@ compute: bridge-01       # required — specKey of the host VM the terminator ru
 ## Realization
 
 On Hetzner the terminator is realized over SSH at deploy time: inforge connects to the host as its
-`deploy_user`, installs Caddy plus the host tooling (`jq`, `yq`, `sops`, `age`), writes a base
+`deploy_user`, installs Caddy (plus the packages its apt repository needs), writes a base
 Caddyfile that imports `conf.d/*.caddy`, writes one `conf.d/<service>.caddy` vhost per ingress-bearing
 service, and reloads Caddy. The install is idempotent and re-runnable: adding a service adds a vhost
 file and reloads; removing one deletes the file and reloads.

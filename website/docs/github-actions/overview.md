@@ -44,7 +44,6 @@ level — otherwise GitHub blocks the run with a permission error.
 |------------|-------------|
 | `contents: read` | All workflows (checkout) |
 | `pull-requests: write` | `preview.yml`, `deploy.yml` (PR comment reports) |
-| `id-token: write` | `deploy.yml`, `reconcile.yml` (OIDC token for key broker) |
 | `issues: write` | `reconcile.yml` (drift issue creation) |
 
 See [GitHub docs on default permissions](https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token)
@@ -139,15 +138,10 @@ Set these secrets in your repository (Settings → Secrets → Actions):
 | `INFISICAL_CLIENT_ID` | Infisical client ID | Secrets |
 | `INFISICAL_CLIENT_SECRET` | Infisical client secret | Secrets |
 
-## Bootstrap permissions
+## Secret delivery
 
-For VMs with secret values, the deploy workflow needs OIDC permission to call the
-key broker service:
-
-```yaml
-permissions:
-  id-token: write
-  contents: read
-```
-
-This is set automatically in the `deploy.yml` reusable workflow.
+Secrets are delivered to services at deploy time without any OIDC token or key broker: inforge writes
+each service's provider coordinates and a host-key-encrypted machine-identity credential to the host
+over SSH, and the service fetches its own secrets at runtime. The deploy workflow needs the
+`INFISICAL_CLIENT_ID` / `INFISICAL_CLIENT_SECRET` credentials (above) and the deploy SSH key — no
+`id-token: write` permission.

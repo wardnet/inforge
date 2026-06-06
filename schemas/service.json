@@ -4,7 +4,7 @@
   "title": "Service resource",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "container", "provider", "host", "type"],
+  "required": ["name", "container", "provider", "host", "type", "user"],
   "properties": {
     "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
     "container": { "type": "string", "minLength": 1 },

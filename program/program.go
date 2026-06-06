@@ -42,10 +42,10 @@ func Run(ctx *pulumi.Context) error {
 	}
 
 	// The deploy SSH private key is a deploy-time secret used purely to SSH the
-	// host and realize host-level resources (tls-termination). It is injected
-	// here from stack config (deploy_private_key) or INFORGE_DEPLOY_PRIVATE_KEY
-	// — the same pattern as oidc_token — and never read from variables.yaml.
-	// Empty in preview, where no remote command runs.
+	// host and realize host-level resources (tls-termination, service units). It
+	// is injected here from stack config (deploy_private_key) or
+	// INFORGE_DEPLOY_PRIVATE_KEY — never read from variables.yaml. Empty in
+	// preview, where no remote command runs.
 	deployPrivateKey := cfg.Get("deploy_private_key")
 	if deployPrivateKey == "" {
 		deployPrivateKey = os.Getenv("INFORGE_DEPLOY_PRIVATE_KEY")
@@ -55,8 +55,8 @@ func Run(ctx *pulumi.Context) error {
 	// inforgeVersion pins the inforge-bootstrap release asset each host downloads
 	// during service provisioning. It is injected by the CLI (which knows its own
 	// build version) via stack config / INFORGE_VERSION — the same pattern as
-	// oidc_token/deploy_private_key — and defaults to "dev", which has no release
-	// asset and so fails service provisioning at up time with a clear error.
+	// deploy_private_key — and defaults to "dev", which has no release asset and so
+	// fails service provisioning at up time with a clear error.
 	inforgeVersion := cfg.Get("inforge_version")
 	if inforgeVersion == "" {
 		inforgeVersion = os.Getenv("INFORGE_VERSION")
@@ -177,7 +177,11 @@ func Run(ctx *pulumi.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := realizeTLSTermination(ctx, reg, res, computeOutputs[region], env, slug, vars.BaseDomain); err != nil {
+		// gates memoizes one cloud-init readiness gate per host in this region.
+		// Both TLS realization and service provisioning SSH the same hosts, so the
+		// gate they each depend on must be the same resource — share the map.
+		gates := map[string]pulumi.Resource{}
+		if err := realizeTLSTermination(ctx, reg, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain); err != nil {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs}
@@ -185,12 +189,44 @@ func Run(ctx *pulumi.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := provisionServices(ctx, res, computeOutputs[region], bundles, vars.SSH.DeployPrivateKey, env, slug, inforgeVersion); err != nil {
+		if err := provisionServices(ctx, res, computeOutputs[region], bundles, gates, vars.SSH.DeployPrivateKey, env, slug, inforgeVersion); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// cloudInitGate returns the per-host cloud-init readiness gate, creating it on
+// first use for a host and memoizing it in gates by canonical host specKey. It
+// connects as ROOT — Hetzner injects the deploy public key into root's
+// authorized_keys at server creation (via the server's SshKeys), so root SSH
+// works before cloud-init has finished creating the asynchronous deploy_user —
+// and blocks on `cloud-init status --wait`, which exits non-zero if cloud-init
+// failed (so the gate fails the deploy loudly rather than racing it). It carries
+// no Triggers, so Pulumi runs it about once per host (first provision); every
+// per-host SSH command DependsOn it, so none races deploy_user creation. In
+// preview command.remote never connects, so there is no behavior change there.
+func cloudInitGate(ctx *pulumi.Context, gates map[string]pulumi.Resource, hostKey string, host types.ComputeOutputs, deployPrivateKey, env, slug string) (pulumi.Resource, error) {
+	if g, ok := gates[hostKey]; ok {
+		return g, nil
+	}
+	conn := iremote.Connection(host.PublicIP, "root", deployPrivateKey)
+	// The gate is the one truly per-host command resource (all sibling commands are
+	// per service/terminator), so its logical name keys on the canonical host
+	// specKey — yielding a stable, unique Pulumi name, one per host.
+	name := naming.Resource(env, slug, "vm", hostKey) + "-cloudinit-ready"
+	const wait = "cloud-init status --wait"
+	gate, err := remote.NewCommand(ctx, name, &remote.CommandArgs{
+		Connection: conn,
+		Create:     pulumi.String(wait),
+		Update:     pulumi.String(wait),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("host %q: cloud-init readiness gate: %w", hostKey, err)
+	}
+	gates[hostKey] = gate
+	return gate, nil
 }
 
 // provisionServices writes the host-side scaffolding for each service in a
@@ -203,7 +239,7 @@ func Run(ctx *pulumi.Context) error {
 // whole `pulumi up`. The unit is written, daemon-reloaded, and enabled (for
 // boot persistence); release performs the first real start with code present.
 // Connection details and the preview/up guard mirror realizeTLSTermination.
-func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, bundles map[string]*types.ServiceSecretsBundle, deployPrivateKey, env, slug, inforgeVersion string) error {
+func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, bundles map[string]*types.ServiceSecretsBundle, gates map[string]pulumi.Resource, deployPrivateKey, env, slug, inforgeVersion string) error {
 	if len(res.Service) == 0 {
 		return nil
 	}
@@ -236,11 +272,24 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 				return fmt.Errorf("service %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", svc.Name)
 			}
 		}
-		if err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug, inforgeVersion); err != nil {
+		// Every per-host SSH command waits on the host's cloud-init readiness gate
+		// so it never races the asynchronous deploy_user creation.
+		gate, err := cloudInitGate(ctx, gates, hostKey, host, deployPrivateKey, env, slug)
+		if err != nil {
 			return err
 		}
+		if err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug, inforgeVersion, gate); err != nil {
+			return err
+		}
+		// Every service gets a descriptor.yaml. A secret-bearing service also gets a
+		// host-key-encrypted credential.age; a secret-less one (no bundle) gets a
+		// static descriptor with an empty provider and no env.
 		if bundle := bundles[svc.Name]; bundle != nil {
-			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, slug); err != nil {
+			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, slug, gate); err != nil {
+				return err
+			}
+		} else {
+			if err := deliverServiceDescriptor(ctx, svc, host, deployUser, deployPrivateKey, env, slug, gate); err != nil {
 				return err
 			}
 		}
@@ -250,7 +299,7 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 
 // provisionService writes one service's unit + folder (+ no-login user) on its
 // host. The unit is enabled but never started here (see provisionServices).
-func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug, inforgeVersion string) error {
+func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug, inforgeVersion string, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	createScript := serviceProvisionScript(svc, inforgeVersion)
 	name := naming.Resource(env, slug, "svc", svc.Name)
@@ -264,7 +313,7 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 		Update:   pulumi.String(createScript),
 		Delete:   pulumi.String(serviceDeprovisionScript(svc)),
 		Triggers: pulumi.Array{pulumi.String(createScript)},
-	}); err != nil {
+	}, pulumi.DependsOn([]pulumi.Resource{gate})); err != nil {
 		return fmt.Errorf("service %q: provision unit: %w", svc.Name, err)
 	}
 	return nil
@@ -274,7 +323,8 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 // writes the service's infra secrets under its scoped vault path and mints a
 // per-service machine identity, returning the bundles keyed by service name. A
 // service whose container has no infisical secrets yields no bundle (and gets a
-// unit but no descriptor/credential — see deliverServiceSecrets).
+// unit + a static secret-less descriptor, but no credential — see
+// deliverServiceDescriptor).
 func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, all types.AllOutputs, env, region string) (map[string]*types.ServiceSecretsBundle, error) {
 	bundles := map[string]*types.ServiceSecretsBundle{}
 	for _, svc := range res.Service {
@@ -321,25 +371,20 @@ func serviceSecretsProviderName(svc types.ServiceSpec, res types.Resources) stri
 // second command writes both files. The descriptor's provider.project is the
 // workspace ID, so it too is rendered inside an ApplyT on that output. Connection
 // details and the preview/up guards mirror provisionService.
-func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, slug string) error {
-	// A secret-bearing service must declare the no-login user it runs as: the
-	// descriptor requires it, and the bootstrapper fails the start without it.
-	// Catch it here at deploy time rather than letting the host reject the
-	// descriptor at first start.
-	if svc.User == "" {
-		return fmt.Errorf("service %q: a service with secrets must declare a user (the no-login account it runs as)", svc.Name)
-	}
+func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, slug string, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
 	// Read the host SSH public key. It is world-readable, so no sudo is needed;
 	// its Stdout (with a trailing newline agehost.Encrypt trims) is the recipient.
+	// This is the first per-host SSH command in this path, so it waits on the
+	// cloud-init gate; the credential write chains off it transitively.
 	const readHostKey = "cat /etc/ssh/ssh_host_ed25519_key.pub"
 	hostKey, err := remote.NewCommand(ctx, name+"-hostkey", &remote.CommandArgs{
 		Connection: conn,
 		Create:     pulumi.String(readHostKey),
 		Update:     pulumi.String(readHostKey),
-	})
+	}, pulumi.DependsOn([]pulumi.Resource{gate}))
 	if err != nil {
 		return fmt.Errorf("service %q: read host key: %w", svc.Name, err)
 	}
@@ -400,24 +445,56 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 	return nil
 }
 
+// deliverServiceDescriptor writes a secret-less service's descriptor.yaml (0644)
+// onto its host: a single static command, with no provider, no env, no host-key
+// read, and no credential. The descriptor is fully known at plan time (no
+// workspace ID to resolve), so it needs no ApplyT. Connection details and the
+// preview/up guards mirror provisionService.
+func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug string, gate pulumi.Resource) error {
+	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
+	name := naming.Resource(env, slug, "svc", svc.Name)
+
+	descriptor, err := renderDescriptor(svc, nil, "")
+	if err != nil {
+		return err
+	}
+	writeScript := iremote.WriteFileScript(service.DescriptorPath(svc.Name), descriptor)
+	deleteScript := iremote.DeleteFileScript(service.DescriptorPath(svc.Name))
+
+	if _, err := remote.NewCommand(ctx, name+"-secrets", &remote.CommandArgs{
+		Connection: conn,
+		Create:     pulumi.String(writeScript),
+		Update:     pulumi.String(writeScript),
+		Delete:     pulumi.String(deleteScript),
+		Triggers:   pulumi.Array{pulumi.String(writeScript)},
+	}, pulumi.DependsOn([]pulumi.Resource{gate})); err != nil {
+		return fmt.Errorf("service %q: write descriptor: %w", svc.Name, err)
+	}
+	return nil
+}
+
 // renderDescriptor marshals the on-host bootstrapper descriptor for a service.
 // It builds the bootstrapper's own Descriptor struct (imported, not duplicated)
-// so the producer can never drift from the consumer's schema; project is the
-// resolved workspace ID.
+// so the producer can never drift from the consumer's schema. A nil bundle is a
+// secret-less service: the provider is left zero-valued and env nil, which the
+// bootstrapper reads as "no secrets to fetch". For a secret-bearing service,
+// project is the resolved workspace ID.
 func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle, project string) (string, error) {
 	d := bootstrapper.Descriptor{
 		Version: bootstrapper.SupportedVersion,
 		Service: svc.Name,
 		Exec:    service.ExecPath(svc.Name),
 		User:    svc.User,
-		Provider: bootstrapper.Provider{
+	}
+	if bundle != nil {
+		d.Provider = bootstrapper.Provider{
 			Kind:        bundle.ProviderKind,
 			URL:         bundle.URL,
 			Project:     project,
 			Environment: bundle.Environment,
 			SecretPath:  bundle.SecretPath,
-		},
-		Env: bundle.Env,
+		}
+		d.Env = bundle.Env
 	}
 	b, err := yaml.Marshal(d)
 	if err != nil {
@@ -506,7 +583,7 @@ func serviceDeprovisionScript(svc types.ServiceSpec) string {
 // provider stays a pure installer), and asks the provider to realize it. Compute
 // FKs are resolved through the same canonicalization validation uses, so
 // `compute: bridge` and `host: bridge-01` agree on the host.
-func realizeTLSTermination(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, env, slug, baseDomain string) error {
+func realizeTLSTermination(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, deployPrivateKey, env, slug, baseDomain string) error {
 	if len(res.TLSTermination) == 0 {
 		return nil
 	}
@@ -528,7 +605,12 @@ func realizeTLSTermination(ctx *pulumi.Context, reg registry.ProviderRegistry, r
 		if err != nil {
 			return err
 		}
-		if err := tp.Realize(ctx, spec, host, deployUserByCompute[hostKey], vhostsByCompute[hostKey], env); err != nil {
+		// The realization SSHes the host, so it waits on the host's cloud-init gate.
+		gate, err := cloudInitGate(ctx, gates, hostKey, host, deployPrivateKey, env, slug)
+		if err != nil {
+			return err
+		}
+		if err := tp.Realize(ctx, spec, host, deployUserByCompute[hostKey], vhostsByCompute[hostKey], env, []pulumi.Resource{gate}); err != nil {
 			return err
 		}
 	}

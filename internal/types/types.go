@@ -218,20 +218,17 @@ type DnsProvider interface {
 // The signature is grounded in the Hetzner/Caddy consumer: the provider is a
 // pure installer over SSH, so it needs the host, the connection identity, and
 // the resolved vhosts — nothing more. env scopes the names of the Pulumi
-// resources it creates.
+// resources it creates. dependsOn carries the host's cloud-init readiness gate
+// (and any other prerequisites): the provider must make its first per-host SSH
+// command depend on it so realization never races the host's deploy_user
+// creation.
 type TLSTerminationProvider interface {
-	Realize(ctx *pulumi.Context, spec TLSTerminationSpec, host ComputeOutputs, deployUser string, vhosts []Vhost, env string) error
+	Realize(ctx *pulumi.Context, spec TLSTerminationSpec, host ComputeOutputs, deployUser string, vhosts []Vhost, env string, dependsOn []pulumi.Resource) error
 }
 
 // DatabaseProvider creates a managed database.
 type DatabaseProvider interface {
 	Create(ctx *pulumi.Context, spec DatabaseSpec, env, region string) (DatabaseOutputs, error)
-}
-
-// SecretsBackendProvider materialises a secrets resource into a backend,
-// resolving references against the outputs produced so far.
-type SecretsBackendProvider interface {
-	Create(ctx *pulumi.Context, spec SecretsSpec, env, region string, all AllOutputs) error
 }
 
 // ServiceSecretsBundle is everything inforge needs to deliver one service's
@@ -281,9 +278,8 @@ type SSHConfig struct {
 	//
 	// It is a deploy-time secret: never read from variables.yaml (hence
 	// `yaml:"-"`), but injected by the program from stack config
-	// (deploy_private_key) or INFORGE_DEPLOY_PRIVATE_KEY — the same pattern as
-	// the OIDC token. A committed private key would violate "never commit
-	// secrets".
+	// (deploy_private_key) or INFORGE_DEPLOY_PRIVATE_KEY. A committed private key
+	// would violate "never commit secrets".
 	DeployPrivateKey string `yaml:"-"`
 }
 

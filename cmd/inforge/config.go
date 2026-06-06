@@ -20,14 +20,9 @@ type backendConfig struct {
 	Branch string `yaml:"branch"`
 }
 
-type brokerConfig struct {
-	URL string `yaml:"url"`
-}
-
 type projectConfig struct {
 	Name    string        `yaml:"name"`
 	Backend backendConfig `yaml:"backend"`
-	Broker  brokerConfig  `yaml:"broker"`
 }
 
 // backendURL returns the Pulumi-compatible backend URL for the project config.

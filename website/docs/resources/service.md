@@ -16,7 +16,7 @@ container: bridge        # required
 provider: ""             # optional — services have no provider (host-managed)
 host: bridge-01          # required — specKey of the Compute VM that hosts this service
 type: raw                # required — delivery type
-user: wardnet            # optional — no-login system user the service runs as (raw only)
+user: wardnet            # required — no-login system user the service runs as
 ingress:                 # optional — expose this service via the host's TLS terminator
   hostname: api          #   required — host label, env-scoped into an FQDN
   port: 8080             #   required — local port the service listens on
@@ -31,7 +31,7 @@ ingress:                 # optional — expose this service via the host's TLS t
 | `provider` | string | No | Unused for services; omit or leave empty. |
 | `host` | string | Yes | specKey of the Compute VM that hosts this service. |
 | `type` | string | Yes | Delivery type. Currently only `raw` (SSH-push) is supported. `container` is reserved. |
-| `user` | string | No | No-login system user the service runs as (`raw` only). When set, inforge emits `User=<name>` in the systemd unit and creates the user via SSH on first deploy. When absent, no user is created. |
+| `user` | string | Yes | No-login system user the service runs as. inforge emits `User=<name>` in the systemd unit and creates the account via SSH on first deploy; the bootstrapper drops privilege to it before exec. |
 | `ingress` | object | No | Exposes the service for inbound traffic via the host's [TLS termination](./tls-termination) resource. See [Ingress](#ingress) below. |
 
 ## Delivery types
@@ -74,15 +74,15 @@ then SSHes in as the host's deploy user, extracts the payload into the folder, a
 
 ## Service user
 
-When `user` is set, `inforge deploy`:
+Every service must declare a `user`. `inforge deploy`:
 
 1. Emits `User=<name>` in the inforge-managed systemd unit so the service process runs as that account.
 2. Creates the account with `useradd --system --shell /usr/sbin/nologin <name>` when provisioning the
    unit (idempotent).
 
 The user is a no-login system account, **distinct from the host's `deploy_user`** (the account inforge
-connects as over SSH). This field is only meaningful for `type: raw` services; container services
-manage their user inside the image.
+connects as over SSH). It is the account `inforge-bootstrap` drops privilege to before exec, so it is
+required for every service — with or without secrets.
 
 ## Ingress
 

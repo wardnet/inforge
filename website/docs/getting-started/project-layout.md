@@ -10,7 +10,7 @@ An inforge project has a fixed directory structure. Every path is relative to th
 
 | File | Purpose |
 |------|---------|
-| `inforge.yaml` | Project config: name, backend, key broker URL |
+| `inforge.yaml` | Project config: name, backend |
 | `inforge.<env>.yaml` | Per-environment stack config (one file per environment) |
 
 ## resources/
