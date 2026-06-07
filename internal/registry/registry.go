@@ -184,7 +184,10 @@ func (r *registry) Database(name string) (types.DatabaseProvider, error) {
 	case "neon":
 		r.neonDbOnce.Do(func() {
 			apiKey := providerCfgString(r.config, "neon", "apiKey")
-			r.neonDb = neon.New(apiKey, r.project, r.slug)
+			// region is empty for a regional block (the abstract region maps to a
+			// Neon region) and set for the global block (no abstract region to map).
+			region := providerCfgString(r.config, "neon", "region")
+			r.neonDb = neon.New(apiKey, r.project, r.slug, region)
 		})
 		return r.neonDb, nil
 	default:

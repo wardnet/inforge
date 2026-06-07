@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -278,9 +279,16 @@ func envToSlug(env string) string {
 // resolveRef resolves a secrets source string to a Pulumi StringOutput.
 //
 // Supported forms:
-//   - ref:database/<name>.<output> — looks up database output (connectionUrl)
-//   - ref:compute/<name>.<output>  — looks up compute output (publicIp)
-//   - gha:<NAME>                   — returns the GHA placeholder string
+//   - ref:database/<name>.<output>        — looks up database output (connectionUrl)
+//   - ref:compute/<name>.<output>         — looks up compute output (publicIp)
+//   - ref:database/global/<name>.<output> — looks up a GLOBAL database output
+//   - ref:compute/global/<name>.<output>  — looks up a GLOBAL compute output
+//   - gha:<NAME>                          — returns the GHA placeholder string
+//
+// A `global/` prefix on the referenced name (RefName == "global/<name>") is the
+// one allowed cross-region reference: it resolves against the region-less global
+// slot (all.Database["global"] / all.Compute["global"]) regardless of the
+// service's own region. The lookup region and the bare name are derived once here.
 func resolveRef(source, region string, all types.AllOutputs) (pulumi.StringOutput, error) {
 	src, err := validate.ParseSource(source)
 	if err != nil {
@@ -292,6 +300,13 @@ func resolveRef(source, region string, all types.AllOutputs) (pulumi.StringOutpu
 		return pulumi.String("__GHA_SECRET:" + src.GHAName + "__").ToStringOutput(), nil
 
 	case validate.SourceRef:
+		// A global/ prefix redirects the lookup to the global slot, independent of
+		// the consuming service's region.
+		name := src.RefName
+		if rest, ok := strings.CutPrefix(src.RefName, "global/"); ok {
+			region = "global"
+			name = rest
+		}
 		switch src.RefType {
 		case "database":
 			regionMap, ok := all.Database[region]
@@ -301,11 +316,11 @@ func resolveRef(source, region string, all types.AllOutputs) (pulumi.StringOutpu
 					source, region, sortedKeys(all.Database),
 				)
 			}
-			db, ok := regionMap[src.RefName]
+			db, ok := regionMap[name]
 			if !ok {
 				return pulumi.StringOutput{}, fmt.Errorf(
 					"resolveRef %q: no database %q in region %q (available: %v)",
-					source, src.RefName, region, sortedStringKeys(regionMap),
+					source, name, region, sortedStringKeys(regionMap),
 				)
 			}
 			if src.RefOutput != "connectionUrl" {
@@ -324,11 +339,11 @@ func resolveRef(source, region string, all types.AllOutputs) (pulumi.StringOutpu
 					source, region, sortedKeys(all.Compute),
 				)
 			}
-			comp, ok := regionMap[src.RefName]
+			comp, ok := regionMap[name]
 			if !ok {
 				return pulumi.StringOutput{}, fmt.Errorf(
 					"resolveRef %q: no compute instance %q in region %q (available: %v)",
-					source, src.RefName, region, sortedStringKeys(regionMap),
+					source, name, region, sortedStringKeys(regionMap),
 				)
 			}
 			if src.RefOutput != "publicIp" {

@@ -1,0 +1,19 @@
+# A single region whose services reference a database that lives once, globally.
+regions:
+  us-east-1:
+    slug: use1
+    providers:
+      neon:
+        apiKey: test-key
+      infisical:
+        clientId: test-id
+        clientSecret: test-secret
+# The global slot carries provider config only (no slug): the global slice
+# realizes against it with region-less naming.
+global:
+  providers:
+    neon:
+      apiKey: test-key
+      # The region-less global slice has no abstract region to map, so its Neon
+      # region is given explicitly here (see ADR-0013).
+      region: aws-us-east-2

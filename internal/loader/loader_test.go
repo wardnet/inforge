@@ -72,6 +72,32 @@ func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
 	require.Len(t, res.Network, 2)
 }
 
+// TestLoadGlobalResources reads the global slice under resources/<env>/global/
+// into a separate resource set, distinct from the regional set.
+func TestLoadGlobalResources(t *testing.T) {
+	global, err := LoadGlobalResources("global-ok", testdataDir)
+	require.NoError(t, err)
+	require.Len(t, global.Database, 1, "the global slice declares one database")
+	assert.Equal(t, "shared", global.Database[0].Name)
+	assert.Equal(t, "main", global.Database[0].Branch, "database branch should default to main")
+
+	// The regional set of the same environment does NOT include the global
+	// database: global/ is loaded separately, not as a regional resource type.
+	regional, err := LoadResources("global-ok", testdataDir)
+	require.NoError(t, err)
+	assert.Empty(t, regional.Database, "global/ must not leak into the regional set")
+}
+
+// TestLoadGlobalResourcesMissing confirms an environment with no global/ slice
+// yields an empty set (the global slice is optional), with no error.
+func TestLoadGlobalResourcesMissing(t *testing.T) {
+	global, err := LoadGlobalResources("ok", testdataDir)
+	require.NoError(t, err)
+	assert.Empty(t, global.Database)
+	assert.Empty(t, global.Compute)
+	assert.Empty(t, global.Network)
+}
+
 // TestLoadRegionTableFromFile exercises the nested regions.yaml: the per-region
 // slug + provider config under `regions:`, plus the optional `global:` block.
 func TestLoadRegionTableFromFile(t *testing.T) {

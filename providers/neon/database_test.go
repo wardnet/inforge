@@ -62,7 +62,7 @@ func (m *dbMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Pr
 // meaning no duplicate NeonProject resources are registered.
 func TestEnsureContainerIdempotent(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("test-api-key", "test-project", "use1")
+		adapter := New("test-api-key", "test-project", "use1", "")
 
 		first, err := adapter.ensureContainer(ctx, "mycontainer", "prod", "aws-us-east-2")
 		if err != nil {
@@ -86,7 +86,7 @@ func TestEnsureContainerIdempotent(t *testing.T) {
 // (container, region) pairs produce distinct NeonProject resources.
 func TestEnsureContainerDifferentRegionsAreIndependent(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("test-api-key", "test-project", "use1")
+		adapter := New("test-api-key", "test-project", "use1", "")
 
 		east, err := adapter.ensureContainer(ctx, "mycontainer", "prod", "aws-us-east-2")
 		if err != nil {
@@ -154,7 +154,7 @@ func (m *namingCapture) NewResource(args pulumi.MockResourceArgs) (string, resou
 func TestNeonProjectNamePassedToAPIMatchesNamingConvention(t *testing.T) {
 	mocks := newNamingCapture()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("api-key", "inforge", "use1")
+		adapter := New("api-key", "inforge", "use1", "")
 		spec := types.DatabaseSpec{
 			Name:      "main",
 			Container: "bridge",
@@ -178,7 +178,7 @@ func TestNeonProjectNamePassedToAPIMatchesNamingConvention(t *testing.T) {
 func TestNeonDatabasePulumiNameMatchesNamingConvention(t *testing.T) {
 	mocks := newNamingCapture()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("api-key", "inforge", "use1")
+		adapter := New("api-key", "inforge", "use1", "")
 		spec := types.DatabaseSpec{
 			Name:      "main",
 			Container: "bridge",
@@ -197,10 +197,34 @@ func TestNeonDatabasePulumiNameMatchesNamingConvention(t *testing.T) {
 		"Neon database Pulumi logical name must follow naming convention")
 }
 
+// TestResolveRegionConfigOverridesMap verifies the physical Neon region comes
+// from provider config when set (required for the region-less global slice, which
+// has no abstract region to map), and falls back to the abstract-region map
+// otherwise (the regional default, unchanged).
+func TestResolveRegionConfigOverridesMap(t *testing.T) {
+	// Explicit config region wins, even for an abstract region absent from the map
+	// (e.g. the global slice's "global").
+	withRegion := New("k", "p", "", "aws-eu-central-1")
+	got, err := withRegion.resolveRegion("global")
+	require.NoError(t, err)
+	assert.Equal(t, "aws-eu-central-1", got)
+
+	// No config region: fall back to the abstract-region map.
+	noRegion := New("k", "p", "use1", "")
+	got, err = noRegion.resolveRegion("us-east-1")
+	require.NoError(t, err)
+	assert.Equal(t, "aws-us-east-2", got)
+
+	// No config region and an unmapped abstract region: error.
+	_, err = noRegion.resolveRegion("global")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no region mapping")
+}
+
 // TestCreateSmoke verifies that Create returns a non-empty DatabaseOutputs.
 func TestCreateSmoke(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("test-api-key", "test-project", "use1")
+		adapter := New("test-api-key", "test-project", "use1", "")
 		spec := types.DatabaseSpec{
 			Name:      "bridge",
 			Container: "mycontainer",

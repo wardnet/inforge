@@ -64,6 +64,32 @@ func TestResourceInstance(t *testing.T) {
 	}
 }
 
+// TestResourceGlobalScope: an empty slug drops the region segment, yielding the
+// region-less global name (identical to GlobalResource).
+func TestResourceGlobalScope(t *testing.T) {
+	if got, want := Resource("prd", "", "db", "main"), "wardnet-prd-db-main"; got != want {
+		t.Errorf("Resource(global) = %q, want %q", got, want)
+	}
+	if got, want := Resource("prd", "", "db", "main"), GlobalResource("prd", "db", "main"); got != want {
+		t.Errorf("Resource with empty slug = %q, want GlobalResource %q", got, want)
+	}
+}
+
+// TestResourceInstanceGlobalScope: an empty slug drops the region segment but
+// keeps the -NN instance suffix.
+func TestResourceInstanceGlobalScope(t *testing.T) {
+	if got, want := ResourceInstance("prd", "", "vm", "bridge", 1), "wardnet-prd-vm-bridge-01"; got != want {
+		t.Errorf("ResourceInstance(global) = %q, want %q", got, want)
+	}
+}
+
+// TestRecordNameGlobalScope: an empty slug drops the region segment.
+func TestRecordNameGlobalScope(t *testing.T) {
+	if got, want := RecordName("prd", "", "bridge"), "bridge.prd"; got != want {
+		t.Errorf("RecordName(global) = %q, want %q", got, want)
+	}
+}
+
 func TestGlobalResource(t *testing.T) {
 	got := GlobalResource("prd", "key", "user")
 	want := "wardnet-prd-key-user"

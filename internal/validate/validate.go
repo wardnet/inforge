@@ -97,6 +97,43 @@ func readFiles[T any](dir string) ([]fileOf[T], error) {
 	return out, nil
 }
 
+// globalRefs carries the global slice's referenceable outputs so a regional
+// secrets `ref:` may resolve a `global/<name>` target. It holds the global
+// database names and expanded compute specKeys; the regional validation context
+// is seeded with these under a `global/` prefix (see validateResourceSet). It is
+// nil for the global slice's own validation pass, which runs in a global-only
+// context so that a global resource referencing a regional one fails as
+// not-found (enforcing "global → global only").
+type globalRefs struct {
+	databaseNames map[string]bool   // bare global database name -> true
+	computeKind   map[string]string // accepted global compute FK form -> kind
+}
+
+// buildGlobalRefs derives the cross-referenceable outputs from the loaded
+// global resource set (already default-normalised by the loader). Single-instance
+// computes are additionally keyed by their bare name, mirroring CanonicalComputeKeys.
+func buildGlobalRefs(global types.Resources) *globalRefs {
+	g := &globalRefs{databaseNames: map[string]bool{}, computeKind: map[string]string{}}
+	for _, d := range global.Database {
+		g.databaseNames[d.Name] = true
+	}
+	for _, c := range global.Compute {
+		for i := 1; i <= c.InstanceCount; i++ {
+			g.computeKind[naming.SpecKey(c.Name, i)] = c.Kind
+		}
+		if c.InstanceCount == 1 {
+			g.computeKind[c.Name] = c.Kind
+		}
+	}
+	return g
+}
+
+// globalHasResources reports whether the global slice declares any resource.
+func globalHasResources(g types.Resources) bool {
+	return len(g.Network)+len(g.Compute)+len(g.DNS)+len(g.Database)+
+		len(g.Secrets)+len(g.Service)+len(g.TLSTermination) > 0
+}
+
 // regionContext holds the foreign-key targets and tables a region's semantic
 // checks resolve against.
 type regionContext struct {
@@ -134,22 +171,48 @@ func ValidateResources(env, dir string) error {
 	if err != nil {
 		return err
 	}
+	// The global slice's referenceable outputs seed the regional context so a
+	// regional secrets `ref:` may resolve a global/<name> database/compute target.
+	globalRes, err := loader.LoadGlobalResources(env, dir)
+	if err != nil {
+		return err
+	}
 
 	r := &reporter{}
-	checkVariables(r, vars, filepath.Join(dir, env, "variables.yaml"))
-	checkRegionsFile(r, regionTable, global, filepath.Join(dir, env, "regions.yaml"))
+	base := filepath.Join(dir, env)
+	globalBase := filepath.Join(base, "global")
+	checkVariables(r, vars, filepath.Join(base, "variables.yaml"))
+	checkRegionsFile(r, regionTable, global, filepath.Join(base, "regions.yaml"))
 
-	// Validate the shared set once: schema + the region-independent FK graph.
-	// Provider availability is region-specific, so it is skipped here (available
-	// nil) and checked separately per region below.
-	if err := validateResourceSet(r, schemaSet, filepath.Join(dir, env), nil, sizeTable); err != nil {
+	// Validate the global slice in a GLOBAL-ONLY context (globalRefs nil): its FK
+	// graph resolves only against global resources, so a global resource
+	// referencing a regional one fails as not-found — enforcing "global → global
+	// only". A global slice with resources but no global providers block is an error.
+	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil); err != nil {
+		return err
+	}
+	if global == nil && globalHasResources(globalRes) {
+		r.fail("regions.yaml [global]", "resources/"+env+"/global declares resources but regions.yaml has no global providers block")
+	}
+
+	// Validate the shared regional set once: schema + the region-independent FK
+	// graph, with the global outputs injected so a regional secrets `ref:` may
+	// resolve a global/<name> target. Provider availability is region-specific, so
+	// it is skipped here (available nil) and checked separately per region below.
+	if err := validateResourceSet(r, schemaSet, base, nil, sizeTable, buildGlobalRefs(globalRes)); err != nil {
 		return err
 	}
 
 	// Per-region provider availability: the same set deploys into every region, so
 	// each resource's provider must be declared in that region's providers block.
-	if err := checkProviderAvailability(r, filepath.Join(dir, env), regionTable); err != nil {
+	if err := checkProviderAvailability(r, base, regionTable); err != nil {
 		return err
+	}
+	// The global slice realizes against the regions.yaml global providers block.
+	if global != nil {
+		if err := checkGlobalProviderAvailability(r, globalBase, global); err != nil {
+			return err
+		}
 	}
 
 	if r.failed {
@@ -158,7 +221,7 @@ func ValidateResources(env, dir string) error {
 	return nil
 }
 
-func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table) error {
+func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs) error {
 	networkFiles, err := readFiles[types.NetworkSpec](filepath.Join(base, "network"))
 	if err != nil {
 		return err
@@ -239,6 +302,18 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for _, f := range tlsFiles {
 		if c, ok := ctx.computeCanonical[f.spec.Compute]; ok {
 			ctx.tlsByCompute[c] = true
+		}
+	}
+	// Seed the global slice's referenceable outputs under a `global/` prefix so a
+	// regional secrets `ref:database/global/<name>` (RefName == "global/<name>")
+	// resolves. Only database/compute outputs are referenceable cross-region;
+	// service.host and compute.network to global are rejected explicitly below.
+	if global != nil {
+		for name := range global.databaseNames {
+			ctx.databaseNames["global/"+name] = true
+		}
+		for key, kind := range global.computeKind {
+			ctx.computeKind["global/"+key] = kind
 		}
 	}
 
@@ -515,6 +590,29 @@ func checkProviderAvailability(r *reporter, base string, table regions.Table) er
 	return nil
 }
 
+// checkGlobalProviderAvailability verifies each global resource's declared
+// provider is present in the regions.yaml global providers block. The global
+// slice is region-less, so it is checked once against the single global block
+// (mirroring the per-region check in checkProviderAvailability).
+func checkGlobalProviderAvailability(r *reporter, globalBase string, global *regions.Global) error {
+	refs, err := collectProviderRefs(globalBase)
+	if err != nil {
+		return err
+	}
+	available := availableProviders(global.Providers)
+	var msgs []string
+	for _, ref := range refs {
+		if !available[ref.provider] {
+			msgs = append(msgs, fmt.Sprintf("%s: provider %q not defined in regions.yaml global providers block", ref.path, ref.provider))
+		}
+	}
+	if len(msgs) > 0 {
+		sort.Strings(msgs)
+		r.fail("regions.yaml [global] provider availability", msgs...)
+	}
+	return nil
+}
+
 func providerErr(provider string, available map[string]bool) []string {
 	if available == nil {
 		return nil
@@ -549,7 +647,13 @@ func checkCompute(s types.ComputeSpec, ctx regionContext) (errs, warns []string)
 	if s.Kind == "cluster" {
 		warns = append(warns, "kind: \"cluster\" is reserved and not implemented this phase")
 	}
-	if _, ok := ctx.networks[s.Network]; !ok {
+	// A compute attaching to a global network (network: global/<name>) is
+	// recognized but rejected: materializing cross-region networking is not
+	// supported yet. The global/ prefix is detected before the normal
+	// network-existence check so the message is specific rather than "not found".
+	if strings.HasPrefix(s.Network, "global/") {
+		errs = append(errs, fmt.Sprintf("network: %q references a global network — cross-region networking is recognized but not supported yet", s.Network))
+	} else if _, ok := ctx.networks[s.Network]; !ok {
 		errs = append(errs, fmt.Sprintf("network: %q not found", s.Network))
 	}
 	if err := ctx.sizeTable.Resolve(s.Size); err != nil {
@@ -616,6 +720,13 @@ func checkSecrets(s types.SecretsSpec, ctx regionContext) (errs, warns []string)
 
 func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string) {
 	errs = append(errs, providerErr(s.Provider, ctx.available)...)
+	// A service on a global host (host: global/<name>) is rejected: a service that
+	// runs on a global host is defined in the global slice itself, not referenced
+	// from a region. Detected before host resolution so the message is specific.
+	if strings.HasPrefix(s.Host, "global/") {
+		errs = append(errs, fmt.Sprintf("host: %q references a global host — a service on a global host is defined in the global slice itself, not referenced from a region", s.Host))
+		return errs, warns
+	}
 	kind, ok := ctx.computeKind[s.Host]
 	if !ok {
 		errs = append(errs, fmt.Sprintf("host: %q does not resolve to a compute instance", s.Host))

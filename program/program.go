@@ -26,6 +26,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// globalScope is the reserved region key for the region-less global slice: the
+// slot its outputs land in (computeOutputs["global"], …) and the realization key
+// its providers are extracted under. It is NOT an abstract region — it carries an
+// empty slug, so naming.Resource/ResourceInstance produce region-less names.
+const globalScope = "global"
+
 // Run is the Pulumi program entry point, passed to the Automation API as an
 // inline program source.
 func Run(ctx *pulumi.Context) error {
@@ -65,7 +71,7 @@ func Run(ctx *pulumi.Context) error {
 		inforgeVersion = "dev"
 	}
 
-	regionTable, _, err := loader.LoadRegionTable(env, dir)
+	regionTable, globalBlock, err := loader.LoadRegionTable(env, dir)
 	if err != nil {
 		return err
 	}
@@ -75,6 +81,13 @@ func Run(ctx *pulumi.Context) error {
 	// The resource set is defined ONCE and instantiated into every region; the
 	// region slug baked into each cloud name keeps instances unique per region.
 	res, err := loader.LoadResources(env, dir)
+	if err != nil {
+		return err
+	}
+	// The global slice is instantiated once, region-less, before any region — its
+	// outputs land in the "global" slot so a regional secrets ref:database/global/…
+	// can resolve against them. Optional: an absent global/ dir yields an empty set.
+	globalRes, err := loader.LoadGlobalResources(env, dir)
 	if err != nil {
 		return err
 	}
@@ -90,71 +103,31 @@ func Run(ctx *pulumi.Context) error {
 		registries[region] = registry.BuildRegistry(ctx, regionTable[region].Providers, vars.SSH, regionTable, ctx.Project(), env, region)
 	}
 
-	// networkOutputs: region → specName+"/"+subnetName → NetworkOutputs
+	// networkOutputs: region → specName+"/"+subnetName → NetworkOutputs. The
+	// region-less global slice lands under the reserved "global" key.
 	networkOutputs := map[string]map[string]types.NetworkOutputs{}
 	computeOutputs := map[string]map[string]types.ComputeOutputs{}
 	databaseOutputs := map[string]map[string]types.DatabaseOutputs{}
 
+	// Global resources are created FIRST, with an empty slug (region-less naming),
+	// into the "global" slot — so a regional secrets ref:database/global/<name>
+	// resolves against them. The global slice realizes against the regions.yaml
+	// global providers block; its realization is keyed under globalScope so the
+	// hetzner per-region config lookup (ExtractRegionConfigs) still resolves.
+	if globalBlock != nil {
+		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, vars.SSH, regionTable, ctx.Project(), env, globalScope)
+		if err := createInfra(ctx, globalReg, globalRes, env, globalScope, "", vars.BaseDomain, networkOutputs, computeOutputs, databaseOutputs); err != nil {
+			return err
+		}
+	}
+
 	for _, region := range regionNames {
-		reg := registries[region]
 		slug, err := regionTable.Slug(region)
 		if err != nil {
 			return err
 		}
-		networkOutputs[region] = map[string]types.NetworkOutputs{}
-		computeOutputs[region] = map[string]types.ComputeOutputs{}
-		databaseOutputs[region] = map[string]types.DatabaseOutputs{}
-
-		for _, spec := range res.Network {
-			np, err := reg.Network(spec.Provider)
-			if err != nil {
-				return err
-			}
-			subnetMap, err := np.Create(ctx, spec, env, region)
-			if err != nil {
-				return err
-			}
-			for subnetName, out := range subnetMap {
-				networkOutputs[region][spec.Name+"/"+subnetName] = out
-			}
-		}
-
-		for _, spec := range res.Compute {
-			man, err := assembleManifest(spec, env, region, slug)
-			if err != nil {
-				return err
-			}
-
-			netOut, err := resolveNetworkOutput(spec, res.Network, networkOutputs[region])
-			if err != nil {
-				return fmt.Errorf("compute %s/%s: %w", region, spec.Name, err)
-			}
-
-			cp, err := reg.Compute(spec.Provider)
-			if err != nil {
-				return err
-			}
-			for i := 1; i <= spec.InstanceCount; i++ {
-				key := naming.SpecKey(spec.Name, i)
-				domain := naming.RecordFQDN(env, slug, subdomainFor(key, spec.Name, res.DNS), vars.BaseDomain)
-				out, err := cp.Create(ctx, spec, netOut, env, region, domain, man)
-				if err != nil {
-					return err
-				}
-				computeOutputs[region][key] = out
-			}
-		}
-
-		for _, spec := range res.Database {
-			dp, err := reg.Database(spec.Provider)
-			if err != nil {
-				return err
-			}
-			out, err := dp.Create(ctx, spec, env, region)
-			if err != nil {
-				return err
-			}
-			databaseOutputs[region][spec.Name] = out
+		if err := createInfra(ctx, registries[region], res, env, region, slug, vars.BaseDomain, networkOutputs, computeOutputs, databaseOutputs); err != nil {
+			return err
 		}
 	}
 
@@ -195,6 +168,77 @@ func Run(ctx *pulumi.Context) error {
 		}
 	}
 
+	return nil
+}
+
+// createInfra instantiates one scope's network, compute, and database resources
+// into the output maps under the key `region`, using `slug` for naming (empty for
+// the global scope → region-less names). It is the shared body of the per-region
+// instantiation and the global-first pass: the same resource pipeline keyed by a
+// different (region, slug) pair. Compute domains and manifests are scoped by the
+// same slug, so global hosts get region-less FQDNs and regional hosts keep their
+// slug-scoped ones.
+func createInfra(
+	ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, env, region, slug, baseDomain string,
+	networkOutputs map[string]map[string]types.NetworkOutputs,
+	computeOutputs map[string]map[string]types.ComputeOutputs,
+	databaseOutputs map[string]map[string]types.DatabaseOutputs,
+) error {
+	networkOutputs[region] = map[string]types.NetworkOutputs{}
+	computeOutputs[region] = map[string]types.ComputeOutputs{}
+	databaseOutputs[region] = map[string]types.DatabaseOutputs{}
+
+	for _, spec := range res.Network {
+		np, err := reg.Network(spec.Provider)
+		if err != nil {
+			return err
+		}
+		subnetMap, err := np.Create(ctx, spec, env, region)
+		if err != nil {
+			return err
+		}
+		for subnetName, out := range subnetMap {
+			networkOutputs[region][spec.Name+"/"+subnetName] = out
+		}
+	}
+
+	for _, spec := range res.Compute {
+		man, err := assembleManifest(spec, env, region, slug)
+		if err != nil {
+			return err
+		}
+
+		netOut, err := resolveNetworkOutput(spec, res.Network, networkOutputs[region])
+		if err != nil {
+			return fmt.Errorf("compute %s/%s: %w", region, spec.Name, err)
+		}
+
+		cp, err := reg.Compute(spec.Provider)
+		if err != nil {
+			return err
+		}
+		for i := 1; i <= spec.InstanceCount; i++ {
+			key := naming.SpecKey(spec.Name, i)
+			domain := naming.RecordFQDN(env, slug, subdomainFor(key, spec.Name, res.DNS), baseDomain)
+			out, err := cp.Create(ctx, spec, netOut, env, region, domain, man)
+			if err != nil {
+				return err
+			}
+			computeOutputs[region][key] = out
+		}
+	}
+
+	for _, spec := range res.Database {
+		dp, err := reg.Database(spec.Provider)
+		if err != nil {
+			return err
+		}
+		out, err := dp.Create(ctx, spec, env, region)
+		if err != nil {
+			return err
+		}
+		databaseOutputs[region][spec.Name] = out
+	}
 	return nil
 }
 

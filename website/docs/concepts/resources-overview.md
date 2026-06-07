@@ -42,6 +42,14 @@ A resource instance's identity is its **specKey**: `<name>-<NN>` zero-padded (e.
 For a Compute with `name: bridge` and `instance_count: 2`, inforge expands it into `bridge-01`
 and `bridge-02`. Other resources reference compute instances using their specKey as a foreign key.
 
+## The global slice
+
+Alongside the regional set, an environment may define a **global slice** under
+`resources/<env>/global/` — resources that deploy **once**, region-less, instead of into every region.
+A regional secret may reference a global database or compute output; that is the one allowed
+cross-region reference. See [Global resources](./global-resources) for the naming, the `regions.yaml`
+`global:` block, and the cross-reference rules.
+
 ## Validation
 
 Run validation before every PR:

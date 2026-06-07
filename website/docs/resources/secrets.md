@@ -50,6 +50,21 @@ The parts are:
 
 Supported resource types: `database`, `compute`.
 
+#### Referencing a global resource
+
+A `global/` prefix on the referenced name targets the [global slice](../concepts/global-resources) —
+a database or compute that deploys once, region-less, instead of per region:
+
+```yaml
+source: ref:database/global/shared.connectionUrl
+source: ref:compute/global/edge-01.publicIp
+```
+
+This is the **one allowed cross-region reference**: a regional secret may read a global database or
+compute output. The reference resolves against the global slice regardless of which region the
+consuming service runs in. Referencing a global resource from `service.host` or `compute.network` is
+**rejected** — see [Global resources](../concepts/global-resources) for the full rules.
+
 ### `gha:<NAME>`
 
 References a GitHub Actions secret:
@@ -83,7 +98,7 @@ container declares no secrets gets a descriptor with no provider and starts with
 
 ## Example
 
-```yaml title="resources/prd/us-east-1/secrets/bridge-01.yaml"
+```yaml title="resources/prd/secrets/bridge-01.yaml"
 name: bridge-secrets
 container: bridge
 provider: infisical

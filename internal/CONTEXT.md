@@ -31,6 +31,16 @@ The per-environment `regions.yaml`: a map from abstract region to its `{slug, pr
 single authority for which regions deploy and all provider config. The built-in slugs in
 `internal/regions` are naming vocabulary only; there is no default fallback table.
 
+**Global slice**:
+The reserved, region-less scope under `resources/<env>/global/`: resources deployed **once** instead
+of into every region. Not a new resource kind — the same types and schemas — with **region-less
+naming** (`wardnet-<env>-<type>-<name>`, empty slug) and its own provider config in the top-level
+`global:` block of `regions.yaml` (providers, no slug). A regional **Secrets** `ref:` may target a
+global database/compute output via a `global/` name prefix (`ref:database/global/<name>.<output>`) —
+the one allowed cross-region reference; `service.host`/`compute.network` to global are rejected, and a
+global resource may reference only other global resources.
+_Avoid_: "global resource type" (global is a scope, not a kind).
+
 **Container**:
 A logical grouping label (e.g. `bridge`, `ingress`) shared by the resources that make up one unit;
 the basis of URN namespaces and tags.

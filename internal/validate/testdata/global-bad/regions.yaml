@@ -1,0 +1,17 @@
+regions:
+  us-east-1:
+    slug: use1
+    providers:
+      neon:
+        apiKey: test-key
+      infisical:
+        clientId: test-id
+        clientSecret: test-secret
+global:
+  providers:
+    neon:
+      apiKey: test-key
+      region: aws-us-east-2
+    infisical:
+      clientId: test-id
+      clientSecret: test-secret

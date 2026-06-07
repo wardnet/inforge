@@ -81,17 +81,24 @@ type NeonDatabaseAdapter struct {
 	apiKey     string
 	project    string
 	slug       string
+	region     string // explicit Neon region from provider config; overrides the abstract-region map when set
 	mu         sync.Mutex
 	containers map[string]*neonProjectResource // key → project resource
 }
 
 // New returns a NeonDatabaseAdapter configured with the given Neon API key,
-// inforge project name, and region slug.
-func New(apiKey, project, slug string) *NeonDatabaseAdapter {
+// inforge project name, region slug, and an optional explicit Neon region. The
+// explicit region (providers.neon.region in regions.yaml) is the physical Neon
+// region the project lives in: it is required for the region-less global slice
+// (which has no abstract region to map) and overrides the abstract-region map for
+// any region that sets it. When empty, the abstract region is resolved through
+// the built-in map (the regional default), so regional behavior is unchanged.
+func New(apiKey, project, slug, region string) *NeonDatabaseAdapter {
 	return &NeonDatabaseAdapter{
 		apiKey:     apiKey,
 		project:    project,
 		slug:       slug,
+		region:     region,
 		containers: map[string]*neonProjectResource{},
 	}
 }
@@ -101,7 +108,7 @@ func New(apiKey, project, slug string) *NeonDatabaseAdapter {
 func (n *NeonDatabaseAdapter) Create(
 	ctx *pulumi.Context, spec types.DatabaseSpec, env, abstractRegion string,
 ) (types.DatabaseOutputs, error) {
-	neonRegion, err := ResolveRegion(abstractRegion)
+	neonRegion, err := n.resolveRegion(abstractRegion)
 	if err != nil {
 		return types.DatabaseOutputs{}, err
 	}

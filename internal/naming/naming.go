@@ -40,14 +40,27 @@ func SpecKey(name string, instance int) string {
 	return fmt.Sprintf("%s-%02d", name, instance)
 }
 
-// Resource returns wardnet-<env>-<regionSlug>-<type>-<name>.
+// Resource returns wardnet-<env>-<regionSlug>-<type>-<name>. An EMPTY regionSlug
+// is the global scope: the region segment is dropped, yielding the region-less
+// wardnet-<env>-<type>-<name> (identical to GlobalResource). Global resources
+// (resources/<env>/global/) realize with an empty slug so their names carry no
+// region; regional callers always pass a non-empty slug (validated in
+// checkRegionsFile), so the regional path is never silently globalised.
 func Resource(env, regionSlug, resourceType, name string) string {
+	if regionSlug == "" {
+		return GlobalResource(env, resourceType, name)
+	}
 	return fmt.Sprintf("%s-%s-%s-%s-%s", usage, env, regionSlug, resourceType, name)
 }
 
 // ResourceInstance returns wardnet-<env>-<regionSlug>-<type>-<name>-<NN>.
-// Only for resources with instance_count (servers).
+// Only for resources with instance_count (servers). An EMPTY regionSlug is the
+// global scope: the region segment is dropped, yielding
+// wardnet-<env>-<type>-<name>-<NN> (see Resource).
 func ResourceInstance(env, regionSlug, resourceType, name string, instance int) string {
+	if regionSlug == "" {
+		return fmt.Sprintf("%s-%s-%s-%s-%02d", usage, env, resourceType, name, instance)
+	}
 	return fmt.Sprintf("%s-%s-%s-%s-%s-%02d", usage, env, regionSlug, resourceType, name, instance)
 }
 
@@ -60,8 +73,13 @@ func GlobalResource(env, resourceType, name string) string {
 // RecordName returns the zone-relative DNS record name for a host:
 // "<subdomain>.<env>.<regionSlug>" (e.g. "bridge.prd.use1"). The DNS provider
 // appends the zone (base domain) to form the FQDN. This is the single source of
-// truth for DNS record naming — see RecordFQDN for the absolute form.
+// truth for DNS record naming — see RecordFQDN for the absolute form. An EMPTY
+// regionSlug is the global scope: the region segment is dropped, yielding
+// "<subdomain>.<env>".
 func RecordName(env, regionSlug, subdomain string) string {
+	if regionSlug == "" {
+		return fmt.Sprintf("%s.%s", subdomain, env)
+	}
 	return fmt.Sprintf("%s.%s.%s", subdomain, env, regionSlug)
 }
 
