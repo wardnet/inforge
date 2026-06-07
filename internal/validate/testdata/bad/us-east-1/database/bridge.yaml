@@ -1,4 +1,4 @@
-# provider not defined in variables.yaml providers -> FAIL.
+# provider not defined in this region's regions.yaml providers block -> FAIL.
 name: bridge
 container: bridge
 provider: mystery

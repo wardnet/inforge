@@ -108,23 +108,29 @@ func LoadVariablesLenient(env, dir string) (types.EnvironmentVariables, error) {
 	return loadVariables(env, dir, true)
 }
 
-// LoadRegionTable returns the region table for an environment: the per-env
-// resources/<env>/regions.yaml if present (replacing the defaults wholesale),
-// otherwise the built-in defaults.
-func LoadRegionTable(env, dir string) (regions.Table, error) {
+// LoadRegionTable parses an environment's resources/<env>/regions.yaml: the
+// per-region table (slug + provider config) under the top-level `regions:` key,
+// plus the optional region-less `global:` block. regions.yaml is the single
+// authority for which regions deploy and all provider config. A missing file
+// yields an empty table and nil global — an environment with no regions deploys
+// nothing; validation reports the missing authority.
+func LoadRegionTable(env, dir string) (regions.Table, *regions.Global, error) {
 	path := filepath.Join(envDir(env, dir), "regions.yaml")
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return regions.DefaultTable(), nil
+		return regions.Table{}, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read regions table: %w", err)
+		return nil, nil, fmt.Errorf("read regions table: %w", err)
 	}
-	var tbl regions.Table
-	if err := yaml.Unmarshal(b, &tbl); err != nil {
-		return nil, fmt.Errorf("parse regions table: %w", err)
+	var f regions.File
+	if err := yaml.Unmarshal(b, &f); err != nil {
+		return nil, nil, fmt.Errorf("parse regions table: %w", err)
 	}
-	return tbl, nil
+	if f.Regions == nil {
+		f.Regions = regions.Table{}
+	}
+	return f.Regions, f.Global, nil
 }
 
 // LoadSizeTable returns the size table for an environment: the per-env

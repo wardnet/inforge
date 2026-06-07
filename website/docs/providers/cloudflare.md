@@ -14,14 +14,17 @@ The Cloudflare provider implements **DNS** resources.
 
 ## Configuration
 
-Set in `variables.yaml` under `providers.cloudflare`:
+Set in each region's `providers.cloudflare` block in [`regions.yaml`](/configuration/regions-yaml):
 
 ```yaml
-providers:
-  cloudflare:
-    apiToken: ${CLOUDFLARE_API_TOKEN}
-    zoneId: abc123def456   # Cloudflare Zone ID the DNS records are added to
-    tagRecords: false      # optional, default true — see below
+regions:
+  us-east-1:
+    slug: use1
+    providers:
+      cloudflare:
+        apiToken: ${CLOUDFLARE_API_TOKEN}
+        zoneId: abc123def456   # Cloudflare Zone ID the DNS records are added to
+        tagRecords: false      # optional, default true — see below
 ```
 
 - `zoneId` (required) — the Cloudflare Zone ID to add records to.

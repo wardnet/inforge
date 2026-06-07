@@ -104,7 +104,7 @@ func (r *registry) Network(name string) (types.NetworkProvider, error) {
 	switch name {
 	case "hetzner":
 		r.hetznerNetOnce.Do(func() {
-			realizations := hetzner.ExtractRegionConfigs(r.config)
+			realizations := hetzner.ExtractRegionConfigs(r.region, r.config)
 			r.hetznerNet = hetzner.New(r.hetznerProv(), r.project, r.slug, realizations)
 		})
 		return r.hetznerNet, nil
@@ -117,7 +117,7 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 	switch name {
 	case "hetzner":
 		r.hetznerCompOnce.Do(func() {
-			realizations := hetzner.ExtractRegionConfigs(r.config)
+			realizations := hetzner.ExtractRegionConfigs(r.region, r.config)
 			r.hetznerComp = hetzner.NewCompute(
 				r.ssh.AuthorizedKeys,
 				r.ssh.DeployPublicKey,

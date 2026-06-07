@@ -16,17 +16,19 @@ The Hetzner provider implements **Network** and **Compute** resources using
 
 ## Configuration
 
-All Hetzner configuration lives in one block in `variables.yaml` under `providers.hetzner`: the API
-token plus one **region realization** for every abstract region the provider serves. A realization is
-the complete concretization of that region — `location`, `network_zone`, the `serverTypes` map
-(size name → server-type SKU) and the `images` map (canonical image → Hetzner image id):
+Hetzner configuration lives in each region's `providers.hetzner` block in
+[`regions.yaml`](/configuration/regions-yaml): the API token plus that region's **realization**. A
+realization is the complete concretization of the region — `location`, `network_zone`, the
+`serverTypes` map (size name → server-type SKU) and the `images` map (canonical image → Hetzner image
+id):
 
 ```yaml
-providers:
-  hetzner:
-    apiToken: ${HCLOUD_TOKEN}      # supplied via the HCLOUD_TOKEN env var
-    regions:
-      eu-central-1:
+regions:
+  eu-central-1:
+    slug: euc1
+    providers:
+      hetzner:
+        apiToken: ${HCLOUD_TOKEN}      # supplied via the HCLOUD_TOKEN env var
         location: nbg1
         network_zone: eu-central
         serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}

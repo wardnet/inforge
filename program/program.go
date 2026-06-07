@@ -65,10 +65,13 @@ func Run(ctx *pulumi.Context) error {
 		inforgeVersion = "dev"
 	}
 
-	regionTable, err := loader.LoadRegionTable(env, dir)
+	regionTable, _, err := loader.LoadRegionTable(env, dir)
 	if err != nil {
 		return err
 	}
+	// Which regions deploy comes from regions.yaml. Iterate in sorted order so
+	// resource creation is deterministic across runs (the table is a map).
+	regionNames := sortedKeys(regionTable)
 	byRegion, err := loader.LoadResources(env, dir)
 	if err != nil {
 		return err
@@ -80,9 +83,9 @@ func Run(ctx *pulumi.Context) error {
 	}
 	ctx.Export("deployDescriptor", pulumi.Any(desc))
 
-	registries := make(map[string]registry.ProviderRegistry, len(vars.Regions))
-	for _, re := range vars.Regions {
-		registries[re.Name] = registry.BuildRegistry(ctx, vars.Providers, vars.SSH, regionTable, ctx.Project(), env, re.Name)
+	registries := make(map[string]registry.ProviderRegistry, len(regionNames))
+	for _, region := range regionNames {
+		registries[region] = registry.BuildRegistry(ctx, regionTable[region].Providers, vars.SSH, regionTable, ctx.Project(), env, region)
 	}
 
 	// networkOutputs: region → specName+"/"+subnetName → NetworkOutputs
@@ -90,8 +93,7 @@ func Run(ctx *pulumi.Context) error {
 	computeOutputs := map[string]map[string]types.ComputeOutputs{}
 	databaseOutputs := map[string]map[string]types.DatabaseOutputs{}
 
-	for _, re := range vars.Regions {
-		region := re.Name
+	for _, region := range regionNames {
 		reg := registries[region]
 		res := byRegion[region]
 		slug, err := regionTable.Slug(region)
@@ -155,8 +157,7 @@ func Run(ctx *pulumi.Context) error {
 		}
 	}
 
-	for _, re := range vars.Regions {
-		region := re.Name
+	for _, region := range regionNames {
 		reg := registries[region]
 		res := byRegion[region]
 		for _, spec := range res.DNS {

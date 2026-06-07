@@ -1,9 +1,9 @@
 // Package hetzner implements the Hetzner Cloud provider for inforge. It maps
 // each abstract region an environment uses to a complete Hetzner region
 // realization — location, network zone, the server type per size, and the image
-// id per canonical image — read from the providers.hetzner.regions block of
-// variables.yaml. Realizations are fully explicit per region: there are no
-// built-in defaults and no inheritance.
+// id per canonical image — read from that region's
+// regions.yaml regions.<region>.providers.hetzner block. Realizations are fully
+// explicit per region: there are no built-in defaults and no inheritance.
 package hetzner
 
 import (
@@ -20,34 +20,31 @@ type RegionConfig struct {
 	Images      map[string]string // canonical image -> Hetzner image id
 }
 
-// ExtractRegionConfigs reads the providers.hetzner.regions block from the
-// provider config and builds a RegionConfig per abstract region. Each
-// realization supplies "location", "network_zone", "serverTypes" (a size-name →
-// SKU map) and "images" (a canonical-image → image-id map); values arrive as
-// map[string]any from yaml, so non-string and empty entries are skipped. It is
-// nil-safe and returns an empty map when the block is absent. Missing fields are
-// not validated here — ResolveRegion and compute.Create fail closed at use time.
-func ExtractRegionConfigs(config map[string]map[string]any) map[string]RegionConfig {
-	raw, ok := config["hetzner"]["regions"].(map[string]any)
-	if !ok {
+// ExtractRegionConfigs reads the hetzner realization for a single abstract
+// region from that region's provider config (regions.yaml
+// regions.<region>.providers) and returns it keyed by the region name, so
+// ResolveRegion still looks it up by abstract region. The hetzner block supplies
+// "location", "network_zone", "serverTypes" (a size-name → SKU map) and "images"
+// (a canonical-image → image-id map) directly — there is no nested regions map.
+// Values arrive as map[string]any from yaml, so non-string and empty entries are
+// skipped. It is nil-safe and returns an empty map when the region declares no
+// hetzner provider. Missing fields are not validated here — ResolveRegion and
+// compute.Create fail closed at use time.
+func ExtractRegionConfigs(region string, providers map[string]map[string]any) map[string]RegionConfig {
+	h := providers["hetzner"]
+	if h == nil {
 		return map[string]RegionConfig{}
 	}
-	out := make(map[string]RegionConfig, len(raw))
-	for region, v := range raw {
-		realization, ok := v.(map[string]any)
-		if !ok {
-			continue
-		}
-		loc, _ := realization["location"].(string)
-		zone, _ := realization["network_zone"].(string)
-		out[region] = RegionConfig{
+	loc, _ := h["location"].(string)
+	zone, _ := h["network_zone"].(string)
+	return map[string]RegionConfig{
+		region: {
 			Location:    loc,
 			NetworkZone: zone,
-			ServerTypes: extractStringMap(realization["serverTypes"]),
-			Images:      extractStringMap(realization["images"]),
-		}
+			ServerTypes: extractStringMap(h["serverTypes"]),
+			Images:      extractStringMap(h["images"]),
+		},
 	}
-	return out
 }
 
 // extractStringMap turns a yaml-decoded map[string]any into a map[string]string,

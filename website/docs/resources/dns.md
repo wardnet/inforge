@@ -55,4 +55,4 @@ proxied: false
 The Cloudflare provider needs:
 
 - `CLOUDFLARE_API_TOKEN` environment variable with permission to edit the zone
-- `cloudflare.zoneId` in the region provider config under `variables.yaml`
+- `cloudflare.zoneId` in the region's `providers.cloudflare` block in `regions.yaml`

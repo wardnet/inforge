@@ -15,19 +15,19 @@ exactly one; inforge never acts on multiple environments at once.
 _Avoid_: stage, tier.
 
 **Region target**:
-An abstract region an environment deploys into, named in `variables.yaml` `regions[]`. Resources live
-under `resources/<env>/<region>/`. It is a plain selector — *which* regions this environment uses; the
-provider-specific realization of each region lives in the provider config (see **Region realization**).
+An abstract region an environment deploys into, a key under `regions:` in `regions.yaml`. Resources
+live under `resources/<env>/<region>/`. The set of `regions:` keys *is* the deploy set; each entry
+carries the region's slug and its provider config (see **Region realization**).
 _Avoid_: "region" unqualified — see Flagged ambiguities.
 
 **Region slug**:
-The short location code an abstract region maps to (`us-east-1` → `use1`), held in the **region
-table**. Used to build display names and DNS subdomains.
+The short location code an abstract region maps to (`us-east-1` → `use1`), held per region in the
+**region table**. Used to build display names and DNS subdomains.
 
 **Region table**:
-The abstract-region → slug map, and *only* that — it carries no provider topology. Built-in defaults
-live in `internal/regions`; a per-environment `regions.yaml`, when present, **replaces** them
-wholesale.
+The per-environment `regions.yaml`: a map from abstract region to its `{slug, providers}`. It is the
+single authority for which regions deploy and all provider config. The built-in slugs in
+`internal/regions` are naming vocabulary only; there is no default fallback table.
 
 **Container**:
 A logical grouping label (e.g. `bridge`, `ingress`) shared by the resources that make up one unit;
@@ -102,15 +102,16 @@ The lookup that maps a provider name to the implementation satisfying a provider
 this phase — every lookup returns `unknown provider`.
 
 **Provider config**:
-Everything a provider needs, in one block per provider under `variables.yaml` `providers.<name>`:
-credentials plus a region-keyed map of **region realizations**. Provider-centric — the cloud-agnostic
-vocabulary tables (region/size) carry no provider specifics.
+Everything a provider needs, in one block per provider under a region's
+`regions.<region>.providers.<name>` in `regions.yaml`: credentials plus that region's **realization**.
+Held per region — `variables.yaml` carries no provider config.
 
 **Region realization**:
-The complete concretization of one abstract region on one provider, held under
-`providers.<name>.regions[<abstractRegion>]`. For Hetzner: `location`, `network_zone`, `serverTypes`
-(size name → SKU) and `images` (canonical image → provider image id). Fully explicit per region — no
-global defaults, no inheritance (a realization is the whole truth for that region).
+The complete concretization of one abstract region on one provider, held directly under that region's
+`providers.<name>` block in `regions.yaml` (no nested `regions` map — the enclosing entry already names
+the region). For Hetzner: `location`, `network_zone`, `serverTypes` (size name → SKU) and `images`
+(canonical image → provider image id). Fully explicit per region — no global defaults, no inheritance
+(a realization is the whole truth for that region).
 _Avoid_: "region override" (it is not an override of anything), "region config".
 
 ### Manifest & secrets
@@ -159,10 +160,11 @@ resources, that the deployment workflow consumes.
 
 ## Flagged ambiguities
 
-- **"Region"** — three distinct things; always qualify which: a *region target* (which abstract
-  regions an env deploys into, `variables.yaml` `regions[]`), a *region table* entry (the abstract→slug
-  vocabulary, `regions.yaml`), or a *region realization* (one provider's concrete `{location,
-  network_zone, serverTypes, images}` for a region, `providers.<name>.regions[…]`).
+- **"Region"** — three distinct things; always qualify which: a *region target* (a key under
+  `regions:` in `regions.yaml` — which regions an env deploys into), a *region table* entry (that
+  region's `{slug, providers}` in `regions.yaml`), or a *region realization* (one provider's concrete
+  `{location, network_zone, serverTypes, images}` for a region, under that region's
+  `providers.<name>` block).
 - **"Container"** — the resource grouping label, **not** a Docker/OCI container. A service's
   `type: container` is an unrelated delivery mode. Keep the two distinct.
 - **"Provider"** — the named integration chosen in a resource (`provider: hetzner`), **not** the
@@ -178,7 +180,7 @@ resources, that the deployment workflow consumes.
 > **Dev:** And `bridge` lives in `us-east-1` — that's the region target?
 > **Expert:** Right, the region target. Its slug `use1` is what shows up in the display name and the
 > DNS subdomain. How `us-east-1` becomes a real Hetzner datacenter and server type — that's the region
-> realization under `providers.hetzner.regions`, not the target itself.
+> realization under that region's `providers.hetzner` block in `regions.yaml`, not the target itself.
 > **Dev:** The secrets file has `source: ref:database/bridge.connectionUrl`. How does the service get
 > that secret?
 > **Expert:** inforge writes it to the secrets provider under the service's path and mints a per-service

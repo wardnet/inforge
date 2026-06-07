@@ -1,5 +1,13 @@
 # Provider config owns per-region realizations; abstraction tables stay cloud-agnostic
 
+> **Superseded by [ADR-0011](0011-regions-yaml-region-and-provider-authority.md).** This ADR put
+> provider config (credentials + realizations) under `providers.<name>` in `variables.yaml`, keeping
+> `regions.yaml` as a cloud-agnostic abstract-region → slug table. ADR-0011 moves all provider config
+> *into* `regions.yaml`, keyed per region, making it the single authority for which regions deploy and
+> how each provider realizes them. The "by provider, fully-explicit, no inheritance, enforce at the
+> provider boundary" decisions below still hold — only the *file* that owns the per-provider block
+> changed (from `variables.yaml` to each region's entry in `regions.yaml`).
+
 inforge has cloud-agnostic abstractions — regions, sizes, images — that each provider must translate
 into concrete values (for Hetzner: a datacenter `location` + `network_zone`, a server type per size,
 an image id per canonical image) alongside its credentials. These translations had drifted across

@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -32,6 +33,59 @@ func TestValidateResourcesNamingAliasMulti(t *testing.T) {
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
+// TestCheckRegionsFile exercises the regions.yaml validation paths directly: the
+// ok/bad fixtures only cover the happy path and base_domain, so the per-region
+// slug/providers and global checks need explicit coverage.
+func TestCheckRegionsFile(t *testing.T) {
+	withProviders := map[string]map[string]any{"hetzner": {}}
+
+	t.Run("valid", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: withProviders},
+		}, nil, "regions.yaml")
+		assert.False(t, r.failed)
+	})
+
+	t.Run("empty table", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{}, nil, "regions.yaml")
+		assert.True(t, r.failed)
+	})
+
+	t.Run("missing slug", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Providers: withProviders},
+		}, nil, "regions.yaml")
+		assert.True(t, r.failed)
+	})
+
+	t.Run("empty providers block", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1"},
+		}, nil, "regions.yaml")
+		assert.True(t, r.failed)
+	})
+
+	t.Run("global without providers", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: withProviders},
+		}, &regions.Global{}, "regions.yaml")
+		assert.True(t, r.failed)
+	})
+
+	t.Run("global with providers", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: withProviders},
+		}, &regions.Global{Providers: withProviders}, "regions.yaml")
+		assert.False(t, r.failed)
+	})
+}
+
 // baseCtx returns a regionContext with one vm host (bridge-01) and hetzner
 // available, for exercising the per-spec semantic checks directly.
 func baseCtx() regionContext {
@@ -56,7 +110,7 @@ func TestCheckTLSTermination(t *testing.T) {
 
 	errs, _ = checkTLSTermination(types.TLSTerminationSpec{Provider: "nope", Compute: "bridge-01"}, ctx)
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "not defined in variables.yaml providers")
+	assert.Contains(t, errs[0], "not defined in this region's regions.yaml providers")
 
 	// A terminator on a host with no deploy_user can't be realized over SSH.
 	noDeployer := baseCtx()
