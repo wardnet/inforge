@@ -199,7 +199,27 @@ func isYAML(name string) bool {
 // directory to walk. cloud_init paths are resolved to absolute paths relative to
 // the compute dir.
 func LoadResources(env, dir string) (types.Resources, error) {
-	base := envDir(env, dir)
+	return loadResourceSet(envDir(env, dir))
+}
+
+// LoadGlobalResources reads the global resource set under
+// <dir>/<env>/global/{network,compute,…} and returns it parsed and
+// default-normalised. The global set is region-less: it is instantiated once
+// (not per region) with region-less naming, and other regions may reference its
+// outputs under strict cross-reference rules (see internal/validate). A missing
+// global/ directory yields an empty set (loadType treats absent dirs as empty),
+// so the global slice is optional. The regional LoadResources walks named type
+// dirs (network, compute, …) and never lists base children, so it does not pick
+// up global/ as a regional resource type.
+func LoadGlobalResources(env, dir string) (types.Resources, error) {
+	return loadResourceSet(filepath.Join(envDir(env, dir), "global"))
+}
+
+// loadResourceSet reads every resource type directory under base into a single
+// types.Resources, applying the defaults yaml.v3 cannot and resolving cloud_init
+// paths relative to base/compute. It backs both the regional and global loaders,
+// which differ only in their base directory.
+func loadResourceSet(base string) (types.Resources, error) {
 	var res types.Resources
 	var err error
 

@@ -14,7 +14,18 @@ func ResolveRegion(abstractRegion string) (string, error) {
 		return r, nil
 	}
 	return "", fmt.Errorf(
-		"neon has no region mapping for %q — add a mapping in providers/neon/regions.go",
+		"neon has no region mapping for %q — add a mapping in providers/neon/regions.go or set providers.neon.region in regions.yaml",
 		abstractRegion,
 	)
+}
+
+// resolveRegion picks the physical Neon region for a project. An explicit region
+// from provider config (n.region) wins — it is the only source for the region-less
+// global slice, which has no abstract region to map. Otherwise the abstract region
+// is resolved through the built-in map (the regional default).
+func (n *NeonDatabaseAdapter) resolveRegion(abstractRegion string) (string, error) {
+	if n.region != "" {
+		return n.region, nil
+	}
+	return ResolveRegion(abstractRegion)
 }

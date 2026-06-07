@@ -3,6 +3,7 @@ package infisical
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -199,6 +200,71 @@ func (m *infisicalMocks) NewResource(args pulumi.MockResourceArgs) (string, reso
 		outputs["workspaceId"] = resource.NewStringProperty("ws-test-id")
 	}
 	return args.Name + "-id", outputs, nil
+}
+
+// awaitString resolves a StringOutput to its concrete value (or fails on timeout).
+func awaitString(t *testing.T, o pulumi.StringOutput) string {
+	t.Helper()
+	ch := make(chan string, 1)
+	o.ApplyT(func(s string) string { ch <- s; return s })
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout awaiting output")
+		return ""
+	}
+}
+
+// TestResolveRefGlobalDatabase verifies a global/ prefix redirects a database ref
+// to the region-less global slot, regardless of the consuming service's region.
+func TestResolveRefGlobalDatabase(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		all := types.AllOutputs{
+			Database: map[string]map[string]types.DatabaseOutputs{
+				"us-east-1": {"shared": {ConnectionURL: pulumi.String("regional-url").ToStringOutput()}},
+				"global":    {"shared": {ConnectionURL: pulumi.String("global-url").ToStringOutput()}},
+			},
+		}
+		out, err := resolveRef("ref:database/global/shared.connectionUrl", "us-east-1", all)
+		require.NoError(t, err)
+		assert.Equal(t, "global-url", awaitString(t, out), "global/ must resolve against the global slot, not the service's region")
+		return nil
+	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
+	require.NoError(t, err)
+}
+
+// TestResolveRefGlobalCompute verifies the same redirect for a compute ref.
+func TestResolveRefGlobalCompute(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		all := types.AllOutputs{
+			Compute: map[string]map[string]types.ComputeOutputs{
+				"global": {"edge-01": {PublicIP: pulumi.String("203.0.113.7").ToStringOutput()}},
+			},
+		}
+		out, err := resolveRef("ref:compute/global/edge-01.publicIp", "us-east-1", all)
+		require.NoError(t, err)
+		assert.Equal(t, "203.0.113.7", awaitString(t, out))
+		return nil
+	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
+	require.NoError(t, err)
+}
+
+// TestResolveRefGlobalMissing verifies a global ref to an absent name fails
+// against the global slot (not the service's region).
+func TestResolveRefGlobalMissing(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		all := types.AllOutputs{
+			Database: map[string]map[string]types.DatabaseOutputs{
+				"global": {},
+			},
+		}
+		_, err := resolveRef("ref:database/global/missing.connectionUrl", "us-east-1", all)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `no database "missing" in region "global"`)
+		return nil
+	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
+	require.NoError(t, err)
 }
 
 // TestEnsureWorkspaceIdempotent verifies that the same (container, env) pair

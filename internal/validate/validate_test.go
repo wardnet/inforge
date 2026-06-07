@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/regions"
+	"github.com/wardnet/inforge/internal/sizes"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -32,6 +33,93 @@ func TestValidateResourcesNamingAliasMulti(t *testing.T) {
 	err := ValidateResources("naming-alias-multi", testdataDir)
 	require.Error(t, err, "the naming-alias-multi environment should fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
+}
+
+// TestValidateResourcesGlobalOK validates an environment whose regional secret
+// resolves a GLOBAL database output (ref:database/global/shared.connectionUrl) —
+// the one allowed cross-region reference.
+func TestValidateResourcesGlobalOK(t *testing.T) {
+	err := ValidateResources("global-ok", testdataDir)
+	assert.NoError(t, err, "a regional secret referencing a global database should validate cleanly")
+}
+
+// TestValidateResourcesGlobalBad validates an environment whose GLOBAL secret
+// references a REGIONAL database: the global slice is validated in a global-only
+// context, so the regional database is not found and validation fails — enforcing
+// "global → global only".
+func TestValidateResourcesGlobalBad(t *testing.T) {
+	err := ValidateResources("global-bad", testdataDir)
+	require.Error(t, err, "a global resource referencing a regional one should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
+// TestCheckComputeGlobalNetworkRejected: a compute attaching to a global network
+// is recognized but rejected (cross-region networking not supported yet).
+func TestCheckComputeGlobalNetworkRejected(t *testing.T) {
+	ctx := baseCtx()
+	ctx.sizeTable = sizes.DefaultTable()
+	ctx.networks = map[string]types.NetworkSpec{}
+	errs, _ := checkCompute(types.ComputeSpec{
+		Provider: "hetzner", Network: "global/corenet", Size: "SMALL", Kind: "vm",
+	}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, errs[0], "not supported yet")
+	// The generic "network not found" message must NOT also fire for a global ref.
+	for _, e := range errs {
+		assert.NotContains(t, e, "not found")
+	}
+}
+
+// TestCheckServiceGlobalHostRejected: a service on a global host is rejected —
+// such a service is defined in the global slice itself, not referenced from a region.
+func TestCheckServiceGlobalHostRejected(t *testing.T) {
+	ctx := baseCtx()
+	errs, _ := checkService(types.ServiceSpec{
+		Provider: "hetzner", Host: "global/edge-01", Type: "raw", User: "svc",
+	}, ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "defined in the global slice itself")
+}
+
+// TestCheckSecretsGlobalDatabaseRef: a regional secret resolves a global database
+// when the regional context is seeded with the global/<name> key (as
+// validateResourceSet does from buildGlobalRefs).
+func TestCheckSecretsGlobalDatabaseRef(t *testing.T) {
+	ctx := baseCtx()
+	ctx.available = nil // provider availability is checked separately, per region
+	ctx.databaseNames = map[string]bool{"global/shared": true}
+	errs, _ := checkSecrets(types.SecretsSpec{
+		Provider: "infisical",
+		Secrets: map[string]types.SecretsEntry{
+			"DB": {Source: "ref:database/global/shared.connectionUrl"},
+		},
+	}, ctx)
+	assert.Empty(t, errs, "a regional secret may reference a global database output")
+
+	// Without the global seed the same ref is not found.
+	ctx2 := baseCtx()
+	ctx2.available = nil
+	ctx2.databaseNames = map[string]bool{}
+	errs, _ = checkSecrets(types.SecretsSpec{
+		Provider: "infisical",
+		Secrets: map[string]types.SecretsEntry{
+			"DB": {Source: "ref:database/global/shared.connectionUrl"},
+		},
+	}, ctx2)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], `database "global/shared" not found`)
+}
+
+// TestBuildGlobalRefs derives referenceable database names and compute keys from
+// the global resource set, keying single-instance computes by both forms.
+func TestBuildGlobalRefs(t *testing.T) {
+	g := buildGlobalRefs(types.Resources{
+		Database: []types.DatabaseSpec{{Name: "shared"}},
+		Compute:  []types.ComputeSpec{{Name: "edge", Kind: "vm", InstanceCount: 1}},
+	})
+	assert.True(t, g.databaseNames["shared"])
+	assert.Equal(t, "vm", g.computeKind["edge"])
+	assert.Equal(t, "vm", g.computeKind["edge-01"])
 }
 
 // TestCheckRegionsFile exercises the regions.yaml validation paths directly: the

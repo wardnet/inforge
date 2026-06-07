@@ -1,0 +1,9 @@
+# A database defined once in the global slice; regional secrets reference it as
+# global/shared. Region-less: it realizes against regions.yaml global.providers.
+name: shared
+container: shared
+provider: neon
+engine: postgresql
+branch: main
+database: shared
+role: app
