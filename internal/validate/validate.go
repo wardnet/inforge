@@ -766,6 +766,11 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 		if ok && !ctx.tlsByCompute[host] {
 			errs = append(errs, fmt.Sprintf("ingress: host %q has no tls-termination resource to terminate it", s.Host))
 		}
+		// hostname is the SNI a named route matches, so it is required — except for
+		// a catch-all, which matches every unmatched SNI and has none to declare.
+		if !s.Ingress.Catchall && s.Ingress.Hostname == "" {
+			errs = append(errs, "ingress: hostname is required unless catchall")
+		}
 		// A catch-all forwards every unmatched SNI, so it is inherently passthrough;
 		// terminating arbitrary SNIs would need on-demand certs, which we don't do.
 		if s.Ingress.Catchall && s.Ingress.TLS == types.IngressTLSTerminate {
