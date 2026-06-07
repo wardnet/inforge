@@ -296,6 +296,15 @@ func TestCheckServiceIngressModes(t *testing.T) {
 	assert.Empty(t, errs)
 	require.Len(t, warns, 1)
 	assert.Contains(t, warns[0], "proxy_protocol has no effect")
+
+	// A catch-all may omit hostname (it has no SNI to declare).
+	errs, _ = checkService(svc(&types.IngressSpec{Port: 9000, Catchall: true}), base())
+	assert.Empty(t, errs)
+
+	// A named (non-catchall) route without hostname is an error.
+	errs, _ = checkService(svc(&types.IngressSpec{Port: 80}), base())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "hostname is required")
 }
 
 func TestCheckServiceDeployUser(t *testing.T) {

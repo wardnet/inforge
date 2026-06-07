@@ -15,9 +15,9 @@
     "ingress": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["hostname", "port"],
+      "required": ["port"],
       "properties": {
-        "hostname": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "hostname": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "description": "host label / SNI matched. Required unless catchall (enforced in code); a catch-all has no SNI to declare." },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "tls": { "type": "string", "enum": ["terminate", "passthrough"], "description": "terminate (default): ACME TLS terminated and reverse-proxied to port. passthrough: raw TLS forwarded by SNI to port; backend owns its TLS." },
         "catchall": { "type": "boolean", "description": "at most one per host; matches all unmatched SNIs; implies passthrough" },

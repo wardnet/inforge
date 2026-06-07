@@ -67,7 +67,7 @@ func TestRoutesByHostModesAndCatchall(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
 		Service: []types.ServiceSpec{
-			{Name: "dispatch", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "x", Port: 9000, Catchall: true}},
+			{Name: "dispatch", Host: "bridge-01", Ingress: &types.IngressSpec{Port: 9000, Catchall: true}}, // no hostname
 			{Name: "db", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "db", Port: 5432, TLS: types.IngressTLSPassthrough}},
 			{Name: "web", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "web", Port: 80}},
 		},
@@ -88,6 +88,7 @@ func TestRoutesByHostModesAndCatchall(t *testing.T) {
 	assert.True(t, ca.Catchall)
 	assert.Equal(t, types.IngressTLSPassthrough, ca.Mode, "catch-all is passthrough")
 	assert.Equal(t, "v2", ca.ProxyProtocol, "catch-all defaults to PROXY v2")
+	assert.Empty(t, ca.FQDN, "a hostname-less catch-all carries no FQDN")
 }
 
 func TestRoutesByHostRejectsMultipleCatchall(t *testing.T) {

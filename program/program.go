@@ -712,9 +712,15 @@ func routesByHost(res types.Resources, canonical map[string]string, env, slug, b
 				pp = "v2"
 			}
 		}
+		// A catch-all matches every unmatched SNI, so it carries no FQDN (and may
+		// omit hostname); a named route's FQDN is its matched SNI.
+		fqdn := ""
+		if in.Hostname != "" {
+			fqdn = naming.RecordFQDN(env, slug, in.Hostname, baseDomain)
+		}
 		byHost[hostKey] = append(byHost[hostKey], types.TLSRoute{
 			Service:       svc.Name,
-			FQDN:          naming.RecordFQDN(env, slug, in.Hostname, baseDomain),
+			FQDN:          fqdn,
 			Port:          in.Port,
 			Mode:          in.Mode(),
 			Catchall:      in.Catchall,

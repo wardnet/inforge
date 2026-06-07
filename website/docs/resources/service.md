@@ -95,7 +95,7 @@ env-scoped FQDN) and, per service, either terminates TLS or passes it through:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `hostname` | string | Yes | Host label for the service — the SNI matched. The env-scoped FQDN it resolves to (`<hostname>.<env>.<slug>.<baseDomain>`) is derived at deploy time. Unused for matching when `catchall` is set. |
+| `hostname` | string | Conditional | Host label for the service — the SNI matched. The env-scoped FQDN it resolves to (`<hostname>.<env>.<slug>.<baseDomain>`) is derived at deploy time. **Required for named routes; omit it for a `catchall`** (which matches every unmatched SNI and has none to declare). |
 | `port` | int | Yes | Local port (1–65535) traffic is forwarded to. |
 | `tls` | string | No | `terminate` (default) or `passthrough`. |
 | `catchall` | bool | No | Marks this service as the host's catch-all. **At most one per host.** Implies `passthrough`. |
