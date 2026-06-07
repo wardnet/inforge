@@ -26,7 +26,7 @@ func TestDeployUsersByHost(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestVhostsByHostDerivesEnvScopedFQDN(t *testing.T) {
+func TestRoutesByHostDerivesEnvScopedFQDN(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
 		Service: []types.ServiceSpec{
@@ -39,32 +39,77 @@ func TestVhostsByHostDerivesEnvScopedFQDN(t *testing.T) {
 	}
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 
-	got := vhostsByHost(res, canonical, "prd", "use1", "wardnet.network")
+	got, err := routesByHost(res, canonical, "prd", "use1", "wardnet.network")
+	require.NoError(t, err)
 
 	// `host: bridge` and `host: bridge-01` both land on the same canonical host.
 	require.Len(t, got, 1)
-	vhosts := got["bridge-01"]
-	require.Len(t, vhosts, 2)
+	routes := got["bridge-01"]
+	require.Len(t, routes, 2)
 
-	// Sorted by service name: api before web.
-	assert.Equal(t, "api", vhosts[0].Service)
-	assert.Equal(t, "api.prd.use1.wardnet.network", vhosts[0].FQDN)
-	assert.Equal(t, 8080, vhosts[0].Port)
+	// Sorted by FQDN: api before web. Default mode is terminate.
+	assert.Equal(t, "api", routes[0].Service)
+	assert.Equal(t, "api.prd.use1.wardnet.network", routes[0].FQDN)
+	assert.Equal(t, 8080, routes[0].Port)
+	assert.Equal(t, types.IngressTLSTerminate, routes[0].Mode)
 
-	assert.Equal(t, "web", vhosts[1].Service)
-	assert.Equal(t, "web.prd.use1.wardnet.network", vhosts[1].FQDN)
-	assert.Equal(t, 3000, vhosts[1].Port)
+	assert.Equal(t, "web", routes[1].Service)
+	assert.Equal(t, "web.prd.use1.wardnet.network", routes[1].FQDN)
+	assert.Equal(t, 3000, routes[1].Port)
 
 	// The FQDN matches RecordFQDN exactly — derivation lives in one place.
-	assert.Equal(t, naming.RecordFQDN("prd", "use1", "api", "wardnet.network"), vhosts[0].FQDN)
+	assert.Equal(t, naming.RecordFQDN("prd", "use1", "api", "wardnet.network"), routes[0].FQDN)
 }
 
-func TestVhostsByHostNoIngressNoVhosts(t *testing.T) {
+// passthrough mode and a catch-all carry through; the catch-all defaults to PROXY
+// protocol v2 and sorts last.
+func TestRoutesByHostModesAndCatchall(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "dispatch", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "x", Port: 9000, Catchall: true}},
+			{Name: "db", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "db", Port: 5432, TLS: types.IngressTLSPassthrough}},
+			{Name: "web", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "web", Port: 80}},
+		},
+	}
+	got, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	require.NoError(t, err)
+	routes := got["bridge-01"]
+	require.Len(t, routes, 3)
+
+	// Catch-all sorts last; non-catch-all by FQDN (db before web).
+	assert.Equal(t, "db", routes[0].Service)
+	assert.Equal(t, types.IngressTLSPassthrough, routes[0].Mode)
+	assert.Equal(t, "web", routes[1].Service)
+	assert.Equal(t, types.IngressTLSTerminate, routes[1].Mode)
+
+	ca := routes[2]
+	assert.Equal(t, "dispatch", ca.Service)
+	assert.True(t, ca.Catchall)
+	assert.Equal(t, types.IngressTLSPassthrough, ca.Mode, "catch-all is passthrough")
+	assert.Equal(t, "v2", ca.ProxyProtocol, "catch-all defaults to PROXY v2")
+}
+
+func TestRoutesByHostRejectsMultipleCatchall(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "d1", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "a", Port: 1, Catchall: true}},
+			{Name: "d2", Host: "bridge", Ingress: &types.IngressSpec{Hostname: "b", Port: 2, Catchall: true}},
+		},
+	}
+	_, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "catch-all")
+}
+
+func TestRoutesByHostNoIngressNoRoutes(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
 		Service: []types.ServiceSpec{{Name: "worker", Host: "bridge-01"}},
 	}
-	got := vhostsByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	got, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	require.NoError(t, err)
 	assert.Empty(t, got)
 }
 

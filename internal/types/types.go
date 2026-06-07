@@ -125,8 +125,32 @@ type DeployUserSpec struct {
 // env-scoped FQDN it resolves to is derived at realization time, not authored
 // here.
 type IngressSpec struct {
-	Hostname string `yaml:"hostname"` // host label, env-scoped into an FQDN at realization
-	Port     int    `yaml:"port"`     // local port the service listens on
+	Hostname string `yaml:"hostname"`                 // host label, env-scoped into an FQDN at realization; the SNI matched (ignored when Catchall)
+	Port     int    `yaml:"port"`                     // local port traffic is forwarded to
+	TLS      string `yaml:"tls,omitempty"`            // "terminate" (default) | "passthrough"
+	Catchall bool   `yaml:"catchall,omitempty"`       // at most one per host; matches all unmatched SNIs; implies passthrough
+	// ProxyProtocol enables the PROXY protocol to the upstream on passthrough/catchall
+	// routes so the backend learns the real client address: "" (off) | "v1" | "v2".
+	ProxyProtocol string `yaml:"proxy_protocol,omitempty"`
+}
+
+// Ingress TLS modes and the default applied when IngressSpec.TLS is empty.
+const (
+	IngressTLSTerminate   = "terminate"
+	IngressTLSPassthrough = "passthrough"
+)
+
+// Mode returns the effective TLS mode for an ingress: passthrough when the
+// ingress is a catch-all (terminating arbitrary SNIs is not supported) or when
+// explicitly set, otherwise the default "terminate".
+func (i IngressSpec) Mode() string {
+	if i.Catchall {
+		return IngressTLSPassthrough
+	}
+	if i.TLS == "" {
+		return IngressTLSTerminate
+	}
+	return i.TLS
 }
 
 // ServiceSpec is one service resource — a workload hosted on a compute.
@@ -153,16 +177,28 @@ type TLSTerminationSpec struct {
 	Compute   string `yaml:"compute"` // FK -> an expanded compute specKey whose kind=vm
 }
 
-// Vhost is one per-service reverse-proxy entry a TLS terminator realizes on its
-// host: an already-env-scoped FQDN that terminates TLS (ACME) and proxies to a
-// local port. The program derives these from each ingress-bearing service whose
-// host the terminator covers; the FQDN is fully resolved (env + region slug +
-// base domain) before it reaches the provider, so the provider stays a pure
-// renderer/installer and never re-derives names.
-type Vhost struct {
-	Service string // service name; the terminator writes one vhost file per service
-	FQDN    string // fully-qualified, env-scoped host name the terminator serves
-	Port    int    // local port on the host the service listens on
+// TLSRoute is one inbound routing entry a TLS terminator realizes on its host,
+// derived from one ingress-bearing service. It is provider-agnostic: the Hetzner
+// provider translates it to Caddy, but another provider could realize the same
+// route with a managed load balancer. The FQDN is fully resolved (env + region
+// slug + base domain) before it reaches the provider, so the provider stays a
+// pure renderer/installer and never re-derives names.
+//
+// Mode selects whether the terminator decrypts the connection:
+//   - "terminate": ACME TLS is terminated and traffic reverse-proxied to Port.
+//   - "passthrough": the raw TLS stream is forwarded by SNI to Port; the backend
+//     owns its own TLS. ProxyProtocol optionally prepends a PROXY header so the
+//     backend learns the real client address.
+//
+// Catchall marks the single per-host route that matches every SNI not matched by
+// a named route (always passthrough). Its FQDN is unused for matching.
+type TLSRoute struct {
+	Service       string
+	FQDN          string // fully-qualified, env-scoped SNI matched (empty/unused when Catchall)
+	Port          int    // local port traffic is forwarded to
+	Mode          string // IngressTLSTerminate | IngressTLSPassthrough
+	Catchall      bool
+	ProxyProtocol string // "", "v1", "v2"
 }
 
 // NetworkOutputs are the values a NetworkProvider returns after creating a
@@ -210,20 +246,20 @@ type DnsProvider interface {
 
 // TLSTerminationProvider realizes a tls-termination spec on its host. host
 // carries the target's public IP; deployUser is the sudo-capable account
-// inforge connects as over SSH (the host's deploy user); vhosts are the
-// per-service reverse-proxy entries, with FQDNs already env-scoped by the
-// caller. Realize installs the terminator once per host, writes one vhost per
-// service, and reloads — and must be safe to re-run as services are added.
+// inforge connects as over SSH (the host's deploy user); routes are the inbound
+// routing entries (terminate / passthrough / catch-all), with FQDNs already
+// env-scoped by the caller. Realize installs the terminator once per host, writes
+// its config, and reloads — and must be safe to re-run as services are added.
 //
 // The signature is grounded in the Hetzner/Caddy consumer: the provider is a
 // pure installer over SSH, so it needs the host, the connection identity, and
-// the resolved vhosts — nothing more. env scopes the names of the Pulumi
+// the resolved routes — nothing more. env scopes the names of the Pulumi
 // resources it creates. dependsOn carries the host's cloud-init readiness gate
 // (and any other prerequisites): the provider must make its first per-host SSH
 // command depend on it so realization never races the host's deploy_user
 // creation.
 type TLSTerminationProvider interface {
-	Realize(ctx *pulumi.Context, spec TLSTerminationSpec, host ComputeOutputs, deployUser string, vhosts []Vhost, env string, dependsOn []pulumi.Resource) error
+	Realize(ctx *pulumi.Context, spec TLSTerminationSpec, host ComputeOutputs, deployUser string, routes []TLSRoute, env string, dependsOn []pulumi.Resource) error
 }
 
 // DatabaseProvider creates a managed database.

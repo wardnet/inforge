@@ -44,7 +44,7 @@ func (h *HetznerTLS) Realize(
 	spec types.TLSTerminationSpec,
 	host types.ComputeOutputs,
 	deployUser string,
-	vhosts []types.Vhost,
+	routes []types.TLSRoute,
 	env string,
 	dependsOn []pulumi.Resource,
 ) error {
@@ -68,6 +68,13 @@ func (h *HetznerTLS) Realize(
 	conn := iremote.Connection(host.PublicIP, deployUser, h.deployPrivateKey)
 
 	base := naming.Resource(env, h.slug, "tls", spec.Name)
+
+	// Hosts with any passthrough/catch-all route need the layer4 realization
+	// (path B); terminate-only hosts keep the simpler Caddyfile/conf.d path (A).
+	if caddy.NeedsL4(routes) {
+		return h.realizeL4(ctx, spec, conn, base, routes, dependsOn)
+	}
+
 	caddyfileContent := caddy.Caddyfile()
 
 	// 1. Install Caddy and prepare conf.d. This is the first per-host SSH command,
@@ -97,11 +104,11 @@ func (h *HetznerTLS) Realize(
 
 	// 3. Write one vhost per service. Each is its own resource so adding or
 	//    removing a service maps to creating or deleting exactly one file.
-	configDeps := make([]pulumi.Resource, 1, 1+len(vhosts))
+	configDeps := make([]pulumi.Resource, 1, 1+len(routes))
 	configDeps[0] = caddyfile
-	reloadTriggers := make(pulumi.Array, 1, 1+len(vhosts))
+	reloadTriggers := make(pulumi.Array, 1, 1+len(routes))
 	reloadTriggers[0] = pulumi.String(caddyfileContent)
-	for _, v := range vhosts {
+	for _, v := range routes {
 		content := caddy.Vhost(v)
 		writeScript := iremote.WriteFileScript(caddy.VhostPath(v.Service), content)
 		cmd, vErr := remote.NewCommand(ctx, base+"-vhost-"+v.Service, &remote.CommandArgs{
@@ -129,6 +136,59 @@ func (h *HetznerTLS) Realize(
 		Update:     pulumi.String("sudo systemctl reload-or-restart caddy"),
 		Triggers:   reloadTriggers,
 	}, pulumi.DependsOn(configDeps)); err != nil {
+		return fmt.Errorf("tls-termination %q: reload caddy: %w", spec.Name, err)
+	}
+
+	return nil
+}
+
+// realizeL4 is the layer4 realization (path B) for hosts with passthrough or
+// catch-all routes. It installs a layer4-capable Caddy pointed at a native-JSON
+// config, writes that config, and reloads. A single JSON file expresses the
+// whole routing table (terminate, passthrough, catch-all), so unlike path A
+// there is no per-service conf.d file — one config resource, re-runnable in place.
+func (h *HetznerTLS) realizeL4(
+	ctx *pulumi.Context,
+	spec types.TLSTerminationSpec,
+	conn remote.ConnectionArgs,
+	base string,
+	routes []types.TLSRoute,
+	dependsOn []pulumi.Resource,
+) error {
+	jsonContent, err := caddy.RenderL4Config(routes)
+	if err != nil {
+		return fmt.Errorf("tls-termination %q: %w", spec.Name, err)
+	}
+
+	// 1. Install the layer4 Caddy + JSON-config systemd override. First per-host
+	//    SSH command, so it carries the cloud-init readiness gate (dependsOn).
+	install, err := remote.NewCommand(ctx, base+"-install", &remote.CommandArgs{
+		Connection: conn,
+		Create:     pulumi.String(caddy.InstallScriptL4()),
+	}, pulumi.DependsOn(dependsOn))
+	if err != nil {
+		return fmt.Errorf("tls-termination %q: install layer4 caddy: %w", spec.Name, err)
+	}
+
+	// 2. Write the native-JSON config. Update in place on a content change.
+	writeScript := iremote.WriteFileScript(caddy.L4ConfigPath, jsonContent)
+	cfg, err := remote.NewCommand(ctx, base+"-config", &remote.CommandArgs{
+		Connection: conn,
+		Create:     pulumi.String(writeScript),
+		Update:     pulumi.String(writeScript),
+		Triggers:   pulumi.Array{pulumi.String(jsonContent)},
+	}, pulumi.DependsOn([]pulumi.Resource{install}))
+	if err != nil {
+		return fmt.Errorf("tls-termination %q: write caddy.json: %w", spec.Name, err)
+	}
+
+	// 3. Reload Caddy after the config is in place; re-runs on any config change.
+	if _, err := remote.NewCommand(ctx, base+"-reload", &remote.CommandArgs{
+		Connection: conn,
+		Create:     pulumi.String("sudo systemctl reload-or-restart caddy"),
+		Update:     pulumi.String("sudo systemctl reload-or-restart caddy"),
+		Triggers:   pulumi.Array{pulumi.String(jsonContent)},
+	}, pulumi.DependsOn([]pulumi.Resource{cfg})); err != nil {
 		return fmt.Errorf("tls-termination %q: reload caddy: %w", spec.Name, err)
 	}
 

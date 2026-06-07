@@ -18,8 +18,11 @@ host: bridge-01          # required — specKey of the Compute VM that hosts thi
 type: raw                # required — delivery type
 user: wardnet            # required — no-login system user the service runs as
 ingress:                 # optional — expose this service via the host's TLS terminator
-  hostname: api          #   required — host label, env-scoped into an FQDN
-  port: 8080             #   required — local port the service listens on
+  hostname: api          #   required — host label, env-scoped into an FQDN (the SNI)
+  port: 8080             #   required — local port traffic is forwarded to
+  tls: terminate         #   optional — terminate (default) | passthrough
+  catchall: false        #   optional — at most one per host; implies passthrough
+  proxy_protocol: ""     #   optional — v1 | v2 (passthrough/catchall only)
 ```
 
 ## Fields
@@ -87,19 +90,32 @@ required for every service — with or without secrets.
 ## Ingress
 
 The optional `ingress` block exposes a service for inbound traffic through its host's
-[TLS termination](./tls-termination) resource. Declaring `ingress` means "terminate TLS for this
-host and reverse-proxy to its local port": the terminator writes one vhost per service that does
-exactly that, with an ACME-issued certificate. There is no non-TLS ingress — a service that wants
-raw inbound traffic opens the port on the host firewall instead (see below).
+[TLS termination](./tls-termination) resource. The terminator routes by **SNI** (the service's
+env-scoped FQDN) and, per service, either terminates TLS or passes it through:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `hostname` | string | Yes | Host label for the service. The env-scoped FQDN it resolves to (matching the form `<hostname>.<env>.<slug>.<baseDomain>`) is derived at deploy time. |
-| `port` | int | Yes | Local port (1–65535) the service listens on; the terminator reverse-proxies to it. |
+| `hostname` | string | Yes | Host label for the service — the SNI matched. The env-scoped FQDN it resolves to (`<hostname>.<env>.<slug>.<baseDomain>`) is derived at deploy time. Unused for matching when `catchall` is set. |
+| `port` | int | Yes | Local port (1–65535) traffic is forwarded to. |
+| `tls` | string | No | `terminate` (default) or `passthrough`. |
+| `catchall` | bool | No | Marks this service as the host's catch-all. **At most one per host.** Implies `passthrough`. |
+| `proxy_protocol` | string | No | `v1` or `v2`. Sends the PROXY protocol header to the upstream on passthrough/catch-all routes so the backend learns the real client address. Ignored on terminate routes. |
+
+### Modes
+
+- **`terminate`** (default): the terminator owns an ACME certificate for the FQDN, terminates TLS, and
+  reverse-proxies HTTP to `localhost:<port>`. This is the original behavior — existing configs are
+  unchanged.
+- **`passthrough`**: the raw TLS stream for the FQDN is forwarded by SNI to `localhost:<port>`; the
+  **backend owns its own TLS** (its own certificate). Set `proxy_protocol: v2` if the backend needs
+  the real client IP.
+- **catch-all**: a single service per host whose `ingress.catchall: true` receives every SNI not
+  matched by a named route. It is always passthrough; the dispatcher backend reads the SNI from the
+  TLS handshake it receives (`proxy_protocol` defaults to `v2`, conveying the client address).
 
 A service that declares `ingress` **must** have a `tls-termination` resource on its host — validation
-fails otherwise. A service that instead wants to receive raw inbound traffic should open the port on
-the [Compute](./compute) host firewall and declare no `ingress`.
+fails otherwise. A service that instead wants raw inbound traffic (no SNI routing) should open the
+port on the [Compute](./compute) host firewall and declare no `ingress`.
 
 ## Example
 
