@@ -110,8 +110,12 @@ type regionContext struct {
 	tlsByCompute     map[string]bool // canonical compute specKey -> has a tls-termination resource
 }
 
-// ValidateResources validates every region under <dir>/<env>/ and returns an
-// error if any file failed.
+// ValidateResources validates the single shared resource set under <dir>/<env>/
+// and returns an error if any file failed. The resource set is defined once and
+// instantiated into every region in regions.yaml, so its schema and foreign-key
+// graph are region-independent and checked once; provider availability is then
+// checked per region (a resource's provider must be declared in every region the
+// set deploys into).
 func ValidateResources(env, dir string) error {
 	schemaSet, err := compileSchemas()
 	if err != nil {
@@ -135,25 +139,17 @@ func ValidateResources(env, dir string) error {
 	checkVariables(r, vars, filepath.Join(dir, env, "variables.yaml"))
 	checkRegionsFile(r, regionTable, global, filepath.Join(dir, env, "regions.yaml"))
 
-	regionDirs, err := loader.RegionDirs(env, dir)
-	if err != nil {
+	// Validate the shared set once: schema + the region-independent FK graph.
+	// Provider availability is region-specific, so it is skipped here (available
+	// nil) and checked separately per region below.
+	if err := validateResourceSet(r, schemaSet, filepath.Join(dir, env), nil, sizeTable); err != nil {
 		return err
 	}
 
-	for _, region := range regionDirs {
-		regionBase := filepath.Join(dir, env, region)
-		ar, declared := regionTable[region]
-		if !declared {
-			r.fail(regionBase, fmt.Sprintf("region %q is not declared in regions.yaml regions", region))
-			continue
-		}
-
-		// Provider availability is now per region: a resource's provider must be
-		// declared in its own region's providers block.
-		available := availableProviders(ar.Providers)
-		if err := validateRegion(r, schemaSet, regionBase, available, sizeTable); err != nil {
-			return err
-		}
+	// Per-region provider availability: the same set deploys into every region, so
+	// each resource's provider must be declared in that region's providers block.
+	if err := checkProviderAvailability(r, filepath.Join(dir, env), regionTable); err != nil {
+		return err
 	}
 
 	if r.failed {
@@ -162,33 +158,33 @@ func ValidateResources(env, dir string) error {
 	return nil
 }
 
-func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, regionBase string, available map[string]bool, sizeTable sizes.Table) error {
-	networkFiles, err := readFiles[types.NetworkSpec](filepath.Join(regionBase, "network"))
+func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table) error {
+	networkFiles, err := readFiles[types.NetworkSpec](filepath.Join(base, "network"))
 	if err != nil {
 		return err
 	}
-	computeDir := filepath.Join(regionBase, "compute")
+	computeDir := filepath.Join(base, "compute")
 	computeFiles, err := readFiles[types.ComputeSpec](computeDir)
 	if err != nil {
 		return err
 	}
-	dnsFiles, err := readFiles[types.DnsSpec](filepath.Join(regionBase, "dns"))
+	dnsFiles, err := readFiles[types.DnsSpec](filepath.Join(base, "dns"))
 	if err != nil {
 		return err
 	}
-	databaseFiles, err := readFiles[types.DatabaseSpec](filepath.Join(regionBase, "database"))
+	databaseFiles, err := readFiles[types.DatabaseSpec](filepath.Join(base, "database"))
 	if err != nil {
 		return err
 	}
-	secretsFiles, err := readFiles[types.SecretsSpec](filepath.Join(regionBase, "secrets"))
+	secretsFiles, err := readFiles[types.SecretsSpec](filepath.Join(base, "secrets"))
 	if err != nil {
 		return err
 	}
-	serviceFiles, err := readFiles[types.ServiceSpec](filepath.Join(regionBase, "service"))
+	serviceFiles, err := readFiles[types.ServiceSpec](filepath.Join(base, "service"))
 	if err != nil {
 		return err
 	}
-	tlsFiles, err := readFiles[types.TLSTerminationSpec](filepath.Join(regionBase, "tls-termination"))
+	tlsFiles, err := readFiles[types.TLSTerminationSpec](filepath.Join(base, "tls-termination"))
 	if err != nil {
 		return err
 	}
@@ -386,7 +382,7 @@ func checkVariables(r *reporter, vars types.EnvironmentVariables, path string) {
 // checkRegionsFile validates regions.yaml: at least one region, each with a slug
 // and a non-empty providers block, and (when present) a global block carrying
 // providers. Per-resource provider availability is checked against each region's
-// own providers set in validateRegion.
+// own providers set in checkProviderAvailability.
 func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, path string) {
 	var errs []string
 	if len(table) == 0 {
@@ -412,7 +408,117 @@ func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, 
 	r.report(path, errs, nil)
 }
 
+// providerErr reports a provider that is not available. A nil available set means
+// provider availability is being checked separately (per region, against the
+// shared resource set — see checkProviderAvailability), so the per-spec FK pass
+// skips it.
+// providerRef is one resource's declared provider together with its file path,
+// for the per-region availability pass.
+type providerRef struct {
+	path     string
+	provider string
+}
+
+// collectProviderRefs reads every resource file under base and returns each
+// spec's path + declared provider. It only surfaces refs for files that parsed;
+// malformed files are reported by the schema/FK pass in validateResourceSet.
+func collectProviderRefs(base string) ([]providerRef, error) {
+	var refs []providerRef
+	if rs, err := refsOf[types.NetworkSpec](filepath.Join(base, "network"), func(s types.NetworkSpec) string { return s.Provider }); err != nil {
+		return nil, err
+	} else {
+		refs = append(refs, rs...)
+	}
+	if rs, err := refsOf[types.ComputeSpec](filepath.Join(base, "compute"), func(s types.ComputeSpec) string { return s.Provider }); err != nil {
+		return nil, err
+	} else {
+		refs = append(refs, rs...)
+	}
+	if rs, err := refsOf[types.DnsSpec](filepath.Join(base, "dns"), func(s types.DnsSpec) string { return s.Provider }); err != nil {
+		return nil, err
+	} else {
+		refs = append(refs, rs...)
+	}
+	if rs, err := refsOf[types.DatabaseSpec](filepath.Join(base, "database"), func(s types.DatabaseSpec) string { return s.Provider }); err != nil {
+		return nil, err
+	} else {
+		refs = append(refs, rs...)
+	}
+	if rs, err := refsOf[types.SecretsSpec](filepath.Join(base, "secrets"), func(s types.SecretsSpec) string { return s.Provider }); err != nil {
+		return nil, err
+	} else {
+		refs = append(refs, rs...)
+	}
+	if rs, err := refsOf[types.ServiceSpec](filepath.Join(base, "service"), func(s types.ServiceSpec) string { return s.Provider }); err != nil {
+		return nil, err
+	} else {
+		refs = append(refs, rs...)
+	}
+	if rs, err := refsOf[types.TLSTerminationSpec](filepath.Join(base, "tls-termination"), func(s types.TLSTerminationSpec) string { return s.Provider }); err != nil {
+		return nil, err
+	} else {
+		refs = append(refs, rs...)
+	}
+	return refs, nil
+}
+
+// refsOf reads the resource files of one type under dir and returns each parsed
+// spec's path + provider (extracted via providerOf). Parse failures are skipped
+// here — validateResourceSet reports them.
+func refsOf[T any](dir string, providerOf func(T) string) ([]providerRef, error) {
+	files, err := readFiles[T](dir)
+	if err != nil {
+		return nil, err
+	}
+	var refs []providerRef
+	for _, f := range files {
+		if f.parseErr != nil {
+			continue
+		}
+		refs = append(refs, providerRef{path: f.path, provider: providerOf(f.spec)})
+	}
+	return refs, nil
+}
+
+// checkProviderAvailability verifies, for every region in the table, that each
+// resource's declared provider is present in that region's providers block. The
+// shared set deploys into every region, so a provider missing from any region is
+// a failure for that region. Failures are reported under a per-region label
+// rather than the resource file's path: the file's own OK/FAIL line is owned by
+// the region-independent once-pass (validateResourceSet), and keying these on the
+// same path would print a contradictory OK and FAIL for one file. Regions and the
+// files within each are reported in sorted order for deterministic output.
+func checkProviderAvailability(r *reporter, base string, table regions.Table) error {
+	refs, err := collectProviderRefs(base)
+	if err != nil {
+		return err
+	}
+	regionNames := make([]string, 0, len(table))
+	for region := range table {
+		regionNames = append(regionNames, region)
+	}
+	sort.Strings(regionNames)
+
+	for _, region := range regionNames {
+		available := availableProviders(table[region].Providers)
+		var msgs []string
+		for _, ref := range refs {
+			if !available[ref.provider] {
+				msgs = append(msgs, fmt.Sprintf("%s: provider %q not defined in this region's regions.yaml providers block", ref.path, ref.provider))
+			}
+		}
+		if len(msgs) > 0 {
+			sort.Strings(msgs)
+			r.fail(fmt.Sprintf("regions.yaml [%s] provider availability", region), msgs...)
+		}
+	}
+	return nil
+}
+
 func providerErr(provider string, available map[string]bool) []string {
+	if available == nil {
+		return nil
+	}
 	if !available[provider] {
 		return []string{fmt.Sprintf("provider: %q not defined in this region's regions.yaml providers block", provider)}
 	}

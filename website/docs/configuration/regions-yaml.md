@@ -42,8 +42,9 @@ global:                        # optional — region-less slot (no slug)
 ### `regions`
 
 A map from abstract region name (e.g. `us-east-1`) to that region's entry. The set of keys is exactly
-the set of regions the environment deploys into. Each region directory under
-`resources/<env>/<region>/` must have a matching entry here.
+the set of regions the environment deploys into: the single shared resource set under
+`resources/<env>/` is instantiated into every region listed here. Each resource's `provider:` must be
+declared in **every** region's `providers` block, since the same set deploys into all of them.
 
 Each entry has:
 
