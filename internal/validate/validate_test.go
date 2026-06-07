@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -83,6 +84,41 @@ func TestCheckRegionsFile(t *testing.T) {
 			"us-east-1": {Slug: "use1", Providers: withProviders},
 		}, &regions.Global{Providers: withProviders}, "regions.yaml")
 		assert.False(t, r.failed)
+	})
+}
+
+// TestCheckProviderAvailabilityPerRegion confirms the single shared resource set
+// must have each declared provider available in EVERY region it deploys into: a
+// provider present in one region but absent from another fails for the region
+// that lacks it. It runs against the ok fixture (which uses hetzner, cloudflare,
+// neon and infisical).
+func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
+	full := map[string]map[string]any{
+		"hetzner": {}, "cloudflare": {}, "neon": {}, "infisical": {},
+	}
+
+	t.Run("all providers in every region", func(t *testing.T) {
+		r := &reporter{}
+		table := regions.Table{
+			"us-east-1":    {Slug: "use1", Providers: full},
+			"eu-central-1": {Slug: "euc1", Providers: full},
+		}
+		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table))
+		assert.False(t, r.failed, "every region declares every provider the shared set uses")
+	})
+
+	t.Run("provider missing in one region", func(t *testing.T) {
+		r := &reporter{}
+		// eu-central-1 omits neon, which the shared database resource requires.
+		noNeon := map[string]map[string]any{
+			"hetzner": {}, "cloudflare": {}, "infisical": {},
+		}
+		table := regions.Table{
+			"us-east-1":    {Slug: "use1", Providers: full},
+			"eu-central-1": {Slug: "euc1", Providers: noNeon},
+		}
+		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table))
+		assert.True(t, r.failed, "neon is unavailable in eu-central-1")
 	})
 }
 

@@ -47,11 +47,8 @@ func TestLoadVariables(t *testing.T) {
 }
 
 func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
-	byRegion, err := LoadResources("ok", testdataDir)
+	res, err := LoadResources("ok", testdataDir)
 	require.NoError(t, err)
-
-	res, ok := byRegion["us-east-1"]
-	require.True(t, ok)
 
 	require.Len(t, res.Compute, 1)
 	c := res.Compute[0]

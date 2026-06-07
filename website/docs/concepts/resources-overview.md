@@ -5,7 +5,8 @@ sidebar_position: 2
 # Resources Overview
 
 inforge defines seven resource types. Each resource is a single YAML file under
-`resources/<env>/<region>/<type>/`. All files are validated against embedded JSON schemas.
+`resources/<env>/<type>/`. The set is defined once per environment and instantiated into every region
+in `regions.yaml`. All files are validated against embedded JSON schemas.
 
 ## Resource types
 
@@ -16,7 +17,7 @@ inforge defines seven resource types. Each resource is a single YAML file under
 | [DNS](../resources/dns) | `dns/` | DNS record (Cloudflare) |
 | [Database](../resources/database) | `database/` | Managed PostgreSQL (Neon) |
 | [Secrets](../resources/secrets) | `secrets/` | Secret references (Infisical) |
-| [Service](../resources/service) | `services/` | Application hosted on a VM |
+| [Service](../resources/service) | `service/` | Application hosted on a VM |
 | [TLS termination](../resources/tls-termination) | `tls-termination/` | Host-level TLS terminator (Caddy on Hetzner) |
 
 ## Common fields

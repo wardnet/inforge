@@ -7,6 +7,7 @@ package service
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/wardnet/inforge/internal/naming"
@@ -123,18 +124,29 @@ type DeployDescriptor struct {
 }
 
 // BuildDeployDescriptor derives the deploy descriptor for an environment from
-// its resolved resources (keyed by region). A service's host DNS is the domain
-// of the DNS record pointing at its host compute instance; if the host has no
-// DNS record, the compute name is used as the subdomain.
-func BuildDeployDescriptor(env, baseDomain string, byRegion map[string]types.Resources, table regions.Table) (DeployDescriptor, error) {
+// its single shared resource set, instantiated into every region in the table.
+// Each service expands into one DeployTarget per region — the region slug makes
+// each target's host DNS distinct — so a single-region environment is unchanged
+// while a multi-region one fans a service out across every region's host.
+// Regions are iterated in sorted order so the targets are stable across runs. A
+// service's host DNS is the domain of the DNS record pointing at its host compute
+// instance; if the host has no DNS record, the compute name is used as the
+// subdomain.
+func BuildDeployDescriptor(env, baseDomain string, res types.Resources, table regions.Table) (DeployDescriptor, error) {
 	desc := DeployDescriptor{Environment: env}
-	for region, res := range byRegion {
+	regionNames := make([]string, 0, len(table))
+	for region := range table {
+		regionNames = append(regionNames, region)
+	}
+	sort.Strings(regionNames)
+
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	deployUsers := deployUsersByHost(res.Compute)
+	for _, region := range regionNames {
 		slug, err := table.Slug(region)
 		if err != nil {
 			return DeployDescriptor{}, fmt.Errorf("region %q: %w", region, err)
 		}
-		canonical := naming.CanonicalComputeKeys(res.Compute)
-		deployUsers := deployUsersByHost(res.Compute)
 		for _, svc := range res.Service {
 			hostDNS := hostDNS(svc.Host, env, baseDomain, slug, res.DNS)
 			sshUser := deployUsers[canonical[svc.Host]]

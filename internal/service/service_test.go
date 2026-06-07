@@ -39,20 +39,24 @@ func TestDescriptorDirAndExecPath(t *testing.T) {
 	assert.Equal(t, "/srv/wardnet/api/run", ExecPath("api"))
 }
 
+// singleRegionTable is a one-region table used by the descriptor tests that
+// assert single-region output (one target per service).
+func singleRegionTable() regions.Table {
+	return regions.Table{"us-east-1": {Slug: "use1"}}
+}
+
 func TestBuildDeployDescriptor(t *testing.T) {
-	byRegion := map[string]types.Resources{
-		"us-east-1": {
-			DNS: []types.DnsSpec{
-				{Provider: "cloudflare", Compute: "bridge-01", Subdomain: "bridge"},
-			},
-			Service: []types.ServiceSpec{
-				{Name: "api", Host: "bridge-01", Type: "raw"},
-				{Name: "worker", Host: "bridge-02", Type: "raw"}, // no DNS record -> falls back to compute name
-			},
+	res := types.Resources{
+		DNS: []types.DnsSpec{
+			{Provider: "cloudflare", Compute: "bridge-01", Subdomain: "bridge"},
+		},
+		Service: []types.ServiceSpec{
+			{Name: "api", Host: "bridge-01", Type: "raw"},
+			{Name: "worker", Host: "bridge-02", Type: "raw"}, // no DNS record -> falls back to compute name
 		},
 	}
 
-	desc, err := BuildDeployDescriptor("prd", "example.com", byRegion, regions.DefaultTable())
+	desc, err := BuildDeployDescriptor("prd", "example.com", res, singleRegionTable())
 	require.NoError(t, err)
 	require.Len(t, desc.Targets, 2)
 
@@ -70,16 +74,45 @@ func TestBuildDeployDescriptor(t *testing.T) {
 	assert.Equal(t, "bridge.prd.use1.example.com", worker.HostDNS, "falls back to the compute name as subdomain, with env")
 }
 
-func TestBuildDeployDescriptorPropagatesUser(t *testing.T) {
-	byRegion := map[string]types.Resources{
-		"us-east-1": {
-			Service: []types.ServiceSpec{
-				{Name: "api", Host: "bridge-01", Type: "raw", User: "wardnet"},
-				{Name: "worker", Host: "bridge-01", Type: "raw"},
-			},
+// TestBuildDeployDescriptorMultiRegion asserts the shared resource set fans each
+// service out into one target per region, with region-specific host DNS, in
+// sorted region order.
+func TestBuildDeployDescriptorMultiRegion(t *testing.T) {
+	res := types.Resources{
+		Service: []types.ServiceSpec{
+			{Name: "api", Host: "bridge-01", Type: "raw"},
 		},
 	}
-	desc, err := BuildDeployDescriptor("prd", "example.com", byRegion, regions.DefaultTable())
+	table := regions.Table{
+		"us-east-1":    {Slug: "use1"},
+		"eu-central-1": {Slug: "euc1"},
+	}
+
+	desc, err := BuildDeployDescriptor("prd", "example.com", res, table)
+	require.NoError(t, err)
+	// One service × two regions -> two targets, sorted by region name.
+	require.Len(t, desc.Targets, 2)
+
+	hostDNSByService := map[string][]string{}
+	for _, tgt := range desc.Targets {
+		assert.Equal(t, "api", tgt.Service)
+		hostDNSByService[tgt.Service] = append(hostDNSByService[tgt.Service], tgt.HostDNS)
+	}
+	// eu-central-1 sorts before us-east-1; both carry the same service, distinct slugs.
+	assert.Equal(t, []string{
+		"bridge.prd.euc1.example.com",
+		"bridge.prd.use1.example.com",
+	}, hostDNSByService["api"])
+}
+
+func TestBuildDeployDescriptorPropagatesUser(t *testing.T) {
+	res := types.Resources{
+		Service: []types.ServiceSpec{
+			{Name: "api", Host: "bridge-01", Type: "raw", User: "wardnet"},
+			{Name: "worker", Host: "bridge-01", Type: "raw"},
+		},
+	}
+	desc, err := BuildDeployDescriptor("prd", "example.com", res, singleRegionTable())
 	require.NoError(t, err)
 	byName := map[string]DeployTarget{}
 	for _, tgt := range desc.Targets {
@@ -90,19 +123,17 @@ func TestBuildDeployDescriptorPropagatesUser(t *testing.T) {
 }
 
 func TestBuildDeployDescriptorSSHUser(t *testing.T) {
-	byRegion := map[string]types.Resources{
-		"us-east-1": {
-			Compute: []types.ComputeSpec{
-				{Name: "bridge", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deployer"}},
-				{Name: "edge", InstanceCount: 1}, // no deploy_user
-			},
-			Service: []types.ServiceSpec{
-				{Name: "api", Host: "bridge-01", Type: "raw"},  // host declares deploy_user "deployer"
-				{Name: "worker", Host: "edge-01", Type: "raw"}, // host declares none -> fallback
-			},
+	res := types.Resources{
+		Compute: []types.ComputeSpec{
+			{Name: "bridge", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deployer"}},
+			{Name: "edge", InstanceCount: 1}, // no deploy_user
+		},
+		Service: []types.ServiceSpec{
+			{Name: "api", Host: "bridge-01", Type: "raw"},  // host declares deploy_user "deployer"
+			{Name: "worker", Host: "edge-01", Type: "raw"}, // host declares none -> fallback
 		},
 	}
-	desc, err := BuildDeployDescriptor("prd", "example.com", byRegion, regions.DefaultTable())
+	desc, err := BuildDeployDescriptor("prd", "example.com", res, singleRegionTable())
 	require.NoError(t, err)
 	byName := map[string]DeployTarget{}
 	for _, tgt := range desc.Targets {
@@ -111,14 +142,6 @@ func TestBuildDeployDescriptorSSHUser(t *testing.T) {
 	// SSHUser (connect-as) is distinct from User (run-as).
 	assert.Equal(t, "deployer", byName["api"].SSHUser, "uses the host's deploy_user")
 	assert.Equal(t, "deploy", byName["worker"].SSHUser, "falls back to deploy when the host declares none")
-}
-
-func TestBuildDeployDescriptorUnknownRegion(t *testing.T) {
-	byRegion := map[string]types.Resources{
-		"mars-1": {Service: []types.ServiceSpec{{Name: "api", Host: "bridge-01"}}},
-	}
-	_, err := BuildDeployDescriptor("prd", "example.com", byRegion, regions.DefaultTable())
-	assert.Error(t, err)
 }
 
 func TestDeployDescriptorMarshal(t *testing.T) {

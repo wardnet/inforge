@@ -15,9 +15,11 @@ exactly one; inforge never acts on multiple environments at once.
 _Avoid_: stage, tier.
 
 **Region target**:
-An abstract region an environment deploys into, a key under `regions:` in `regions.yaml`. Resources
-live under `resources/<env>/<region>/`. The set of `regions:` keys *is* the deploy set; each entry
-carries the region's slug and its provider config (see **Region realization**).
+An abstract region an environment deploys into, a key under `regions:` in `regions.yaml`. The shared
+resource set is defined **once** under `resources/<env>/{network,compute,…}` and instantiated into
+every region (the region slug in each cloud name keeps instances unique). The set of `regions:` keys
+*is* the deploy set; each entry carries the region's slug and its provider config (see **Region
+realization**).
 _Avoid_: "region" unqualified — see Flagged ambiguities.
 
 **Region slug**:

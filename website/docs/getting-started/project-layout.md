@@ -23,14 +23,20 @@ resources/
     ├── variables.yaml       # base_domain + SSH config for this env
     ├── regions.yaml         # which regions deploy + per-region provider config
     ├── sizes.yaml           # optional: overrides the default size table
-    └── <region>/            # one directory per region (e.g. us-east-1)
-        ├── network/         # NetworkSpec files
-        ├── compute/         # ComputeSpec files
-        ├── dns/             # DnsSpec files
-        ├── database/        # DatabaseSpec files
-        ├── secrets/         # SecretsSpec files
-        └── services/        # ServiceSpec files
+    ├── network/             # NetworkSpec files
+    ├── compute/             # ComputeSpec files
+    ├── dns/                 # DnsSpec files
+    ├── database/            # DatabaseSpec files
+    ├── secrets/             # SecretsSpec files
+    ├── service/             # ServiceSpec files
+    └── tls-termination/     # TLSTerminationSpec files
 ```
+
+The resource set is defined **once** per environment and instantiated into every region listed in
+`regions.yaml` — there are no per-region directories. Each cloud resource name embeds the region
+slug, so instances stay unique per region (`wardnet-prd-use1-vm-bridge`,
+`wardnet-prd-euc1-vm-bridge`, …). The only per-region difference is the provider realization
+(location, server types, credentials), which lives in `regions.yaml`.
 
 Each YAML file under a resource type directory contains exactly one resource spec. The filename
 is used as a display hint but the identity of the resource is its `name` + `instance` fields.

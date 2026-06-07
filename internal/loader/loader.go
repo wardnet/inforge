@@ -1,6 +1,7 @@
 // Package loader reads a project's on-disk resource definitions for a single
 // environment: variables.yaml, the optional per-env region/size tables, and
-// the per-region resource files. It applies the defaults that yaml.v3 cannot,
+// the single shared resource set under resources/<env>/{network,compute,…},
+// instantiated into every region. It applies the defaults that yaml.v3 cannot,
 // substitutes ${ENV_VAR} references in variables.yaml, and resolves cloud-init
 // paths. Cross-resource and semantic validation lives in internal/validate.
 package loader
@@ -191,62 +192,42 @@ func isYAML(name string) bool {
 	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
 }
 
-// RegionDirs returns the names of the region subdirectories under an
-// environment (every directory entry below <dir>/<env>/).
-func RegionDirs(env, dir string) ([]string, error) {
-	entries, err := os.ReadDir(envDir(env, dir))
-	if err != nil {
-		return nil, fmt.Errorf("read env dir: %w", err)
-	}
-	var out []string
-	for _, e := range entries {
-		if e.IsDir() {
-			out = append(out, e.Name())
-		}
-	}
-	return out, nil
-}
+// LoadResources reads the single shared resource set under <dir>/<env>/{network,
+// compute,…} and returns it parsed and default-normalised. The set is defined
+// once and instantiated into every region from regions.yaml (the region slug in
+// each cloud name keeps instances unique per region), so there is no per-region
+// directory to walk. cloud_init paths are resolved to absolute paths relative to
+// the compute dir.
+func LoadResources(env, dir string) (types.Resources, error) {
+	base := envDir(env, dir)
+	var res types.Resources
+	var err error
 
-// LoadResources walks each region subdirectory under <dir>/<env>/ and returns
-// the parsed, default-normalised resources keyed by region directory name.
-// cloud_init paths are resolved to absolute paths relative to the compute dir.
-func LoadResources(env, dir string) (map[string]types.Resources, error) {
-	regionDirs, err := RegionDirs(env, dir)
-	if err != nil {
-		return nil, err
+	if res.Network, err = loadType[types.NetworkSpec](filepath.Join(base, "network")); err != nil {
+		return types.Resources{}, err
 	}
-	out := make(map[string]types.Resources, len(regionDirs))
-	for _, region := range regionDirs {
-		base := filepath.Join(envDir(env, dir), region)
-		var res types.Resources
-
-		if res.Network, err = loadType[types.NetworkSpec](filepath.Join(base, "network")); err != nil {
-			return nil, err
-		}
-		computeDir := filepath.Join(base, "compute")
-		if res.Compute, err = loadType[types.ComputeSpec](computeDir); err != nil {
-			return nil, err
-		}
-		if res.DNS, err = loadType[types.DnsSpec](filepath.Join(base, "dns")); err != nil {
-			return nil, err
-		}
-		if res.Database, err = loadType[types.DatabaseSpec](filepath.Join(base, "database")); err != nil {
-			return nil, err
-		}
-		if res.Secrets, err = loadType[types.SecretsSpec](filepath.Join(base, "secrets")); err != nil {
-			return nil, err
-		}
-		if res.Service, err = loadType[types.ServiceSpec](filepath.Join(base, "service")); err != nil {
-			return nil, err
-		}
-		if res.TLSTermination, err = loadType[types.TLSTerminationSpec](filepath.Join(base, "tls-termination")); err != nil {
-			return nil, err
-		}
-
-		applyDefaults(&res, computeDir)
-		out[region] = res
+	computeDir := filepath.Join(base, "compute")
+	if res.Compute, err = loadType[types.ComputeSpec](computeDir); err != nil {
+		return types.Resources{}, err
 	}
-	return out, nil
+	if res.DNS, err = loadType[types.DnsSpec](filepath.Join(base, "dns")); err != nil {
+		return types.Resources{}, err
+	}
+	if res.Database, err = loadType[types.DatabaseSpec](filepath.Join(base, "database")); err != nil {
+		return types.Resources{}, err
+	}
+	if res.Secrets, err = loadType[types.SecretsSpec](filepath.Join(base, "secrets")); err != nil {
+		return types.Resources{}, err
+	}
+	if res.Service, err = loadType[types.ServiceSpec](filepath.Join(base, "service")); err != nil {
+		return types.Resources{}, err
+	}
+	if res.TLSTermination, err = loadType[types.TLSTerminationSpec](filepath.Join(base, "tls-termination")); err != nil {
+		return types.Resources{}, err
+	}
+
+	applyDefaults(&res, computeDir)
+	return res, nil
 }
 
 // applyDefaults fills in the defaults yaml.v3 cannot and resolves cloud_init

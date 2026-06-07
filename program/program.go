@@ -72,12 +72,14 @@ func Run(ctx *pulumi.Context) error {
 	// Which regions deploy comes from regions.yaml. Iterate in sorted order so
 	// resource creation is deterministic across runs (the table is a map).
 	regionNames := sortedKeys(regionTable)
-	byRegion, err := loader.LoadResources(env, dir)
+	// The resource set is defined ONCE and instantiated into every region; the
+	// region slug baked into each cloud name keeps instances unique per region.
+	res, err := loader.LoadResources(env, dir)
 	if err != nil {
 		return err
 	}
 
-	desc, err := service.BuildDeployDescriptor(env, vars.BaseDomain, byRegion, regionTable)
+	desc, err := service.BuildDeployDescriptor(env, vars.BaseDomain, res, regionTable)
 	if err != nil {
 		return err
 	}
@@ -95,7 +97,6 @@ func Run(ctx *pulumi.Context) error {
 
 	for _, region := range regionNames {
 		reg := registries[region]
-		res := byRegion[region]
 		slug, err := regionTable.Slug(region)
 		if err != nil {
 			return err
@@ -159,7 +160,6 @@ func Run(ctx *pulumi.Context) error {
 
 	for _, region := range regionNames {
 		reg := registries[region]
-		res := byRegion[region]
 		for _, spec := range res.DNS {
 			dp, err := reg.DNS(spec.Provider)
 			if err != nil {

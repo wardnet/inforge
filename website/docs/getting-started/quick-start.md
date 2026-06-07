@@ -13,18 +13,17 @@ my-infra/
 ├── inforge.yaml              # project config
 ├── inforge.prd.yaml          # stack config for prd environment
 └── resources/
-    └── prd/
+    └── prd/                  # defined once, instantiated into every region
         ├── variables.yaml    # base_domain + SSH config
         ├── regions.yaml      # regions + per-region provider config
-        ├── us-east-1/
-        │   ├── network/
-        │   │   └── ingress.yaml
-        │   ├── compute/
-        │   │   └── bridge.yaml
-        │   └── dns/
-        │       └── bridge.yaml
-        └── services/
-            └── api-01.yaml
+        ├── network/
+        │   └── ingress.yaml
+        ├── compute/
+        │   └── bridge.yaml
+        ├── dns/
+        │   └── bridge.yaml
+        └── service/
+            └── api.yaml
 ```
 
 ## 2. Write `inforge.yaml`
@@ -76,7 +75,7 @@ regions:
 
 ## 5. Write a compute resource
 
-```yaml title="resources/prd/eu-central-1/compute/bridge.yaml"
+```yaml title="resources/prd/compute/bridge.yaml"
 name: bridge
 container: bridge
 provider: hetzner
