@@ -265,6 +265,39 @@ func TestCheckServiceIngress(t *testing.T) {
 	assert.Empty(t, errs)
 }
 
+func TestCheckServiceIngressModes(t *testing.T) {
+	base := func() regionContext {
+		c := baseCtx()
+		c.tlsByCompute["bridge-01"] = true
+		return c
+	}
+	svc := func(in *types.IngressSpec) types.ServiceSpec {
+		return types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Ingress: in}
+	}
+
+	// passthrough is accepted.
+	errs, _ := checkService(svc(&types.IngressSpec{Hostname: "db", Port: 5432, TLS: types.IngressTLSPassthrough}), base())
+	assert.Empty(t, errs)
+
+	// catchall + tls:terminate is contradictory.
+	errs, _ = checkService(svc(&types.IngressSpec{Hostname: "x", Port: 9000, Catchall: true, TLS: types.IngressTLSTerminate}), base())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "passthrough-only")
+
+	// More than one catch-all on the host.
+	ctx := base()
+	ctx.catchallByHost = map[string]int{"bridge-01": 2}
+	errs, _ = checkService(svc(&types.IngressSpec{Hostname: "x", Port: 9000, Catchall: true}), ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "catch-all")
+
+	// proxy_protocol on a terminate route warns (no effect), not an error.
+	errs, warns := checkService(svc(&types.IngressSpec{Hostname: "web", Port: 80, ProxyProtocol: "v2"}), base())
+	assert.Empty(t, errs)
+	require.Len(t, warns, 1)
+	assert.Contains(t, warns[0], "proxy_protocol has no effect")
+}
+
 func TestCheckServiceDeployUser(t *testing.T) {
 	// A service whose host declares no deploy_user can't be provisioned over SSH.
 	ctx := baseCtx()

@@ -17,7 +17,7 @@ func TestCaddyfileImportsConfDir(t *testing.T) {
 }
 
 func TestVhostRendersReverseProxy(t *testing.T) {
-	out := Vhost(types.Vhost{Service: "api", FQDN: "api.prd.use1.wardnet.network", Port: 8080})
+	out := Vhost(types.TLSRoute{Service: "api", FQDN: "api.prd.use1.wardnet.network", Port: 8080})
 
 	assert.Contains(t, out, "api.prd.use1.wardnet.network {")
 	assert.Contains(t, out, "reverse_proxy localhost:8080")
@@ -52,6 +52,15 @@ func TestInstallScriptInstallsTooling(t *testing.T) {
 	assert.Contains(t, script, "caddy", "install script should provision caddy")
 	// Prepares the conf.d directory the base Caddyfile imports from.
 	assert.Contains(t, script, ConfDir)
+}
+
+// TestInstallScriptRevertsL4 guards the B->A transition: a terminate-only
+// realization must remove any layer4 systemd override + JSON config a prior
+// passthrough realization left, or the unit keeps serving the stale caddy.json.
+func TestInstallScriptRevertsL4(t *testing.T) {
+	script := InstallScript()
+	assert.Contains(t, script, "rm -f /etc/systemd/system/caddy.service.d/inforge-l4.conf")
+	assert.Contains(t, script, "rm -f "+L4ConfigPath)
 }
 
 // TestInstallScriptInstallsNoSecretTooling guards that the host gets no

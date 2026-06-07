@@ -18,7 +18,10 @@
       "required": ["hostname", "port"],
       "properties": {
         "hostname": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "tls": { "type": "string", "enum": ["terminate", "passthrough"], "description": "terminate (default): ACME TLS terminated and reverse-proxied to port. passthrough: raw TLS forwarded by SNI to port; backend owns its TLS." },
+        "catchall": { "type": "boolean", "description": "at most one per host; matches all unmatched SNIs; implies passthrough" },
+        "proxy_protocol": { "type": "string", "enum": ["v1", "v2"], "description": "send the PROXY protocol header to the upstream on passthrough/catchall routes so the backend learns the real client address" }
       }
     }
   }

@@ -9,9 +9,10 @@ realizes on a host to terminate inbound TLS and reverse-proxy to the services ru
 Hetzner this is realized by [Caddy](https://caddyserver.com/) (ACME / Let's Encrypt); another
 provider could realize the same resource with a managed load balancer + ACM.
 
-Per-service [ingress](./service#ingress) feeds this terminator: for each service on the host that
-declares `ingress`, the terminator writes one vhost that terminates TLS for the service's hostname and
-reverse-proxies to its local port.
+Per-service [ingress](./service#ingress) feeds this terminator: each service on the host that declares
+`ingress` contributes one **SNI route**. A route either **terminates** TLS (ACME cert + reverse-proxy
+to a local port) or **passes through** the raw TLS to a backend that owns its own certificate. A
+single per-host **catch-all** route forwards every unmatched SNI to a dispatcher.
 
 ## Schema
 
@@ -33,13 +34,23 @@ compute: bridge-01       # required — specKey of the host VM the terminator ru
 
 ## Realization
 
-On Hetzner the terminator is realized over SSH at deploy time: inforge connects to the host as its
-`deploy_user`, installs Caddy (plus the packages its apt repository needs), writes a base
-Caddyfile that imports `conf.d/*.caddy`, writes one `conf.d/<service>.caddy` vhost per ingress-bearing
-service, and reloads Caddy. The install is idempotent and re-runnable: adding a service adds a vhost
-file and reloads; removing one deletes the file and reloads.
+On Hetzner the terminator is realized over SSH at deploy time as the host's `deploy_user`. The Caddy
+configuration is just Hetzner's translation of the provider-agnostic route set; another provider could
+realize the same routes with a managed load balancer. There are two realization paths:
 
-Because realization happens over SSH as the deploy user, the terminator's host **must** declare a
+- **Terminate-only host** (no passthrough/catch-all route): inforge installs the stock Caddy and writes
+  a base Caddyfile that imports one `conf.d/<service>.caddy` vhost per service, then reloads. Adding a
+  service adds a vhost file; removing one deletes it.
+- **Host with any passthrough/catch-all route**: inforge installs a Caddy build that includes the
+  [layer4](https://github.com/mholt/caddy-l4) module (downloaded from Caddy's build service) and writes
+  a single native-JSON config. A `layer4` listener wrapper on `:443` inspects the TLS ClientHello and
+  raw-proxies passthrough/catch-all SNIs to their local ports (optionally with the PROXY protocol);
+  terminate SNIs fall through to Caddy's normal TLS termination + reverse-proxy on the same listener,
+  so terminate behavior (including ACME and the real client IP) is unchanged. The catch-all matches
+  every SNI not claimed by a terminate route.
+
+Both paths are idempotent and re-runnable. Because realization happens over SSH as the deploy user,
+the terminator's host **must** declare a
 [`deploy_user`](./compute) — validation fails otherwise, so the gap is caught before deploy rather
 than at `pulumi up`.
 
@@ -49,8 +60,8 @@ A terminator and a service's ingress are two halves of one feature:
 
 - The **terminator** (this resource) is installed once per host and owns the host's TLS / cert
   lifecycle.
-- A service's **`ingress`** (a field on the [Service](./service#ingress)) contributes one vhost to the
-  terminator on its host.
+- A service's **`ingress`** (a field on the [Service](./service#ingress)) contributes one SNI route
+  (terminate, passthrough, or the catch-all) to the terminator on its host.
 
 A service that declares `ingress` must have a `tls-termination` resource on its host — validation
 fails otherwise. A host may have a terminator with no services pointing at it yet (it is then idle

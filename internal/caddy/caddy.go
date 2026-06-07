@@ -49,11 +49,12 @@ func VhostPath(service string) string {
 	return ConfDir + "/" + VhostFilename(service)
 }
 
-// Vhost renders one per-service vhost. The site address is the env-scoped FQDN;
-// Caddy's automatic HTTPS issues and renews an ACME certificate for it, so
-// declaring ingress always terminates TLS — there is no non-TLS form. Traffic
-// is reverse-proxied to the service's local port on the same host.
-func Vhost(v types.Vhost) string {
+// Vhost renders one per-service vhost for the terminate-only realization (path
+// A). The site address is the env-scoped FQDN; Caddy's automatic HTTPS issues
+// and renews an ACME certificate for it and reverse-proxies to the service's
+// local port on the same host. Only terminate routes reach this renderer;
+// passthrough/catch-all hosts use RenderL4Config instead.
+func Vhost(v types.TLSRoute) string {
 	return fmt.Sprintf(`# Managed by inforge — vhost for service %q.
 %s {
 	reverse_proxy localhost:%d

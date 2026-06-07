@@ -635,7 +635,10 @@ func realizeTLSTermination(ctx *pulumi.Context, reg registry.ProviderRegistry, r
 
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	deployUserByCompute := deployUsersByHost(res.Compute)
-	vhostsByCompute := vhostsByHost(res, canonical, env, slug, baseDomain)
+	routesByCompute, err := routesByHost(res, canonical, env, slug, baseDomain)
+	if err != nil {
+		return fmt.Errorf("tls-termination: %w", err)
+	}
 
 	for _, spec := range res.TLSTermination {
 		hostKey, ok := canonical[spec.Compute]
@@ -655,7 +658,7 @@ func realizeTLSTermination(ctx *pulumi.Context, reg registry.ProviderRegistry, r
 		if err != nil {
 			return err
 		}
-		if err := tp.Realize(ctx, spec, host, deployUserByCompute[hostKey], vhostsByCompute[hostKey], env, []pulumi.Resource{gate}); err != nil {
+		if err := tp.Realize(ctx, spec, host, deployUserByCompute[hostKey], routesByCompute[hostKey], env, []pulumi.Resource{gate}); err != nil {
 			return err
 		}
 	}
@@ -679,14 +682,19 @@ func deployUsersByHost(computes []types.ComputeSpec) map[string]string {
 	return byHost
 }
 
-// vhostsByHost derives the per-service vhosts for every ingress-bearing service,
+// routesByHost derives the inbound TLS routes for every ingress-bearing service,
 // grouped by the canonical specKey of the host it runs on. Each service's FQDN
 // is env-scoped here (<hostname>.<env>.<slug>.<baseDomain>) so the provider
-// receives fully-resolved names. Within a host, vhosts are sorted by service so
-// the realized resources are stable across runs. canonical resolves a service's
-// host FK to the same specKey validation uses.
-func vhostsByHost(res types.Resources, canonical map[string]string, env, slug, baseDomain string) map[string][]types.Vhost {
-	byHost := map[string][]types.Vhost{}
+// receives fully-resolved names. The ingress TLS mode (terminate/passthrough),
+// catch-all flag and proxy_protocol carry through. A catch-all defaults to PROXY
+// protocol v2 when unset so the dispatcher backend learns the real client IP.
+// Within a host, routes are sorted (catch-all last) so realized resources are
+// stable across runs. It errors if any host has more than one catch-all route —
+// the preview/deploy half of the rule validate also enforces, so the guarantee
+// holds even when `up` runs without a prior `validate`.
+func routesByHost(res types.Resources, canonical map[string]string, env, slug, baseDomain string) (map[string][]types.TLSRoute, error) {
+	byHost := map[string][]types.TLSRoute{}
+	catchallByHost := map[string][]string{}
 	for _, svc := range res.Service {
 		if svc.Ingress == nil {
 			continue
@@ -696,16 +704,42 @@ func vhostsByHost(res types.Resources, canonical map[string]string, env, slug, b
 			// Validation guarantees the host resolves; skip defensively.
 			continue
 		}
-		byHost[hostKey] = append(byHost[hostKey], types.Vhost{
-			Service: svc.Name,
-			FQDN:    naming.RecordFQDN(env, slug, svc.Ingress.Hostname, baseDomain),
-			Port:    svc.Ingress.Port,
+		in := svc.Ingress
+		pp := in.ProxyProtocol
+		if in.Catchall {
+			catchallByHost[hostKey] = append(catchallByHost[hostKey], svc.Name)
+			if pp == "" {
+				pp = "v2"
+			}
+		}
+		byHost[hostKey] = append(byHost[hostKey], types.TLSRoute{
+			Service:       svc.Name,
+			FQDN:          naming.RecordFQDN(env, slug, in.Hostname, baseDomain),
+			Port:          in.Port,
+			Mode:          in.Mode(),
+			Catchall:      in.Catchall,
+			ProxyProtocol: pp,
 		})
 	}
-	for _, vhosts := range byHost {
-		sort.Slice(vhosts, func(i, j int) bool { return vhosts[i].Service < vhosts[j].Service })
+	for hostKey, names := range catchallByHost {
+		if len(names) > 1 {
+			sort.Strings(names)
+			return nil, fmt.Errorf("host %q has %d catch-all ingress services (%s); at most one is allowed", hostKey, len(names), strings.Join(names, ", "))
+		}
 	}
-	return byHost
+	for _, routes := range byHost {
+		sort.Slice(routes, func(i, j int) bool {
+			// Catch-all sorts last; otherwise by FQDN then service for stability.
+			if routes[i].Catchall != routes[j].Catchall {
+				return !routes[i].Catchall
+			}
+			if routes[i].FQDN != routes[j].FQDN {
+				return routes[i].FQDN < routes[j].FQDN
+			}
+			return routes[i].Service < routes[j].Service
+		})
+	}
+	return byHost, nil
 }
 
 // resolveNetworkOutput returns the NetworkOutputs for the subnet a compute spec

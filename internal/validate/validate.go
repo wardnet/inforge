@@ -145,6 +145,7 @@ type regionContext struct {
 	computeDeployer  map[string]bool              // canonical specKey -> declares a deploy_user
 	databaseNames    map[string]bool
 	tlsByCompute     map[string]bool // canonical compute specKey -> has a tls-termination resource
+	catchallByHost   map[string]int  // canonical compute specKey -> count of catch-all ingress services
 }
 
 // ValidateResources validates the single shared resource set under <dir>/<env>/
@@ -275,6 +276,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		computeDeployer:  map[string]bool{},
 		databaseNames:    map[string]bool{},
 		tlsByCompute:     map[string]bool{},
+		catchallByHost:   map[string]int{},
 	}
 	for _, f := range networkFiles {
 		ctx.networks[f.spec.Name] = f.spec
@@ -302,6 +304,17 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for _, f := range tlsFiles {
 		if c, ok := ctx.computeCanonical[f.spec.Compute]; ok {
 			ctx.tlsByCompute[c] = true
+		}
+	}
+	// Count catch-all ingress services per host so checkService can enforce the
+	// at-most-one rule (the host's whole route table funnels its unmatched SNIs to
+	// a single dispatcher).
+	for _, f := range serviceFiles {
+		if f.spec.Ingress == nil || !f.spec.Ingress.Catchall {
+			continue
+		}
+		if c, ok := ctx.computeCanonical[f.spec.Host]; ok {
+			ctx.catchallByHost[c]++
 		}
 	}
 	// Seed the global slice's referenceable outputs under a `global/` prefix so a
@@ -748,8 +761,27 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	if ok && !ctx.computeDeployer[ctx.computeCanonical[s.Host]] {
 		errs = append(errs, fmt.Sprintf("host: %q has no deploy_user; inforge provisions the service over SSH and requires one", s.Host))
 	}
-	if s.Ingress != nil && ok && !ctx.tlsByCompute[ctx.computeCanonical[s.Host]] {
-		errs = append(errs, fmt.Sprintf("ingress: host %q has no tls-termination resource to terminate it", s.Host))
+	if s.Ingress != nil {
+		host := ctx.computeCanonical[s.Host]
+		if ok && !ctx.tlsByCompute[host] {
+			errs = append(errs, fmt.Sprintf("ingress: host %q has no tls-termination resource to terminate it", s.Host))
+		}
+		// A catch-all forwards every unmatched SNI, so it is inherently passthrough;
+		// terminating arbitrary SNIs would need on-demand certs, which we don't do.
+		if s.Ingress.Catchall && s.Ingress.TLS == types.IngressTLSTerminate {
+			errs = append(errs, "ingress: catchall is passthrough-only; remove tls: terminate")
+		}
+		// At most one catch-all per host: its unmatched-SNI traffic funnels to a
+		// single dispatcher. Caught here (and again at preview/deploy) rather than
+		// silently picking one.
+		if s.Ingress.Catchall && ok && ctx.catchallByHost[host] > 1 {
+			errs = append(errs, fmt.Sprintf("ingress: host %q has %d catch-all services; at most one is allowed", s.Host, ctx.catchallByHost[host]))
+		}
+		// proxy_protocol only affects passthrough/catch-all upstreams; on a
+		// terminate route it is silently ignored, so flag the likely mistake.
+		if s.Ingress.ProxyProtocol != "" && s.Ingress.Mode() == types.IngressTLSTerminate {
+			warns = append(warns, "ingress: proxy_protocol has no effect on a terminate route")
+		}
 	}
 	return errs, warns
 }
