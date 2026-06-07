@@ -14,7 +14,8 @@ my-infra/
 ├── inforge.prd.yaml          # stack config for prd environment
 └── resources/
     └── prd/
-        ├── variables.yaml    # regions, providers, SSH config
+        ├── variables.yaml    # base_domain + SSH config
+        ├── regions.yaml      # regions + per-region provider config
         ├── us-east-1/
         │   ├── network/
         │   │   └── ingress.yaml
@@ -50,23 +51,27 @@ config:
 
 ```yaml
 base_domain: example.com
+ssh:
+  authorizedKeys: "ssh-ed25519 AAAA... user@host"
+  deployPublicKey: "ssh-ed25519 AAAA... deploy@host"
+```
+
+## 4b. Write `resources/prd/regions.yaml`
+
+```yaml
 regions:
-  - name: eu-central-1
-providers:
-  hetzner:
-    apiToken: ${HCLOUD_TOKEN}
-    regions:
-      eu-central-1:
+  eu-central-1:
+    slug: euc1
+    providers:
+      hetzner:
+        apiToken: ${HCLOUD_TOKEN}
         location: nbg1
         network_zone: eu-central
         serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
         images: {ubuntu-24.04: ubuntu-24.04}
-  cloudflare:
-    apiToken: ${CLOUDFLARE_API_TOKEN}
-    zoneId: ""
-ssh:
-  authorizedKeys: "ssh-ed25519 AAAA... user@host"
-  deployPublicKey: "ssh-ed25519 AAAA... deploy@host"
+      cloudflare:
+        apiToken: ${CLOUDFLARE_API_TOKEN}
+        zoneId: ""
 ```
 
 ## 5. Write a compute resource

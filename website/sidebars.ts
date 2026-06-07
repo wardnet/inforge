@@ -75,6 +75,7 @@ const sidebars: SidebarsConfig = {
         'configuration/inforge-yaml',
         'configuration/environment-yaml',
         'configuration/variables-yaml',
+        'configuration/regions-yaml',
       ],
     },
     {

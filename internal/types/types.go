@@ -283,20 +283,13 @@ type SSHConfig struct {
 	DeployPrivateKey string `yaml:"-"`
 }
 
-// RegionEntry is one entry in an environment's regions[] — an abstract region
-// this environment deploys into. It is a plain selector; the provider-specific
-// realization of each region lives in the provider config under
-// providers.<name>.regions.
-type RegionEntry struct {
-	Name string `yaml:"name"`
-}
-
-// EnvironmentVariables is the parsed variables.yaml for one environment.
+// EnvironmentVariables is the parsed variables.yaml for one environment. Which
+// regions deploy and all provider config (credentials + per-region
+// realizations) now live in regions.yaml (see internal/regions); variables.yaml
+// carries only the base domain and SSH material.
 type EnvironmentVariables struct {
-	BaseDomain string                    `yaml:"base_domain"`
-	Regions    []RegionEntry             `yaml:"regions"`
-	Providers  map[string]map[string]any `yaml:"providers"`
-	SSH        SSHConfig                 `yaml:"ssh"`
+	BaseDomain string    `yaml:"base_domain"`
+	SSH        SSHConfig `yaml:"ssh"`
 }
 
 // Resources is the full set of resource specs for one region.

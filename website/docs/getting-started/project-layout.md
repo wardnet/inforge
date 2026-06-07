@@ -20,8 +20,8 @@ All infrastructure definitions live under `resources/`.
 ```
 resources/
 └── <env>/                   # one directory per environment (e.g. prd, dev)
-    ├── variables.yaml       # regions, providers, SSH config for this env
-    ├── regions.yaml         # optional: overrides the default region→slug table
+    ├── variables.yaml       # base_domain + SSH config for this env
+    ├── regions.yaml         # which regions deploy + per-region provider config
     ├── sizes.yaml           # optional: overrides the default size table
     └── <region>/            # one directory per region (e.g. us-east-1)
         ├── network/         # NetworkSpec files
@@ -61,25 +61,29 @@ Pulumi state directory. Location depends on the `backend.type` in `inforge.yaml`
 ```yaml
 base_domain: example.com            # base domain for VM DNS names
 
-regions:
-  - name: eu-central-1              # abstract region(s) this env deploys into
-
-providers:                          # credentials + per-region realizations
-  hetzner:
-    apiToken: ${HCLOUD_TOKEN}
-    regions:
-      eu-central-1:
-        location: nbg1
-        network_zone: eu-central
-        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
-        images: {ubuntu-24.04: ubuntu-24.04}
-  cloudflare:
-    apiToken: ${CLOUDFLARE_API_TOKEN}
-    zoneId: abc123
-
 ssh:
   authorizedKeys: "ssh-ed25519 ..."   # added to every VM's authorized_keys
   deployPublicKey: "ssh-ed25519 ..."  # deploy user's public key
 ```
 
 See [variables.yaml](/configuration/variables-yaml) for the full reference.
+
+## regions.yaml fields
+
+```yaml
+regions:                            # which regions this env deploys into
+  eu-central-1:
+    slug: euc1
+    providers:                      # credentials + this region's realizations
+      hetzner:
+        apiToken: ${HCLOUD_TOKEN}
+        location: nbg1
+        network_zone: eu-central
+        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+        images: {ubuntu-24.04: ubuntu-24.04}
+      cloudflare:
+        apiToken: ${CLOUDFLARE_API_TOKEN}
+        zoneId: abc123
+```
+
+See [regions.yaml](/configuration/regions-yaml) for the full reference.

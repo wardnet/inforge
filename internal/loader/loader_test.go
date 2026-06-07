@@ -43,9 +43,7 @@ func TestLoadVariables(t *testing.T) {
 	vars, err := LoadVariables("ok", testdataDir)
 	require.NoError(t, err)
 	assert.Equal(t, "example.com", vars.BaseDomain)
-	require.Len(t, vars.Regions, 1)
-	assert.Equal(t, "us-east-1", vars.Regions[0].Name)
-	assert.Contains(t, vars.Providers, "hetzner")
+	assert.Equal(t, "ssh-ed25519 AAAA...authorized", vars.SSH.AuthorizedKeys)
 }
 
 func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
@@ -77,16 +75,34 @@ func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
 	require.Len(t, res.Network, 2)
 }
 
-func TestLoadTablesDefault(t *testing.T) {
-	rt, err := LoadRegionTable("ok", testdataDir)
+// TestLoadRegionTableFromFile exercises the nested regions.yaml: the per-region
+// slug + provider config under `regions:`, plus the optional `global:` block.
+func TestLoadRegionTableFromFile(t *testing.T) {
+	rt, global, err := LoadRegionTable("ok", testdataDir)
 	require.NoError(t, err)
 	slug, err := rt.Slug("us-east-1")
 	require.NoError(t, err)
 	assert.Equal(t, "use1", slug)
+	// Provider config now lives per region in regions.yaml.
+	assert.Contains(t, rt["us-east-1"].Providers, "hetzner")
+	// The ok fixture declares no global slot.
+	assert.Nil(t, global)
 
 	st, err := LoadSizeTable("ok", testdataDir)
 	require.NoError(t, err)
 	require.NoError(t, st.Resolve("SMALL"))
+}
+
+// TestLoadRegionTableMissing confirms an absent regions.yaml yields an empty
+// table (the new model makes regions.yaml the deploy authority — there is no
+// built-in fallback region set), with no error.
+func TestLoadRegionTableMissing(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
+	rt, global, err := LoadRegionTable("prd", dir)
+	require.NoError(t, err)
+	assert.Empty(t, rt)
+	assert.Nil(t, global)
 }
 
 // TestLoadSizeTableFromFile exercises the on-disk size table: a YAML list of

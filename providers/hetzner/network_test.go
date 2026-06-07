@@ -7,7 +7,6 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/wardnet/inforge/internal/types"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,27 +46,28 @@ func TestResolveRegionIncompleteRealization(t *testing.T) {
 	assert.Contains(t, err.Error(), "missing network_zone")
 }
 
-// TestExtractRegionConfigsFromYAML decodes a variables.yaml fragment exactly as
-// the loader does (yaml.Unmarshal into EnvironmentVariables) and confirms the
-// nested providers.hetzner.regions block — including serverTypes and images —
-// round-trips into the RegionConfig map, verifying the decode shape empirically.
+// TestExtractRegionConfigsFromYAML decodes a regions.yaml region's providers
+// block exactly as the loader does (yaml.Unmarshal into the AbstractRegion's
+// Providers shape) and confirms the hetzner realization — including serverTypes
+// and images — round-trips into the RegionConfig keyed by the region name,
+// verifying the decode shape empirically.
 func TestExtractRegionConfigsFromYAML(t *testing.T) {
 	const doc = `
-base_domain: example.com
+slug: euc1
 providers:
   hetzner:
     apiToken: tok
-    regions:
-      eu-central-1:
-        location: nbg1
-        network_zone: eu-central
-        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
-        images: {ubuntu-24.04: ubuntu-24.04}
+    location: nbg1
+    network_zone: eu-central
+    serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+    images: {ubuntu-24.04: ubuntu-24.04}
 `
-	var vars types.EnvironmentVariables
-	require.NoError(t, yaml.Unmarshal([]byte(doc), &vars))
+	var ar struct {
+		Providers map[string]map[string]any `yaml:"providers"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(doc), &ar))
 
-	got := ExtractRegionConfigs(vars.Providers)
+	got := ExtractRegionConfigs("eu-central-1", ar.Providers)
 	assert.Equal(t, RegionConfig{
 		Location:    "nbg1",
 		NetworkZone: "eu-central",
@@ -78,30 +78,34 @@ providers:
 
 func TestExtractRegionConfigs(t *testing.T) {
 	tests := []struct {
-		name   string
-		config map[string]map[string]any
-		want   map[string]RegionConfig
+		name      string
+		region    string
+		providers map[string]map[string]any
+		want      map[string]RegionConfig
 	}{
 		{
-			name:   "absent hetzner provider",
-			config: map[string]map[string]any{"neon": {"apiKey": "k"}},
-			want:   map[string]RegionConfig{},
+			name:      "absent hetzner provider",
+			region:    "us-east-1",
+			providers: map[string]map[string]any{"neon": {"apiKey": "k"}},
+			want:      map[string]RegionConfig{},
 		},
 		{
-			name:   "absent regions key",
-			config: map[string]map[string]any{"hetzner": {"apiToken": "tok"}},
-			want:   map[string]RegionConfig{},
+			name:      "hetzner without realization fields",
+			region:    "us-east-1",
+			providers: map[string]map[string]any{"hetzner": {"apiToken": "tok"}},
+			want: map[string]RegionConfig{
+				"us-east-1": {ServerTypes: map[string]string{}, Images: map[string]string{}},
+			},
 		},
 		{
-			name: "non-string and empty entries skipped within maps",
-			config: map[string]map[string]any{"hetzner": {"regions": map[string]any{
-				"us-east-1": map[string]any{
-					"location":     "ash",
-					"network_zone": "us-east",
-					"serverTypes":  map[string]any{"SMALL": "cx23", "MEDIUM": 33, "LARGE": ""},
-					"images":       map[string]any{"ubuntu-24.04": "ubuntu-24.04"},
-				},
-			}}},
+			name:   "non-string and empty entries skipped within maps",
+			region: "us-east-1",
+			providers: map[string]map[string]any{"hetzner": {
+				"location":     "ash",
+				"network_zone": "us-east",
+				"serverTypes":  map[string]any{"SMALL": "cx23", "MEDIUM": 33, "LARGE": ""},
+				"images":       map[string]any{"ubuntu-24.04": "ubuntu-24.04"},
+			}},
 			want: map[string]RegionConfig{
 				"us-east-1": {
 					Location:    "ash",
@@ -112,10 +116,11 @@ func TestExtractRegionConfigs(t *testing.T) {
 			},
 		},
 		{
-			name: "missing maps default to empty",
-			config: map[string]map[string]any{"hetzner": {"regions": map[string]any{
-				"us-east-1": map[string]any{"location": "ash", "network_zone": "us-east"},
-			}}},
+			name:   "missing maps default to empty",
+			region: "us-east-1",
+			providers: map[string]map[string]any{"hetzner": {
+				"location": "ash", "network_zone": "us-east",
+			}},
 			want: map[string]RegionConfig{
 				"us-east-1": {
 					Location:    "ash",
@@ -128,7 +133,7 @@ func TestExtractRegionConfigs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, ExtractRegionConfigs(tt.config))
+			assert.Equal(t, tt.want, ExtractRegionConfigs(tt.region, tt.providers))
 		})
 	}
 }

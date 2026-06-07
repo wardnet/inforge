@@ -118,7 +118,7 @@ func ValidateResources(env, dir string) error {
 		return fmt.Errorf("compile schemas: %w", err)
 	}
 
-	regionTable, err := loader.LoadRegionTable(env, dir)
+	regionTable, global, err := loader.LoadRegionTable(env, dir)
 	if err != nil {
 		return err
 	}
@@ -132,12 +132,8 @@ func ValidateResources(env, dir string) error {
 	}
 
 	r := &reporter{}
-	checkVariables(r, vars, regionTable, filepath.Join(dir, env, "variables.yaml"))
-
-	declared := map[string]bool{}
-	for _, re := range vars.Regions {
-		declared[re.Name] = true
-	}
+	checkVariables(r, vars, filepath.Join(dir, env, "variables.yaml"))
+	checkRegionsFile(r, regionTable, global, filepath.Join(dir, env, "regions.yaml"))
 
 	regionDirs, err := loader.RegionDirs(env, dir)
 	if err != nil {
@@ -146,13 +142,16 @@ func ValidateResources(env, dir string) error {
 
 	for _, region := range regionDirs {
 		regionBase := filepath.Join(dir, env, region)
-		if !declared[region] {
-			r.fail(regionBase, fmt.Sprintf("region %q is not declared in variables.yaml regions[]", region))
-		} else if err := regionTable.Validate(region); err != nil {
-			r.fail(regionBase, err.Error())
+		ar, declared := regionTable[region]
+		if !declared {
+			r.fail(regionBase, fmt.Sprintf("region %q is not declared in regions.yaml regions", region))
+			continue
 		}
 
-		if err := validateRegion(r, schemaSet, regionBase, vars, sizeTable); err != nil {
+		// Provider availability is now per region: a resource's provider must be
+		// declared in its own region's providers block.
+		available := availableProviders(ar.Providers)
+		if err := validateRegion(r, schemaSet, regionBase, available, sizeTable); err != nil {
 			return err
 		}
 	}
@@ -163,7 +162,7 @@ func ValidateResources(env, dir string) error {
 	return nil
 }
 
-func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, regionBase string, vars types.EnvironmentVariables, sizeTable sizes.Table) error {
+func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, regionBase string, available map[string]bool, sizeTable sizes.Table) error {
 	networkFiles, err := readFiles[types.NetworkSpec](filepath.Join(regionBase, "network"))
 	if err != nil {
 		return err
@@ -209,7 +208,7 @@ func validateRegion(r *reporter, schemaSet map[string]*jsonschema.Schema, region
 	}
 
 	ctx := regionContext{
-		available:        availableProviders(vars),
+		available:        available,
 		sizeTable:        sizeTable,
 		networks:         map[string]types.NetworkSpec{},
 		computeKind:      map[string]string{},
@@ -363,32 +362,59 @@ func flattenValidationError(ve *jsonschema.ValidationError) []string {
 	return out
 }
 
-// availableProviders returns the set of provider names defined in the
-// environment's provider config.
-func availableProviders(vars types.EnvironmentVariables) map[string]bool {
+// availableProviders returns the set of provider names defined in a region's
+// provider config.
+func availableProviders(providers map[string]map[string]any) map[string]bool {
 	out := map[string]bool{}
-	for name := range vars.Providers {
+	for name := range providers {
 		out[name] = true
 	}
 	return out
 }
 
-func checkVariables(r *reporter, vars types.EnvironmentVariables, table regions.Table, path string) {
+// checkVariables validates variables.yaml, now slimmed to base_domain + ssh.
+// Region selection and provider config moved to regions.yaml (see
+// checkRegionsFile).
+func checkVariables(r *reporter, vars types.EnvironmentVariables, path string) {
 	var errs []string
 	if strings.TrimSpace(vars.BaseDomain) == "" {
 		errs = append(errs, "base_domain: required")
 	}
-	for _, re := range vars.Regions {
-		if err := table.Validate(re.Name); err != nil {
-			errs = append(errs, err.Error())
+	r.report(path, errs, nil)
+}
+
+// checkRegionsFile validates regions.yaml: at least one region, each with a slug
+// and a non-empty providers block, and (when present) a global block carrying
+// providers. Per-resource provider availability is checked against each region's
+// own providers set in validateRegion.
+func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, path string) {
+	var errs []string
+	if len(table) == 0 {
+		errs = append(errs, "regions: at least one region must be defined")
+	}
+	names := make([]string, 0, len(table))
+	for name := range table {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ar := table[name]
+		if strings.TrimSpace(ar.Slug) == "" {
+			errs = append(errs, fmt.Sprintf("regions.%s: slug required", name))
 		}
+		if len(ar.Providers) == 0 {
+			errs = append(errs, fmt.Sprintf("regions.%s: providers block required", name))
+		}
+	}
+	if global != nil && len(global.Providers) == 0 {
+		errs = append(errs, "global: providers block required when global is defined")
 	}
 	r.report(path, errs, nil)
 }
 
 func providerErr(provider string, available map[string]bool) []string {
 	if !available[provider] {
-		return []string{fmt.Sprintf("provider: %q not defined in variables.yaml providers", provider)}
+		return []string{fmt.Sprintf("provider: %q not defined in this region's regions.yaml providers block", provider)}
 	}
 	return nil
 }
