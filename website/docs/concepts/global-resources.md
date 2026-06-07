@@ -97,4 +97,5 @@ service's region.
 This slice realizes the global **network**, **compute**, and **database** resources (the referenceable
 outputs). Global **service**, **dns**, and **tls-termination** resources are loaded and validated, but
 their host-level provisioning is not wired yet — only the output-producing types deploy globally for
-now.
+now. Note that validation still enforces the **full** rules for these types (e.g. a global service must
+declare a `deploy_user` and a tls-termination for any ingress), even though they do not deploy yet.
