@@ -4,4 +4,4 @@ provider: neon
 engine: postgresql
 branch: main
 database: bridge
-role: app
+owner: app

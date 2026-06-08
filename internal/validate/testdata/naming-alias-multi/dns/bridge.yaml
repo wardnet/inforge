@@ -1,6 +1,0 @@
-name: bridge
-container: core
-provider: cloudflare
-compute: bridge
-subdomain: bridge
-proxied: false

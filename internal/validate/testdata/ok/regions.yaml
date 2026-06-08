@@ -1,6 +1,9 @@
 regions:
   us-east-1:
     slug: use1
+    dns:
+      provider: cloudflare
+      zone: test-zone
     providers:
       hetzner:
         apiToken: test-token
@@ -10,7 +13,6 @@ regions:
         images: {ubuntu-24.04: ubuntu-24.04}
       cloudflare:
         apiToken: test-token
-        zoneId: test-zone
       neon:
         apiKey: test-key
       infisical:

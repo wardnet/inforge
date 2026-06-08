@@ -32,8 +32,8 @@ func TestRoutesByHostDerivesEnvScopedFQDN(t *testing.T) {
 		Service: []types.ServiceSpec{
 			// Two ingress services on the same host, declared out of order, to
 			// exercise grouping + stable sorting. One service has no ingress.
-			{Name: "web", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "web", Port: 3000}},
-			{Name: "api", Host: "bridge", Ingress: &types.IngressSpec{Hostname: "api", Port: 8080}},
+			{Name: "web", Host: "bridge-01", Ingress: []types.IngressSpec{{Port: 3000, TLS: types.IngressTLSTerminate}}},
+			{Name: "api", Host: "bridge", Ingress: []types.IngressSpec{{Port: 8080, TLS: types.IngressTLSTerminate}}},
 			{Name: "worker", Host: "bridge-01"},
 		},
 	}
@@ -47,56 +47,119 @@ func TestRoutesByHostDerivesEnvScopedFQDN(t *testing.T) {
 	routes := got["bridge-01"]
 	require.Len(t, routes, 2)
 
-	// Sorted by FQDN: api before web. Default mode is terminate.
+	// Sorted by FQDN: api before web. The FQDN is the auto-derived "<svc>.svc".
 	assert.Equal(t, "api", routes[0].Service)
-	assert.Equal(t, "api.prd.use1.wardnet.network", routes[0].FQDN)
+	assert.Equal(t, "api.svc.prd.use1.wardnet.network", routes[0].FQDN)
 	assert.Equal(t, 8080, routes[0].Port)
 	assert.Equal(t, types.IngressTLSTerminate, routes[0].Mode)
 
 	assert.Equal(t, "web", routes[1].Service)
-	assert.Equal(t, "web.prd.use1.wardnet.network", routes[1].FQDN)
+	assert.Equal(t, "web.svc.prd.use1.wardnet.network", routes[1].FQDN)
 	assert.Equal(t, 3000, routes[1].Port)
 
-	// The FQDN matches RecordFQDN exactly — derivation lives in one place.
-	assert.Equal(t, naming.RecordFQDN("prd", "use1", "api", "wardnet.network"), routes[0].FQDN)
+	// The FQDN matches ServiceFQDN exactly — derivation lives in one place.
+	assert.Equal(t, naming.ServiceFQDN("prd", "use1", "api", "wardnet.network"), routes[0].FQDN)
 }
 
-// passthrough mode and a catch-all carry through; the catch-all defaults to PROXY
-// protocol v2 and sorts last.
-func TestRoutesByHostModesAndCatchall(t *testing.T) {
+// A single service carrying a terminate route (with vanity) plus a catch-all is
+// the bridge shape: the terminate entry expands to one route per FQDN (auto +
+// vanity), the catch-all carries no FQDN, defaults to PROXY v2, and sorts last.
+func TestRoutesByHostTerminatePlusCatchall(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
 		Service: []types.ServiceSpec{
-			{Name: "dispatch", Host: "bridge-01", Ingress: &types.IngressSpec{Port: 9000, Catchall: true}}, // no hostname
-			{Name: "db", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "db", Port: 5432, TLS: types.IngressTLSPassthrough}},
-			{Name: "web", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "web", Port: 80}},
+			{Name: "bridge", Host: "bridge-01", Ingress: []types.IngressSpec{
+				{Port: 8080, TLS: types.IngressTLSTerminate, Vanity: []string{
+					"key-broker.{BASE_DOMAIN}",
+					"key-broker.inforge.wardnet.network",
+				}},
+				{Port: 8443, Catchall: true},
+			}},
 		},
 	}
 	got, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
 	require.NoError(t, err)
 	routes := got["bridge-01"]
-	require.Len(t, routes, 3)
+	require.Len(t, routes, 4) // 3 terminate FQDNs + 1 catch-all
 
-	// Catch-all sorts last; non-catch-all by FQDN (db before web).
-	assert.Equal(t, "db", routes[0].Service)
-	assert.Equal(t, types.IngressTLSPassthrough, routes[0].Mode)
-	assert.Equal(t, "web", routes[1].Service)
-	assert.Equal(t, types.IngressTLSTerminate, routes[1].Mode)
+	var terminate []string
+	for _, r := range routes[:3] {
+		assert.Equal(t, types.IngressTLSTerminate, r.Mode)
+		assert.Equal(t, 8080, r.Port)
+		terminate = append(terminate, r.FQDN)
+	}
+	assert.Equal(t, []string{
+		"bridge.svc.prd.use1.wardnet.network",
+		"key-broker.inforge.wardnet.network",
+		"key-broker.wardnet.network",
+	}, terminate, "auto + vanity FQDNs, sorted")
 
-	ca := routes[2]
-	assert.Equal(t, "dispatch", ca.Service)
+	ca := routes[3]
 	assert.True(t, ca.Catchall)
+	assert.Equal(t, 8443, ca.Port)
 	assert.Equal(t, types.IngressTLSPassthrough, ca.Mode, "catch-all is passthrough")
 	assert.Equal(t, "v2", ca.ProxyProtocol, "catch-all defaults to PROXY v2")
-	assert.Empty(t, ca.FQDN, "a hostname-less catch-all carries no FQDN")
+	assert.Empty(t, ca.FQDN, "a catch-all carries no FQDN")
+}
+
+// TestDerivedRecordsBridge asserts the bridge yields exactly the host record plus
+// the terminate route's auto + vanity records (catch-all contributes none), with
+// the right zone-relative names and resource-name components, all pointing at the
+// host.
+func TestDerivedRecordsBridge(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "bridge", Container: "bridge", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "bridge", Container: "bridge", Host: "bridge-01", Ingress: []types.IngressSpec{
+				{Port: 8080, TLS: types.IngressTLSTerminate, Vanity: []string{
+					"key-broker.{BASE_DOMAIN}",
+					"key-broker.inforge.wardnet.network",
+				}},
+				{Port: 8443, Catchall: true},
+			}},
+		},
+	}
+
+	got := derivedRecords(res, "prd", "use1", "wardnet.network")
+
+	type rn struct{ name, record, host string }
+	var flat []rn
+	for _, d := range got {
+		flat = append(flat, rn{d.rec.Name, d.rec.RecordName, d.hostKey})
+		assert.Equal(t, "bridge", d.rec.Container)
+	}
+	assert.Equal(t, []rn{
+		{"bridge-vm-prd-use1", "bridge.vm.prd.use1", "bridge-01"},
+		{"bridge-svc-prd-use1", "bridge.svc.prd.use1", "bridge-01"},
+		{"key-broker", "key-broker", "bridge-01"}, // key-broker.{BASE_DOMAIN} -> key-broker.wardnet.network
+		{"key-broker-inforge", "key-broker.inforge", "bridge-01"},
+	}, flat)
+}
+
+// Two services on one host sharing the same vanity FQDN collide on one SNI, which
+// routesByHost must reject (createDNSRecords' guard is a no-op without a DNS
+// authority, so the route side guards too).
+func TestRoutesByHostRejectsDuplicateFQDN(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "a", Host: "bridge-01", Ingress: []types.IngressSpec{
+				{Port: 8080, TLS: types.IngressTLSTerminate, Vanity: []string{"dup.example.com"}}}},
+			{Name: "b", Host: "bridge-01", Ingress: []types.IngressSpec{
+				{Port: 9090, TLS: types.IngressTLSTerminate, Vanity: []string{"dup.example.com"}}}},
+		},
+	}
+	_, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dup.example.com")
 }
 
 func TestRoutesByHostRejectsMultipleCatchall(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
 		Service: []types.ServiceSpec{
-			{Name: "d1", Host: "bridge-01", Ingress: &types.IngressSpec{Hostname: "a", Port: 1, Catchall: true}},
-			{Name: "d2", Host: "bridge", Ingress: &types.IngressSpec{Hostname: "b", Port: 2, Catchall: true}},
+			{Name: "d1", Host: "bridge-01", Ingress: []types.IngressSpec{{Port: 1, Catchall: true}}},
+			{Name: "d2", Host: "bridge", Ingress: []types.IngressSpec{{Port: 2, Catchall: true}}},
 		},
 	}
 	_, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")

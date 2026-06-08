@@ -6,4 +6,4 @@ provider: neon
 engine: postgresql
 branch: main
 database: regionaldb
-role: app
+owner: app

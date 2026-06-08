@@ -4,7 +4,7 @@
   "title": "Database resource",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "container", "provider", "engine", "database", "role"],
+  "required": ["name", "container", "provider", "engine", "database", "owner"],
   "properties": {
     "name": { "type": "string", "minLength": 1 },
     "container": { "type": "string", "minLength": 1 },
@@ -12,6 +12,6 @@
     "engine": { "type": "string", "enum": ["postgresql"] },
     "branch": { "type": "string", "minLength": 1 },
     "database": { "type": "string", "minLength": 1 },
-    "role": { "type": "string", "minLength": 1 }
+    "owner": { "type": "string", "minLength": 1 }
   }
 }

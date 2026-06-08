@@ -1,7 +1,0 @@
-# compute FK does not resolve to any expanded compute specKey -> FAIL.
-name: bridge
-container: core
-provider: cloudflare
-compute: bridge-09
-subdomain: bridge
-proxied: false

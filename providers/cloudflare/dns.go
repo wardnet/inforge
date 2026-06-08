@@ -37,27 +37,28 @@ func New(zoneID, project, env, slug string, tagRecords bool, provider *cf.Provid
 	}
 }
 
-// Create creates one Cloudflare A-record for the given DnsSpec.
-func (c *CloudflareDns) Create(ctx *pulumi.Context, spec types.DnsSpec, compute types.ComputeOutputs) error {
-	recordName := naming.RecordName(c.env, c.slug, spec.Subdomain)
-	pulumiName := naming.Resource(c.env, c.slug, "record", spec.Name)
+// CreateRecord creates one Cloudflare A-record from a derived DnsRecord. The
+// caller has already resolved the zone-relative name (rec.RecordName) and the
+// unique resource-name component (rec.Name); the provider stays a pure renderer.
+func (c *CloudflareDns) CreateRecord(ctx *pulumi.Context, rec types.DnsRecord, target types.ComputeOutputs) error {
+	pulumiName := naming.Resource(c.env, c.slug, "record", rec.Name)
 
 	ttl := pulumi.Float64(60)
-	if spec.Proxied {
+	if rec.Proxied {
 		ttl = pulumi.Float64(1) // Cloudflare requires ttl=1 when proxied
 	}
 	args := &cf.RecordArgs{
 		ZoneId:  pulumi.StringPtr(c.zoneID),
-		Name:    pulumi.String(recordName),
+		Name:    pulumi.String(rec.RecordName),
 		Type:    pulumi.String("A"),
-		Content: compute.PublicIP.ToStringPtrOutput(),
-		Proxied: pulumi.BoolPtr(spec.Proxied),
+		Content: target.PublicIP.ToStringPtrOutput(),
+		Proxied: pulumi.BoolPtr(rec.Proxied),
 		Ttl:     ttl,
 	}
 	// Record tags require a Cloudflare Enterprise zone; only set them when the
 	// project opts in, otherwise the create is rejected on non-Enterprise plans.
 	if c.tagRecords {
-		cfTags := tags.CloudflareTags(c.project, c.env, c.slug, spec.Container)
+		cfTags := tags.CloudflareTags(c.project, c.env, c.slug, rec.Container)
 		tagInputs := make(pulumi.StringArray, len(cfTags))
 		for i, t := range cfTags {
 			tagInputs[i] = pulumi.String(t)

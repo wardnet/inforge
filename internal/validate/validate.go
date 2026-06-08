@@ -130,7 +130,7 @@ func buildGlobalRefs(global types.Resources) *globalRefs {
 
 // globalHasResources reports whether the global slice declares any resource.
 func globalHasResources(g types.Resources) bool {
-	return len(g.Network)+len(g.Compute)+len(g.DNS)+len(g.Database)+
+	return len(g.Network)+len(g.Compute)+len(g.Database)+
 		len(g.Secrets)+len(g.Service)+len(g.TLSTermination) > 0
 }
 
@@ -142,6 +142,7 @@ type regionContext struct {
 	networks         map[string]types.NetworkSpec // specKey -> network
 	computeKind      map[string]string            // expanded specKey -> kind
 	computeCanonical map[string]string            // any accepted compute FK form -> canonical specKey
+	computeInstances map[string]int               // canonical specKey -> the compute's instance_count
 	computeDeployer  map[string]bool              // canonical specKey -> declares a deploy_user
 	databaseNames    map[string]bool
 	tlsByCompute     map[string]bool // canonical compute specKey -> has a tls-termination resource
@@ -232,10 +233,6 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	if err != nil {
 		return err
 	}
-	dnsFiles, err := readFiles[types.DnsSpec](filepath.Join(base, "dns"))
-	if err != nil {
-		return err
-	}
 	databaseFiles, err := readFiles[types.DatabaseSpec](filepath.Join(base, "database"))
 	if err != nil {
 		return err
@@ -273,6 +270,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		networks:         map[string]types.NetworkSpec{},
 		computeKind:      map[string]string{},
 		computeCanonical: map[string]string{},
+		computeInstances: map[string]int{},
 		computeDeployer:  map[string]bool{},
 		databaseNames:    map[string]bool{},
 		tlsByCompute:     map[string]bool{},
@@ -288,11 +286,13 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		for i := 1; i <= f.spec.InstanceCount; i++ {
 			key := naming.SpecKey(f.spec.Name, i)
 			ctx.computeKind[key] = f.spec.Kind
+			ctx.computeInstances[key] = f.spec.InstanceCount
 			ctx.computeDeployer[key] = hasDeployer
 		}
 		if f.spec.InstanceCount == 1 {
 			// bridge and bridge-01 both reference the same host.
 			ctx.computeKind[f.spec.Name] = f.spec.Kind
+			ctx.computeInstances[f.spec.Name] = f.spec.InstanceCount
 		}
 	}
 	// Canonicalization (any compute FK form -> expanded specKey) is shared with
@@ -306,15 +306,18 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			ctx.tlsByCompute[c] = true
 		}
 	}
-	// Count catch-all ingress services per host so checkService can enforce the
+	// Count catch-all ingress entries per host so checkService can enforce the
 	// at-most-one rule (the host's whole route table funnels its unmatched SNIs to
 	// a single dispatcher).
 	for _, f := range serviceFiles {
-		if f.spec.Ingress == nil || !f.spec.Ingress.Catchall {
+		c, ok := ctx.computeCanonical[f.spec.Host]
+		if !ok {
 			continue
 		}
-		if c, ok := ctx.computeCanonical[f.spec.Host]; ok {
-			ctx.catchallByHost[c]++
+		for _, in := range f.spec.Ingress {
+			if in.Catchall {
+				ctx.catchallByHost[c]++
+			}
 		}
 	}
 	// Seed the global slice's referenceable outputs under a `global/` prefix so a
@@ -335,9 +338,6 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	})
 	validateType(r, schemaSet["compute"], computeFiles, func(s types.ComputeSpec) ([]string, []string) {
 		return checkCompute(s, ctx)
-	})
-	validateType(r, schemaSet["dns"], dnsFiles, func(s types.DnsSpec) ([]string, []string) {
-		return checkDNS(s, ctx)
 	})
 	validateType(r, schemaSet["database"], databaseFiles, func(s types.DatabaseSpec) ([]string, []string) {
 		return checkDatabase(s, ctx)
@@ -376,7 +376,7 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 
 // compileSchemas compiles every embedded JSON Schema, keyed by resource type.
 func compileSchemas() (map[string]*jsonschema.Schema, error) {
-	names := []string{"network", "compute", "dns", "database", "secrets", "service", "tls-termination"}
+	names := []string{"network", "compute", "database", "secrets", "service", "tls-termination"}
 	c := jsonschema.NewCompiler()
 	for _, n := range names {
 		b, err := schemas.FS.ReadFile(n + ".json")
@@ -489,6 +489,17 @@ func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, 
 		if len(ar.Providers) == 0 {
 			errs = append(errs, fmt.Sprintf("regions.%s: providers block required", name))
 		}
+		// The DNS authority is optional, but when declared both fields are
+		// load-bearing: an empty provider/zone silently creates no (or zone-less)
+		// records at apply. Caught here rather than failing at the DNS provider.
+		if d := ar.Dns; d != nil {
+			if strings.TrimSpace(d.Provider) == "" {
+				errs = append(errs, fmt.Sprintf("regions.%s.dns: provider required when a dns authority is declared", name))
+			}
+			if strings.TrimSpace(d.Zone) == "" {
+				errs = append(errs, fmt.Sprintf("regions.%s.dns: zone required when a dns authority is declared", name))
+			}
+		}
 	}
 	if global != nil && len(global.Providers) == 0 {
 		errs = append(errs, "global: providers block required when global is defined")
@@ -518,11 +529,6 @@ func collectProviderRefs(base string) ([]providerRef, error) {
 		refs = append(refs, rs...)
 	}
 	if rs, err := refsOf[types.ComputeSpec](filepath.Join(base, "compute"), func(s types.ComputeSpec) string { return s.Provider }); err != nil {
-		return nil, err
-	} else {
-		refs = append(refs, rs...)
-	}
-	if rs, err := refsOf[types.DnsSpec](filepath.Join(base, "dns"), func(s types.DnsSpec) string { return s.Provider }); err != nil {
 		return nil, err
 	} else {
 		refs = append(refs, rs...)
@@ -680,14 +686,6 @@ func checkCompute(s types.ComputeSpec, ctx regionContext) (errs, warns []string)
 	return errs, warns
 }
 
-func checkDNS(s types.DnsSpec, ctx regionContext) (errs, warns []string) {
-	errs = append(errs, providerErr(s.Provider, ctx.available)...)
-	if _, ok := ctx.computeKind[s.Compute]; !ok {
-		errs = append(errs, fmt.Sprintf("compute: %q does not resolve to a compute instance", s.Compute))
-	}
-	return errs, warns
-}
-
 func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []string) {
 	errs = append(errs, providerErr(s.Provider, ctx.available)...)
 	return errs, warns
@@ -746,6 +744,13 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	} else if kind != "vm" {
 		errs = append(errs, fmt.Sprintf("host: %q has kind %q; services require a vm host", s.Host, kind))
 	}
+	// A service's host DNS and its host's "<compute>.vm" record are derived from the
+	// bare compute name (no instance index), so they cannot address one instance of
+	// a multi-instance compute. Reject it here rather than silently resolving every
+	// instance to instance 1's record. Multi-instance VM hosts are not supported yet.
+	if ok && ctx.computeInstances[ctx.computeCanonical[s.Host]] > 1 {
+		errs = append(errs, fmt.Sprintf("host: %q is a multi-instance compute; a service host must be single-instance (the host DNS record cannot address one instance)", s.Host))
+	}
 	if s.Type == "container" {
 		warns = append(warns, "type: \"container\" is reserved and not implemented this phase")
 	}
@@ -761,31 +766,48 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	if ok && !ctx.computeDeployer[ctx.computeCanonical[s.Host]] {
 		errs = append(errs, fmt.Sprintf("host: %q has no deploy_user; inforge provisions the service over SSH and requires one", s.Host))
 	}
-	if s.Ingress != nil {
+	if len(s.Ingress) > 0 {
 		host := ctx.computeCanonical[s.Host]
 		if ok && !ctx.tlsByCompute[host] {
 			errs = append(errs, fmt.Sprintf("ingress: host %q has no tls-termination resource to terminate it", s.Host))
 		}
-		// hostname is the SNI a named route matches, so it is required — except for
-		// a catch-all, which matches every unmatched SNI and has none to declare.
-		if !s.Ingress.Catchall && s.Ingress.Hostname == "" {
-			errs = append(errs, "ingress: hostname is required unless catchall")
+		// Each service has at most one catch-all and at most one non-catch-all
+		// entry: the non-catch-all entry (terminate OR named passthrough) owns the
+		// service's auto-derived "<svc>.svc" FQDN, so a second would collide.
+		catchalls, named := 0, 0
+		for _, in := range s.Ingress {
+			if in.Catchall {
+				catchalls++
+				// A catch-all forwards every unmatched SNI, so it is inherently
+				// passthrough; terminating arbitrary SNIs would need on-demand certs.
+				if in.TLS == types.IngressTLSTerminate {
+					errs = append(errs, "ingress: catchall is passthrough-only; remove tls: terminate")
+				}
+				// Vanity FQDNs are an SNI/cert concept; a catch-all has no SNI.
+				if len(in.Vanity) > 0 {
+					errs = append(errs, "ingress: catchall has no SNI; remove vanity")
+				}
+			} else {
+				named++
+			}
+			// proxy_protocol only affects passthrough/catch-all upstreams; on a
+			// terminate route it is silently ignored, so flag the likely mistake.
+			if in.ProxyProtocol != "" && in.Mode() == types.IngressTLSTerminate {
+				warns = append(warns, "ingress: proxy_protocol has no effect on a terminate route")
+			}
 		}
-		// A catch-all forwards every unmatched SNI, so it is inherently passthrough;
-		// terminating arbitrary SNIs would need on-demand certs, which we don't do.
-		if s.Ingress.Catchall && s.Ingress.TLS == types.IngressTLSTerminate {
-			errs = append(errs, "ingress: catchall is passthrough-only; remove tls: terminate")
+		if catchalls > 1 {
+			errs = append(errs, fmt.Sprintf("ingress: service %q has %d catch-all entries; at most one is allowed", s.Name, catchalls))
 		}
-		// At most one catch-all per host: its unmatched-SNI traffic funnels to a
-		// single dispatcher. Caught here (and again at preview/deploy) rather than
-		// silently picking one.
-		if s.Ingress.Catchall && ok && ctx.catchallByHost[host] > 1 {
-			errs = append(errs, fmt.Sprintf("ingress: host %q has %d catch-all services; at most one is allowed", s.Host, ctx.catchallByHost[host]))
+		if named > 1 {
+			errs = append(errs, fmt.Sprintf("ingress: service %q has %d non-catch-all entries; at most one is allowed (it owns the service's <svc>.svc FQDN)", s.Name, named))
 		}
-		// proxy_protocol only affects passthrough/catch-all upstreams; on a
-		// terminate route it is silently ignored, so flag the likely mistake.
-		if s.Ingress.ProxyProtocol != "" && s.Ingress.Mode() == types.IngressTLSTerminate {
-			warns = append(warns, "ingress: proxy_protocol has no effect on a terminate route")
+		// At most one catch-all per host across all its services: the host's
+		// unmatched-SNI traffic funnels to a single dispatcher. Only flagged on a
+		// service that itself declares a catch-all, so named-only services sharing
+		// the host don't each repeat the error.
+		if ok && catchalls > 0 && ctx.catchallByHost[host] > 1 {
+			errs = append(errs, fmt.Sprintf("ingress: host %q has %d catch-all ingress entries across its services; at most one is allowed", s.Host, ctx.catchallByHost[host]))
 		}
 	}
 	return errs, warns

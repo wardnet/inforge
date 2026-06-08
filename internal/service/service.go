@@ -148,7 +148,7 @@ func BuildDeployDescriptor(env, baseDomain string, res types.Resources, table re
 			return DeployDescriptor{}, fmt.Errorf("region %q: %w", region, err)
 		}
 		for _, svc := range res.Service {
-			hostDNS := hostDNS(svc.Host, env, baseDomain, slug, res.DNS)
+			hostDNS := hostDNS(svc.Host, env, baseDomain, slug)
 			sshUser := deployUsers[canonical[svc.Host]]
 			if sshUser == "" {
 				sshUser = defaultSSHUser
@@ -181,18 +181,11 @@ func deployUsersByHost(computes []types.ComputeSpec) map[string]string {
 	return byHost
 }
 
-// hostDNS computes the fully-qualified domain for a host compute specKey:
-// "<subdomain>.<env>.<slug>.<baseDomain>", where subdomain comes from the DNS
-// record targeting that compute, falling back to the compute name.
-func hostDNS(hostKey, env, baseDomain, slug string, dns []types.DnsSpec) string {
-	subdomain := computeName(hostKey)
-	for _, d := range dns {
-		if d.Compute == hostKey {
-			subdomain = d.Subdomain
-			break
-		}
-	}
-	return naming.RecordFQDN(env, slug, subdomain, baseDomain)
+// hostDNS computes the fully-qualified SSH/cloud-init domain for a host compute
+// specKey: "<compute>.vm.<env>.<slug>.<baseDomain>", derived deterministically
+// from the bare compute name (the "vm"-segment host record).
+func hostDNS(hostKey, env, baseDomain, slug string) string {
+	return naming.HostFQDN(env, slug, computeName(hostKey), baseDomain)
 }
 
 // computeName strips the "-NN" instance suffix from an expanded compute specKey.

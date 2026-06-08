@@ -20,9 +20,9 @@ The global slice lives under `resources/<env>/global/`, mirroring the regional t
 resources/<env>/
   variables.yaml
   regions.yaml
-  network/ compute/ dns/ database/ secrets/ service/ tls-termination/   # the regional set (per region)
+  network/ compute/ database/ secrets/ service/ tls-termination/   # the regional set (per region)
   global/
-    network/ compute/ dns/ database/ secrets/ service/ tls-termination/ # the global slice (once)
+    network/ compute/ database/ secrets/ service/ tls-termination/ # the global slice (once)
 ```
 
 The slice is **optional** — an environment with no `global/` directory deploys nothing globally.
@@ -95,7 +95,7 @@ service's region.
 ## What realizes today
 
 This slice realizes the global **network**, **compute**, and **database** resources (the referenceable
-outputs). Global **service**, **dns**, and **tls-termination** resources are loaded and validated, but
+outputs). Global **service** and **tls-termination** resources are loaded and validated, but
 their host-level provisioning is not wired yet — only the output-producing types deploy globally for
 now. Note that validation still enforces the **full** rules for these types (e.g. a global service must
 declare a `deploy_user` and a tls-termination for any ingress), even though they do not deploy yet.

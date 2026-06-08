@@ -4,30 +4,29 @@ sidebar_position: 2
 
 # Cloudflare
 
-The Cloudflare provider implements **DNS** resources.
-
-## Resources
-
-| Resource | Status |
-|----------|--------|
-| DNS | Available |
+The Cloudflare provider is the **DNS authority** inforge creates all [derived DNS
+records](/resources/dns) on.
 
 ## Configuration
 
-Set in each region's `providers.cloudflare` block in [`regions.yaml`](/configuration/regions-yaml):
+The authority's provider + zone live in each region's
+[`dns`](/configuration/regions-yaml#dns-authority) block; the credentials and options live in the
+matching `providers.cloudflare` block, both in [`regions.yaml`](/configuration/regions-yaml):
 
 ```yaml
 regions:
   us-east-1:
     slug: use1
+    dns:
+      provider: cloudflare
+      zone: abc123def456       # Cloudflare Zone ID every derived record is added to
     providers:
       cloudflare:
         apiToken: ${CLOUDFLARE_API_TOKEN}
-        zoneId: abc123def456   # Cloudflare Zone ID the DNS records are added to
         tagRecords: false      # optional, default true — see below
 ```
 
-- `zoneId` (required) — the Cloudflare Zone ID to add records to.
+- `dns.zone` (required to create records) — the Cloudflare Zone ID to add records to.
 - `tagRecords` (optional, default `true`) — whether inforge labels each DNS record with its resource
   tags. **DNS record tags are a Cloudflare Enterprise-only feature**; on Free/Pro/Business zones the
   API rejects them with error 9300 (`DNS record has N tags, exceeding the quota of 0`). Set

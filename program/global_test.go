@@ -85,7 +85,7 @@ func TestCreateInfraGlobalScope(t *testing.T) {
 			},
 			"neon": {"apiKey": "k", "region": "aws-us-east-2"},
 		}
-		reg := registry.BuildRegistry(ctx, config, types.SSHConfig{}, regions.Table{}, "proj", "prd", globalScope)
+		reg := registry.BuildRegistry(ctx, config, nil, types.SSHConfig{}, regions.Table{}, "proj", "prd", globalScope)
 
 		res := types.Resources{
 			Network: []types.NetworkSpec{{
@@ -100,7 +100,7 @@ func TestCreateInfraGlobalScope(t *testing.T) {
 			}},
 			Database: []types.DatabaseSpec{{
 				Name: "shared", Container: "shared", Provider: "neon",
-				Engine: "postgresql", Branch: "main", Database: "shared", Role: "app",
+				Engine: "postgresql", Branch: "main", Database: "shared", Owner: "app",
 			}},
 		}
 

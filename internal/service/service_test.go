@@ -47,12 +47,9 @@ func singleRegionTable() regions.Table {
 
 func TestBuildDeployDescriptor(t *testing.T) {
 	res := types.Resources{
-		DNS: []types.DnsSpec{
-			{Provider: "cloudflare", Compute: "bridge-01", Subdomain: "bridge"},
-		},
 		Service: []types.ServiceSpec{
 			{Name: "api", Host: "bridge-01", Type: "raw"},
-			{Name: "worker", Host: "bridge-02", Type: "raw"}, // no DNS record -> falls back to compute name
+			{Name: "worker", Host: "edge-01", Type: "raw"},
 		},
 	}
 
@@ -66,12 +63,12 @@ func TestBuildDeployDescriptor(t *testing.T) {
 	}
 
 	api := byName["api"]
-	assert.Equal(t, "bridge.prd.use1.example.com", api.HostDNS, "uses the DNS record subdomain, with env")
+	assert.Equal(t, "bridge.vm.prd.use1.example.com", api.HostDNS, "host DNS is the bare compute name with the vm segment, env+slug scoped")
 	assert.Equal(t, "/srv/wardnet/api", api.Folder)
 	assert.Equal(t, "wardnet-api.service", api.Unit)
 
 	worker := byName["worker"]
-	assert.Equal(t, "bridge.prd.use1.example.com", worker.HostDNS, "falls back to the compute name as subdomain, with env")
+	assert.Equal(t, "edge.vm.prd.use1.example.com", worker.HostDNS, "host DNS is derived from each service's own host compute")
 }
 
 // TestBuildDeployDescriptorMultiRegion asserts the shared resource set fans each
@@ -100,8 +97,8 @@ func TestBuildDeployDescriptorMultiRegion(t *testing.T) {
 	}
 	// eu-central-1 sorts before us-east-1; both carry the same service, distinct slugs.
 	assert.Equal(t, []string{
-		"bridge.prd.euc1.example.com",
-		"bridge.prd.use1.example.com",
+		"bridge.vm.prd.euc1.example.com",
+		"bridge.vm.prd.use1.example.com",
 	}, hostDNSByService["api"])
 }
 

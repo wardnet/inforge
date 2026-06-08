@@ -2,6 +2,7 @@ package validate
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -173,6 +174,24 @@ func TestCheckRegionsFile(t *testing.T) {
 		}, &regions.Global{Providers: withProviders}, "regions.yaml")
 		assert.False(t, r.failed)
 	})
+
+	t.Run("dns authority with provider and zone", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: withProviders,
+				Dns: &regions.DnsAuthority{Provider: "cloudflare", Zone: "z1"}},
+		}, nil, "regions.yaml")
+		assert.False(t, r.failed)
+	})
+
+	t.Run("dns authority missing zone fails", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: withProviders,
+				Dns: &regions.DnsAuthority{Provider: "cloudflare"}},
+		}, nil, "regions.yaml")
+		assert.True(t, r.failed)
+	})
 }
 
 // TestCheckProviderAvailabilityPerRegion confirms the single shared resource set
@@ -244,8 +263,18 @@ func TestCheckTLSTermination(t *testing.T) {
 	assert.Contains(t, errs[0], "no deploy_user")
 }
 
+// A service may not run on a multi-instance compute: the host DNS / "<compute>.vm"
+// record is derived from the bare compute name and can't address one instance.
+func TestCheckServiceRejectsMultiInstanceHost(t *testing.T) {
+	ctx := baseCtx()
+	ctx.computeInstances = map[string]int{"bridge-01": 2}
+	errs, _ := checkService(types.ServiceSpec{Name: "api", Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc"}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "multi-instance")
+}
+
 func TestCheckServiceIngress(t *testing.T) {
-	ingress := &types.IngressSpec{Hostname: "api", Port: 8080}
+	ingress := []types.IngressSpec{{Port: 8080, TLS: types.IngressTLSTerminate}}
 
 	// Ingress with a terminator on the same host -> OK.
 	ctx := baseCtx()
@@ -271,40 +300,51 @@ func TestCheckServiceIngressModes(t *testing.T) {
 		c.tlsByCompute["bridge-01"] = true
 		return c
 	}
-	svc := func(in *types.IngressSpec) types.ServiceSpec {
-		return types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Ingress: in}
+	svc := func(in ...types.IngressSpec) types.ServiceSpec {
+		return types.ServiceSpec{Name: "svc", Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Ingress: in}
 	}
 
 	// passthrough is accepted.
-	errs, _ := checkService(svc(&types.IngressSpec{Hostname: "db", Port: 5432, TLS: types.IngressTLSPassthrough}), base())
+	errs, _ := checkService(svc(types.IngressSpec{Port: 5432, TLS: types.IngressTLSPassthrough}), base())
 	assert.Empty(t, errs)
 
 	// catchall + tls:terminate is contradictory.
-	errs, _ = checkService(svc(&types.IngressSpec{Hostname: "x", Port: 9000, Catchall: true, TLS: types.IngressTLSTerminate}), base())
+	errs, _ = checkService(svc(types.IngressSpec{Port: 9000, Catchall: true, TLS: types.IngressTLSTerminate}), base())
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "passthrough-only")
 
 	// More than one catch-all on the host.
 	ctx := base()
 	ctx.catchallByHost = map[string]int{"bridge-01": 2}
-	errs, _ = checkService(svc(&types.IngressSpec{Hostname: "x", Port: 9000, Catchall: true}), ctx)
+	errs, _ = checkService(svc(types.IngressSpec{Port: 9000, Catchall: true}), ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "catch-all")
 
 	// proxy_protocol on a terminate route warns (no effect), not an error.
-	errs, warns := checkService(svc(&types.IngressSpec{Hostname: "web", Port: 80, ProxyProtocol: "v2"}), base())
+	errs, warns := checkService(svc(types.IngressSpec{Port: 80, ProxyProtocol: "v2"}), base())
 	assert.Empty(t, errs)
 	require.Len(t, warns, 1)
 	assert.Contains(t, warns[0], "proxy_protocol has no effect")
 
-	// A catch-all may omit hostname (it has no SNI to declare).
-	errs, _ = checkService(svc(&types.IngressSpec{Port: 9000, Catchall: true}), base())
+	// A terminate route + a catch-all on one service is the bridge shape -> OK.
+	errs, _ = checkService(svc(
+		types.IngressSpec{Port: 8080, TLS: types.IngressTLSTerminate, Vanity: []string{"key-broker.inforge.example.com"}},
+		types.IngressSpec{Port: 8443, Catchall: true},
+	), base())
 	assert.Empty(t, errs)
 
-	// A named (non-catchall) route without hostname is an error.
-	errs, _ = checkService(svc(&types.IngressSpec{Port: 80}), base())
+	// Two non-catch-all entries collide on the auto "<svc>.svc" name -> FAIL.
+	errs, _ = checkService(svc(
+		types.IngressSpec{Port: 8080, TLS: types.IngressTLSTerminate},
+		types.IngressSpec{Port: 9090, TLS: types.IngressTLSPassthrough},
+	), base())
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "hostname is required")
+	assert.Contains(t, errs[0], "non-catch-all")
+
+	// Vanity on a catch-all is meaningless -> FAIL.
+	errs, _ = checkService(svc(types.IngressSpec{Port: 9000, Catchall: true, Vanity: []string{"x"}}), base())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "catchall has no SNI")
 }
 
 func TestCheckServiceDeployUser(t *testing.T) {
