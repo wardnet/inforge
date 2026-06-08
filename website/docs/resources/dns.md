@@ -4,55 +4,42 @@ sidebar_position: 3
 
 # DNS
 
-A **DNS** resource creates a DNS record in Cloudflare pointing at a Compute instance's public IP.
+DNS is **not a resource you author**. inforge derives every record automatically and creates it
+against the region's [DNS authority](../configuration/regions-yaml#dns-authority) — the single
+provider + zone declared per `(env, region)` in `regions.yaml`. Different regions may use different
+authorities.
 
-## Schema
+## Derived records
 
-```yaml
-name: bridge             # required
-container: bridge        # required
-provider: cloudflare     # required
-compute: bridge-01       # required — specKey of the Compute to point at
-subdomain: bridge        # required — left part of the DNS record
-proxied: false           # optional — enable Cloudflare proxy (default false)
-```
+Every record is an A-record pointing at a host's public IP, named with the resource naming convention
+(a type segment after the name):
 
-## Fields
+| Record | FQDN | Source | Certificate? |
+|--------|------|--------|--------------|
+| Host | `<compute>.vm.<env>.<slug>.<base>` | each [Compute](./compute) host (its SSH / cloud-init domain) | no |
+| Service | `<service>.svc.<env>.<slug>.<base>` | a non-catch-all [ingress](./service#ingress) entry | yes, on a terminate route |
+| Vanity | the expanded vanity value | an ingress entry's `vanity` list | yes, on a terminate route |
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | Resource name. |
-| `container` | string | Yes | Grouping label. |
-| `provider` | string | Yes | Must be `cloudflare`. |
-| `compute` | string | Yes | specKey of the Compute this record points at. |
-| `subdomain` | string | Yes | Left part of the hostname. Full name becomes `<subdomain>.<env>.<slug>.<baseDomain>`. |
-| `proxied` | bool | No | Enable Cloudflare orange-cloud proxy (default `false`). |
+A named **passthrough** route gets a DNS record but no certificate (the backend owns TLS); a
+**catch-all** gets neither (it has no SNI to resolve).
 
-## Resulting hostname
+For environment `prd`, region `us-east-1` (slug `use1`), `base_domain: wardnet.network`:
 
-The DNS record name is assembled from `subdomain`, the environment, the region slug, and `base_domain`:
+- host `bridge` → `bridge.vm.prd.use1.wardnet.network`
+- service `bridge` ingress → `bridge.svc.prd.use1.wardnet.network`
 
-```
-<subdomain>.<env>.<region-slug>.<base_domain>
-```
+## Vanity domains
 
-For a record with `subdomain: bridge` in environment `prd`, region `us-east-1` (slug `use1`) with
-`base_domain: example.com`, the record is `bridge.prd.use1.example.com`.
-
-## Example
-
-```yaml title="resources/prd/us-east-1/dns/bridge.yaml"
-name: bridge
-container: bridge
-provider: cloudflare
-compute: bridge-01
-subdomain: bridge
-proxied: false
-```
+A service's terminate/named ingress entry may serve extra public names via its `vanity` list — see
+[Service → Ingress](./service#hostnames-dns-and-certificates) for the templating rules
+(`{BASE_DOMAIN}`, `{ENV}`, `{REGION_SLUG}`, and bare-token scoping). inforge creates a DNS record (and,
+for terminate routes, an ACME certificate) for each.
 
 ## Provider requirements
 
-The Cloudflare provider needs:
+The Cloudflare authority needs:
 
-- `CLOUDFLARE_API_TOKEN` environment variable with permission to edit the zone
-- `cloudflare.zoneId` in the region's `providers.cloudflare` block in `regions.yaml`
+- `CLOUDFLARE_API_TOKEN` (the `providers.cloudflare.apiToken` credential) with permission to edit the
+  zone
+- the zone id in the region's `dns.zone` (see
+  [regions.yaml → DNS authority](../configuration/regions-yaml#dns-authority))

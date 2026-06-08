@@ -14,11 +14,14 @@ in `regions.yaml`. All files are validated against embedded JSON schemas.
 |------|-----------|-------------|
 | [Network](../resources/network) | `network/` | VPC / network (Hetzner) |
 | [Compute](../resources/compute) | `compute/` | Virtual machine |
-| [DNS](../resources/dns) | `dns/` | DNS record (Cloudflare) |
 | [Database](../resources/database) | `database/` | Managed PostgreSQL (Neon) |
 | [Secrets](../resources/secrets) | `secrets/` | Secret references (Infisical) |
 | [Service](../resources/service) | `service/` | Application hosted on a VM |
 | [TLS termination](../resources/tls-termination) | `tls-termination/` | Host-level TLS terminator (Caddy on Hetzner) |
+
+[DNS](../resources/dns) is **not** an authored resource type: inforge derives every record (host,
+service, vanity) automatically and creates it on the region's
+[DNS authority](../configuration/regions-yaml#dns-authority).
 
 ## Common fields
 

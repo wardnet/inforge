@@ -6,4 +6,4 @@ provider: neon
 engine: postgresql
 branch: main
 database: shared
-role: app
+owner: app

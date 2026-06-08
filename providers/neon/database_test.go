@@ -160,7 +160,7 @@ func TestNeonProjectNamePassedToAPIMatchesNamingConvention(t *testing.T) {
 			Container: "bridge",
 			Provider:  "neon",
 			Database:  "appdb",
-			Role:      "app",
+			Owner:     "app",
 		}
 		_, err := adapter.Create(ctx, spec, "prd", "us-east-1")
 		return err
@@ -184,7 +184,7 @@ func TestNeonDatabasePulumiNameMatchesNamingConvention(t *testing.T) {
 			Container: "bridge",
 			Provider:  "neon",
 			Database:  "appdb",
-			Role:      "app",
+			Owner:     "app",
 		}
 		_, err := adapter.Create(ctx, spec, "prd", "us-east-1")
 		return err
@@ -232,7 +232,7 @@ func TestCreateSmoke(t *testing.T) {
 			Engine:    "postgresql",
 			Branch:    "main",
 			Database:  "appdb",
-			Role:      "approle",
+			Owner:     "approle",
 		}
 		out, err := adapter.Create(ctx, spec, "prod", "us-east-1")
 		if err != nil {

@@ -113,3 +113,58 @@ func TestRecordFQDN(t *testing.T) {
 		t.Errorf("RecordFQDN = %q, want %q", got, want)
 	}
 }
+
+func TestHostFQDN(t *testing.T) {
+	got := HostFQDN("prd", "use1", "bridge", "wardnet.network")
+	want := "bridge.vm.prd.use1.wardnet.network"
+	if got != want {
+		t.Errorf("HostFQDN = %q, want %q", got, want)
+	}
+}
+
+func TestServiceFQDN(t *testing.T) {
+	got := ServiceFQDN("prd", "use1", "bridge", "wardnet.network")
+	want := "bridge.svc.prd.use1.wardnet.network"
+	if got != want {
+		t.Errorf("ServiceFQDN = %q, want %q", got, want)
+	}
+}
+
+func TestExpandVanity(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"bare token is env+region scoped", "foo", "foo.prd.use1.wardnet.network"},
+		{"base-domain placeholder", "key-broker.{BASE_DOMAIN}", "key-broker.wardnet.network"},
+		{"apex via base-domain placeholder", "{BASE_DOMAIN}", "wardnet.network"},
+		{"literal full fqdn used as-is", "key-broker.inforge.wardnet.network", "key-broker.inforge.wardnet.network"},
+		{"env and slug placeholders", "x.{ENV}.{REGION_SLUG}.{BASE_DOMAIN}", "x.prd.use1.wardnet.network"},
+		// Degenerate: a lone placeholder contains "{", so it takes the template
+		// branch and is substituted verbatim — NOT env/region-scoped. Documented,
+		// not a bug: such a vanity is operator nonsense, but the result is
+		// deterministic rather than surprising.
+		{"lone ENV placeholder is not scoped", "{ENV}", "prd"},
+		{"lone REGION_SLUG placeholder is not scoped", "{REGION_SLUG}", "use1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ExpandVanity(c.in, "prd", "use1", "wardnet.network"); got != c.want {
+				t.Errorf("ExpandVanity(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestZoneRelative(t *testing.T) {
+	cases := []struct{ name, fqdn, want string }{
+		{"normal", "bridge.svc.prd.use1.wardnet.network", "bridge.svc.prd.use1"},
+		{"multi-label vanity", "key-broker.inforge.wardnet.network", "key-broker.inforge"},
+		{"single label", "key-broker.wardnet.network", "key-broker"},
+		{"apex", "wardnet.network", "@"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ZoneRelative(c.fqdn, "wardnet.network"); got != c.want {
+				t.Errorf("ZoneRelative(%q) = %q, want %q", c.fqdn, got, c.want)
+			}
+		})
+	}
+}

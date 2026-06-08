@@ -9,8 +9,9 @@ realizes on a host to terminate inbound TLS and reverse-proxy to the services ru
 Hetzner this is realized by [Caddy](https://caddyserver.com/) (ACME / Let's Encrypt); another
 provider could realize the same resource with a managed load balancer + ACM.
 
-Per-service [ingress](./service#ingress) feeds this terminator: each service on the host that declares
-`ingress` contributes one **SNI route**. A route either **terminates** TLS (ACME cert + reverse-proxy
+Per-service [ingress](./service#ingress) feeds this terminator: each ingress entry on a host that
+declares `ingress` contributes one or more **SNI routes** — one per FQDN, i.e. the auto-derived
+`<svc>.svc` name plus any vanity names. A route either **terminates** TLS (ACME cert + reverse-proxy
 to a local port) or **passes through** the raw TLS to a backend that owns its own certificate. A
 single per-host **catch-all** route forwards every unmatched SNI to a dispatcher.
 
@@ -60,8 +61,9 @@ A terminator and a service's ingress are two halves of one feature:
 
 - The **terminator** (this resource) is installed once per host and owns the host's TLS / cert
   lifecycle.
-- A service's **`ingress`** (a field on the [Service](./service#ingress)) contributes one SNI route
-  (terminate, passthrough, or the catch-all) to the terminator on its host.
+- A service's **`ingress`** (a list field on the [Service](./service#ingress)) contributes its SNI
+  routes (terminate, passthrough, and/or the catch-all) to the terminator on its host — one route per
+  FQDN it serves.
 
 A service that declares `ingress` must have a `tls-termination` resource on its host — validation
 fails otherwise. A host may have a terminator with no services pointing at it yet (it is then idle

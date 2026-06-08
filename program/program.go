@@ -18,6 +18,7 @@ import (
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/regions"
 	iremote "github.com/wardnet/inforge/internal/remote"
 	"github.com/wardnet/inforge/internal/registry"
 	"github.com/wardnet/inforge/internal/service"
@@ -100,7 +101,7 @@ func Run(ctx *pulumi.Context) error {
 
 	registries := make(map[string]registry.ProviderRegistry, len(regionNames))
 	for _, region := range regionNames {
-		registries[region] = registry.BuildRegistry(ctx, regionTable[region].Providers, vars.SSH, regionTable, ctx.Project(), env, region)
+		registries[region] = registry.BuildRegistry(ctx, regionTable[region].Providers, regionTable[region].Dns, vars.SSH, regionTable, ctx.Project(), env, region)
 	}
 
 	// networkOutputs: region → specName+"/"+subnetName → NetworkOutputs. The
@@ -115,7 +116,8 @@ func Run(ctx *pulumi.Context) error {
 	// global providers block; its realization is keyed under globalScope so the
 	// hetzner per-region config lookup (ExtractRegionConfigs) still resolves.
 	if globalBlock != nil {
-		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, vars.SSH, regionTable, ctx.Project(), env, globalScope)
+		// The region-less global slice has no DNS authority (records are per-region).
+		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, nil, vars.SSH, regionTable, ctx.Project(), env, globalScope)
 		if err := createInfra(ctx, globalReg, globalRes, env, globalScope, "", vars.BaseDomain, networkOutputs, computeOutputs, databaseOutputs); err != nil {
 			return err
 		}
@@ -133,24 +135,14 @@ func Run(ctx *pulumi.Context) error {
 
 	for _, region := range regionNames {
 		reg := registries[region]
-		for _, spec := range res.DNS {
-			dp, err := reg.DNS(spec.Provider)
-			if err != nil {
-				return err
-			}
-			computeOut, ok := computeOutputs[region][spec.Compute]
-			if !ok {
-				return fmt.Errorf("dns %s/%s: compute %q not found (available: %v)", region, spec.Name, spec.Compute, sortedKeys(computeOutputs[region]))
-			}
-			if err := dp.Create(ctx, spec, computeOut); err != nil {
-				return err
-			}
-		}
-
 		slug, err := regionTable.Slug(region)
 		if err != nil {
 			return err
 		}
+		if err := createDNSRecords(ctx, reg, regionTable[region].Dns, res, computeOutputs[region], env, slug, vars.BaseDomain); err != nil {
+			return err
+		}
+
 		// gates memoizes one cloud-init readiness gate per host in this region.
 		// Both TLS realization and service provisioning SSH the same hosts, so the
 		// gate they each depend on must be the same resource — share the map.
@@ -219,7 +211,9 @@ func createInfra(
 		}
 		for i := 1; i <= spec.InstanceCount; i++ {
 			key := naming.SpecKey(spec.Name, i)
-			domain := naming.RecordFQDN(env, slug, subdomainFor(key, spec.Name, res.DNS), baseDomain)
+			// The host's SSH / cloud-init domain is derived from the bare compute
+			// name with the "vm" segment — deterministic, never a free-form record.
+			domain := naming.HostFQDN(env, slug, spec.Name, baseDomain)
 			out, err := cp.Create(ctx, spec, netOut, env, region, domain, man)
 			if err != nil {
 				return err
@@ -682,11 +676,28 @@ func deployUsersByHost(computes []types.ComputeSpec) map[string]string {
 	return byHost
 }
 
+// ingressFQDNs returns the env-scoped FQDNs one ingress entry serves/matches: the
+// auto-derived "<svc>.svc" FQDN plus every expanded vanity entry. A catch-all has
+// no SNI, so it returns nil. This is the single source of truth for ingress FQDNs
+// — both routesByHost (the TLS routes / certs) and createDNSRecords (the A-records)
+// call it, so a cert FQDN and its A-record can never drift apart.
+func ingressFQDNs(svcName string, in types.IngressSpec, env, slug, baseDomain string) []string {
+	if in.Catchall {
+		return nil
+	}
+	fqdns := []string{naming.ServiceFQDN(env, slug, svcName, baseDomain)}
+	for _, v := range in.Vanity {
+		fqdns = append(fqdns, naming.ExpandVanity(v, env, slug, baseDomain))
+	}
+	return fqdns
+}
+
 // routesByHost derives the inbound TLS routes for every ingress-bearing service,
-// grouped by the canonical specKey of the host it runs on. Each service's FQDN
-// is env-scoped here (<hostname>.<env>.<slug>.<baseDomain>) so the provider
-// receives fully-resolved names. The ingress TLS mode (terminate/passthrough),
-// catch-all flag and proxy_protocol carry through. A catch-all defaults to PROXY
+// grouped by the canonical specKey of the host it runs on. Each non-catch-all
+// ingress entry expands to one TLSRoute per FQDN it serves (the auto-derived
+// "<svc>.svc" name plus vanity), so a terminate entry with vanity certs renders
+// one Caddy site per name. A catch-all carries no FQDN. The ingress TLS mode,
+// catch-all flag and proxy_protocol carry through; a catch-all defaults to PROXY
 // protocol v2 when unset so the dispatcher backend learns the real client IP.
 // Within a host, routes are sorted (catch-all last) so realized resources are
 // stable across runs. It errors if any host has more than one catch-all route —
@@ -696,41 +707,58 @@ func routesByHost(res types.Resources, canonical map[string]string, env, slug, b
 	byHost := map[string][]types.TLSRoute{}
 	catchallByHost := map[string][]string{}
 	for _, svc := range res.Service {
-		if svc.Ingress == nil {
-			continue
-		}
 		hostKey, ok := canonical[svc.Host]
 		if !ok {
 			// Validation guarantees the host resolves; skip defensively.
 			continue
 		}
-		in := svc.Ingress
-		pp := in.ProxyProtocol
-		if in.Catchall {
-			catchallByHost[hostKey] = append(catchallByHost[hostKey], svc.Name)
-			if pp == "" {
-				pp = "v2"
+		for _, in := range svc.Ingress {
+			pp := in.ProxyProtocol
+			if in.Catchall {
+				catchallByHost[hostKey] = append(catchallByHost[hostKey], svc.Name)
+				if pp == "" {
+					pp = "v2"
+				}
+				byHost[hostKey] = append(byHost[hostKey], types.TLSRoute{
+					Service:       svc.Name,
+					Port:          in.Port,
+					Mode:          in.Mode(),
+					Catchall:      true,
+					ProxyProtocol: pp,
+				})
+				continue
+			}
+			for _, fqdn := range ingressFQDNs(svc.Name, in, env, slug, baseDomain) {
+				byHost[hostKey] = append(byHost[hostKey], types.TLSRoute{
+					Service:       svc.Name,
+					FQDN:          fqdn,
+					Port:          in.Port,
+					Mode:          in.Mode(),
+					ProxyProtocol: pp,
+				})
 			}
 		}
-		// A catch-all matches every unmatched SNI, so it carries no FQDN (and may
-		// omit hostname); a named route's FQDN is its matched SNI.
-		fqdn := ""
-		if in.Hostname != "" {
-			fqdn = naming.RecordFQDN(env, slug, in.Hostname, baseDomain)
-		}
-		byHost[hostKey] = append(byHost[hostKey], types.TLSRoute{
-			Service:       svc.Name,
-			FQDN:          fqdn,
-			Port:          in.Port,
-			Mode:          in.Mode(),
-			Catchall:      in.Catchall,
-			ProxyProtocol: pp,
-		})
 	}
 	for hostKey, names := range catchallByHost {
 		if len(names) > 1 {
 			sort.Strings(names)
 			return nil, fmt.Errorf("host %q has %d catch-all ingress services (%s); at most one is allowed", hostKey, len(names), strings.Join(names, ", "))
+		}
+	}
+	// Two services on one host can resolve to the same SNI (e.g. the same vanity
+	// FQDN), which would render two conflicting routes for one name. createDNSRecords
+	// guards the DNS side, but it is a no-op when the region has no DNS authority, so
+	// guard the route side here too.
+	for hostKey, routes := range byHost {
+		seen := map[string]string{}
+		for _, rt := range routes {
+			if rt.Catchall {
+				continue
+			}
+			if prev, dup := seen[rt.FQDN]; dup {
+				return nil, fmt.Errorf("host %q has two ingress routes for SNI %q (services %s and %s); an SNI must be unique per host", hostKey, rt.FQDN, prev, rt.Service)
+			}
+			seen[rt.FQDN] = rt.Service
 		}
 	}
 	for _, routes := range byHost {
@@ -793,13 +821,92 @@ func assembleManifest(spec types.ComputeSpec, env, region, slug string) (string,
 	return manifest.Generate(base, nil)
 }
 
-func subdomainFor(key, name string, dns []types.DnsSpec) string {
-	for _, d := range dns {
-		if d.Compute == key {
-			return d.Subdomain
+// derivedRecord is one A-record inforge derives for a region, paired with the
+// canonical compute specKey whose public IP it points at. Splitting derivation
+// (pure) from creation (the Pulumi side effect) keeps the naming logic unit-
+// testable without a provider.
+type derivedRecord struct {
+	rec     types.DnsRecord
+	hostKey string
+}
+
+// derivedRecords derives every A-record for a region: one "<compute>.vm" host
+// record per compute (its SSH/cloud-init domain, pointing at instance 1), plus
+// one record per non-catch-all ingress FQDN (the auto "<svc>.svc" name and every
+// vanity). It shares its FQDN derivation with the TLS routes (ingressFQDNs), so a
+// cert and its A-record never drift. Catch-all ingress emits no record (it has no
+// SNI to resolve). The result is deterministic (compute then service order).
+func derivedRecords(res types.Resources, env, slug, baseDomain string) []derivedRecord {
+	var out []derivedRecord
+	add := func(fqdn, container, hostKey string) {
+		rel := naming.ZoneRelative(fqdn, baseDomain)
+		out = append(out, derivedRecord{
+			rec: types.DnsRecord{
+				Name:       recordResourceName(rel),
+				RecordName: rel,
+				Container:  container,
+			},
+			hostKey: hostKey,
+		})
+	}
+	for _, spec := range res.Compute {
+		fqdn := naming.HostFQDN(env, slug, spec.Name, baseDomain)
+		add(fqdn, spec.Container, naming.SpecKey(spec.Name, 1))
+	}
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	for _, svc := range res.Service {
+		hostKey, ok := canonical[svc.Host]
+		if !ok {
+			continue // validation guarantees resolution; skip defensively
+		}
+		for _, in := range svc.Ingress {
+			for _, fqdn := range ingressFQDNs(svc.Name, in, env, slug, baseDomain) {
+				add(fqdn, svc.Container, hostKey)
+			}
 		}
 	}
-	return name
+	return out
+}
+
+// createDNSRecords creates every derived A-record for a region against its DNS
+// authority, each pointing at its host's public IP. When the region declares no
+// DNS authority, it is a no-op.
+func createDNSRecords(ctx *pulumi.Context, reg registry.ProviderRegistry, authority *regions.DnsAuthority, res types.Resources, computeOut map[string]types.ComputeOutputs, env, slug, baseDomain string) error {
+	if authority == nil {
+		return nil
+	}
+	dp, err := reg.DNS(authority.Provider)
+	if err != nil {
+		return err
+	}
+	// Two services on one host can resolve to the same derived FQDN (e.g. the same
+	// vanity literal), which would collide on one DNS record / Pulumi logical name.
+	// Reject it here rather than letting the apply fail mid-way.
+	seen := map[string]string{}
+	for _, dr := range derivedRecords(res, env, slug, baseDomain) {
+		if prev, dup := seen[dr.rec.RecordName]; dup {
+			return fmt.Errorf("dns: record %q is derived more than once (%s and %s); a DNS name must be unique", dr.rec.RecordName, prev, dr.rec.Name)
+		}
+		seen[dr.rec.RecordName] = dr.rec.Name
+		target, ok := computeOut[dr.hostKey]
+		if !ok {
+			return fmt.Errorf("dns: record %q host %q has no output (available: %v)", dr.rec.RecordName, dr.hostKey, sortedKeys(computeOut))
+		}
+		if err := dp.CreateRecord(ctx, dr.rec, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// recordResourceName builds a stable, unique resource-name component from a
+// record's zone-relative name: dots become dashes ("bridge.svc.prd.use1" ->
+// "bridge-svc-prd-use1"), and the apex becomes "apex".
+func recordResourceName(zoneRelative string) string {
+	if zoneRelative == "@" {
+		return "apex"
+	}
+	return strings.ReplaceAll(zoneRelative, ".", "-")
 }
 
 func sortedKeys[V any](m map[string]V) []string {

@@ -5,5 +5,7 @@ host: bridge-01
 type: raw
 user: api
 ingress:
-  hostname: api
-  port: 8080
+  - port: 8080
+    tls: terminate
+    vanity:
+      - api.{BASE_DOMAIN}

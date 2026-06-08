@@ -25,7 +25,6 @@ resources/
     ├── sizes.yaml           # optional: overrides the default size table
     ├── network/             # NetworkSpec files
     ├── compute/             # ComputeSpec files
-    ├── dns/                 # DnsSpec files
     ├── database/            # DatabaseSpec files
     ├── secrets/             # SecretsSpec files
     ├── service/             # ServiceSpec files
@@ -89,7 +88,9 @@ regions:                            # which regions this env deploys into
         images: {ubuntu-24.04: ubuntu-24.04}
       cloudflare:
         apiToken: ${CLOUDFLARE_API_TOKEN}
-        zoneId: abc123
+    dns:
+      provider: cloudflare
+      zone: abc123
 ```
 
 See [regions.yaml](/configuration/regions-yaml) for the full reference.

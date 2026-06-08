@@ -43,7 +43,7 @@ credentials) — lives in `regions.yaml`, not in duplicated resource files.
 ## Region slug
 
 A **region slug** is the short location code an abstract region maps to (e.g. `us-east-1` → `use1`).
-Slugs are used in display names, DNS subdomains, and resource URNs.
+Slugs are used in display names, DNS names, and resource URNs.
 
 The mapping is defined per environment in [`regions.yaml`](/configuration/regions-yaml), alongside
 each region's provider config. Built-in slugs in `internal/regions` provide the naming vocabulary.

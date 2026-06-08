@@ -4,4 +4,4 @@ container: bridge
 provider: mystery
 engine: postgresql
 database: bridge
-role: app
+owner: app

@@ -20,8 +20,6 @@ my-infra/
         │   └── ingress.yaml
         ├── compute/
         │   └── bridge.yaml
-        ├── dns/
-        │   └── bridge.yaml
         └── service/
             └── api.yaml
 ```
@@ -61,6 +59,9 @@ ssh:
 regions:
   eu-central-1:
     slug: euc1
+    dns:
+      provider: cloudflare
+      zone: ""               # Cloudflare Zone ID derived records are created in
     providers:
       hetzner:
         apiToken: ${HCLOUD_TOKEN}
@@ -70,7 +71,6 @@ regions:
         images: {ubuntu-24.04: ubuntu-24.04}
       cloudflare:
         apiToken: ${CLOUDFLARE_API_TOKEN}
-        zoneId: ""
 ```
 
 ## 5. Write a compute resource

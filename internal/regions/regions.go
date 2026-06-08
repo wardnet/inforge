@@ -4,18 +4,29 @@
 // resources/<env>/regions.yaml (see internal/loader); regions.yaml is the single
 // authority for which regions deploy and all provider config. Built-in slug
 // defaults live here for naming vocabulary. The region slug is used to build
-// display names and DNS subdomains.
+// display names and the <slug> segment of derived DNS names.
 package regions
 
 import "fmt"
 
-// AbstractRegion is one entry in the region table: its slug plus the per-region
-// provider config. Providers maps a provider name (e.g. "hetzner") to that
-// provider's config for this region — credentials and the region's realization
-// (location, server types, images, …) in a single block.
+// AbstractRegion is one entry in the region table: its slug, its DNS authority,
+// plus the per-region provider config. Providers maps a provider name (e.g.
+// "hetzner") to that provider's config for this region — credentials and the
+// region's realization (location, server types, images, …) in a single block.
 type AbstractRegion struct {
 	Slug      string                    `yaml:"slug"`
+	Dns       *DnsAuthority             `yaml:"dns"`
 	Providers map[string]map[string]any `yaml:"providers"`
+}
+
+// DnsAuthority is the single DNS authority for one (env, region): the provider
+// that owns the zone all of the region's auto-derived records are created on.
+// Different regions may use different authorities. Credentials stay in the
+// matching providers block (e.g. providers.cloudflare.apiToken); the authority
+// carries only the provider selector and the zone.
+type DnsAuthority struct {
+	Provider string `yaml:"provider"` // e.g. "cloudflare"
+	Zone     string `yaml:"zone"`     // the authority's zone id records are created in
 }
 
 // Table maps an abstract region name (e.g. "us-east-1") to its realization.

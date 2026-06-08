@@ -21,7 +21,7 @@ provider: neon           # required
 engine: postgresql       # required — must be "postgresql"
 branch: main             # optional — Neon branch name (default "main")
 database: app            # required — database name within the branch
-role: app                # required — database role/user
+owner: app               # required — PostgreSQL role that owns the database
 ```
 
 ## Fields
@@ -34,7 +34,7 @@ role: app                # required — database role/user
 | `engine` | string | Yes | Must be `postgresql`. |
 | `branch` | string | No | Neon branch name (default `main`). |
 | `database` | string | Yes | PostgreSQL database name. |
-| `role` | string | Yes | PostgreSQL role/user for the application. |
+| `owner` | string | Yes | PostgreSQL role that owns the database. |
 
 ## Outputs
 
@@ -59,7 +59,7 @@ container: bridge
 provider: neon
 engine: postgresql
 database: app
-role: app
+owner: app
 ```
 
 ## Provider requirements

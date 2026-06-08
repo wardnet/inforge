@@ -56,7 +56,7 @@ type neonDatabaseResource struct {
 
 func newNeonDatabaseResource(
 	ctx *pulumi.Context, name string,
-	projectId pulumi.StringInput, branch, database, role, apiKey string,
+	projectId pulumi.StringInput, branch, database, owner, apiKey string,
 	opts ...pulumi.ResourceOption,
 ) (*neonDatabaseResource, error) {
 	res := &neonDatabaseResource{}
@@ -64,7 +64,7 @@ func newNeonDatabaseResource(
 		"projectId": projectId,
 		"branch":    pulumi.String(branch),
 		"database":  pulumi.String(database),
-		"role":      pulumi.String(role),
+		"owner":     pulumi.String(owner),
 		"apiKey":    pulumi.String(apiKey),
 	}
 	if err := ctx.RegisterResource(neonDatabaseType, name, args, res, opts...); err != nil {
@@ -124,7 +124,7 @@ func (n *NeonDatabaseAdapter) Create(
 	}
 
 	dbName := naming.Resource(env, n.slug, "db", spec.Name)
-	dbRes, err := newNeonDatabaseResource(ctx, dbName, proj.ProjectId, branch, spec.Database, spec.Role, n.apiKey)
+	dbRes, err := newNeonDatabaseResource(ctx, dbName, proj.ProjectId, branch, spec.Database, spec.Owner, n.apiKey)
 	if err != nil {
 		return types.DatabaseOutputs{}, fmt.Errorf("create neon database %q: %w", dbName, err)
 	}

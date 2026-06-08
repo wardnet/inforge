@@ -230,9 +230,6 @@ func loadResourceSet(base string) (types.Resources, error) {
 	if res.Compute, err = loadType[types.ComputeSpec](computeDir); err != nil {
 		return types.Resources{}, err
 	}
-	if res.DNS, err = loadType[types.DnsSpec](filepath.Join(base, "dns")); err != nil {
-		return types.Resources{}, err
-	}
 	if res.Database, err = loadType[types.DatabaseSpec](filepath.Join(base, "database")); err != nil {
 		return types.Resources{}, err
 	}

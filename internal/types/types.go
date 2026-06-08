@@ -75,14 +75,22 @@ type ComputeSpec struct {
 	DeployUser    *DeployUserSpec `yaml:"deploy_user,omitempty"`
 }
 
-// DnsSpec is one DNS record.
-type DnsSpec struct {
-	Name      string `yaml:"name"`
-	Container string `yaml:"container"`
-	Provider  string `yaml:"provider"`
-	Compute   string `yaml:"compute"` // FK -> an expanded compute specKey
-	Subdomain string `yaml:"subdomain"`
-	Proxied   bool   `yaml:"proxied"`
+// DnsRecord is one A-record inforge derives and creates against a region's DNS
+// authority (see regions.DnsAuthority). Records are never hand-authored: they are
+// derived from hosts (the "<compute>.vm" record) and from service ingress (the
+// "<svc>.svc" record plus any vanity FQDNs). The FQDN is fully resolved and
+// RecordName is its zone-relative form (FQDN minus the authority's zone, "@" at
+// the apex) so the provider stays a pure renderer. Container labels the record's
+// tags.
+type DnsRecord struct {
+	// Name is the unique resource-name component (e.g. "bridge-vm", "bridge-svc",
+	// "key-broker-inforge") used to build the Pulumi logical name.
+	Name string
+	// RecordName is the zone-relative DNS name the authority appends its zone to
+	// (e.g. "bridge.vm.prd.use1", or "@" at the apex).
+	RecordName string
+	Container  string
+	Proxied    bool
 }
 
 // DatabaseSpec is one managed database resource.
@@ -93,7 +101,7 @@ type DatabaseSpec struct {
 	Engine    string `yaml:"engine"` // "postgresql"
 	Branch    string `yaml:"branch"` // default "main"
 	Database  string `yaml:"database"`
-	Role      string `yaml:"role"`
+	Owner     string `yaml:"owner"` // PostgreSQL role that owns the database
 }
 
 // SecretsEntry is one entry in a secrets resource, naming where the value comes
@@ -116,19 +124,23 @@ type DeployUserSpec struct {
 	Name string `yaml:"name"`
 }
 
-// IngressSpec exposes a service for inbound traffic through its host's
-// tls-termination resource. Declaring ingress means "terminate TLS for this
-// host and reverse-proxy to its local port": the terminator writes one
-// per-service vhost that does exactly that. Non-TLS exposure is a firewall
-// concern, not a terminator one, so there is no opt-out — ingress always
-// implies ACME TLS. Hostname is a host label (like DnsSpec.Subdomain); the
-// env-scoped FQDN it resolves to is derived at realization time, not authored
-// here.
+// IngressSpec is one inbound routing entry a service exposes through its host's
+// tls-termination resource. A service carries a list of these (ServiceSpec.Ingress):
+// at most one catch-all and at most one non-catch-all (terminate OR named
+// passthrough), since the non-catch-all entry owns the service's auto-derived
+// "<svc>.svc" FQDN. A terminate entry's SNI/ACME-cert FQDNs are the auto-derived
+// service FQDN plus any Vanity entries; a catch-all has no FQDN (it matches every
+// unmatched SNI). The env-scoped FQDNs are derived at realization time (see
+// naming.ServiceFQDN / naming.ExpandVanity), not authored here.
 type IngressSpec struct {
-	Hostname string `yaml:"hostname"`                 // host label, env-scoped into an FQDN at realization; the SNI matched (ignored when Catchall)
-	Port     int    `yaml:"port"`                     // local port traffic is forwarded to
-	TLS      string `yaml:"tls,omitempty"`            // "terminate" (default) | "passthrough"
-	Catchall bool   `yaml:"catchall,omitempty"`       // at most one per host; matches all unmatched SNIs; implies passthrough
+	Port     int    `yaml:"port"`               // local port traffic is forwarded to
+	TLS      string `yaml:"tls,omitempty"`      // "terminate" (default) | "passthrough"
+	Catchall bool   `yaml:"catchall,omitempty"` // at most one per host; matches all unmatched SNIs; implies passthrough
+	// Vanity adds extra public FQDNs (beyond the auto-derived "<svc>.svc" name) a
+	// terminate/named route serves: a bare token is env+region-scoped, anything
+	// with a dot or a {BASE_DOMAIN}/{ENV}/{REGION_SLUG} placeholder is a literal
+	// FQDN. Ignored on a catch-all (it has no SNI).
+	Vanity []string `yaml:"vanity,omitempty"`
 	// ProxyProtocol enables the PROXY protocol to the upstream on passthrough/catchall
 	// routes so the backend learns the real client address: "" (off) | "v1" | "v2".
 	ProxyProtocol string `yaml:"proxy_protocol,omitempty"`
@@ -160,8 +172,8 @@ type ServiceSpec struct {
 	Provider  string       `yaml:"provider"`
 	Host      string       `yaml:"host"`              // FK -> an expanded compute specKey whose kind=vm
 	Type      string       `yaml:"type"`              // "raw" (built) | "container" (reserved)
-	User      string       `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
-	Ingress   *IngressSpec `yaml:"ingress,omitempty"` // optional inbound exposure via the host's tls-termination
+	User      string        `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
+	Ingress   []IngressSpec `yaml:"ingress,omitempty"` // inbound routes via the host's tls-termination (≤1 catch-all, ≤1 non-catch-all)
 }
 
 // TLSTerminationSpec declares a host-level TLS terminator — a capability the
@@ -239,9 +251,10 @@ type ComputeProvider interface {
 	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest string) (ComputeOutputs, error)
 }
 
-// DnsProvider creates a DNS record pointing at a compute instance.
+// DnsProvider creates a derived DNS record pointing at a compute instance, on a
+// region's DNS authority.
 type DnsProvider interface {
-	Create(ctx *pulumi.Context, spec DnsSpec, compute ComputeOutputs) error
+	CreateRecord(ctx *pulumi.Context, rec DnsRecord, target ComputeOutputs) error
 }
 
 // TLSTerminationProvider realizes a tls-termination spec on its host. host
@@ -332,7 +345,6 @@ type EnvironmentVariables struct {
 type Resources struct {
 	Network        []NetworkSpec
 	Compute        []ComputeSpec
-	DNS            []DnsSpec
 	Database       []DatabaseSpec
 	Secrets        []SecretsSpec
 	Service        []ServiceSpec

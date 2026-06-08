@@ -5,6 +5,7 @@ package naming
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/wardnet/inforge/internal/types"
 )
@@ -83,11 +84,57 @@ func RecordName(env, regionSlug, subdomain string) string {
 	return fmt.Sprintf("%s.%s.%s", subdomain, env, regionSlug)
 }
 
-// RecordFQDN returns the fully-qualified domain for a host:
+// RecordFQDN returns the fully-qualified domain for a record:
 // "<subdomain>.<env>.<regionSlug>.<baseDomain>" (e.g.
 // "bridge.prd.use1.wardnet.network"). It is RecordName plus the base domain, so
 // the DNS record, the VM's cloud-init domain, and the deploy descriptor's host
 // DNS all agree.
 func RecordFQDN(env, regionSlug, subdomain, baseDomain string) string {
 	return fmt.Sprintf("%s.%s", RecordName(env, regionSlug, subdomain), baseDomain)
+}
+
+// HostFQDN returns a host's (VM's) fully-qualified domain, derived from its bare
+// compute name with the "vm" type segment: "<compute>.vm.<env>.<slug>.<base>"
+// (e.g. "bridge.vm.prd.use1.wardnet.network"). This is the host's SSH /
+// cloud-init domain and is deterministic from the compute — never authored as a
+// free-form subdomain, so it can never be confused with a service record.
+func HostFQDN(env, regionSlug, compute, baseDomain string) string {
+	return RecordFQDN(env, regionSlug, compute+".vm", baseDomain)
+}
+
+// ServiceFQDN returns a service's canonical (auto-derived) public domain with the
+// "svc" type segment: "<service>.svc.<env>.<slug>.<base>" (e.g.
+// "bridge.svc.prd.use1.wardnet.network"). It is the default SNI/ACME-cert FQDN a
+// service's ingress terminates or matches; vanity FQDNs are additive (see
+// ExpandVanity).
+func ServiceFQDN(env, regionSlug, service, baseDomain string) string {
+	return RecordFQDN(env, regionSlug, service+".svc", baseDomain)
+}
+
+// ExpandVanity resolves one vanity entry to a fully-qualified domain. A bare
+// token (no dot, no "{" placeholder) is env+region-scoped exactly like a service
+// record: "foo" -> "foo.<env>.<slug>.<base>". Anything containing a dot or a
+// placeholder is treated as a literal/template FQDN and used as-is after
+// expanding {BASE_DOMAIN}, {ENV} and {REGION_SLUG}.
+func ExpandVanity(vanity, env, regionSlug, baseDomain string) string {
+	if !strings.ContainsAny(vanity, ".{") {
+		return RecordFQDN(env, regionSlug, vanity, baseDomain)
+	}
+	r := strings.NewReplacer(
+		"{BASE_DOMAIN}", baseDomain,
+		"{ENV}", env,
+		"{REGION_SLUG}", regionSlug,
+	)
+	return r.Replace(vanity)
+}
+
+// ZoneRelative returns a record's zone-relative name: the FQDN with the trailing
+// base domain (the DNS authority's zone) removed. The zone apex (fqdn ==
+// baseDomain) becomes "@". Cloudflare appends the zone, so providers consume this
+// form rather than the absolute FQDN.
+func ZoneRelative(fqdn, baseDomain string) string {
+	if fqdn == baseDomain {
+		return "@"
+	}
+	return strings.TrimSuffix(fqdn, "."+baseDomain)
 }

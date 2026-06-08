@@ -9,12 +9,12 @@ import (
 	"github.com/pulumi/pulumi-go-provider/infer"
 )
 
-// NeonDatabaseArgs are the inputs for a Neon branch + database + role resource.
+// NeonDatabaseArgs are the inputs for a Neon branch + database + owner-role resource.
 type NeonDatabaseArgs struct {
 	ProjectId string `pulumi:"projectId"`
 	Branch    string `pulumi:"branch"`
 	Database  string `pulumi:"database"`
-	Role      string `pulumi:"role"`
+	Owner     string `pulumi:"owner"`
 	ApiKey    string `pulumi:"apiKey" provider:"secret"`
 }
 
@@ -45,13 +45,13 @@ func (*NeonDatabase) Create(
 	if err != nil {
 		return infer.CreateResponse[NeonDatabaseState]{}, err
 	}
-	if err := ensureRole(ctx, inp.ApiKey, inp.ProjectId, branchId, inp.Role); err != nil {
+	if err := ensureRole(ctx, inp.ApiKey, inp.ProjectId, branchId, inp.Owner); err != nil {
 		return infer.CreateResponse[NeonDatabaseState]{}, err
 	}
-	if err := ensureDatabase(ctx, inp.ApiKey, inp.ProjectId, branchId, inp.Database, inp.Role); err != nil {
+	if err := ensureDatabase(ctx, inp.ApiKey, inp.ProjectId, branchId, inp.Database, inp.Owner); err != nil {
 		return infer.CreateResponse[NeonDatabaseState]{}, err
 	}
-	connURL, err := getConnectionURI(ctx, inp.ApiKey, inp.ProjectId, branchId, inp.Role, inp.Database)
+	connURL, err := getConnectionURI(ctx, inp.ApiKey, inp.ProjectId, branchId, inp.Owner, inp.Database)
 	if err != nil {
 		return infer.CreateResponse[NeonDatabaseState]{}, err
 	}

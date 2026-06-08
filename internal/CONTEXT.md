@@ -24,7 +24,7 @@ _Avoid_: "region" unqualified — see Flagged ambiguities.
 
 **Region slug**:
 The short location code an abstract region maps to (`us-east-1` → `use1`), held per region in the
-**region table**. Used to build display names and DNS subdomains.
+**region table**. Used to build display names and the `<slug>` segment of DNS names.
 
 **Region table**:
 The per-environment `regions.yaml`: a map from abstract region to its `{slug, providers}`. It is the
@@ -56,9 +56,9 @@ The fully-qualified resource name `wardnet-<env>-<resourceType>-<slug>-<specKey>
 ### Resources
 
 **Resource**:
-One of the declarative types under a region: **Network**, **Compute**, **DNS**, **Database**,
-**Secrets**, **Service**, **TLS termination**. Each is one YAML file validated against an embedded
-JSON schema.
+One of the declarative types under a region: **Network**, **Compute**, **Database**, **Secrets**,
+**Service**, **TLS termination**. Each is one YAML file validated against an embedded JSON schema.
+DNS is **not** an authored resource — see **DNS authority**.
 
 **Compute**:
 A host/runtime resource with a `kind`: `vm` (built now) or `cluster` (k8s, reserved). VM sizing is
@@ -77,12 +77,24 @@ is `raw` (a gzip of files + scripts; built now) or `container` (pull-based; rese
 _Avoid_: app, workload (acceptable informally), daemon.
 
 **Ingress**:
-The optional `ingress` block on a Service (`hostname`, `tls`, `port`) declaring that it is exposed for
-inbound traffic. Ingress is fed to the host's **TLS termination** resource, which writes one vhost per
-service that terminates TLS and reverse-proxies to the service's local port. A service that declares
+The optional `ingress` **list** on a Service: each entry (`port`, `tls`, `catchall`, `vanity`,
+`proxy_protocol`) declares one inbound route fed to the host's **TLS termination** resource. A service
+carries at most one catch-all and at most one non-catch-all entry — the non-catch-all entry owns the
+service's auto-derived `<svc>.svc` SNI/cert FQDN (plus any **vanity** names). The bridge shape
+(terminate own SNI, pass the rest through) is one service with two entries. A service that declares
 ingress *must* have a TLS termination resource on its host; a service that wants raw inbound traffic
 instead opens the port itself on the host firewall and declares no ingress.
-_Avoid_: confusing the per-service `ingress` field with the host-level terminator (the resource).
+_Avoid_: confusing the per-service `ingress` field with the host-level terminator (the resource);
+authoring SNIs by hand (they are derived — see **DNS authority**).
+
+**DNS authority**:
+The single DNS provider + zone for one (env, region), declared in `regions.yaml` under `dns:`
+(sibling of `providers:`; credentials stay in the providers block). inforge authors no DNS records —
+it derives them and creates them on the authority: a host record `<compute>.vm.<env>.<slug>.<base>`,
+a service record `<svc>.svc.<env>.<slug>.<base>` per non-catch-all ingress entry, and one per vanity
+FQDN. Terminate routes also get an ACME cert per FQDN; named passthrough gets a record only; catch-all
+gets neither. See ADR-0014.
+_Avoid_: "DNS resource" / `DnsSpec` (removed); a free-form per-host `subdomain`.
 
 **TLS termination**:
 A host-level resource (its own YAML type, `tls-termination/`) declaring a terminator the compute
@@ -174,7 +186,7 @@ resources, that the deployment workflow consumes.
 
 - **"Region"** — three distinct things; always qualify which: a *region target* (a key under
   `regions:` in `regions.yaml` — which regions an env deploys into), a *region table* entry (that
-  region's `{slug, providers}` in `regions.yaml`), or a *region realization* (one provider's concrete
+  region's `{slug, dns, providers}` in `regions.yaml`), or a *region realization* (one provider's concrete
   `{location, network_zone, serverTypes, images}` for a region, under that region's
   `providers.<name>` block).
 - **"Container"** — the resource grouping label, **not** a Docker/OCI container. A service's
@@ -186,9 +198,9 @@ resources, that the deployment workflow consumes.
 
 ## Example dialogue
 
-> **Dev:** For `bridge` in `prd`, the DNS file points at `compute: bridge-01`. Is that the file name?
+> **Dev:** For `bridge` in `prd`, the tls-termination points at `compute: bridge-01`. Is that the file name?
 > **Expert:** It's the specKey — `bridge` with instance `01`. If `bridge`'s `instance_count` were 2,
-> you'd have `bridge-01` and `bridge-02`, and a DNS resource targets one of them.
+> you'd have `bridge-01` and `bridge-02`, and the resource targets one of them.
 > **Dev:** And `bridge` lives in `us-east-1` — that's the region target?
 > **Expert:** Right, the region target. Its slug `use1` is what shows up in the display name and the
 > DNS subdomain. How `us-east-1` becomes a real Hetzner datacenter and server type — that's the region

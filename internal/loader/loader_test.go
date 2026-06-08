@@ -60,9 +60,9 @@ func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
 	assert.Equal(t, "raw", res.Service[0].Type, "service type should default to raw")
 
 	// the api service declares ingress fed by the host's tls-termination.
-	require.NotNil(t, res.Service[0].Ingress, "api service should declare ingress")
-	assert.Equal(t, "api", res.Service[0].Ingress.Hostname)
-	assert.Equal(t, 8080, res.Service[0].Ingress.Port)
+	require.Len(t, res.Service[0].Ingress, 1, "api service should declare one ingress route")
+	assert.Equal(t, 8080, res.Service[0].Ingress[0].Port)
+	assert.Equal(t, "terminate", res.Service[0].Ingress[0].TLS)
 
 	require.Len(t, res.TLSTermination, 1)
 	assert.Equal(t, "edge", res.TLSTermination[0].Name)

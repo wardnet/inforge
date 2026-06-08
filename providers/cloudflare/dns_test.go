@@ -46,23 +46,22 @@ func createRecord(t *testing.T, tagRecords bool) *recordMocks {
 	mocks := &recordMocks{}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		c := New("zone123", "test-project", "prd", "use1", tagRecords, nil)
-		spec := types.DnsSpec{
-			Name: "bridge", Container: "bridge", Provider: "cloudflare",
-			Compute: "bridge-01", Subdomain: "bridge",
+		rec := types.DnsRecord{
+			Name: "bridge-vm", RecordName: "bridge.vm.prd.use1", Container: "bridge",
 		}
 		out := types.ComputeOutputs{PublicIP: pulumi.String("1.2.3.4").ToStringOutput()}
-		return c.Create(ctx, spec, out)
+		return c.CreateRecord(ctx, rec, out)
 	}, pulumi.WithMocks("inforge", "test", mocks))
 	require.NoError(t, err)
 	return mocks
 }
 
-// TestCreateRecordName confirms the zone-relative record name includes the
-// environment: <subdomain>.<env>.<slug> (Cloudflare appends the zone).
+// TestCreateRecordName confirms the provider passes the zone-relative record name
+// straight through (the caller resolves it; Cloudflare appends the zone).
 func TestCreateRecordName(t *testing.T) {
 	mocks := createRecord(t, true)
 	require.Len(t, mocks.names, 1)
-	assert.Equal(t, "bridge.prd.use1", mocks.names[0])
+	assert.Equal(t, "bridge.vm.prd.use1", mocks.names[0])
 }
 
 // TestCreateRecordTagsEnabled confirms record tags are applied when the project

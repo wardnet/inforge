@@ -37,6 +37,7 @@ type registry struct {
 	region      string
 	slug        string
 	config      map[string]map[string]any
+	dns         *regions.DnsAuthority
 	ssh         types.SSHConfig
 	regionTable regions.Table
 
@@ -70,7 +71,7 @@ type registry struct {
 // to label cloud resources. ctx is stored and used lazily when provider objects
 // are first constructed — it must be the context passed to the Pulumi program's
 // run function.
-func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, ssh types.SSHConfig, regionTable regions.Table, project, env, region string) ProviderRegistry {
+func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, dns *regions.DnsAuthority, ssh types.SSHConfig, regionTable regions.Table, project, env, region string) ProviderRegistry {
 	slug, _ := regionTable.Slug(region) // already validated by loader
 	return &registry{
 		ctx:         ctx,
@@ -79,6 +80,7 @@ func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, ssh ty
 		region:      region,
 		slug:        slug,
 		config:      config,
+		dns:         dns,
 		ssh:         ssh,
 		regionTable: regionTable,
 	}
@@ -167,7 +169,12 @@ func (r *registry) DNS(name string) (types.DnsProvider, error) {
 	switch name {
 	case "cloudflare":
 		r.cfDnsOnce.Do(func() {
-			zoneID := providerCfgString(r.config, "cloudflare", "zoneId")
+			// The zone comes from the region's DNS authority (regions.yaml dns block),
+			// not the providers credentials block.
+			zoneID := ""
+			if r.dns != nil {
+				zoneID = r.dns.Zone
+			}
 			// Record tagging defaults on; non-Enterprise zones must set
 			// providers.cloudflare.tagRecords: false (record tags are Enterprise-only).
 			tagRecords := providerCfgBool(r.config, "cloudflare", "tagRecords", true)
