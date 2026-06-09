@@ -239,9 +239,6 @@ func loadResourceSet(base string) (types.Resources, error) {
 	if res.Service, err = loadType[types.ServiceSpec](filepath.Join(base, "service")); err != nil {
 		return types.Resources{}, err
 	}
-	if res.TLSTermination, err = loadType[types.TLSTerminationSpec](filepath.Join(base, "tls-termination")); err != nil {
-		return types.Resources{}, err
-	}
 
 	applyDefaults(&res, computeDir)
 	return res, nil

@@ -14,21 +14,34 @@
     "user": { "type": "string", "minLength": 1 },
     "ingress": {
       "type": "array",
-      "description": "inbound routes via the host's tls-termination. At most one catch-all and at most one non-catch-all entry (enforced in code).",
+      "description": "typed inbound routes realized on the host's nginx. Each entry binds a public listen port; tls-termination entries may share a port (SNI demux), a forward port is single-service-exclusive.",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["port"],
+        "required": ["type", "listen", "target"],
         "properties": {
-          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-          "tls": { "type": "string", "enum": ["terminate", "passthrough"], "description": "terminate (default): ACME TLS terminated and reverse-proxied to port. passthrough: raw TLS forwarded by SNI to port; backend owns its TLS." },
-          "catchall": { "type": "boolean", "description": "at most one per host; matches all unmatched SNIs; implies passthrough" },
+          "type": {
+            "type": "string",
+            "enum": ["tls-termination", "forward"],
+            "description": "tls-termination: nginx terminates ACME TLS for the service's SNIs and reverse-proxies to target. forward: nginx stream-forwards the raw L4 connection to target with the PROXY protocol; the backend owns its TLS."
+          },
+          "listen": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "public port nginx accepts traffic on (required; no default; must differ from target)"
+          },
+          "target": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "loopback port the service listens on; nginx reverse-proxies/forwards to 127.0.0.1:target (required; must differ from listen). A raw public port with no proxy belongs on the compute's firewall.inbound, not here."
+          },
           "vanity": {
             "type": "array",
-            "description": "extra public FQDNs (beyond the auto-derived <svc>.svc name) a terminate/named route serves. A bare token is env+region-scoped; a value with a dot or a {BASE_DOMAIN}/{ENV}/{REGION_SLUG} placeholder is a literal FQDN. Ignored on a catch-all.",
+            "description": "extra public FQDNs (beyond the auto-derived <svc>.svc name) a tls-termination entry serves. A bare token is env+region-scoped; a value with a dot or a {BASE_DOMAIN}/{ENV}/{REGION_SLUG} placeholder is a literal FQDN. Valid only on tls-termination (forward has no SNI).",
             "items": { "type": "string", "minLength": 1 }
-          },
-          "proxy_protocol": { "type": "string", "enum": ["v1", "v2"], "description": "send the PROXY protocol header to the upstream on passthrough/catchall routes so the backend learns the real client address" }
+          }
         }
       }
     }

@@ -5,7 +5,13 @@ host: bridge-01
 type: raw
 user: api
 ingress:
-  - port: 8080
-    tls: terminate
+  # tls-termination and a forward on one service: nginx terminates ACME TLS on
+  # 443 and reverse-proxies to 8080, and stream-forwards 853 to a local backend.
+  - type: tls-termination
+    listen: 443
+    target: 8080
     vanity:
       - api.{BASE_DOMAIN}
+  - type: forward
+    listen: 853
+    target: 5353

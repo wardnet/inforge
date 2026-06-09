@@ -17,11 +17,11 @@ Every record is an A-record pointing at a host's public IP, named with the resou
 | Record | FQDN | Source | Certificate? |
 |--------|------|--------|--------------|
 | Host | `<compute>.vm.<env>.<slug>.<base>` | each [Compute](./compute) host (its SSH / cloud-init domain) | no |
-| Service | `<service>.svc.<env>.<slug>.<base>` | a non-catch-all [ingress](./service#ingress) entry | yes, on a terminate route |
-| Vanity | the expanded vanity value | an ingress entry's `vanity` list | yes, on a terminate route |
+| Service | `<service>.svc.<env>.<slug>.<base>` | any [ingress](./service#ingress) entry | yes, on a `tls-termination` route |
+| Vanity | the expanded vanity value | a `tls-termination` entry's `vanity` list | yes |
 
-A named **passthrough** route gets a DNS record but no certificate (the backend owns TLS); a
-**catch-all** gets neither (it has no SNI to resolve).
+A `forward` entry gets the `<svc>.svc` DNS record but no certificate (the backend owns TLS). The
+`<svc>.svc` name is derived once per service even if it carries several ingress entries.
 
 For environment `prd`, region `us-east-1` (slug `use1`), `base_domain: wardnet.network`:
 
@@ -30,10 +30,10 @@ For environment `prd`, region `us-east-1` (slug `use1`), `base_domain: wardnet.n
 
 ## Vanity domains
 
-A service's terminate/named ingress entry may serve extra public names via its `vanity` list — see
+A service's `tls-termination` ingress entry may serve extra public names via its `vanity` list — see
 [Service → Ingress](./service#hostnames-dns-and-certificates) for the templating rules
-(`{BASE_DOMAIN}`, `{ENV}`, `{REGION_SLUG}`, and bare-token scoping). inforge creates a DNS record (and,
-for terminate routes, an ACME certificate) for each.
+(`{BASE_DOMAIN}`, `{ENV}`, `{REGION_SLUG}`, and bare-token scoping). inforge creates a DNS record and an
+ACME certificate entry for each.
 
 ## Provider requirements
 

@@ -106,9 +106,16 @@ own at runtime via `inforge-bootstrap`.
 
 ## Firewall rules
 
-When `firewall` is omitted, inforge allows only SSH (22) inbound. All other inbound ports must be declared explicitly. Outbound traffic is always fully allowed.
+The inbound rule set is **derived**, not hand-maintained:
 
-When `firewall` is present, only the declared `inbound` rules are applied — **plus SSH (22), which is always permitted** to preserve management access. Outbound traffic is always fully allowed regardless of what is declared.
+- **SSH (22)** is always permitted (management access is never locked out).
+- Every service's [ingress](./service#ingress) `listen` port on this host is opened automatically, plus
+  **`:80`** when the host terminates TLS (nginx serves the ACME HTTP-01 challenge there).
+- Any rules in the `firewall.inbound` block are unioned on top — for **raw** ports not fronted by nginx
+  (a port a service binds directly, with no proxy).
+
+Outbound traffic is always fully allowed. So you only declare a `firewall.inbound` rule for a raw public
+port; ports behind nginx ingress open themselves.
 
 ```yaml title="resources/prd/us-east-1/compute/bridge.yaml"
 name: bridge
@@ -119,10 +126,9 @@ size: SMALL
 image: ubuntu-24.04
 firewall:
   inbound:
-    - proto: tcp
-      port: 80
-    - proto: tcp
-      port: 443
+    # A raw UDP port a service binds directly (not nginx ingress).
+    - proto: udp
+      port: 51820
 ```
 
 ### Firewall rule fields

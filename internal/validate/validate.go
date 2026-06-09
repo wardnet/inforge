@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
+	"github.com/wardnet/inforge/internal/bootstrapper"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/regions"
@@ -131,7 +132,7 @@ func buildGlobalRefs(global types.Resources) *globalRefs {
 // globalHasResources reports whether the global slice declares any resource.
 func globalHasResources(g types.Resources) bool {
 	return len(g.Network)+len(g.Compute)+len(g.Database)+
-		len(g.Secrets)+len(g.Service)+len(g.TLSTermination) > 0
+		len(g.Secrets)+len(g.Service) > 0
 }
 
 // regionContext holds the foreign-key targets and tables a region's semantic
@@ -145,8 +146,20 @@ type regionContext struct {
 	computeInstances map[string]int               // canonical specKey -> the compute's instance_count
 	computeDeployer  map[string]bool              // canonical specKey -> declares a deploy_user
 	databaseNames    map[string]bool
-	tlsByCompute     map[string]bool // canonical compute specKey -> has a tls-termination resource
-	catchallByHost   map[string]int  // canonical compute specKey -> count of catch-all ingress services
+	// portUsersByHost maps a canonical host specKey to, per listen port, the names
+	// of the services with an ingress entry on that port. It enforces that a
+	// forward port is single-service-exclusive (and, since forward is the only
+	// non-terminating type, that any shared port is tls-termination).
+	portUsersByHost map[string]map[int][]string
+	// targetUsersByHost maps a canonical host specKey to, per loopback target port,
+	// the names of the services binding it. nginx forwards to 127.0.0.1:<target>, so
+	// a target must belong to a single service and must not collide with any public
+	// listen port nginx holds on the host (see checkService).
+	targetUsersByHost map[string]map[int][]string
+	// tlsTermIngressByHost marks a canonical host specKey that has at least one
+	// tls-termination ingress entry across its services — so a forward on :80
+	// (which ACME needs) can be rejected.
+	tlsTermIngressByHost map[string]bool
 }
 
 // ValidateResources validates the single shared resource set under <dir>/<env>/
@@ -245,10 +258,6 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	if err != nil {
 		return err
 	}
-	tlsFiles, err := readFiles[types.TLSTerminationSpec](filepath.Join(base, "tls-termination"))
-	if err != nil {
-		return err
-	}
 
 	// Apply defaults so semantic checks see normalised specs.
 	for i := range networkFiles {
@@ -265,16 +274,17 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	}
 
 	ctx := regionContext{
-		available:        available,
-		sizeTable:        sizeTable,
-		networks:         map[string]types.NetworkSpec{},
-		computeKind:      map[string]string{},
-		computeCanonical: map[string]string{},
-		computeInstances: map[string]int{},
-		computeDeployer:  map[string]bool{},
-		databaseNames:    map[string]bool{},
-		tlsByCompute:     map[string]bool{},
-		catchallByHost:   map[string]int{},
+		available:            available,
+		sizeTable:            sizeTable,
+		networks:             map[string]types.NetworkSpec{},
+		computeKind:          map[string]string{},
+		computeCanonical:     map[string]string{},
+		computeInstances:     map[string]int{},
+		computeDeployer:      map[string]bool{},
+		databaseNames:        map[string]bool{},
+		portUsersByHost:      map[string]map[int][]string{},
+		targetUsersByHost:    map[string]map[int][]string{},
+		tlsTermIngressByHost: map[string]bool{},
 	}
 	for _, f := range networkFiles {
 		ctx.networks[f.spec.Name] = f.spec
@@ -301,22 +311,26 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for _, f := range databaseFiles {
 		ctx.databaseNames[f.spec.Name] = true
 	}
-	for _, f := range tlsFiles {
-		if c, ok := ctx.computeCanonical[f.spec.Compute]; ok {
-			ctx.tlsByCompute[c] = true
-		}
-	}
-	// Count catch-all ingress entries per host so checkService can enforce the
-	// at-most-one rule (the host's whole route table funnels its unmatched SNIs to
-	// a single dispatcher).
+	// Aggregate per-host ingress so checkService can enforce the cross-service
+	// rules: which services use each listen port (forward ports are
+	// single-service-exclusive) and whether the host has any tls-termination entry
+	// (so a forward on :80, which ACME owns, can be rejected).
 	for _, f := range serviceFiles {
 		c, ok := ctx.computeCanonical[f.spec.Host]
 		if !ok {
 			continue
 		}
 		for _, in := range f.spec.Ingress {
-			if in.Catchall {
-				ctx.catchallByHost[c]++
+			if ctx.portUsersByHost[c] == nil {
+				ctx.portUsersByHost[c] = map[int][]string{}
+			}
+			if ctx.targetUsersByHost[c] == nil {
+				ctx.targetUsersByHost[c] = map[int][]string{}
+			}
+			ctx.portUsersByHost[c][in.Listen] = append(ctx.portUsersByHost[c][in.Listen], f.spec.Name)
+			ctx.targetUsersByHost[c][in.Target] = append(ctx.targetUsersByHost[c][in.Target], f.spec.Name)
+			if in.Type == types.IngressTypeTLSTermination {
+				ctx.tlsTermIngressByHost[c] = true
 			}
 		}
 	}
@@ -348,9 +362,6 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	validateType(r, schemaSet["service"], serviceFiles, func(s types.ServiceSpec) ([]string, []string) {
 		return checkService(s, ctx)
 	})
-	validateType(r, schemaSet["tls-termination"], tlsFiles, func(s types.TLSTerminationSpec) ([]string, []string) {
-		return checkTLSTermination(s, ctx)
-	})
 	return nil
 }
 
@@ -376,7 +387,7 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 
 // compileSchemas compiles every embedded JSON Schema, keyed by resource type.
 func compileSchemas() (map[string]*jsonschema.Schema, error) {
-	names := []string{"network", "compute", "database", "secrets", "service", "tls-termination"}
+	names := []string{"network", "compute", "database", "secrets", "service"}
 	c := jsonschema.NewCompiler()
 	for _, n := range names {
 		b, err := schemas.FS.ReadFile(n + ".json")
@@ -548,11 +559,6 @@ func collectProviderRefs(base string) ([]providerRef, error) {
 	} else {
 		refs = append(refs, rs...)
 	}
-	if rs, err := refsOf[types.TLSTerminationSpec](filepath.Join(base, "tls-termination"), func(s types.TLSTerminationSpec) string { return s.Provider }); err != nil {
-		return nil, err
-	} else {
-		refs = append(refs, rs...)
-	}
 	return refs, nil
 }
 
@@ -700,6 +706,12 @@ func checkSecrets(s types.SecretsSpec, ctx regionContext) (errs, warns []string)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
+		// A secret key is also the env var name the bootstrapper sets, so it must not
+		// claim the reserved INFORGE_* namespace inforge injects (the deployment
+		// context) — that would collide with an injected var at runtime.
+		if strings.HasPrefix(k, bootstrapper.ReservedEnvPrefix) {
+			errs = append(errs, fmt.Sprintf("%s: env var name uses the reserved %s* namespace owned by inforge", k, bootstrapper.ReservedEnvPrefix))
+		}
 		src := s.Secrets[k].Source
 		parsed, err := ParseSource(src)
 		if err != nil {
@@ -768,64 +780,78 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	}
 	if len(s.Ingress) > 0 {
 		host := ctx.computeCanonical[s.Host]
-		if ok && !ctx.tlsByCompute[host] {
-			errs = append(errs, fmt.Sprintf("ingress: host %q has no tls-termination resource to terminate it", s.Host))
-		}
-		// Each service has at most one catch-all and at most one non-catch-all
-		// entry: the non-catch-all entry (terminate OR named passthrough) owns the
-		// service's auto-derived "<svc>.svc" FQDN, so a second would collide.
-		catchalls, named := 0, 0
+		// nginx is always the host's sole public entry point when any ingress exists;
+		// the service binds 127.0.0.1:target behind it. No host-level resource is
+		// needed — realization is driven by ingress presence (provider from compute).
 		for _, in := range s.Ingress {
-			if in.Catchall {
-				catchalls++
-				// A catch-all forwards every unmatched SNI, so it is inherently
-				// passthrough; terminating arbitrary SNIs would need on-demand certs.
-				if in.TLS == types.IngressTLSTerminate {
-					errs = append(errs, "ingress: catchall is passthrough-only; remove tls: terminate")
-				}
-				// Vanity FQDNs are an SNI/cert concept; a catch-all has no SNI.
+			switch in.Type {
+			case types.IngressTypeTLSTermination, types.IngressTypeForward:
+			default:
+				errs = append(errs, fmt.Sprintf("ingress: type %q is invalid; must be %q or %q", in.Type, types.IngressTypeTLSTermination, types.IngressTypeForward))
+			}
+			// Both ports are mandatory and explicit (no implicit defaults).
+			if in.Listen < 1 || in.Listen > 65535 {
+				errs = append(errs, fmt.Sprintf("ingress: listen %d is invalid; a public port (1..65535) is required on every ingress entry", in.Listen))
+			}
+			if in.Target < 1 || in.Target > 65535 {
+				errs = append(errs, fmt.Sprintf("ingress: listen %d needs a target (1..65535) — the loopback port the service listens on", in.Listen))
+			}
+			// nginx binds *:listen (all interfaces, incl. loopback), so the service
+			// cannot also bind 127.0.0.1:listen — listen and target must differ.
+			if in.Listen == in.Target && in.Listen != 0 {
+				errs = append(errs, fmt.Sprintf("ingress: listen and target must differ (both %d); nginx occupies the public port on all interfaces, so the service must listen on a different loopback port", in.Listen))
+			}
+			// The collision is host-wide: a target must not equal ANY public listen
+			// port on the host (nginx holds *:<listen> on loopback too). The == own
+			// listen case is reported above, so guard against a double error.
+			if in.Listen != in.Target && len(ctx.portUsersByHost[host][in.Target]) > 0 {
+				errs = append(errs, fmt.Sprintf("ingress: target %d collides with a public listen port on host %q; nginx occupies that port on all interfaces, so the service cannot bind it on loopback", in.Target, s.Host))
+			}
+			// A loopback target is bound by one process, so two different services
+			// cannot share it (the same service may reuse its target across entries).
+			if others := otherUsers(ctx.targetUsersByHost[host][in.Target], s.Name); len(others) > 0 {
+				errs = append(errs, fmt.Sprintf("ingress: target %d on host %q is also used by service(s) %s; a loopback port belongs to a single service", in.Target, s.Host, strings.Join(others, ", ")))
+			}
+			if in.Type == types.IngressTypeForward {
+				// vanity is an SNI/cert concept; a forward route has no SNI.
 				if len(in.Vanity) > 0 {
-					errs = append(errs, "ingress: catchall has no SNI; remove vanity")
+					errs = append(errs, fmt.Sprintf("ingress: forward on listen %d has no SNI; remove vanity", in.Listen))
 				}
-			} else {
-				named++
+				// A forward port is single-service-exclusive: nginx stream cannot
+				// demux it, so no other ingress entry on the host may share it. (Since
+				// forward is the only non-terminating type, this also guarantees any
+				// shared listen port is tls-termination.)
+				if users := ctx.portUsersByHost[host][in.Listen]; len(users) > 1 {
+					others := otherUsers(users, s.Name)
+					who := "another ingress entry on the same service"
+					if len(others) > 0 {
+						who = "service(s) " + strings.Join(others, ", ")
+					}
+					errs = append(errs, fmt.Sprintf("ingress: forward on listen %d is single-service-exclusive, but that port is also used by %s on host %q", in.Listen, who, s.Host))
+				}
+				// ACME owns :80 for HTTP-01 challenges, so a forward there collides
+				// with any tls-termination on the same host.
+				if in.Listen == 80 && ctx.tlsTermIngressByHost[host] {
+					errs = append(errs, fmt.Sprintf("ingress: forward on :80 conflicts with a tls-termination on host %q (ACME owns :80 for HTTP-01 challenges)", s.Host))
+				}
 			}
-			// proxy_protocol only affects passthrough/catch-all upstreams; on a
-			// terminate route it is silently ignored, so flag the likely mistake.
-			if in.ProxyProtocol != "" && in.Mode() == types.IngressTLSTerminate {
-				warns = append(warns, "ingress: proxy_protocol has no effect on a terminate route")
-			}
-		}
-		if catchalls > 1 {
-			errs = append(errs, fmt.Sprintf("ingress: service %q has %d catch-all entries; at most one is allowed", s.Name, catchalls))
-		}
-		if named > 1 {
-			errs = append(errs, fmt.Sprintf("ingress: service %q has %d non-catch-all entries; at most one is allowed (it owns the service's <svc>.svc FQDN)", s.Name, named))
-		}
-		// At most one catch-all per host across all its services: the host's
-		// unmatched-SNI traffic funnels to a single dispatcher. Only flagged on a
-		// service that itself declares a catch-all, so named-only services sharing
-		// the host don't each repeat the error.
-		if ok && catchalls > 0 && ctx.catchallByHost[host] > 1 {
-			errs = append(errs, fmt.Sprintf("ingress: host %q has %d catch-all ingress entries across its services; at most one is allowed", s.Host, ctx.catchallByHost[host]))
 		}
 	}
 	return errs, warns
 }
 
-func checkTLSTermination(s types.TLSTerminationSpec, ctx regionContext) (errs, warns []string) {
-	errs = append(errs, providerErr(s.Provider, ctx.available)...)
-	kind, ok := ctx.computeKind[s.Compute]
-	if !ok {
-		errs = append(errs, fmt.Sprintf("compute: %q does not resolve to a compute instance", s.Compute))
-	} else if kind != "vm" {
-		errs = append(errs, fmt.Sprintf("compute: %q has kind %q; tls-termination requires a vm host", s.Compute, kind))
+// otherUsers returns the port users that are not self, sorted and de-duplicated,
+// for a stable, self-excluding conflict message.
+func otherUsers(users []string, self string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, u := range users {
+		if u == self || seen[u] {
+			continue
+		}
+		seen[u] = true
+		out = append(out, u)
 	}
-	// The terminator is realized over SSH as the host's deploy user. Without one
-	// inforge can't connect, so a config that omits it would only fail at deploy
-	// time — catch it here instead.
-	if ok && !ctx.computeDeployer[ctx.computeCanonical[s.Compute]] {
-		errs = append(errs, fmt.Sprintf("compute: %q has no deploy_user; tls-termination is realized over SSH and requires one", s.Compute))
-	}
-	return errs, warns
+	sort.Strings(out)
+	return out
 }

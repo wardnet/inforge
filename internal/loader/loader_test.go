@@ -56,17 +56,20 @@ func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
 	assert.Equal(t, 1, c.InstanceCount, "instance_count should default to 1")
 	assert.True(t, filepath.IsAbs(c.CloudInit), "cloud_init should resolve to an absolute path")
 
-	require.Len(t, res.Service, 1)
-	assert.Equal(t, "raw", res.Service[0].Type, "service type should default to raw")
+	require.Len(t, res.Service, 2)
+	// Services load in filename order: api before web.
+	api := res.Service[0]
+	assert.Equal(t, "api", api.Name)
+	assert.Equal(t, "raw", api.Type, "service type should default to raw")
 
-	// the api service declares ingress fed by the host's tls-termination.
-	require.Len(t, res.Service[0].Ingress, 1, "api service should declare one ingress route")
-	assert.Equal(t, 8080, res.Service[0].Ingress[0].Port)
-	assert.Equal(t, "terminate", res.Service[0].Ingress[0].TLS)
-
-	require.Len(t, res.TLSTermination, 1)
-	assert.Equal(t, "edge", res.TLSTermination[0].Name)
-	assert.Equal(t, "bridge", res.TLSTermination[0].Compute)
+	// the api service declares a tls-termination and a forward ingress entry.
+	require.Len(t, api.Ingress, 2, "api service should declare two ingress entries")
+	assert.Equal(t, "tls-termination", api.Ingress[0].Type)
+	assert.Equal(t, 443, api.Ingress[0].Listen)
+	assert.Equal(t, 8080, api.Ingress[0].Target)
+	assert.Equal(t, "forward", api.Ingress[1].Type)
+	assert.Equal(t, 853, api.Ingress[1].Listen)
+	assert.Equal(t, 5353, api.Ingress[1].Target)
 
 	// public network keeps its declared type; private keeps its parent.
 	require.Len(t, res.Network, 2)

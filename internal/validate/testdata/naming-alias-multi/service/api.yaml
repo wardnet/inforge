@@ -1,0 +1,8 @@
+# host: bridge is the bare name of a multi-instance compute, which is ambiguous
+# (only single-instance computes get a bare-name alias) -> FAIL.
+name: api
+container: core
+provider: hetzner
+host: bridge
+type: raw
+user: api

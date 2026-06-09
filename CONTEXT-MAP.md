@@ -18,7 +18,7 @@ implemented.
 ## Relationships
 
 - **Toolkit → providers**: the Toolkit defines provider interfaces (`NetworkProvider`,
-  `ComputeProvider`, `DnsProvider`, `DatabaseProvider`, `TLSTerminationProvider`,
+  `ComputeProvider`, `DnsProvider`, `DatabaseProvider`, `IngressProvider`,
   `ServiceSecretsProvisioner`) and a `ProviderRegistry`. Each provider context satisfies one or more
   of these.
 - **Toolkit ↔ secrets**: services fetch their own secrets at runtime via `inforge-bootstrap`. inforge

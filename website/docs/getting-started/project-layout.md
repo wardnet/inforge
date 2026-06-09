@@ -27,8 +27,7 @@ resources/
     ├── compute/             # ComputeSpec files
     ├── database/            # DatabaseSpec files
     ├── secrets/             # SecretsSpec files
-    ├── service/             # ServiceSpec files
-    └── tls-termination/     # TLSTerminationSpec files
+    └── service/             # ServiceSpec files (with typed nginx ingress)
 ```
 
 The resource set is defined **once** per environment and instantiated into every region listed in

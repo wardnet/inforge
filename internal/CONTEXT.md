@@ -57,8 +57,8 @@ The fully-qualified resource name `wardnet-<env>-<resourceType>-<slug>-<specKey>
 
 **Resource**:
 One of the declarative types under a region: **Network**, **Compute**, **Database**, **Secrets**,
-**Service**, **TLS termination**. Each is one YAML file validated against an embedded JSON schema.
-DNS is **not** an authored resource — see **DNS authority**.
+**Service**. Each is one YAML file validated against an embedded JSON schema. DNS is **not** an authored
+resource (see **DNS authority**); nor is the host ingress proxy (see **Ingress**).
 
 **Compute**:
 A host/runtime resource with a `kind`: `vm` (built now) or `cluster` (k8s, reserved). VM sizing is
@@ -77,38 +77,47 @@ is `raw` (a gzip of files + scripts; built now) or `container` (pull-based; rese
 _Avoid_: app, workload (acceptable informally), daemon.
 
 **Ingress**:
-The optional `ingress` **list** on a Service: each entry (`port`, `tls`, `catchall`, `vanity`,
-`proxy_protocol`) declares one inbound route fed to the host's **TLS termination** resource. A service
-carries at most one catch-all and at most one non-catch-all entry — the non-catch-all entry owns the
-service's auto-derived `<svc>.svc` SNI/cert FQDN (plus any **vanity** names). The bridge shape
-(terminate own SNI, pass the rest through) is one service with two entries. A service that declares
-ingress *must* have a TLS termination resource on its host; a service that wants raw inbound traffic
-instead opens the port itself on the host firewall and declares no ingress.
-_Avoid_: confusing the per-service `ingress` field with the host-level terminator (the resource);
-authoring SNIs by hand (they are derived — see **DNS authority**).
+The optional `ingress` **list** on a Service: each entry is **typed** — `type` (`tls-termination` |
+`forward`), a public `listen` port, a loopback `target` port (both required, and `listen` != `target`),
+and `vanity` (tls-termination only). nginx is **always** the host's sole public entry point when any
+service has ingress: the service binds `127.0.0.1:<target>` and nginx fronts it. `tls-termination`
+terminates ACME TLS and reverse-proxies to the target (several services may share a `listen` port,
+SNI-demuxed by `server_name`); `forward` stream-forwards the raw L4 connection to the target with the
+PROXY protocol (single-service-exclusive port; backend owns its TLS). A `tls-termination` entry owns the
+service's auto-derived `<svc>.svc` SNI/cert FQDN plus any **vanity** names. There is **no** host-level
+ingress resource — nginx realization is driven by ingress presence, provider taken from the host's
+compute. A truly raw public port (no proxy) is a `compute.firewall.inbound` rule, not ingress. ACME owns
+`:80`, so a `forward` on `:80` can't coexist with a `tls-termination` on the host. See ADR-0015.
+_Avoid_: a "tls-termination resource" (removed — it is a route *type*, not a resource); authoring SNIs
+by hand (they are derived — see **DNS authority**); "passthrough"/"catch-all" (the old model).
 
 **DNS authority**:
 The single DNS provider + zone for one (env, region), declared in `regions.yaml` under `dns:`
 (sibling of `providers:`; credentials stay in the providers block). inforge authors no DNS records —
 it derives them and creates them on the authority: a host record `<compute>.vm.<env>.<slug>.<base>`,
-a service record `<svc>.svc.<env>.<slug>.<base>` per non-catch-all ingress entry, and one per vanity
-FQDN. Terminate routes also get an ACME cert per FQDN; named passthrough gets a record only; catch-all
-gets neither. See ADR-0014.
+a service record `<svc>.svc.<env>.<slug>.<base>` per ingress-bearing service, and one per vanity FQDN.
+`tls-termination` routes also get an ACME cert per FQDN; a `forward` route gets a record only (the
+backend owns TLS). See ADR-0014.
 _Avoid_: "DNS resource" / `DnsSpec` (removed); a free-form per-host `subdomain`.
 
-**TLS termination**:
-A host-level resource (its own YAML type, `tls-termination/`) declaring a terminator the compute
-provider realizes on a host: it terminates inbound TLS and reverse-proxies to the services running
-there. On Hetzner this is realized by Caddy (ACME / Let's Encrypt); another provider could realize the
-same resource with a managed load balancer + ACM. Targets a host via its `compute` foreign key. The
-Hetzner realization (`internal/caddy` for rendering, `providers/hetzner` for transport) runs over SSH
-via `command.remote`: it connects as the host's `deploy_user`, installs Caddy + tooling, writes a base
-Caddyfile that imports per-service vhosts from `conf.d/`, and reloads. So a terminator's host **must**
-declare a `deploy_user` (validated). `internal/caddy` is a Hetzner-internal detail, not a top-level
-concept. The deploy SSH **private** key is transport-only (it authenticates the connection, encrypts
+**Host ingress proxy (nginx)**:
+The nginx instance inforge installs on any host that has ingress — there is **no** resource to declare
+it (the old `tls-termination/` resource type was removed in ADR-0015). Realization is driven by ingress
+presence: `program.realizeIngress` iterates the hosts that have ingress routes and asks the host's
+compute provider to realize nginx. The Hetzner realization (`internal/nginx` renders the whole
+`nginx.conf` via `nginx-go-crossplane`; `providers/hetzner` is the SSH transport) connects as the host's
+`deploy_user`, installs nginx + the native ACME module from nginx.org, writes `nginx.conf`, runs
+`nginx -t`, and reloads. So an ingress host **must** declare a `deploy_user` (already required for any
+service). The deploy SSH **private** key is transport-only (it authenticates the connection, encrypts
 nothing) and is a deploy-time secret injected via stack config / `INFORGE_DEPLOY_PRIVATE_KEY`, never
 committed to `variables.yaml`.
-_Avoid_: "ingress" (that is the per-service field that feeds this), "load balancer", "proxy" (unqualified).
+_Avoid_: "TLS termination resource" / Caddy (removed); "load balancer"; calling it a resource.
+
+**Deployment context (`INFORGE_DEPLOYMENT_*`)**:
+The secret-free `deployment` block of a service's bootstrapper descriptor — region, region slug,
+environment, base domain, `namespace` (`<env>.<slug>.<service>`), and `fqdn` (the `<svc>.svc` FQDN).
+`inforge-bootstrap` injects each as an `INFORGE_DEPLOYMENT_*` env var alongside the service's secrets,
+for every service (secret-bearing or not). Derived, never authored.
 
 **Source DSL**:
 A Secrets `source` value: `ref:<type>/<name>.<output>` (a reference to another resource's output) or

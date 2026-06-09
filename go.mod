@@ -4,6 +4,7 @@ go 1.25.8
 
 require (
 	filippo.io/age v1.3.1
+	github.com/nginxinc/nginx-go-crossplane v0.4.89
 	github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.17.0
 	github.com/pulumi/pulumi-command/sdk v1.2.1
 	github.com/pulumi/pulumi-go-provider v1.3.2
@@ -68,6 +69,7 @@ require (
 	github.com/iwdgo/sigintwindows v0.2.2 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/json-iterator/go v1.1.13-0.20220915233716-71ac16282d12 // indirect
+	github.com/jstemmer/go-junit-report v1.0.0 // indirect
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect

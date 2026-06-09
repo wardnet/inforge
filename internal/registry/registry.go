@@ -24,7 +24,7 @@ import (
 type ProviderRegistry interface {
 	Network(name string) (types.NetworkProvider, error)
 	Compute(name string) (types.ComputeProvider, error)
-	TLSTermination(name string) (types.TLSTerminationProvider, error)
+	Ingress(name string) (types.IngressProvider, error)
 	DNS(name string) (types.DnsProvider, error)
 	Database(name string) (types.DatabaseProvider, error)
 	ServiceSecretsProvisioner(name string) (types.ServiceSecretsProvisioner, error)
@@ -136,10 +136,10 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 	}
 }
 
-// TLSTermination resolves the provider that realizes tls-termination resources.
-// The Hetzner realization installs Caddy over SSH using the env's deploy private
-// key for transport.
-func (r *registry) TLSTermination(name string) (types.TLSTerminationProvider, error) {
+// Ingress resolves the provider that realizes a host's nginx ingress proxy. The
+// Hetzner realization installs nginx over SSH using the env's deploy private key
+// for transport.
+func (r *registry) Ingress(name string) (types.IngressProvider, error) {
 	switch name {
 	case "hetzner":
 		r.hetznerTLSOnce.Do(func() {

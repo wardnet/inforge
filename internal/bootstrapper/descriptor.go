@@ -25,8 +25,12 @@ import (
 // A descriptor declaring any other version fails the start, so a fleet running
 // mixed bootstrapper builds never silently misreads a newer descriptor. inforge
 // (the producer) stamps this same constant into every descriptor it writes, so
-// producer and consumer can never disagree on the schema version.
-const SupportedVersion = 1
+// producer and consumer can never disagree on the schema version. Because parsing
+// is strict (KnownFields), any field addition is a breaking change for an older
+// reader, so it bumps this major: v2 added the Deployment block, so a v1
+// bootstrapper meeting a v2 descriptor fails cleanly on the version rather than on
+// an unknown field.
+const SupportedVersion = 2
 
 // Descriptor is the versioned, secret-free on-host contract inforge writes to
 // /etc/wardnet/services/<svc>/descriptor.yaml (0644 root). It names the service,
@@ -34,12 +38,27 @@ const SupportedVersion = 1
 // env-var -> vault-key mapping (keys are relative to provider secret_path, with
 // an infra/ or custom/ prefix encoding origin). It carries no secret values.
 type Descriptor struct {
-	Version  int               `yaml:"version"`
-	Service  string            `yaml:"service"`
-	Exec     string            `yaml:"exec"`
-	User     string            `yaml:"user"`
-	Provider Provider          `yaml:"provider"`
-	Env      map[string]string `yaml:"env"`
+	Version    int               `yaml:"version"`
+	Service    string            `yaml:"service"`
+	Exec       string            `yaml:"exec"`
+	User       string            `yaml:"user"`
+	Provider   Provider          `yaml:"provider"`
+	Env        map[string]string `yaml:"env"`
+	Deployment Deployment        `yaml:"deployment"`
+}
+
+// Deployment is the secret-free deployment context inforge derives for a service
+// and the bootstrapper injects as INFORGE_DEPLOYMENT_* environment variables
+// (alongside, and independent of, the service's secrets). Every value is derived
+// from the environment, region and service — none is a secret — so it is delivered
+// in the plain descriptor and is present for secret-less services too.
+type Deployment struct {
+	Region      string `yaml:"region"`      // abstract region, e.g. "us-east-1"
+	RegionSlug  string `yaml:"region_slug"` // region slug, e.g. "use1"
+	Environment string `yaml:"environment"` // environment name, e.g. "prd"
+	BaseDomain  string `yaml:"base_domain"` // e.g. "wardnet.network"
+	Namespace   string `yaml:"namespace"`   // "<env>.<slug>.<service>", e.g. "prd.use1.bridge"
+	FQDN        string `yaml:"fqdn"`        // service public FQDN, "<service>.svc.<env>.<slug>.<base>"
 }
 
 // LoadDescriptor reads and parses the descriptor at path.

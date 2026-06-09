@@ -1,6 +1,0 @@
-# The bare alias `compute: bridge` is ambiguous when instance_count > 1 (it does
-# not canonicalize to a single host), so this FK does not resolve -> FAIL.
-name: bridge
-container: core
-provider: hetzner
-compute: bridge
