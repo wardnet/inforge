@@ -284,6 +284,7 @@ func envToSlug(env string) string {
 //   - ref:database/global/<name>.<output> — looks up a GLOBAL database output
 //   - ref:compute/global/<name>.<output>  — looks up a GLOBAL compute output
 //   - gha:<NAME>                          — returns the GHA placeholder string
+//   - static:<value> / value:<value>      — returns the literal value verbatim
 //
 // A `global/` prefix on the referenced name (RefName == "global/<name>") is the
 // one allowed cross-region reference: it resolves against the region-less global
@@ -298,6 +299,9 @@ func resolveRef(source, region string, all types.AllOutputs) (pulumi.StringOutpu
 	switch src.Kind {
 	case validate.SourceGHA:
 		return pulumi.String("__GHA_SECRET:" + src.GHAName + "__").ToStringOutput(), nil
+
+	case validate.SourceStatic:
+		return pulumi.String(src.StaticValue).ToStringOutput(), nil
 
 	case validate.SourceRef:
 		// A global/ prefix redirects the lookup to the global slot, independent of

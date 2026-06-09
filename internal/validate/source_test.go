@@ -32,6 +32,21 @@ func TestParseSourceGHA(t *testing.T) {
 	assert.Equal(t, "CLOUDFLARE_API_TOKEN", s.GHAName)
 }
 
+func TestParseSourceStatic(t *testing.T) {
+	// Both keywords parse to a literal, verbatim (special characters preserved).
+	for _, in := range []struct{ src, want string }{
+		{"static:info", "info"},
+		{"value:info", "info"},
+		{"value:https://api.example.com:443/v1", "https://api.example.com:443/v1"},
+		{"static:ref:database/x.y", "ref:database/x.y"}, // a literal that looks like a ref
+	} {
+		s, err := ParseSource(in.src)
+		require.NoError(t, err, in.src)
+		assert.Equal(t, SourceStatic, s.Kind, in.src)
+		assert.Equal(t, in.want, s.StaticValue, in.src)
+	}
+}
+
 func TestParseSourceMalformed(t *testing.T) {
 	cases := []string{
 		"nonsense",
@@ -41,6 +56,8 @@ func TestParseSourceMalformed(t *testing.T) {
 		"gha:1LEADINGDIGIT",      // must start with letter/underscore
 		"",                       // empty
 		"ref:compute/bridge-01.", // empty output
+		"static:",                // empty static value
+		"value:",                 // empty value alias
 	}
 	for _, c := range cases {
 		_, err := ParseSource(c)

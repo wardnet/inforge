@@ -3,9 +3,10 @@ package validate
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
-// SourceKind distinguishes the two forms of a secrets source.
+// SourceKind distinguishes the forms of a secrets source.
 type SourceKind int
 
 const (
@@ -14,6 +15,10 @@ const (
 	SourceRef SourceKind = iota
 	// SourceGHA is a GitHub Actions secret reference: gha:<NAME>.
 	SourceGHA
+	// SourceStatic is a literal value authored inline: static:<value> (or the
+	// value:<value> alias). The value is stored in plaintext in the resource file,
+	// so it is for non-secret configuration, not real secrets.
+	SourceStatic
 )
 
 // Source is a parsed secrets source DSL value.
@@ -25,6 +30,8 @@ type Source struct {
 	RefOutput string // output token, e.g. "connectionUrl" | "publicIp"
 	// GHA field (Kind == SourceGHA).
 	GHAName string
+	// StaticValue field (Kind == SourceStatic): the literal value, verbatim.
+	StaticValue string
 }
 
 var (
@@ -47,5 +54,16 @@ func ParseSource(s string) (Source, error) {
 	if m := ghaPattern.FindStringSubmatch(s); m != nil {
 		return Source{Kind: SourceGHA, GHAName: m[1]}, nil
 	}
-	return Source{}, fmt.Errorf("invalid source %q: want ref:<database|compute>/<name>.<output> or gha:<NAME>", s)
+	// static:<value> / value:<value> — a literal. The value is taken verbatim (any
+	// characters), so prefix-strip rather than pattern-match; reject an empty value,
+	// which is always a mistake and would fail the service start later anyway.
+	for _, prefix := range []string{"static:", "value:"} {
+		if v, ok := strings.CutPrefix(s, prefix); ok {
+			if v == "" {
+				return Source{}, fmt.Errorf("invalid source %q: a %s value must not be empty", s, prefix)
+			}
+			return Source{Kind: SourceStatic, StaticValue: v}, nil
+		}
+	}
+	return Source{}, fmt.Errorf("invalid source %q: want ref:<database|compute>/<name>.<output>, gha:<NAME>, or static:<value>", s)
 }

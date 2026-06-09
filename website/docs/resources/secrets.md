@@ -20,6 +20,8 @@ secrets:
     source: ref:database/main.connectionUrl   # from another resource's output
   api_key:
     source: gha:API_KEY                        # from a GitHub Actions secret
+  log_level:
+    source: static:info                        # a literal (non-secret config) value
 ```
 
 ## Fields
@@ -33,7 +35,7 @@ secrets:
 
 ## Source DSL
 
-Each secret entry has a `source` field with one of two forms:
+Each secret entry has a `source` field with one of these forms:
 
 ### `ref:<type>/<name>.<output>`
 
@@ -75,6 +77,25 @@ source: gha:MY_SECRET_NAME
 
 The GitHub Actions secret `MY_SECRET_NAME` is injected as a secret value. It must be
 set as a secret in the repository or environment.
+
+### `static:<value>` (alias `value:<value>`)
+
+A literal value authored inline — useful for non-secret per-service configuration delivered through the
+same env-var mechanism as secrets:
+
+```yaml
+source: static:info
+source: value:https://api.example.com/v1   # the alias; value is taken verbatim
+```
+
+The text after the prefix is used **verbatim** (any characters, including `:` and `/`), and must be
+non-empty.
+
+:::warning Not for real secrets
+A `static:`/`value:` value is committed **in plaintext** in the resource file (it lives in git). Use it
+for non-secret configuration only; use [`gha:`](#ghaname) or [`ref:`](#reftypenameoutput) for anything
+sensitive.
+:::
 
 ## How secrets reach a service
 
