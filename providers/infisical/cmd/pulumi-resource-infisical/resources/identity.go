@@ -30,6 +30,11 @@ type InfisicalIdentityArgs struct {
 	ClientId     string `pulumi:"clientId"`
 	ClientSecret string `pulumi:"clientSecret" provider:"secret"`
 	SiteUrl      string `pulumi:"siteUrl"`
+	// OrganizationId optionally pins the Infisical organization to provision the
+	// identity under. When empty it is derived from the access token's JWT; it
+	// must be set for deployments whose universal-auth token carries no
+	// organizationId claim (see resolveOrgID).
+	OrganizationId string `pulumi:"organizationId,optional"`
 }
 
 // InfisicalIdentityState is the state after the identity is provisioned. It
@@ -67,7 +72,7 @@ func (*InfisicalIdentity) Create(
 	if err != nil {
 		return infer.CreateResponse[InfisicalIdentityState]{}, err
 	}
-	orgId, err := orgIdFromToken(token)
+	orgId, err := resolveOrgID(in.OrganizationId, token)
 	if err != nil {
 		return infer.CreateResponse[InfisicalIdentityState]{}, err
 	}
@@ -327,6 +332,19 @@ func mintClientSecret(ctx context.Context, siteURL, token, identityId string) (s
 		return "", fmt.Errorf("infisical: empty client secret in mint response")
 	}
 	return resp.ClientSecret, nil
+}
+
+// resolveOrgID returns the organization ID to provision the identity under. It
+// prefers an explicitly-configured value (providers.infisical.organizationId)
+// and falls back to the organizationId claim in the access token's JWT. The
+// explicit knob exists because not every Infisical deployment's universal-auth
+// token carries that claim — Infisical Cloud tokens, in particular, do not — so
+// orgIdFromToken alone would have no source there.
+func resolveOrgID(explicit, token string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	return orgIdFromToken(token)
 }
 
 // orgIdFromToken extracts the organization ID from the JWT payload of an

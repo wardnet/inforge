@@ -28,14 +28,39 @@ inforge plugins install
 
 ## Configuration
 
+Provider config lives in `resources/<env>/regions.yaml` — under each region's
+`providers:` block, and/or the sibling `global:` block for the global slice (see
+ADR-0011). Infisical credentials are usually identical across regions:
+
 ```yaml
-providers:
-  infisical:
-    clientId: ""      # set via INFISICAL_CLIENT_ID
-    clientSecret: ""  # set via INFISICAL_CLIENT_SECRET
-    workspaceId: ""   # your Infisical workspace/project ID
-    environment: prd  # Infisical environment slug
+# resources/prd/regions.yaml
+regions:
+  us-east-1:
+    slug: use1
+    providers:
+      infisical:
+        clientId: ${INFISICAL_CLIENT_ID}        # universal-auth client ID
+        clientSecret: ${INFISICAL_CLIENT_SECRET} # universal-auth client secret
+        organizationId: ""                       # optional — see "Organization ID" below
 ```
+
+### Organization ID
+
+Per-service machine identities are provisioned under an Infisical organization.
+By default inforge reads the organization ID from the `organizationId` claim in
+the universal-auth access token's JWT. Some Infisical deployments — Infisical
+Cloud in particular — issue tokens that do **not** carry that claim, which
+surfaces at deploy time as:
+
+```
+infisical:resources:InfisicalIdentity ... error: infisical: no organizationId in JWT claims
+```
+
+Set `organizationId` on the region's `infisical` provider block to fix this — it
+takes precedence over the JWT claim. A service in a region reads that region's
+block; a service in the global slice reads `global.providers.infisical`. Find
+your organization ID in the Infisical dashboard URL
+(`https://app.infisical.com/organization/<organizationId>/...`).
 
 ## Required env vars
 

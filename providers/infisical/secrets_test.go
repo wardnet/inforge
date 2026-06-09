@@ -58,7 +58,7 @@ func TestProvisionServiceScopesPaths(t *testing.T) {
 	mocks := newNamingMocks()
 	var bundle *types.ServiceSecretsBundle
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("cid", "csec", "", "use1")
+		adapter := New("cid", "csec", "", "", "use1")
 		res := types.Resources{
 			Secrets: []types.SecretsSpec{{
 				Name:      "ghost-secrets",
@@ -81,11 +81,35 @@ func TestProvisionServiceScopesPaths(t *testing.T) {
 	assert.Equal(t, map[string]string{"DATABASE_URL": "infra/DATABASE_URL"}, bundle.Env)
 }
 
+// TestProvisionServicePassesOrganizationId verifies the adapter's configured
+// organizationId is threaded onto the identity resource input, so a deployment
+// whose token carries no organizationId claim can still scope the identity.
+func TestProvisionServicePassesOrganizationId(t *testing.T) {
+	mocks := newNamingMocks()
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		adapter := New("cid", "csec", "", "org-explicit", "use1")
+		res := types.Resources{
+			Secrets: []types.SecretsSpec{{
+				Name:      "ghost-secrets",
+				Container: "ghost",
+				Provider:  "infisical",
+				Secrets:   map[string]types.SecretsEntry{"DATABASE_URL": {Source: "gha:DATABASE_URL"}},
+			}},
+		}
+		svc := types.ServiceSpec{Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost"}
+		_, err := adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", types.AllOutputs{})
+		return err
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	assert.Equal(t, "org-explicit", mocks.captured[infisicalIdentityType].inputs["organizationId"].StringValue())
+}
+
 // TestProvisionServiceNoSecretsReturnsNil verifies a service whose container has
 // no infisical secrets yields no bundle and provisions nothing.
 func TestProvisionServiceNoSecretsReturnsNil(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("cid", "csec", "", "use1")
+		adapter := New("cid", "csec", "", "", "use1")
 		svc := types.ServiceSpec{Name: "ghost", Container: "ghost"}
 		bundle, err := adapter.ProvisionService(ctx, svc, types.Resources{}, "prd", "us-east-1", types.AllOutputs{})
 		require.NoError(t, err)
@@ -151,7 +175,7 @@ func bridgeServiceWithSecret() (types.ServiceSpec, types.Resources) {
 func TestWorkspaceNamePassedToAPIMatchesNamingConvention(t *testing.T) {
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("cid", "csec", "", "use1")
+		adapter := New("cid", "csec", "", "", "use1")
 		svc, res := bridgeServiceWithSecret()
 		// env="prd", region="us-east-1" — workspace name must use env, not region.
 		_, err := adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", types.AllOutputs{})
@@ -171,7 +195,7 @@ func TestWorkspaceNamePassedToAPIMatchesNamingConvention(t *testing.T) {
 func TestSecretsBatchNameMatchesNamingConvention(t *testing.T) {
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("cid", "csec", "", "use1")
+		adapter := New("cid", "csec", "", "", "use1")
 		svc, res := bridgeServiceWithSecret()
 		_, err := adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", types.AllOutputs{})
 		return err
@@ -289,7 +313,7 @@ func TestResolveRefGlobalMissing(t *testing.T) {
 // returns the same workspace resource on repeated calls.
 func TestEnsureWorkspaceIdempotent(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("cid", "csec", "", "use1")
+		adapter := New("cid", "csec", "", "", "use1")
 
 		first, err := adapter.ensureWorkspace(ctx, "mycontainer", "prd")
 		if err != nil {
@@ -313,7 +337,7 @@ func TestEnsureWorkspaceIdempotent(t *testing.T) {
 // (container, env) pairs produce separate workspace resources.
 func TestEnsureWorkspaceDifferentEnvsAreIndependent(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		adapter := New("cid", "csec", "", "use1")
+		adapter := New("cid", "csec", "", "", "use1")
 
 		prd, err := adapter.ensureWorkspace(ctx, "mycontainer", "prd")
 		if err != nil {
