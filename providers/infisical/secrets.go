@@ -90,18 +90,19 @@ type infisicalIdentityResource struct {
 
 func newInfisicalIdentityResource(
 	ctx *pulumi.Context, name string,
-	workspaceId pulumi.StringOutput, envSlug, secretPath, clientId, clientSecret, siteUrl string,
+	workspaceId pulumi.StringOutput, envSlug, secretPath, clientId, clientSecret, siteUrl, organizationId string,
 	opts ...pulumi.ResourceOption,
 ) (*infisicalIdentityResource, error) {
 	res := &infisicalIdentityResource{}
 	args := pulumi.Map{
-		"name":         pulumi.String(name),
-		"workspaceId":  workspaceId,
-		"envSlug":      pulumi.String(envSlug),
-		"secretPath":   pulumi.String(secretPath),
-		"clientId":     pulumi.String(clientId),
-		"clientSecret": pulumi.String(clientSecret),
-		"siteUrl":      pulumi.String(siteUrl),
+		"name":           pulumi.String(name),
+		"workspaceId":    workspaceId,
+		"envSlug":        pulumi.String(envSlug),
+		"secretPath":     pulumi.String(secretPath),
+		"clientId":       pulumi.String(clientId),
+		"clientSecret":   pulumi.String(clientSecret),
+		"siteUrl":        pulumi.String(siteUrl),
+		"organizationId": pulumi.String(organizationId),
 	}
 	if err := ctx.RegisterResource(infisicalIdentityType, name, args, res, opts...); err != nil {
 		return nil, err
@@ -115,26 +116,31 @@ func newInfisicalIdentityResource(
 // key; concurrent callers for the same key wait and reuse the same resource via
 // a mutex-protected map.
 type InfisicalSecretsAdapter struct {
-	clientId     string
-	clientSecret string
-	siteUrl      string
-	slug         string
-	mu           sync.Mutex
-	workspaces   map[string]pulumi.StringOutput
+	clientId       string
+	clientSecret   string
+	siteUrl        string
+	organizationId string
+	slug           string
+	mu             sync.Mutex
+	workspaces     map[string]pulumi.StringOutput
 }
 
 // New returns an InfisicalSecretsAdapter configured with the given credentials
-// and region slug.
-func New(clientId, clientSecret, siteUrl, slug string) *InfisicalSecretsAdapter {
+// and region slug. organizationId is optional: when empty, identity
+// provisioning derives the org from the access token's JWT (see resolveOrgID in
+// the provider plugin); set it for Infisical deployments whose token carries no
+// organizationId claim.
+func New(clientId, clientSecret, siteUrl, organizationId, slug string) *InfisicalSecretsAdapter {
 	if siteUrl == "" {
 		siteUrl = "https://app.infisical.com"
 	}
 	return &InfisicalSecretsAdapter{
-		clientId:     clientId,
-		clientSecret: clientSecret,
-		siteUrl:      siteUrl,
-		slug:         slug,
-		workspaces:   map[string]pulumi.StringOutput{},
+		clientId:       clientId,
+		clientSecret:   clientSecret,
+		siteUrl:        siteUrl,
+		organizationId: organizationId,
+		slug:           slug,
+		workspaces:     map[string]pulumi.StringOutput{},
 	}
 }
 
@@ -197,7 +203,7 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 	identityName := naming.Resource(env, a.slug, "identity", svc.Name)
 	idRes, err := newInfisicalIdentityResource(
 		ctx, identityName,
-		workspaceId, envToSlug(env), secretPath, a.clientId, a.clientSecret, a.siteUrl,
+		workspaceId, envToSlug(env), secretPath, a.clientId, a.clientSecret, a.siteUrl, a.organizationId,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("provision identity for service %q: %w", svc.Name, err)

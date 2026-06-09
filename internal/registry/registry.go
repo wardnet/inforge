@@ -218,7 +218,8 @@ func (r *registry) infisicalAdapter() *infisical.InfisicalSecretsAdapter {
 		clientId := providerCfgString(r.config, "infisical", "clientId")
 		clientSecret := providerCfgString(r.config, "infisical", "clientSecret")
 		siteUrl := providerCfgString(r.config, "infisical", "siteUrl")
-		r.infisicalSecrets = infisical.New(clientId, clientSecret, siteUrl, r.slug)
+		organizationId := providerCfgString(r.config, "infisical", "organizationId")
+		r.infisicalSecrets = infisical.New(clientId, clientSecret, siteUrl, organizationId, r.slug)
 	})
 	return r.infisicalSecrets
 }

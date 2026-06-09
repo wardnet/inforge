@@ -24,6 +24,29 @@ func TestOrgIdFromToken(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestResolveOrgID(t *testing.T) {
+	jwtWithOrg := func(org string) string {
+		return "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"organizationId":"`+org+`"}`)) + ".sig"
+	}
+
+	// Explicit org wins and the token is not consulted (a token with no claim
+	// would otherwise error).
+	got, err := resolveOrgID("org-explicit", "not-a-jwt")
+	require.NoError(t, err)
+	assert.Equal(t, "org-explicit", got)
+
+	// Empty explicit falls back to the JWT claim.
+	got, err = resolveOrgID("", jwtWithOrg("org-from-jwt"))
+	require.NoError(t, err)
+	assert.Equal(t, "org-from-jwt", got)
+
+	// Empty explicit and a token without the claim is the failure this knob
+	// exists to fix — it must surface the orgIdFromToken error.
+	noClaim := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{}`)) + ".sig"
+	_, err = resolveOrgID("", noClaim)
+	assert.Error(t, err)
+}
+
 // TestAdoptOrCreateIdentityAdoptsExisting asserts that when an identity with the
 // requested name already exists in the org, its id is returned without a create
 // call (idempotent adopt).
