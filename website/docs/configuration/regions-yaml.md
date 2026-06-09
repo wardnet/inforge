@@ -66,7 +66,7 @@ Resources select which provider handles them via their own `provider:` field —
 here does not, by itself, route any resource to it. A resource's `provider:` must be declared in its
 region's `providers` block.
 
-### `dns` — DNS authority {#dns-authority}
+### `dns`
 
 An optional per-region block naming the **single DNS authority** every derived record for that region
 is created on. inforge does not have a hand-authored DNS resource: it derives the host (`<compute>.vm`),
@@ -110,4 +110,3 @@ regions:
       cloudflare:
         apiToken: ${CLOUDFLARE_API_TOKEN}
 ```
-</content>
