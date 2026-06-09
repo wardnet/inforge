@@ -30,7 +30,7 @@ type HetznerCompute struct {
 	mu                sync.Mutex
 	firewalls         map[string]*hcloud.Firewall
 	// sshKeys is keyed by env since SSH keys are env-scoped (not region-scoped).
-	sshKeys          map[string][]*hcloud.SshKey
+	sshKeys map[string][]*hcloud.SshKey
 	// instanceCounters tracks how many servers have been created for each
 	// spec name so that Create assigns each call its unique specKey suffix.
 	instanceCounters map[string]int
@@ -69,6 +69,7 @@ func (h *HetznerCompute) Create(
 	spec types.ComputeSpec,
 	network types.NetworkOutputs,
 	env, abstractRegion, domain, manifest string,
+	ingressPorts []int,
 ) (types.ComputeOutputs, error) {
 	if spec.Provider != "hetzner" {
 		return types.ComputeOutputs{}, fmt.Errorf("hetzner provider received spec with provider=%q", spec.Provider)
@@ -89,7 +90,7 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, fmt.Errorf("hetzner has no image for %q in region %q — add it to providers.hetzner.regions.%s.images", spec.Image, abstractRegion, abstractRegion)
 	}
 
-	fw, err := h.ensureFirewall(ctx, spec, env)
+	fw, err := h.ensureFirewall(ctx, spec, env, ingressPorts)
 	if err != nil {
 		return types.ComputeOutputs{}, fmt.Errorf("ensure firewall: %w", err)
 	}
@@ -155,18 +156,14 @@ func (h *HetznerCompute) Create(
 	return types.ComputeOutputs{PublicIP: server.Ipv4Address}, nil
 }
 
-// defaultInboundRules are the inbound rules applied when a compute spec does
-// not declare explicit firewall rules: SSH only.
-var defaultInboundRules = []types.FirewallRule{
-	{Proto: "tcp", Port: "22"},
-}
-
-// ensureFirewall returns the hcloud.Firewall for the spec name, creating it if
-// it does not yet exist. When spec.Firewall is set its inbound rules are used;
-// otherwise the built-in defaults apply. SSH (22) is always included as the
-// first inbound rule regardless of what the spec declares. It is safe to call
-// concurrently.
-func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeSpec, env string) (*hcloud.Firewall, error) {
+// ensureFirewall returns the hcloud.Firewall for the spec name, creating it if it
+// does not yet exist. The inbound rule set is derived, not hand-maintained: SSH
+// (22) is always permitted, the host's derived ingressPorts (the union of its
+// services' ingress listen ports, plus :80 when it terminates TLS) are opened as
+// TCP, and any explicit spec.Firewall.Inbound rules are added on top. Duplicate
+// (proto, port) pairs are collapsed so the rendered firewall is stable. It is safe
+// to call concurrently.
+func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeSpec, env string, ingressPorts []int) (*hcloud.Firewall, error) {
 	fwName := naming.Resource(env, h.slug, "fw", spec.Name)
 
 	h.mu.Lock()
@@ -176,11 +173,27 @@ func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeS
 		return fw, nil
 	}
 
-	inbound := defaultInboundRules
+	// SSH first (management access is never locked out), then the derived ingress
+	// ports, then any explicitly declared inbound rules — de-duplicated by
+	// (proto, port) so a port that is both derived and declared appears once.
+	inbound := make([]types.FirewallRule, 0, 1+len(ingressPorts))
+	seen := map[string]bool{}
+	addRule := func(r types.FirewallRule) {
+		key := r.Proto + "/" + string(r.Port)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		inbound = append(inbound, r)
+	}
+	addRule(types.FirewallRule{Proto: "tcp", Port: "22"})
+	for _, p := range ingressPorts {
+		addRule(types.FirewallRule{Proto: "tcp", Port: types.Port(strconv.Itoa(p))})
+	}
 	if spec.Firewall != nil {
-		// Always prepend SSH so management access is never locked out.
-		ssh := types.FirewallRule{Proto: "tcp", Port: "22"}
-		inbound = append([]types.FirewallRule{ssh}, spec.Firewall.Inbound...)
+		for _, r := range spec.Firewall.Inbound {
+			addRule(r)
+		}
 	}
 
 	rules := make(hcloud.FirewallRuleArray, 0, len(inbound)+3)

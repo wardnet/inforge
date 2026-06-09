@@ -1,6 +1,0 @@
-# compute uses the bare host alias (bridge); the api service's ingress targets
-# bridge-01 — both resolve to the same single-instance host (canonical alias).
-name: edge
-container: bridge
-provider: hetzner
-compute: bridge

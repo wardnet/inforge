@@ -51,9 +51,10 @@ type FirewallRule struct {
 	Port  Port   `yaml:"port"`
 }
 
-// FirewallSpec declares the inbound firewall rules for a compute resource.
-// SSH (22) is always permitted regardless of what is declared here.
-// If absent, inforge applies its built-in defaults (22, 80, 443, 853).
+// FirewallSpec declares extra inbound firewall rules for a compute resource. SSH
+// (22) is always permitted, and the host's service ingress listen ports (plus :80
+// when it terminates TLS) are derived and opened automatically; these Inbound
+// rules are unioned on top for any non-ingress ports a host needs.
 type FirewallSpec struct {
 	Inbound []FirewallRule `yaml:"inbound"`
 }
@@ -124,93 +125,71 @@ type DeployUserSpec struct {
 	Name string `yaml:"name"`
 }
 
-// IngressSpec is one inbound routing entry a service exposes through its host's
-// tls-termination resource. A service carries a list of these (ServiceSpec.Ingress):
-// at most one catch-all and at most one non-catch-all (terminate OR named
-// passthrough), since the non-catch-all entry owns the service's auto-derived
-// "<svc>.svc" FQDN. A terminate entry's SNI/ACME-cert FQDNs are the auto-derived
-// service FQDN plus any Vanity entries; a catch-all has no FQDN (it matches every
-// unmatched SNI). The env-scoped FQDNs are derived at realization time (see
-// naming.ServiceFQDN / naming.ExpandVanity), not authored here.
+// IngressSpec is one typed inbound routing entry a service exposes on its host.
+// Every ingress entry is fronted by nginx — there is no direct-bind path: a host
+// with any ingress runs nginx as its sole public entry point, and the service
+// binds 127.0.0.1:Target behind it. Each entry binds a public Listen port (which
+// must differ from Target, since nginx occupies that port on all interfaces),
+// served per Type:
+//
+//   - "tls-termination": nginx terminates ACME TLS for the service's SNIs (the
+//     auto-derived "<svc>.svc" FQDN plus any Vanity entries) and reverse-proxies
+//     cleartext to localhost:Target. Multiple services may share one Listen port
+//     (nginx demuxes by SNI/server_name).
+//   - "forward": nginx stream-forwards the raw L4 connection to 127.0.0.1:Target
+//     with the PROXY protocol (so the backend learns the client address); the
+//     backend owns its own TLS. A forward Listen is single-service-exclusive.
+//
+// A truly raw public port (no proxy) is not ingress — declare it on the compute's
+// firewall.inbound instead. The env-scoped FQDNs are derived at realization time
+// (see naming.ServiceFQDN / naming.ExpandVanity), not authored here.
 type IngressSpec struct {
-	Port     int    `yaml:"port"`               // local port traffic is forwarded to
-	TLS      string `yaml:"tls,omitempty"`      // "terminate" (default) | "passthrough"
-	Catchall bool   `yaml:"catchall,omitempty"` // at most one per host; matches all unmatched SNIs; implies passthrough
+	Type   string `yaml:"type"`   // "tls-termination" | "forward"
+	Listen int    `yaml:"listen"` // public port nginx accepts traffic on (required; != Target)
+	Target int    `yaml:"target"` // loopback port the service listens on (required)
 	// Vanity adds extra public FQDNs (beyond the auto-derived "<svc>.svc" name) a
-	// terminate/named route serves: a bare token is env+region-scoped, anything
+	// tls-termination entry serves: a bare token is env+region-scoped, anything
 	// with a dot or a {BASE_DOMAIN}/{ENV}/{REGION_SLUG} placeholder is a literal
-	// FQDN. Ignored on a catch-all (it has no SNI).
+	// FQDN. Valid only on tls-termination (forward has no SNI).
 	Vanity []string `yaml:"vanity,omitempty"`
-	// ProxyProtocol enables the PROXY protocol to the upstream on passthrough/catchall
-	// routes so the backend learns the real client address: "" (off) | "v1" | "v2".
-	ProxyProtocol string `yaml:"proxy_protocol,omitempty"`
 }
 
-// Ingress TLS modes and the default applied when IngressSpec.TLS is empty.
+// Ingress entry types.
 const (
-	IngressTLSTerminate   = "terminate"
-	IngressTLSPassthrough = "passthrough"
+	IngressTypeTLSTermination = "tls-termination"
+	IngressTypeForward        = "forward"
 )
-
-// Mode returns the effective TLS mode for an ingress: passthrough when the
-// ingress is a catch-all (terminating arbitrary SNIs is not supported) or when
-// explicitly set, otherwise the default "terminate".
-func (i IngressSpec) Mode() string {
-	if i.Catchall {
-		return IngressTLSPassthrough
-	}
-	if i.TLS == "" {
-		return IngressTLSTerminate
-	}
-	return i.TLS
-}
 
 // ServiceSpec is one service resource — a workload hosted on a compute.
 type ServiceSpec struct {
-	Name      string       `yaml:"name"`
-	Container string       `yaml:"container"`
-	Provider  string       `yaml:"provider"`
-	Host      string       `yaml:"host"`              // FK -> an expanded compute specKey whose kind=vm
-	Type      string       `yaml:"type"`              // "raw" (built) | "container" (reserved)
+	Name      string        `yaml:"name"`
+	Container string        `yaml:"container"`
+	Provider  string        `yaml:"provider"`
+	Host      string        `yaml:"host"`              // FK -> an expanded compute specKey whose kind=vm
+	Type      string        `yaml:"type"`              // "raw" (built) | "container" (reserved)
 	User      string        `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
-	Ingress   []IngressSpec `yaml:"ingress,omitempty"` // inbound routes via the host's tls-termination (≤1 catch-all, ≤1 non-catch-all)
+	Ingress   []IngressSpec `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx
 }
 
-// TLSTerminationSpec declares a host-level TLS terminator — a capability the
-// compute provider realizes on a host to terminate inbound TLS and reverse-proxy
-// to the services running there. On Hetzner this is realized by Caddy (ACME /
-// Let's Encrypt); another provider could realize the same resource with a
-// managed load balancer + ACM. Per-service ingress (ServiceSpec.Ingress) feeds
-// this terminator, which writes one vhost per service.
-type TLSTerminationSpec struct {
-	Name      string `yaml:"name"`
-	Container string `yaml:"container"`
-	Provider  string `yaml:"provider"`
-	Compute   string `yaml:"compute"` // FK -> an expanded compute specKey whose kind=vm
-}
-
-// TLSRoute is one inbound routing entry a TLS terminator realizes on its host,
-// derived from one ingress-bearing service. It is provider-agnostic: the Hetzner
-// provider translates it to Caddy, but another provider could realize the same
-// route with a managed load balancer. The FQDN is fully resolved (env + region
-// slug + base domain) before it reaches the provider, so the provider stays a
-// pure renderer/installer and never re-derives names.
+// IngressRoute is one typed inbound routing entry the host ingress proxy (nginx)
+// realizes, derived from one ingress entry of one service. nginx is always the
+// sole public entry point on a host that has any ingress: services bind
+// 127.0.0.1:Target and nginx fronts them on the public Listen port. FQDNs are
+// fully resolved (env + region slug + base domain) before they reach the provider,
+// so the provider stays a pure renderer/installer and never re-derives names.
 //
-// Mode selects whether the terminator decrypts the connection:
-//   - "terminate": ACME TLS is terminated and traffic reverse-proxied to Port.
-//   - "passthrough": the raw TLS stream is forwarded by SNI to Port; the backend
-//     owns its own TLS. ProxyProtocol optionally prepends a PROXY header so the
-//     backend learns the real client address.
-//
-// Catchall marks the single per-host route that matches every SNI not matched by
-// a named route (always passthrough). Its FQDN is unused for matching.
-type TLSRoute struct {
-	Service       string
-	FQDN          string // fully-qualified, env-scoped SNI matched (empty/unused when Catchall)
-	Port          int    // local port traffic is forwarded to
-	Mode          string // IngressTLSTerminate | IngressTLSPassthrough
-	Catchall      bool
-	ProxyProtocol string // "", "v1", "v2"
+// Type selects how the Listen port is served:
+//   - "tls-termination": nginx terminates ACME TLS for FQDNs (server_name demux)
+//     and reverse-proxies cleartext to localhost:Target. Several routes may share
+//     one Listen port, distinguished by FQDNs.
+//   - "forward": nginx stream-forwards the raw L4 connection on Listen to
+//     127.0.0.1:Target with the PROXY protocol. FQDNs is empty (no SNI).
+type IngressRoute struct {
+	Service string
+	Type    string   // IngressTypeTLSTermination | IngressTypeForward
+	FQDNs   []string // fully-qualified, env-scoped SNIs (tls-termination only; nil for forward)
+	Listen  int      // public port the host accepts traffic on
+	Target  int      // loopback port the service listens on
 }
 
 // NetworkOutputs are the values a NetworkProvider returns after creating a
@@ -244,11 +223,15 @@ type NetworkProvider interface {
 }
 
 // ComputeProvider creates one compute instance, wiring in its network, the host
-// domain, and the assembled (plain, secret-free) manifest. Secret delivery is no
-// longer a compute-creation concern: secrets are fetched at runtime by
-// inforge-bootstrap, so there is no bootstrap document.
+// domain, the assembled (plain, secret-free) manifest, and the derived inbound
+// ingress ports. ingressPorts are the public Listen ports of every service ingress
+// entry on this host (deduped, sorted), already including :80 when the host has a
+// tls-termination entry (ACME HTTP-01) — the program derives them so the firewall
+// stays a pure consumer. Secret delivery is no longer a compute-creation concern:
+// secrets are fetched at runtime by inforge-bootstrap, so there is no bootstrap
+// document.
 type ComputeProvider interface {
-	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest string) (ComputeOutputs, error)
+	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest string, ingressPorts []int) (ComputeOutputs, error)
 }
 
 // DnsProvider creates a derived DNS record pointing at a compute instance, on a
@@ -257,22 +240,23 @@ type DnsProvider interface {
 	CreateRecord(ctx *pulumi.Context, rec DnsRecord, target ComputeOutputs) error
 }
 
-// TLSTerminationProvider realizes a tls-termination spec on its host. host
-// carries the target's public IP; deployUser is the sudo-capable account
-// inforge connects as over SSH (the host's deploy user); routes are the inbound
-// routing entries (terminate / passthrough / catch-all), with FQDNs already
-// env-scoped by the caller. Realize installs the terminator once per host, writes
-// its config, and reloads — and must be safe to re-run as services are added.
+// IngressProvider realizes a host's nginx ingress proxy. It is invoked once per
+// host that has any ingress, not per resource — there is no host-level ingress
+// resource; realization is driven by the host's ingress routes. hostKey is the
+// canonical compute specKey (used to name the Pulumi command resources); host
+// carries the target's public IP; deployUser is the sudo-capable account inforge
+// connects as over SSH (the host's deploy user); routes are the host's typed
+// inbound routing entries (tls-termination / forward), with FQDNs already
+// env-scoped by the caller. Realize installs nginx once per host, writes its
+// config, and reloads — and must be safe to re-run as services change.
 //
-// The signature is grounded in the Hetzner/Caddy consumer: the provider is a
-// pure installer over SSH, so it needs the host, the connection identity, and
-// the resolved routes — nothing more. env scopes the names of the Pulumi
-// resources it creates. dependsOn carries the host's cloud-init readiness gate
-// (and any other prerequisites): the provider must make its first per-host SSH
-// command depend on it so realization never races the host's deploy_user
-// creation.
-type TLSTerminationProvider interface {
-	Realize(ctx *pulumi.Context, spec TLSTerminationSpec, host ComputeOutputs, deployUser string, routes []TLSRoute, env string, dependsOn []pulumi.Resource) error
+// The provider is a pure installer over SSH, so it needs the host, the connection
+// identity, and the resolved routes — nothing more. env scopes the names of the
+// Pulumi resources it creates. dependsOn carries the host's cloud-init readiness
+// gate (and any other prerequisites): the provider must make its first per-host
+// SSH command depend on it so realization never races deploy_user creation.
+type IngressProvider interface {
+	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, env string, dependsOn []pulumi.Resource) error
 }
 
 // DatabaseProvider creates a managed database.
@@ -343,10 +327,9 @@ type EnvironmentVariables struct {
 
 // Resources is the full set of resource specs for one region.
 type Resources struct {
-	Network        []NetworkSpec
-	Compute        []ComputeSpec
-	Database       []DatabaseSpec
-	Secrets        []SecretsSpec
-	Service        []ServiceSpec
-	TLSTermination []TLSTerminationSpec
+	Network  []NetworkSpec
+	Compute  []ComputeSpec
+	Database []DatabaseSpec
+	Secrets  []SecretsSpec
+	Service  []ServiceSpec
 }

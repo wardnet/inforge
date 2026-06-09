@@ -111,6 +111,21 @@ func TestCheckSecretsGlobalDatabaseRef(t *testing.T) {
 	assert.Contains(t, errs[0], `database "global/shared" not found`)
 }
 
+// TestCheckSecretsRejectsReservedEnvName: a secret key (which becomes the service's
+// env var name) must not claim the reserved INFORGE_* namespace inforge injects.
+func TestCheckSecretsRejectsReservedEnvName(t *testing.T) {
+	ctx := baseCtx()
+	ctx.available = nil
+	errs, _ := checkSecrets(types.SecretsSpec{
+		Provider: "infisical",
+		Secrets: map[string]types.SecretsEntry{
+			"INFORGE_DEPLOYMENT_REGION": {Source: "gha:SOME_SECRET"},
+		},
+	}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "reserved")
+}
+
 // TestBuildGlobalRefs derives referenceable database names and compute keys from
 // the global resource set, keying single-instance computes by both forms.
 func TestBuildGlobalRefs(t *testing.T) {
@@ -237,30 +252,7 @@ func baseCtx() regionContext {
 		computeKind:      map[string]string{"bridge-01": "vm"},
 		computeCanonical: map[string]string{"bridge-01": "bridge-01"},
 		computeDeployer:  map[string]bool{"bridge-01": true},
-		tlsByCompute:     map[string]bool{},
 	}
-}
-
-func TestCheckTLSTermination(t *testing.T) {
-	ctx := baseCtx()
-
-	errs, _ := checkTLSTermination(types.TLSTerminationSpec{Provider: "hetzner", Compute: "bridge-01"}, ctx)
-	assert.Empty(t, errs, "a terminator on a vm host should validate")
-
-	errs, _ = checkTLSTermination(types.TLSTerminationSpec{Provider: "hetzner", Compute: "ghost-01"}, ctx)
-	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "does not resolve to a compute instance")
-
-	errs, _ = checkTLSTermination(types.TLSTerminationSpec{Provider: "nope", Compute: "bridge-01"}, ctx)
-	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "not defined in this region's regions.yaml providers")
-
-	// A terminator on a host with no deploy_user can't be realized over SSH.
-	noDeployer := baseCtx()
-	noDeployer.computeDeployer = map[string]bool{"bridge-01": false}
-	errs, _ = checkTLSTermination(types.TLSTerminationSpec{Provider: "hetzner", Compute: "bridge-01"}, noDeployer)
-	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "no deploy_user")
 }
 
 // A service may not run on a multi-instance compute: the host DNS / "<compute>.vm"
@@ -274,77 +266,103 @@ func TestCheckServiceRejectsMultiInstanceHost(t *testing.T) {
 }
 
 func TestCheckServiceIngress(t *testing.T) {
-	ingress := []types.IngressSpec{{Port: 8080, TLS: types.IngressTLSTerminate}}
+	svc := func(in ...types.IngressSpec) types.ServiceSpec {
+		return types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Ingress: in}
+	}
 
-	// Ingress with a terminator on the same host -> OK.
+	// tls-termination needs no host resource — nginx is realized from ingress -> OK.
 	ctx := baseCtx()
-	ctx.tlsByCompute["bridge-01"] = true
-	errs, _ := checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Ingress: ingress}, ctx)
+	errs, _ := checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), ctx)
 	assert.Empty(t, errs)
 
-	// Ingress but no terminator targets the host -> FAIL.
+	// A forward entry is equally fine without any host resource -> OK.
 	ctx = baseCtx()
-	errs, _ = checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Ingress: ingress}, ctx)
-	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "no tls-termination resource")
+	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeForward, Listen: 853, Target: 5353}), ctx)
+	assert.Empty(t, errs)
 
-	// No ingress -> the terminator requirement does not apply.
+	// No ingress -> OK.
 	ctx = baseCtx()
 	errs, _ = checkService(types.ServiceSpec{Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc"}, ctx)
 	assert.Empty(t, errs)
 }
 
-func TestCheckServiceIngressModes(t *testing.T) {
+func TestCheckServiceIngressRules(t *testing.T) {
 	base := func() regionContext {
 		c := baseCtx()
-		c.tlsByCompute["bridge-01"] = true
+		c.portUsersByHost = map[string]map[int][]string{}
+		c.targetUsersByHost = map[string]map[int][]string{}
+		c.tlsTermIngressByHost = map[string]bool{}
 		return c
 	}
 	svc := func(in ...types.IngressSpec) types.ServiceSpec {
 		return types.ServiceSpec{Name: "svc", Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Ingress: in}
 	}
 
-	// passthrough is accepted.
-	errs, _ := checkService(svc(types.IngressSpec{Port: 5432, TLS: types.IngressTLSPassthrough}), base())
-	assert.Empty(t, errs)
-
-	// catchall + tls:terminate is contradictory.
-	errs, _ = checkService(svc(types.IngressSpec{Port: 9000, Catchall: true, TLS: types.IngressTLSTerminate}), base())
-	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "passthrough-only")
-
-	// More than one catch-all on the host.
+	// A tls-termination + a forward entry on one service is the bridge shape -> OK.
 	ctx := base()
-	ctx.catchallByHost = map[string]int{"bridge-01": 2}
-	errs, _ = checkService(svc(types.IngressSpec{Port: 9000, Catchall: true}), ctx)
-	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "catch-all")
-
-	// proxy_protocol on a terminate route warns (no effect), not an error.
-	errs, warns := checkService(svc(types.IngressSpec{Port: 80, ProxyProtocol: "v2"}), base())
-	assert.Empty(t, errs)
-	require.Len(t, warns, 1)
-	assert.Contains(t, warns[0], "proxy_protocol has no effect")
-
-	// A terminate route + a catch-all on one service is the bridge shape -> OK.
-	errs, _ = checkService(svc(
-		types.IngressSpec{Port: 8080, TLS: types.IngressTLSTerminate, Vanity: []string{"key-broker.inforge.example.com"}},
-		types.IngressSpec{Port: 8443, Catchall: true},
-	), base())
+	ctx.portUsersByHost["bridge-01"] = map[int][]string{443: {"svc"}, 853: {"svc"}}
+	ctx.tlsTermIngressByHost["bridge-01"] = true
+	errs, _ := checkService(svc(
+		types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: []string{"key-broker.inforge.example.com"}},
+		types.IngressSpec{Type: types.IngressTypeForward, Listen: 853, Target: 5353},
+	), ctx)
 	assert.Empty(t, errs)
 
-	// Two non-catch-all entries collide on the auto "<svc>.svc" name -> FAIL.
-	errs, _ = checkService(svc(
-		types.IngressSpec{Port: 8080, TLS: types.IngressTLSTerminate},
-		types.IngressSpec{Port: 9090, TLS: types.IngressTLSPassthrough},
-	), base())
+	// An invalid type is rejected.
+	errs, _ = checkService(svc(types.IngressSpec{Type: "passthrough", Listen: 443, Target: 8080}), base())
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "non-catch-all")
+	assert.Contains(t, errs[0], "is invalid")
 
-	// Vanity on a catch-all is meaningless -> FAIL.
-	errs, _ = checkService(svc(types.IngressSpec{Port: 9000, Catchall: true, Vanity: []string{"x"}}), base())
+	// listen is required on every entry.
+	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Target: 8080}), base())
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "catchall has no SNI")
+	assert.Contains(t, errs[0], "listen")
+
+	// target is required on every entry.
+	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443}), base())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "needs a target")
+
+	// listen and target must differ (nginx occupies the public port on loopback too).
+	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 443}), base())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "must differ")
+
+	// target collides with ANOTHER entry's public listen port on the host -> FAIL.
+	ctx = base()
+	ctx.portUsersByHost["bridge-01"] = map[int][]string{443: {"svc"}, 8080: {"other"}}
+	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "collides with a public listen port")
+
+	// two different services binding the same loopback target -> FAIL.
+	ctx = base()
+	ctx.targetUsersByHost["bridge-01"] = map[int][]string{8080: {"svc", "other"}}
+	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "belongs to a single service")
+
+	// vanity on a forward is meaningless -> FAIL.
+	ctx = base()
+	ctx.portUsersByHost["bridge-01"] = map[int][]string{853: {"svc"}}
+	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeForward, Listen: 853, Target: 5353, Vanity: []string{"x"}}), ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "remove vanity")
+
+	// A forward port shared with another service -> FAIL (single-service-exclusive).
+	ctx = base()
+	ctx.portUsersByHost["bridge-01"] = map[int][]string{443: {"svc", "other"}}
+	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeForward, Listen: 443, Target: 8080}), ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "single-service-exclusive")
+
+	// A forward on :80 collides with a tls-termination on the host (ACME owns :80).
+	ctx = base()
+	ctx.portUsersByHost["bridge-01"] = map[int][]string{80: {"svc"}}
+	ctx.tlsTermIngressByHost["bridge-01"] = true
+	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeForward, Listen: 80, Target: 8080}), ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "ACME owns :80")
 }
 
 func TestCheckServiceDeployUser(t *testing.T) {

@@ -75,10 +75,15 @@ selects purely on the `serverTypes` mapping above.
 
 inforge creates a firewall per compute spec (per region) with:
 
-- **Inbound**: TCP 22 (SSH) is always allowed. Any rules a compute declares in its
-  [`firewall`](/resources/compute) block are added on top; with no `firewall` block, SSH is the only
-  inbound rule.
+- **Inbound**: TCP 22 (SSH) is always allowed; every service's [ingress](/resources/service#ingress)
+  `listen` port on the host is opened automatically (plus `:80` when the host terminates TLS, for the
+  ACME HTTP-01 challenge); and any rules a compute declares in its [`firewall`](/resources/compute)
+  block are unioned on top for raw ports not fronted by nginx.
 - **Outbound**: all TCP, UDP, ICMP
+
+The host ingress proxy itself is **nginx** (with the native ACME module for Let's Encrypt TLS
+termination and the `stream` module for L4 forwarding), installed and configured over SSH wherever a
+service declares ingress.
 
 ## Required env vars
 

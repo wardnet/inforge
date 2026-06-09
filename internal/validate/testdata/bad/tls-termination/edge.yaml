@@ -1,5 +1,0 @@
-# compute FK does not resolve to a compute instance -> FAIL.
-name: edge
-container: bridge
-provider: hetzner
-compute: ghost-01

@@ -148,7 +148,7 @@ func TestProvisioningDependsOnGate(t *testing.T) {
 		}
 		gates := map[string]pulumi.Resource{}
 		// No bundle for ghost -> secret-less descriptor path.
-		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", "use1", "1.2.3")
+		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", "us-east-1", "use1", "example.com", "1.2.3")
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 
@@ -172,21 +172,20 @@ func TestTLSAndServiceShareOneGate(t *testing.T) {
 			Compute: []types.ComputeSpec{
 				{Name: "bridge", Provider: "hetzner", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
 			},
-			TLSTermination: []types.TLSTerminationSpec{
-				{Name: "edge", Provider: "hetzner", Compute: "bridge-01"},
-			},
 			Service: []types.ServiceSpec{
-				{Name: "ghost", Container: "ghost", Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "ghost"},
+				// Ingress on the host drives nginx realization (no separate resource).
+				{Name: "ghost", Container: "ghost", Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "ghost",
+					Ingress: []types.IngressSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}},
 			},
 		}
 		computeOut := map[string]types.ComputeOutputs{
 			"bridge-01": {PublicIP: pulumi.String("1.2.3.4").ToStringOutput()},
 		}
 		gates := map[string]pulumi.Resource{}
-		if err := realizeTLSTermination(ctx, reg, res, computeOut, gates, "priv", "prd", "use1", "example.com"); err != nil {
+		if err := realizeIngress(ctx, reg, res, computeOut, gates, "priv", "prd", "use1", "example.com"); err != nil {
 			return err
 		}
-		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", "use1", "1.2.3")
+		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", "us-east-1", "use1", "example.com", "1.2.3")
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 

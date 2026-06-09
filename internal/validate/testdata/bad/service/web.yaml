@@ -1,4 +1,4 @@
-# ingress declared but no tls-termination resource targets the host -> FAIL.
+# a tls-termination ingress but no tls-termination resource targets the host -> FAIL.
 name: web
 container: bridge
 provider: hetzner
@@ -6,5 +6,6 @@ host: bridge-01
 type: raw
 user: web
 ingress:
-  - port: 8080
-    tls: terminate
+  - type: tls-termination
+    listen: 443
+    target: 8080

@@ -19,8 +19,8 @@ import (
 	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/regions"
-	iremote "github.com/wardnet/inforge/internal/remote"
 	"github.com/wardnet/inforge/internal/registry"
+	iremote "github.com/wardnet/inforge/internal/remote"
 	"github.com/wardnet/inforge/internal/service"
 	"github.com/wardnet/inforge/internal/tags"
 	"github.com/wardnet/inforge/internal/types"
@@ -144,10 +144,10 @@ func Run(ctx *pulumi.Context) error {
 		}
 
 		// gates memoizes one cloud-init readiness gate per host in this region.
-		// Both TLS realization and service provisioning SSH the same hosts, so the
-		// gate they each depend on must be the same resource — share the map.
+		// Both ingress realization and service provisioning SSH the same hosts, so
+		// the gate they each depend on must be the same resource — share the map.
 		gates := map[string]pulumi.Resource{}
-		if err := realizeTLSTermination(ctx, reg, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain); err != nil {
+		if err := realizeIngress(ctx, reg, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain); err != nil {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs}
@@ -155,7 +155,7 @@ func Run(ctx *pulumi.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := provisionServices(ctx, res, computeOutputs[region], bundles, gates, vars.SSH.DeployPrivateKey, env, slug, inforgeVersion); err != nil {
+		if err := provisionServices(ctx, res, computeOutputs[region], bundles, gates, vars.SSH.DeployPrivateKey, env, region, slug, vars.BaseDomain, inforgeVersion); err != nil {
 			return err
 		}
 	}
@@ -179,6 +179,11 @@ func createInfra(
 	networkOutputs[region] = map[string]types.NetworkOutputs{}
 	computeOutputs[region] = map[string]types.ComputeOutputs{}
 	databaseOutputs[region] = map[string]types.DatabaseOutputs{}
+
+	// Derive each host's inbound ingress ports up front: the firewall is a pure
+	// consumer of this set, and cp.Create (below) runs before routesByHost, so the
+	// derivation cannot wait for the routes.
+	ingressPorts := ingressPortsByHost(res)
 
 	for _, spec := range res.Network {
 		np, err := reg.Network(spec.Provider)
@@ -214,7 +219,7 @@ func createInfra(
 			// The host's SSH / cloud-init domain is derived from the bare compute
 			// name with the "vm" segment — deterministic, never a free-form record.
 			domain := naming.HostFQDN(env, slug, spec.Name, baseDomain)
-			out, err := cp.Create(ctx, spec, netOut, env, region, domain, man)
+			out, err := cp.Create(ctx, spec, netOut, env, region, domain, man, ingressPorts[key])
 			if err != nil {
 				return err
 			}
@@ -277,8 +282,8 @@ func cloudInitGate(ctx *pulumi.Context, gates map[string]pulumi.Resource, hostKe
 // `inforge release` delivers code, so a start here would fail and abort the
 // whole `pulumi up`. The unit is written, daemon-reloaded, and enabled (for
 // boot persistence); release performs the first real start with code present.
-// Connection details and the preview/up guard mirror realizeTLSTermination.
-func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, bundles map[string]*types.ServiceSecretsBundle, gates map[string]pulumi.Resource, deployPrivateKey, env, slug, inforgeVersion string) error {
+// Connection details and the preview/up guard mirror realizeIngress.
+func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, bundles map[string]*types.ServiceSecretsBundle, gates map[string]pulumi.Resource, deployPrivateKey, env, region, slug, baseDomain, inforgeVersion string) error {
 	if len(res.Service) == 0 {
 		return nil
 	}
@@ -324,11 +329,11 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		// host-key-encrypted credential.age; a secret-less one (no bundle) gets a
 		// static descriptor with an empty provider and no env.
 		if bundle := bundles[svc.Name]; bundle != nil {
-			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, slug, gate); err != nil {
+			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, region, slug, baseDomain, gate); err != nil {
 				return err
 			}
 		} else {
-			if err := deliverServiceDescriptor(ctx, svc, host, deployUser, deployPrivateKey, env, slug, gate); err != nil {
+			if err := deliverServiceDescriptor(ctx, svc, host, deployUser, deployPrivateKey, env, region, slug, baseDomain, gate); err != nil {
 				return err
 			}
 		}
@@ -410,7 +415,7 @@ func serviceSecretsProviderName(svc types.ServiceSpec, res types.Resources) stri
 // second command writes both files. The descriptor's provider.project is the
 // workspace ID, so it too is rendered inside an ApplyT on that output. Connection
 // details and the preview/up guards mirror provisionService.
-func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, slug string, gate pulumi.Resource) error {
+func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, region, slug, baseDomain string, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
@@ -431,7 +436,7 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 	// descriptor.yaml depends on the workspace ID (provider.project), so render it
 	// inside an ApplyT on that output.
 	descriptor := bundle.Project.ApplyT(func(project string) (string, error) {
-		return renderDescriptor(svc, bundle, project)
+		return renderDescriptor(svc, bundle, project, env, region, slug, baseDomain)
 	}).(pulumi.StringOutput)
 
 	// Encrypt {client_id, client_secret} to the host key inside an ApplyT over the
@@ -489,11 +494,11 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 // read, and no credential. The descriptor is fully known at plan time (no
 // workspace ID to resolve), so it needs no ApplyT. Connection details and the
 // preview/up guards mirror provisionService.
-func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug string, gate pulumi.Resource) error {
+func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, region, slug, baseDomain string, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
-	descriptor, err := renderDescriptor(svc, nil, "")
+	descriptor, err := renderDescriptor(svc, nil, "", env, region, slug, baseDomain)
 	if err != nil {
 		return err
 	}
@@ -517,13 +522,23 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 // so the producer can never drift from the consumer's schema. A nil bundle is a
 // secret-less service: the provider is left zero-valued and env nil, which the
 // bootstrapper reads as "no secrets to fetch". For a secret-bearing service,
-// project is the resolved workspace ID.
-func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle, project string) (string, error) {
+// project is the resolved workspace ID. The deployment block (region/env/domain/
+// namespace/fqdn) is derived from the deployment context and is present for every
+// service, secret-bearing or not.
+func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle, project, env, region, slug, baseDomain string) (string, error) {
 	d := bootstrapper.Descriptor{
 		Version: bootstrapper.SupportedVersion,
 		Service: svc.Name,
 		Exec:    service.ExecPath(svc.Name),
 		User:    svc.User,
+		Deployment: bootstrapper.Deployment{
+			Region:      region,
+			RegionSlug:  slug,
+			Environment: env,
+			BaseDomain:  baseDomain,
+			Namespace:   env + "." + slug + "." + svc.Name,
+			FQDN:        naming.ServiceFQDN(env, slug, svc.Name, baseDomain),
+		},
 	}
 	if bundle != nil {
 		d.Provider = bootstrapper.Provider{
@@ -616,47 +631,59 @@ func serviceDeprovisionScript(svc types.ServiceSpec) string {
 	}, "\n")
 }
 
-// realizeTLSTermination realizes each tls-termination resource in a region: it
-// resolves the terminator's host, collects the per-service vhosts from every
-// ingress-bearing service on that host (with FQDNs env-scoped here, so the
-// provider stays a pure installer), and asks the provider to realize it. Compute
-// FKs are resolved through the same canonicalization validation uses, so
-// `compute: bridge` and `host: bridge-01` agree on the host.
-func realizeTLSTermination(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, deployPrivateKey, env, slug, baseDomain string) error {
-	if len(res.TLSTermination) == 0 {
+// realizeIngress installs and configures the host ingress proxy (nginx) on every
+// host that has ingress. There is no host-level ingress resource — realization is
+// driven by ingress presence: routesByHost yields a host iff it has ≥1 ingress
+// entry, and each such host gets nginx realized by its compute provider. FQDNs are
+// env-scoped here so the provider stays a pure installer. Compute FKs resolve
+// through the same canonicalization validation uses, so `host: bridge` and
+// `host: bridge-01` agree on the host. Hosts are realized in sorted order so the
+// resource graph is stable across runs.
+func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, deployPrivateKey, env, slug, baseDomain string) error {
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	routesByCompute, err := routesByHost(res, canonical, env, slug, baseDomain)
+	if err != nil {
+		return fmt.Errorf("ingress: %w", err)
+	}
+	if len(routesByCompute) == 0 {
 		return nil
 	}
 
-	canonical := naming.CanonicalComputeKeys(res.Compute)
 	deployUserByCompute := deployUsersByHost(res.Compute)
-	routesByCompute, err := routesByHost(res, canonical, env, slug, baseDomain)
-	if err != nil {
-		return fmt.Errorf("tls-termination: %w", err)
-	}
+	providerByCompute := ingressProvidersByHost(res.Compute)
 
-	for _, spec := range res.TLSTermination {
-		hostKey, ok := canonical[spec.Compute]
-		if !ok {
-			return fmt.Errorf("tls-termination %q: compute %q does not resolve to a host", spec.Name, spec.Compute)
-		}
+	for _, hostKey := range sortedKeys(routesByCompute) {
 		host, ok := computeOut[hostKey]
 		if !ok {
-			return fmt.Errorf("tls-termination %q: host %q has no compute output (available: %v)", spec.Name, hostKey, sortedKeys(computeOut))
+			return fmt.Errorf("ingress: host %q has no compute output (available: %v)", hostKey, sortedKeys(computeOut))
 		}
-		tp, err := reg.TLSTermination(spec.Provider)
+		ip, err := reg.Ingress(providerByCompute[hostKey])
 		if err != nil {
-			return err
+			return fmt.Errorf("ingress: host %q: %w", hostKey, err)
 		}
 		// The realization SSHes the host, so it waits on the host's cloud-init gate.
 		gate, err := cloudInitGate(ctx, gates, hostKey, host, deployPrivateKey, env, slug)
 		if err != nil {
 			return err
 		}
-		if err := tp.Realize(ctx, spec, host, deployUserByCompute[hostKey], routesByCompute[hostKey], env, []pulumi.Resource{gate}); err != nil {
+		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByCompute[hostKey], env, []pulumi.Resource{gate}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// ingressProvidersByHost maps each expanded compute specKey to the provider that
+// realizes its ingress proxy — the host's own compute provider (services have no
+// provider; the proxy runs on the host).
+func ingressProvidersByHost(computes []types.ComputeSpec) map[string]string {
+	byHost := map[string]string{}
+	for _, c := range computes {
+		for i := 1; i <= c.InstanceCount; i++ {
+			byHost[naming.SpecKey(c.Name, i)] = c.Provider
+		}
+	}
+	return byHost
 }
 
 // deployUsersByHost maps each expanded compute specKey to its deploy user (empty
@@ -676,15 +703,14 @@ func deployUsersByHost(computes []types.ComputeSpec) map[string]string {
 	return byHost
 }
 
-// ingressFQDNs returns the env-scoped FQDNs one ingress entry serves/matches: the
-// auto-derived "<svc>.svc" FQDN plus every expanded vanity entry. A catch-all has
-// no SNI, so it returns nil. This is the single source of truth for ingress FQDNs
-// — both routesByHost (the TLS routes / certs) and createDNSRecords (the A-records)
-// call it, so a cert FQDN and its A-record can never drift apart.
+// ingressFQDNs returns the env-scoped FQDNs one ingress entry serves: the
+// auto-derived "<svc>.svc" FQDN plus every expanded vanity entry. (A forward entry
+// carries no vanity, so it yields just the "<svc>.svc" name — a reachable A-record
+// even though nginx stream demands no server_name.) This is the single source of
+// truth for ingress FQDNs — both routesByHost (the tls-termination server_names /
+// ACME certs) and derivedRecords (the A-records) call it, so a cert FQDN and its
+// A-record can never drift apart.
 func ingressFQDNs(svcName string, in types.IngressSpec, env, slug, baseDomain string) []string {
-	if in.Catchall {
-		return nil
-	}
 	fqdns := []string{naming.ServiceFQDN(env, slug, svcName, baseDomain)}
 	for _, v := range in.Vanity {
 		fqdns = append(fqdns, naming.ExpandVanity(v, env, slug, baseDomain))
@@ -692,20 +718,61 @@ func ingressFQDNs(svcName string, in types.IngressSpec, env, slug, baseDomain st
 	return fqdns
 }
 
-// routesByHost derives the inbound TLS routes for every ingress-bearing service,
-// grouped by the canonical specKey of the host it runs on. Each non-catch-all
-// ingress entry expands to one TLSRoute per FQDN it serves (the auto-derived
-// "<svc>.svc" name plus vanity), so a terminate entry with vanity certs renders
-// one Caddy site per name. A catch-all carries no FQDN. The ingress TLS mode,
-// catch-all flag and proxy_protocol carry through; a catch-all defaults to PROXY
-// protocol v2 when unset so the dispatcher backend learns the real client IP.
-// Within a host, routes are sorted (catch-all last) so realized resources are
-// stable across runs. It errors if any host has more than one catch-all route —
-// the preview/deploy half of the rule validate also enforces, so the guarantee
-// holds even when `up` runs without a prior `validate`.
-func routesByHost(res types.Resources, canonical map[string]string, env, slug, baseDomain string) (map[string][]types.TLSRoute, error) {
-	byHost := map[string][]types.TLSRoute{}
-	catchallByHost := map[string][]string{}
+// ingressPortsByHost derives each host's inbound ingress ports, keyed by canonical
+// compute specKey: the union of every service's ingress listen ports on the host,
+// plus :80 when the host has at least one tls-termination entry (nginx serves the
+// ACME HTTP-01 challenge there). SSH (22) is not included — the firewall always
+// permits it regardless. The result per host is sorted and de-duplicated so the
+// rendered firewall is stable across runs.
+func ingressPortsByHost(res types.Resources) map[string][]int {
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	set := map[string]map[int]bool{}
+	add := func(host string, port int) {
+		if set[host] == nil {
+			set[host] = map[int]bool{}
+		}
+		set[host][port] = true
+	}
+	for _, svc := range res.Service {
+		hostKey, ok := canonical[svc.Host]
+		if !ok {
+			continue // validation guarantees resolution; skip defensively
+		}
+		for _, in := range svc.Ingress {
+			add(hostKey, in.Listen)
+			if in.Type == types.IngressTypeTLSTermination {
+				add(hostKey, 80) // ACME HTTP-01
+			}
+		}
+	}
+	out := map[string][]int{}
+	for host, ports := range set {
+		list := make([]int, 0, len(ports))
+		for p := range ports {
+			list = append(list, p)
+		}
+		sort.Ints(list)
+		out[host] = list
+	}
+	return out
+}
+
+// routesByHost derives the typed inbound ingress routes for every ingress-bearing
+// service, grouped by the canonical specKey of the host it runs on. One IngressRoute
+// is emitted per ingress entry (nginx fronts every entry):
+//   - tls-termination: the route carries every SNI the entry serves (the
+//     auto-derived "<svc>.svc" name plus vanity), rendered as one nginx server
+//     block (server_name lists them all) with one ACME certificate.
+//   - forward: a stream-forward route to 127.0.0.1:target with the PROXY protocol.
+//
+// A non-empty result for a host is the realization trigger: a host appears here iff
+// it has at least one ingress entry, and that is exactly when nginx is installed.
+// Within a host, routes are sorted (by listen port, then service) so realized
+// resources are stable across runs. It rejects an SNI claimed by two routes on the
+// same listen port of a host — the preview/deploy half of the rule validate also
+// enforces, so the guarantee holds even when `up` runs without a prior `validate`.
+func routesByHost(res types.Resources, canonical map[string]string, env, slug, baseDomain string) (map[string][]types.IngressRoute, error) {
+	byHost := map[string][]types.IngressRoute{}
 	for _, svc := range res.Service {
 		hostKey, ok := canonical[svc.Host]
 		if !ok {
@@ -713,62 +780,41 @@ func routesByHost(res types.Resources, canonical map[string]string, env, slug, b
 			continue
 		}
 		for _, in := range svc.Ingress {
-			pp := in.ProxyProtocol
-			if in.Catchall {
-				catchallByHost[hostKey] = append(catchallByHost[hostKey], svc.Name)
-				if pp == "" {
-					pp = "v2"
-				}
-				byHost[hostKey] = append(byHost[hostKey], types.TLSRoute{
-					Service:       svc.Name,
-					Port:          in.Port,
-					Mode:          in.Mode(),
-					Catchall:      true,
-					ProxyProtocol: pp,
-				})
-				continue
+			var fqdns []string
+			if in.Type == types.IngressTypeTLSTermination {
+				fqdns = ingressFQDNs(svc.Name, in, env, slug, baseDomain)
+				sort.Strings(fqdns) // canonical server_name / cert SNI order
 			}
-			for _, fqdn := range ingressFQDNs(svc.Name, in, env, slug, baseDomain) {
-				byHost[hostKey] = append(byHost[hostKey], types.TLSRoute{
-					Service:       svc.Name,
-					FQDN:          fqdn,
-					Port:          in.Port,
-					Mode:          in.Mode(),
-					ProxyProtocol: pp,
-				})
-			}
+			byHost[hostKey] = append(byHost[hostKey], types.IngressRoute{
+				Service: svc.Name,
+				Type:    in.Type,
+				FQDNs:   fqdns,
+				Listen:  in.Listen,
+				Target:  in.Target,
+			})
 		}
 	}
-	for hostKey, names := range catchallByHost {
-		if len(names) > 1 {
-			sort.Strings(names)
-			return nil, fmt.Errorf("host %q has %d catch-all ingress services (%s); at most one is allowed", hostKey, len(names), strings.Join(names, ", "))
-		}
-	}
-	// Two services on one host can resolve to the same SNI (e.g. the same vanity
-	// FQDN), which would render two conflicting routes for one name. createDNSRecords
-	// guards the DNS side, but it is a no-op when the region has no DNS authority, so
-	// guard the route side here too.
+	// Two services on one host can resolve to the same SNI on the same listen port
+	// (e.g. the same vanity FQDN), which nginx could not demux. The same FQDN on
+	// different listen ports is fine, so the guard keys on (listen, SNI).
+	// derivedRecords guards the DNS side, but it is a no-op when the region has no
+	// DNS authority, so guard the route side here too.
 	for hostKey, routes := range byHost {
-		seen := map[string]string{}
+		seen := map[string]string{} // "listen|fqdn" -> service
 		for _, rt := range routes {
-			if rt.Catchall {
-				continue
+			for _, fqdn := range rt.FQDNs {
+				key := fmt.Sprintf("%d|%s", rt.Listen, fqdn)
+				if prev, dup := seen[key]; dup {
+					return nil, fmt.Errorf("host %q has two ingress routes for SNI %q on listen %d (services %s and %s); an SNI must be unique per listen port", hostKey, fqdn, rt.Listen, prev, rt.Service)
+				}
+				seen[key] = rt.Service
 			}
-			if prev, dup := seen[rt.FQDN]; dup {
-				return nil, fmt.Errorf("host %q has two ingress routes for SNI %q (services %s and %s); an SNI must be unique per host", hostKey, rt.FQDN, prev, rt.Service)
-			}
-			seen[rt.FQDN] = rt.Service
 		}
 	}
 	for _, routes := range byHost {
 		sort.Slice(routes, func(i, j int) bool {
-			// Catch-all sorts last; otherwise by FQDN then service for stability.
-			if routes[i].Catchall != routes[j].Catchall {
-				return !routes[i].Catchall
-			}
-			if routes[i].FQDN != routes[j].FQDN {
-				return routes[i].FQDN < routes[j].FQDN
+			if routes[i].Listen != routes[j].Listen {
+				return routes[i].Listen < routes[j].Listen
 			}
 			return routes[i].Service < routes[j].Service
 		})
@@ -849,9 +895,23 @@ func derivedRecords(res types.Resources, env, slug, baseDomain string) []derived
 			hostKey: hostKey,
 		})
 	}
+	// A-records are port-independent, so a service with several ingress entries
+	// derives its "<svc>.svc" name once per entry; dedup by (RecordName, hostKey)
+	// so the same name on the same host collapses to one record. A name resolving
+	// to two different hosts survives (different hostKey) for createDNSRecords to
+	// reject.
+	seen := map[string]bool{}
+	dedupAdd := func(fqdn, container, hostKey string) {
+		rel := naming.ZoneRelative(fqdn, baseDomain)
+		if seen[rel+"\x00"+hostKey] {
+			return
+		}
+		seen[rel+"\x00"+hostKey] = true
+		add(fqdn, container, hostKey)
+	}
 	for _, spec := range res.Compute {
 		fqdn := naming.HostFQDN(env, slug, spec.Name, baseDomain)
-		add(fqdn, spec.Container, naming.SpecKey(spec.Name, 1))
+		dedupAdd(fqdn, spec.Container, naming.SpecKey(spec.Name, 1))
 	}
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	for _, svc := range res.Service {
@@ -861,7 +921,7 @@ func derivedRecords(res types.Resources, env, slug, baseDomain string) []derived
 		}
 		for _, in := range svc.Ingress {
 			for _, fqdn := range ingressFQDNs(svc.Name, in, env, slug, baseDomain) {
-				add(fqdn, svc.Container, hostKey)
+				dedupAdd(fqdn, svc.Container, hostKey)
 			}
 		}
 	}
@@ -879,13 +939,15 @@ func createDNSRecords(ctx *pulumi.Context, reg registry.ProviderRegistry, author
 	if err != nil {
 		return err
 	}
-	// Two services on one host can resolve to the same derived FQDN (e.g. the same
-	// vanity literal), which would collide on one DNS record / Pulumi logical name.
-	// Reject it here rather than letting the apply fail mid-way.
+	// derivedRecords already collapses a name repeated on one host (a service with
+	// several ingress entries), so a duplicate RecordName here means the same name
+	// resolving to two different hosts (e.g. two services on different hosts sharing
+	// a vanity FQDN) — reject it rather than letting the apply fail mid-way. (An SNI
+	// claimed twice on one host is a cert conflict, caught by routesByHost.)
 	seen := map[string]string{}
 	for _, dr := range derivedRecords(res, env, slug, baseDomain) {
 		if prev, dup := seen[dr.rec.RecordName]; dup {
-			return fmt.Errorf("dns: record %q is derived more than once (%s and %s); a DNS name must be unique", dr.rec.RecordName, prev, dr.rec.Name)
+			return fmt.Errorf("dns: record %q is derived more than once (%s and %s); a DNS name must resolve to one host", dr.rec.RecordName, prev, dr.rec.Name)
 		}
 		seen[dr.rec.RecordName] = dr.rec.Name
 		target, ok := computeOut[dr.hostKey]
