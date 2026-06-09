@@ -23,6 +23,42 @@ type backendConfig struct {
 type projectConfig struct {
 	Name    string        `yaml:"name"`
 	Backend backendConfig `yaml:"backend"`
+	// Artifacts configures the release artifact store (ADR-0016). Optional —
+	// only `inforge releases` reads it.
+	Artifacts artifactsConfig `yaml:"artifacts"`
+}
+
+// artifactsConfig is the inforge.yaml `artifacts:` block: the release-store
+// bucket and how many historical (unpinned) artifacts to retain per service.
+type artifactsConfig struct {
+	// Backend points at the release-artifact bucket. It MUST be a different
+	// bucket from the state Backend (validated at load).
+	Backend backendConfig `yaml:"backend"`
+	// Keep is the number of unpinned (rollback-history) artifacts retained per
+	// service after a push prunes. 0 or unset disables pruning; SHAs live in any
+	// environment's manifest are always kept and never count toward Keep.
+	Keep int `yaml:"keep"`
+}
+
+// configured reports whether an artifacts backend is declared.
+func (a artifactsConfig) configured() bool {
+	return a.Backend.Type != "" || a.Backend.URL != ""
+}
+
+// bucket returns the bucket name for an r2:// or s3:// backend URL.
+func (b backendConfig) bucket() (string, error) {
+	switch b.Type {
+	case "r2":
+		return r2Bucket(b.URL)
+	case "s3":
+		u, err := url.Parse(b.URL)
+		if err != nil {
+			return "", fmt.Errorf("parse s3 URL: %w", err)
+		}
+		return u.Host, nil
+	default:
+		return "", fmt.Errorf("backend type %q has no bucket (valid: r2, s3)", b.Type)
+	}
 }
 
 // backendURL returns the Pulumi-compatible backend URL for the project config.
@@ -40,9 +76,8 @@ func (c projectConfig) backendURL() (string, error) {
 	}
 }
 
-// r2ToS3URL translates an r2://<bucket> URL to the Pulumi s3:// URL format
-// for Cloudflare R2's S3-compatible API.
-func r2ToS3URL(raw string) (string, error) {
+// r2Bucket extracts the bucket name from an r2://<bucket> URL.
+func r2Bucket(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", fmt.Errorf("parse r2 URL: %w", err)
@@ -53,6 +88,16 @@ func r2ToS3URL(raw string) (string, error) {
 	bucket := strings.TrimPrefix(u.Path, "/")
 	if u.Host != "" {
 		bucket = u.Host
+	}
+	return bucket, nil
+}
+
+// r2ToS3URL translates an r2://<bucket> URL to the Pulumi s3:// URL format
+// for Cloudflare R2's S3-compatible API.
+func r2ToS3URL(raw string) (string, error) {
+	bucket, err := r2Bucket(raw)
+	if err != nil {
+		return "", err
 	}
 	accountID := os.Getenv("CLOUDFLARE_ACCOUNT_ID")
 	if accountID == "" {
@@ -88,7 +133,34 @@ func loadProjectConfig(path string) (projectConfig, error) {
 	if cfg.Name == "" {
 		return cfg, fmt.Errorf("%s: name is required", path)
 	}
+	if err := cfg.validateArtifacts(); err != nil {
+		return cfg, fmt.Errorf("%s: %w", path, err)
+	}
 	return cfg, nil
+}
+
+// validateArtifacts enforces that the release-artifact bucket is distinct from
+// the state bucket — colocating release tarballs with Pulumi state risks a
+// retention sweep touching state objects. A bucket name can only be compared for
+// r2/s3 backends; other state backend types (file, git-branch) trivially differ.
+func (c projectConfig) validateArtifacts() error {
+	if !c.Artifacts.configured() {
+		return nil
+	}
+	artBucket, err := c.Artifacts.Backend.bucket()
+	if err != nil {
+		return fmt.Errorf("artifacts.backend: %w", err)
+	}
+	if c.Backend.Type == "r2" || c.Backend.Type == "s3" {
+		stateBucket, err := c.Backend.bucket()
+		if err != nil {
+			return fmt.Errorf("backend: %w", err)
+		}
+		if artBucket == stateBucket {
+			return fmt.Errorf("artifacts.backend bucket %q must differ from the state backend bucket", artBucket)
+		}
+	}
+	return nil
 }
 
 func loadStackConfig(path string) (stackConfig, error) {

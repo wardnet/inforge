@@ -41,7 +41,7 @@ is used as a display hint but the identity of the resource is its `name` + `inst
 
 ## deployments/ (service repos only)
 
-Service repos — not infra repos — contain a `deployments/` directory used by `inforge release`:
+Service repos — not infra repos — contain a `deployments/` directory used by `inforge releases`:
 
 ```
 deployments/
@@ -49,7 +49,7 @@ deployments/
 └── <service>.yaml           # per-environment artifact path for each service
 ```
 
-`inforge release` reads these files to find the artifact and then resolves the target host,
+`inforge releases` reads these files to find the artifact and then resolves the target host,
 folder, and systemd unit live from the Pulumi stack at release time.
 
 ## .pulumi/ (or state backend)

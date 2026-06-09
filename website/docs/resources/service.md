@@ -71,7 +71,7 @@ deploy the unit exists but fails to start until [code lands](#releasing-code) �
 
 ## Releasing code
 
-`inforge deploy` provisions the scaffolding above; `inforge release` (the `service-release`
+`inforge deploy` provisions the scaffolding above; `inforge releases` (the `service-release`
 workflow) then delivers the payload and starts the service. Release resolves the deploy target
 (host DNS, folder, unit, SSH user) live from the Pulumi stack — no descriptor file is committed —
 then SSHes in as the host's deploy user, extracts the payload into the folder, and
