@@ -4,11 +4,14 @@ sidebar_position: 6
 
 # service-release.yml
 
-Releases a service artifact to a provisioned VM. Called by service repos after their build step.
+Releases a service to a provisioned VM. Called by service repos after their build step. It runs
+[`inforge releases push`](/cli/releases) (upload the artifact to the R2 release store, keyed by
+commit SHA) followed by `inforge releases deploy` (deliver that SHA to the host and record it in the
+per-environment manifest).
 
-Unlike the old `deploy-raw` pattern, there is no deploy descriptor file to commit.
-`service-release` resolves the target host, folder, and systemd unit live from the
-infrastructure Pulumi stack at release time.
+There is no deploy descriptor file to commit: the target host, folder, and systemd unit are resolved
+live from the infrastructure Pulumi stack at release time. A `concurrency` group serialises releases
+per service+environment.
 
 ## Usage
 
@@ -68,7 +71,8 @@ jobs:
 | `environment` | string | Yes | — | Target environment (e.g. `qa`, `prd`) |
 | `stack_config` | string | No | `inforge.<env>.yaml` | Path to the infra stack config file |
 | `deploy_dir` | string | No | `./deployments` | Path to the deployments directory |
-| `dry_run` | boolean | No | `false` | Resolve and print the target without delivering |
+| `sha` | string | No | triggering commit | Artifact SHA to push + deploy |
+| `dry_run` | boolean | No | `false` | Resolve the target and verify the artifact without delivering |
 
 ## Secrets
 
@@ -105,10 +109,13 @@ environments:
 ## What it does
 
 1. Reads `deployments/inforge.yaml` to locate the platform repo and `deployments/<service>.yaml` for the artifact path
-2. Resolves the deploy target (host DNS, folder, systemd unit) live from the Pulumi stack output in the platform repo
-3. Packages `artifact_path` as a `payload.tgz`
-4. Uploads the payload via SCP and extracts it into the service folder
-5. Restarts the inforge-managed systemd unit
+2. **push**: packages `artifact_path` and uploads it to the release store as `<service>/<SHA>.tar.gz`, then prunes old artifacts (keeping live and recent ones)
+3. **deploy**: resolves the deploy target (host DNS, folder, systemd unit) live from the Pulumi stack, downloads `<SHA>.tar.gz`, and SCPs it onto the host
+4. Extracts the payload into the service folder and restarts the inforge-managed systemd unit
+5. Records `host → SHA` in `manifest.<env>.yaml` in the release store
+
+The release store bucket and retention are configured in the platform repo's `inforge.yaml`
+`artifacts:` block — see [`inforge releases`](/cli/releases#configuration).
 
 ## Payload requirements
 

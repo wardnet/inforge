@@ -21,15 +21,21 @@ is never touched during provisioning.
 
 ## Deployment
 
-**Deployment** delivers a service's payload to the provisioned host:
+**Deployment** delivers a service's payload to the provisioned host in two steps
+([ADR-0016](https://github.com/wardnet/inforge/blob/main/docs/adr/0016-r2-release-artifact-store.md)):
 
-- The service repo's CI calls the `service-release` reusable workflow
-- A gzip of the service's build artifacts is pushed via SCP
-- The inforge-managed unit is restarted via SSH
+- **push** — the build artifact is uploaded to an R2 release store as an immutable, SHA-keyed
+  tarball (`<service>/<SHA>.tar.gz`)
+- **deploy** — a chosen SHA is downloaded, SCP'd to the host, the inforge-managed unit is restarted,
+  and the SHA is recorded per host in `manifest.<env>.yaml`
+
+Both run from the service repo's CI via the `service-release` reusable workflow. See
+[`inforge releases`](/cli/releases).
 
 Deployment is **independent** of provisioning. A service can deploy code dozens of
 times without touching infrastructure. Infrastructure can change (e.g. resize a VM)
-without triggering a code redeploy.
+without triggering a code redeploy. Because artifacts are SHA-keyed and retained, rolling
+back is re-deploying a previous SHA.
 
 ## Why separate?
 

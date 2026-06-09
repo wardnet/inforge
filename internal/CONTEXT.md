@@ -185,12 +185,38 @@ doesn't exist until code is released), and provisioning delivers *no* service co
 must declare a `deploy_user` (validated).
 
 **Deployment**:
-The separate, repo-driven step that delivers a service's payload (a gzip) and activates it, via an
-inforge-provided reusable GitHub workflow that SSHes the artifact onto the host.
+The separate, repo-driven step that delivers a service's released artifact and activates it. A
+service's CI **pushes** an artifact to the release store, then **deploys** a chosen SHA onto the host
+via an inforge-provided reusable GitHub workflow that SSHes the artifact down and restarts the unit.
+See [ADR-0016](../docs/adr/0016-r2-release-artifact-store.md).
 
 **Deploy descriptor**:
 A per-environment map of service → `{host DNS, folder, unit}`, derived purely from resolved
 resources, that the deployment workflow consumes.
+
+### Releases
+
+**Release artifact** (or just **artifact**):
+An immutable gzip of a service's built payload, keyed by commit **SHA** and stored in the release store
+at `<service>/<SHA>.tar.gz`. Env-agnostic — the same artifact is deployable to any environment.
+_Avoid_: build, package, image (an image is the deferred `container` delivery mode, a different thing).
+
+**Release store**:
+The R2 bucket holding release artifacts and manifests, **distinct from the Pulumi state bucket**.
+Configured under `artifacts:` in `inforge.yaml` (`backend` + `keep`).
+
+**Release manifest**:
+The single mutable object per service+env, `<service>/manifest.<env>.yaml`, mapping **host** →
+`{sha, deployedAt}`. The source of truth for what is live in that environment. `releases deploy` writes
+it (on success); `releases list` reads it.
+
+**Pinned SHA**:
+A SHA referenced by any release manifest of a service (union across all envs). Pinning exempts an
+artifact from pruning and does not count against `keep`.
+
+**Keep**:
+The number of *unpinned* (historical, rollback) artifacts a service retains. Pruning, run after each
+`releases push`, deletes the oldest unpinned artifacts beyond `keep`.
 
 ## Flagged ambiguities
 
