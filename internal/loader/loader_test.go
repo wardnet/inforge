@@ -131,6 +131,59 @@ func TestLoadRegionTableMissing(t *testing.T) {
 	assert.Nil(t, global)
 }
 
+// writeRegionsYAML writes a regions.yaml with a ${ENV_VAR} provider credential
+// into a temp env dir and returns the dir, for the substitution tests below.
+func writeRegionsYAML(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
+	const doc = `regions:
+  us-east-1:
+    slug: use1
+    providers:
+      hetzner:
+        apiToken: ${INFORGE_TEST_HCLOUD_TOKEN}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "regions.yaml"), []byte(doc), 0o644))
+	return dir
+}
+
+// TestLoadRegionTableSubstitutesEnvVars is the regression guard for the bug: a
+// ${ENV_VAR} in regions.yaml (e.g. a provider credential) must be substituted, not
+// passed to the provider as the literal string "${...}".
+func TestLoadRegionTableSubstitutesEnvVars(t *testing.T) {
+	t.Setenv("INFORGE_TEST_HCLOUD_TOKEN", "real-token-value")
+	dir := writeRegionsYAML(t)
+
+	rt, _, err := LoadRegionTable("prd", dir)
+	require.NoError(t, err)
+	assert.Equal(t, "real-token-value", rt["us-east-1"].Providers["hetzner"]["apiToken"],
+		"the credential ${ENV_VAR} must be substituted, not passed through literally")
+}
+
+// TestLoadRegionTableMissingEnvVarErrors: strict load fails clearly when a
+// referenced credential env var is unset (rather than handing the provider a
+// literal "${...}").
+func TestLoadRegionTableMissingEnvVarErrors(t *testing.T) {
+	t.Setenv("INFORGE_TEST_HCLOUD_TOKEN", "")
+	dir := writeRegionsYAML(t)
+
+	_, _, err := LoadRegionTable("prd", dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing required env var")
+}
+
+// TestLoadRegionTableLenient: the lenient load (used by validation) replaces an
+// unset credential with "" so structural validation runs without credentials.
+func TestLoadRegionTableLenient(t *testing.T) {
+	t.Setenv("INFORGE_TEST_HCLOUD_TOKEN", "")
+	dir := writeRegionsYAML(t)
+
+	rt, _, err := LoadRegionTableLenient("prd", dir)
+	require.NoError(t, err)
+	assert.Equal(t, "", rt["us-east-1"].Providers["hetzner"]["apiToken"])
+}
+
 // TestLoadSizeTableFromFile exercises the on-disk size table: a YAML list of
 // names that replaces the defaults wholesale.
 func TestLoadSizeTableFromFile(t *testing.T) {

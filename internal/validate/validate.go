@@ -174,7 +174,10 @@ func ValidateResources(env, dir string) error {
 		return fmt.Errorf("compile schemas: %w", err)
 	}
 
-	regionTable, global, err := loader.LoadRegionTable(env, dir)
+	// Structural validation must run without credentials, so substitute leniently
+	// (a missing ${ENV_VAR} becomes "" rather than failing): validation checks the
+	// region/provider structure, not credential values.
+	regionTable, global, err := loader.LoadRegionTableLenient(env, dir)
 	if err != nil {
 		return err
 	}
