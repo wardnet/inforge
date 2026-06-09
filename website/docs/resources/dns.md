@@ -5,7 +5,7 @@ sidebar_position: 3
 # DNS
 
 DNS is **not a resource you author**. inforge derives every record automatically and creates it
-against the region's [DNS authority](../configuration/regions-yaml#dns-authority) — the single
+against the region's [DNS authority](../configuration/regions-yaml#dns) — the single
 provider + zone declared per `(env, region)` in `regions.yaml`. Different regions may use different
 authorities.
 
@@ -42,4 +42,4 @@ The Cloudflare authority needs:
 - `CLOUDFLARE_API_TOKEN` (the `providers.cloudflare.apiToken` credential) with permission to edit the
   zone
 - the zone id in the region's `dns.zone` (see
-  [regions.yaml → DNS authority](../configuration/regions-yaml#dns-authority))
+  [regions.yaml → DNS authority](../configuration/regions-yaml#dns))

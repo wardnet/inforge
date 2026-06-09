@@ -10,7 +10,7 @@ records](/resources/dns) on.
 ## Configuration
 
 The authority's provider + zone live in each region's
-[`dns`](/configuration/regions-yaml#dns-authority) block; the credentials and options live in the
+[`dns`](/configuration/regions-yaml#dns) block; the credentials and options live in the
 matching `providers.cloudflare` block, both in [`regions.yaml`](/configuration/regions-yaml):
 
 ```yaml

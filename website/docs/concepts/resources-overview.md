@@ -20,7 +20,7 @@ in `regions.yaml`. All files are validated against embedded JSON schemas.
 
 [DNS](../resources/dns) is **not** an authored resource type: inforge derives every record (host,
 service, vanity) automatically and creates it on the region's
-[DNS authority](../configuration/regions-yaml#dns-authority).
+[DNS authority](../configuration/regions-yaml#dns).
 
 ## Common fields
 

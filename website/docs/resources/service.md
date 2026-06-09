@@ -134,7 +134,7 @@ ingress entry.
 A service's public domain is **derived automatically** from its name:
 `<service>.svc.<env>.<slug>.<baseDomain>` (e.g. `api.svc.prd.use1.wardnet.network`). inforge creates
 the DNS A-record for it (pointing at the host) on the region's
-[DNS authority](../configuration/regions-yaml#dns-authority) — there is no hand-written DNS resource.
+[DNS authority](../configuration/regions-yaml#dns) — there is no hand-written DNS resource.
 
 To serve additional public names on a `tls-termination` entry, list them under `vanity`:
 
