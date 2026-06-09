@@ -120,8 +120,9 @@ environment, base domain, `namespace` (`<env>.<slug>.<service>`), and `fqdn` (th
 for every service (secret-bearing or not). Derived, never authored.
 
 **Source DSL**:
-A Secrets `source` value: `ref:<type>/<name>.<output>` (a reference to another resource's output) or
-`gha:<NAME>` (a GitHub Actions secret). Anything else is invalid.
+A Secrets `source` value: `ref:<type>/<name>.<output>` (a reference to another resource's output),
+`gha:<NAME>` (a GitHub Actions secret), or `static:<value>` / `value:<value>` (a verbatim literal, for
+non-secret config — committed in plaintext). Anything else is invalid.
 
 ### Providers
 

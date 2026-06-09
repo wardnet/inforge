@@ -234,6 +234,24 @@ func TestResolveRefGlobalDatabase(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestResolveRefStatic verifies a static/value source resolves to its literal,
+// verbatim — no resource lookup, no placeholder.
+func TestResolveRefStatic(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		for _, src := range []string{"static:info", "value:info"} {
+			out, err := resolveRef(src, "us-east-1", types.AllOutputs{})
+			require.NoError(t, err)
+			assert.Equal(t, "info", awaitString(t, out), src)
+		}
+		// A value with special characters (URL) is preserved verbatim.
+		out, err := resolveRef("value:https://api.example.com:443/v1", "us-east-1", types.AllOutputs{})
+		require.NoError(t, err)
+		assert.Equal(t, "https://api.example.com:443/v1", awaitString(t, out))
+		return nil
+	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
+	require.NoError(t, err)
+}
+
 // TestResolveRefGlobalCompute verifies the same redirect for a compute ref.
 func TestResolveRefGlobalCompute(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
@@ -313,4 +331,3 @@ func TestEnsureWorkspaceDifferentEnvsAreIndependent(t *testing.T) {
 	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
 	require.NoError(t, err)
 }
-
