@@ -55,6 +55,7 @@ func (m *namingMocks) NewResource(args pulumi.MockResourceArgs) (string, resourc
 // under /<svc>/infra while its identity is scoped read to /<svc>, and that the
 // bundle carries the env-var -> infra/<key> mapping the descriptor needs.
 func TestProvisionServiceScopesPaths(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://example/db")
 	mocks := newNamingMocks()
 	var bundle *types.ServiceSecretsBundle
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
@@ -85,6 +86,7 @@ func TestProvisionServiceScopesPaths(t *testing.T) {
 // organizationId is threaded onto the identity resource input, so a deployment
 // whose token carries no organizationId claim can still scope the identity.
 func TestProvisionServicePassesOrganizationId(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://example/db")
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "org-explicit", "use1")
@@ -173,6 +175,7 @@ func bridgeServiceWithSecret() (types.ServiceSpec, types.Resources) {
 // (wardnet-<env>-<regionSlug>-container-<container>), using the environment
 // ("prd") not the abstract region ("us-east-1") as the env segment.
 func TestWorkspaceNamePassedToAPIMatchesNamingConvention(t *testing.T) {
+	t.Setenv("MY_SECRET", "my-secret-value")
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
@@ -193,6 +196,7 @@ func TestWorkspaceNamePassedToAPIMatchesNamingConvention(t *testing.T) {
 // name of an Infisical secrets batch follows
 // wardnet-<env>-<regionSlug>-secrets-<specName>.
 func TestSecretsBatchNameMatchesNamingConvention(t *testing.T) {
+	t.Setenv("MY_SECRET", "my-secret-value")
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
@@ -274,6 +278,29 @@ func TestResolveRefStatic(t *testing.T) {
 		return nil
 	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
 	require.NoError(t, err)
+}
+
+// TestResolveRefGHA verifies a gha: source resolves to the matching environment
+// variable's value (the GitHub Actions secret injected into the deploy process),
+// not the literal placeholder that used to be written into Infisical verbatim.
+func TestResolveRefGHA(t *testing.T) {
+	t.Setenv("MY_GHA_SECRET", "s3cr3t-value")
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		out, err := resolveRef("gha:MY_GHA_SECRET", "us-east-1", types.AllOutputs{})
+		require.NoError(t, err)
+		assert.Equal(t, "s3cr3t-value", awaitString(t, out))
+		return nil
+	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
+	require.NoError(t, err)
+}
+
+// TestResolveRefGHAUnsetErrors verifies an unset/empty GHA secret fails loudly
+// rather than silently materialising an empty (or placeholder) secret.
+func TestResolveRefGHAUnsetErrors(t *testing.T) {
+	t.Setenv("INFORGE_TEST_GHA_UNSET", "")
+	_, err := resolveRef("gha:INFORGE_TEST_GHA_UNSET", "us-east-1", types.AllOutputs{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty or unset")
 }
 
 // TestResolveRefGlobalCompute verifies the same redirect for a compute ref.
