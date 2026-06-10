@@ -1,0 +1,41 @@
+# Self-hosted Infisical for the client integration tests. Brought up by the
+# integration TestMain (or `make test-infisical`). Pinned so the API contract is
+# reproducible; a nightly job bumps the tag to catch drift. Throwaway instance —
+# the keys below are fixed test values, not secrets.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: infisical
+      POSTGRES_PASSWORD: infisical
+      POSTGRES_DB: infisical
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infisical -d infisical"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    image: infisical/infisical:v0.160.12
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENCRYPTION_KEY: "6c1fe4e407b8911c104518103505b218"
+      AUTH_SECRET: "5lrMXKKWCVocS96erPsl7V0TX2aaUaI7iDkgl3tSmLE="
+      DB_CONNECTION_URI: "postgres://infisical:infisical@db:5432/infisical"
+      REDIS_URL: "redis://redis:6379"
+      SITE_URL: "http://localhost:8080"
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "8080:8080"
