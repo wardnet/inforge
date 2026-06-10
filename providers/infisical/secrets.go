@@ -16,6 +16,7 @@ import (
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/internal/validate"
 )
@@ -174,7 +175,7 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 	keys := sortedStringKeys(entries)
 	ifaces := make([]interface{}, len(keys))
 	for i, key := range keys {
-		resolved, err := resolveRef(entries[key].Source, region, all)
+		resolved, err := resolveRef(key, entries[key].Source, svc.Container, region, all)
 		if err != nil {
 			return nil, fmt.Errorf("resolve ref for service %q secret %q: %w", svc.Name, key, err)
 		}
@@ -292,12 +293,17 @@ func envToSlug(env string) string {
 //   - ref:compute/global/<name>.<output>  — looks up a GLOBAL compute output
 //   - ${NAME}                             — reads environment variable NAME
 //   - static:<value> / value:<value>      — returns the literal value verbatim
+//   - encrypted                           — serves the pre-decrypted store value
 //
 // A `global/` prefix on the referenced name (RefName == "global/<name>") is the
 // one allowed cross-region reference: it resolves against the region-less global
 // slot (all.Database["global"] / all.Compute["global"]) regardless of the
 // service's own region. The lookup region and the bare name are derived once here.
-func resolveRef(source, region string, all types.AllOutputs) (pulumi.StringOutput, error) {
+//
+// key and container address an `encrypted` source's value in all.Encrypted —
+// the program decrypts the env's committed store once, provider-neutrally, and
+// this adapter only ever sees plaintext (ADR-0017).
+func resolveRef(key, source, container, region string, all types.AllOutputs) (pulumi.StringOutput, error) {
 	src, err := validate.ParseSource(source)
 	if err != nil {
 		return pulumi.StringOutput{}, err
@@ -321,6 +327,18 @@ func resolveRef(source, region string, all types.AllOutputs) (pulumi.StringOutpu
 
 	case validate.SourceStatic:
 		return pulumi.String(src.StaticValue).ToStringOutput(), nil
+
+	case validate.SourceEncrypted:
+		val, ok := all.Encrypted[container][key]
+		if !ok {
+			return pulumi.StringOutput{}, fmt.Errorf(
+				"resolveRef %q: no decrypted value for container %q key %q — is the entry in resources/<env>/secrets.enc.yaml and %s set?",
+				source, container, key, secretstore.IdentityEnvVar)
+		}
+		// Marked secret so the plaintext is encrypted in Pulumi state and masked
+		// in console/diff output (the other kinds reference values that already
+		// live elsewhere; this one exists only as ciphertext in git).
+		return pulumi.ToSecret(pulumi.String(val)).(pulumi.StringOutput), nil
 
 	case validate.SourceRef:
 		// A global/ prefix redirects the lookup to the global slot, independent of
