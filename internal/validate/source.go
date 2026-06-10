@@ -13,8 +13,11 @@ const (
 	// SourceRef is a reference to another resource's output:
 	// ref:<type>/<name>.<output>.
 	SourceRef SourceKind = iota
-	// SourceGHA is a GitHub Actions secret reference: gha:<NAME>.
-	SourceGHA
+	// SourceEnv is an environment-variable reference: ${NAME}. The value is read
+	// from the deploy process environment (the same ${ENV_VAR} convention used in
+	// variables.yaml/regions.yaml), so a consumer injects it however they like —
+	// e.g. a GitHub Actions secret mapped to an env var in their workflow.
+	SourceEnv
 	// SourceStatic is a literal value authored inline: static:<value> (or the
 	// value:<value> alias). The value is stored in plaintext in the resource file,
 	// so it is for non-secret configuration, not real secrets.
@@ -28,15 +31,15 @@ type Source struct {
 	RefType   string // "database" | "compute"
 	RefName   string // resource name (compute uses an expanded specKey)
 	RefOutput string // output token, e.g. "connectionUrl" | "publicIp"
-	// GHA field (Kind == SourceGHA).
-	GHAName string
+	// EnvName field (Kind == SourceEnv): the environment variable name.
+	EnvName string
 	// StaticValue field (Kind == SourceStatic): the literal value, verbatim.
 	StaticValue string
 }
 
 var (
 	refPattern = regexp.MustCompile(`^ref:(database|compute)/(.+)\.([^.]+)$`)
-	ghaPattern = regexp.MustCompile(`^gha:([A-Z_][A-Z0-9_]*)$`)
+	envPattern = regexp.MustCompile(`^\$\{([A-Z_][A-Z0-9_]*)\}$`)
 )
 
 // ParseSource parses a secrets source value into its structured form. It only
@@ -51,8 +54,8 @@ func ParseSource(s string) (Source, error) {
 			RefOutput: m[3],
 		}, nil
 	}
-	if m := ghaPattern.FindStringSubmatch(s); m != nil {
-		return Source{Kind: SourceGHA, GHAName: m[1]}, nil
+	if m := envPattern.FindStringSubmatch(s); m != nil {
+		return Source{Kind: SourceEnv, EnvName: m[1]}, nil
 	}
 	// static:<value> / value:<value> — a literal. The value is taken verbatim (any
 	// characters), so prefix-strip rather than pattern-match; reject an empty value,
@@ -65,5 +68,5 @@ func ParseSource(s string) (Source, error) {
 			return Source{Kind: SourceStatic, StaticValue: v}, nil
 		}
 	}
-	return Source{}, fmt.Errorf("invalid source %q: want ref:<database|compute>/<name>.<output>, gha:<NAME>, or static:<value>", s)
+	return Source{}, fmt.Errorf("invalid source %q: want ref:<database|compute>/<name>.<output>, ${ENV_VAR}, or static:<value>", s)
 }
