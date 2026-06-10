@@ -1,6 +1,51 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestResolveStackConfig(t *testing.T) {
+	// A defaulted path whose file is absent is NOT an error: the environment comes
+	// from the stack name, so the stack config file is optional.
+	t.Run("defaulted missing is empty, not an error", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		cfg, err := resolveStackConfig("", "prd")
+		if err != nil {
+			t.Fatalf("want nil error for absent default file, got %v", err)
+		}
+		if len(cfg.Config) != 0 {
+			t.Fatalf("want empty config, got %v", cfg.Config)
+		}
+	})
+
+	// A defaulted path whose file IS present is loaded.
+	t.Run("defaulted present is loaded", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		if err := os.WriteFile(filepath.Join(dir, "inforge.prd.yaml"),
+			[]byte("config:\n  foo: bar\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := resolveStackConfig("", "prd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Config["foo"] != "bar" {
+			t.Fatalf("want foo=bar, got %v", cfg.Config)
+		}
+	})
+
+	// An EXPLICIT --stack-config that is missing is still a hard error: the caller
+	// asked for that specific file, so its absence is a real mistake.
+	t.Run("explicit missing is an error", func(t *testing.T) {
+		_, err := resolveStackConfig(filepath.Join(t.TempDir(), "nope.yaml"), "prd")
+		if err == nil {
+			t.Fatal("want error for absent explicit file, got nil")
+		}
+	})
+}
 
 func TestBackendBucket(t *testing.T) {
 	cases := []struct {

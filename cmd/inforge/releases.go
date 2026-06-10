@@ -148,10 +148,7 @@ func runReleasesDeploy(ctx context.Context, configPath, env, svc, sha, deployDir
 		return err
 	}
 
-	if stackConfigPath == "" {
-		stackConfigPath = "inforge." + env + ".yaml"
-	}
-	stackCfg, err := loadStackConfig(stackConfigPath)
+	stackCfg, err := resolveStackConfig(stackConfigPath, env)
 	if err != nil {
 		return err
 	}

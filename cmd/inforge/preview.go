@@ -45,10 +45,7 @@ func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, for
 		return err
 	}
 
-	if stackConfigPath == "" {
-		stackConfigPath = "inforge." + stackName + ".yaml"
-	}
-	stackCfg, err := loadStackConfig(stackConfigPath)
+	stackCfg, err := resolveStackConfig(stackConfigPath, stackName)
 	if err != nil {
 		return err
 	}
