@@ -54,7 +54,7 @@ func TestAdoptOrCreateIdentityAdoptsExisting(t *testing.T) {
 	createCalled := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/organizations/org-1/identity-memberships":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/organizations/org-1/identity-memberships":
 			_, _ = w.Write([]byte(`{"identityMemberships":[{"identity":{"id":"id-existing","name":"wardnet-prd-use1-identity-ghost"}}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/identities":
 			createCalled = true
