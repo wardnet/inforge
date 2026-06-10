@@ -1,5 +1,5 @@
 ---
-name: grill-with-docs
+name: challenge
 description: Stress-test a plan or design against the existing domain model, sharpens terminology, and updates documentation (CONTEXT.md, ADRs) inline
              as decisions crystallise. Challenge is done through relentless one-question-at-a-time interviewing until shared understanding is reached.
              MUST be used before presenting any plan for user approval (i.e. before calling ExitPlanMode in plan mode), and whenever the
