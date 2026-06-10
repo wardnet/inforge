@@ -38,6 +38,7 @@ func rootCmd() *cobra.Command {
 		newPreviewCmd(&cfg),
 		newDeployCmd(&cfg),
 		newReleasesCmd(&cfg),
+		newSecretCmd(&dir),
 	)
 
 	return root
