@@ -42,7 +42,7 @@ secrets as env vars:
 - uses: wardnet/inforge@v1
   with:
     version: v1.6.0   # pin the CLI; default is the latest release
-- run: inforge deploy --yes --stack prd
+- run: inforge deploy prd --yes
 ```
 
 See [GitHub Actions: Overview](https://wardnet.github.io/inforge/github-actions/overview) for starter

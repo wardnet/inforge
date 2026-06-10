@@ -44,7 +44,7 @@ credentials (the same ones the state backend uses).
 ## `inforge releases push`
 
 ```
-inforge releases push --service <name> --env <env> [--sha <sha>] [--deploy-dir ./deployments]
+inforge releases push <env> --service <name> [--sha <sha>] [--deploy-dir ./deployments]
 ```
 
 Packages the env's `artifact_path` (from `deployments/<service>.yaml`) into a tarball and uploads it
@@ -58,7 +58,7 @@ failures are warnings — the upload has already succeeded.
 ## `inforge releases deploy`
 
 ```
-inforge releases deploy --service <name> --env <env> --sha <sha> [flags]
+inforge releases deploy <env> --service <name> --sha <sha> [flags]
 ```
 
 Verifies `<service>/<SHA>.tar.gz` exists (fails with a clear message if you forgot to `push`),
@@ -69,7 +69,6 @@ inforge-managed unit, and records `host → {sha, deployedAt}` in `manifest.<env
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--service` | `-s` | required | Service name — must match `deployments/<service>.yaml` |
-| `--env` | `-e` | required | Target environment (e.g. `qa`, `prd`) |
 | `--sha` | | `$GITHUB_SHA` | Artifact SHA to deploy (required) |
 | `--deploy-dir` | | `./deployments` | Path to the deployments directory |
 | `--stack-config` | | `inforge.<env>.yaml` | Path to the infra stack config file |
@@ -79,7 +78,7 @@ inforge-managed unit, and records `host → {sha, deployedAt}` in `manifest.<env
 ## `inforge releases list`
 
 ```
-inforge releases list --service <name> --env <env>
+inforge releases list <env> --service <name>
 ```
 
 Reads `manifest.<env>.yaml` and prints each host's deployed SHA and timestamp:
@@ -93,11 +92,11 @@ bridge-01.vm.prd.use1.wardnet.network          abc1234def56  2026-06-09T12:00:00
 
 ```sh
 # Build artifact for qa, then deploy it
-inforge releases push   --service api --env qa --sha "$GITHUB_SHA"
-inforge releases deploy --service api --env qa --sha "$GITHUB_SHA"
+inforge releases push   qa --service api --sha "$GITHUB_SHA"
+inforge releases deploy qa --service api --sha "$GITHUB_SHA"
 
 # What's live in prd?
-inforge releases list --service api --env prd
+inforge releases list prd --service api
 ```
 
 ## Deployments directory

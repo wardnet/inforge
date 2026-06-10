@@ -38,21 +38,21 @@ func newReleasesCmd(configPath *string) *cobra.Command {
 // --- releases push ------------------------------------------------------------
 
 func newReleasesPushCmd(configPath *string) *cobra.Command {
-	var env, svc, sha, deployDir string
+	var svc, sha, deployDir string
 	cmd := &cobra.Command{
-		Use:           "push",
+		Use:           "push <env>",
 		Short:         "Package a service artifact and upload it to the release store",
+		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReleasesPush(cmd.Context(), *configPath, env, svc, sha, deployDir)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runReleasesPush(cmd.Context(), *configPath, args[0], svc, sha, deployDir)
 		},
 	}
-	cmd.Flags().StringVarP(&env, "env", "e", "", "target environment (e.g. qa, prd) (required)")
 	cmd.Flags().StringVarP(&svc, "service", "s", "", "service name to push (required)")
 	cmd.Flags().StringVar(&sha, "sha", "", "artifact SHA key (default: $GITHUB_SHA)")
 	cmd.Flags().StringVar(&deployDir, "deploy-dir", "./deployments", "path to the deployments directory")
-	mustRequire(cmd, "env", "service")
+	mustRequire(cmd, "service")
 	return cmd
 }
 
@@ -110,25 +110,25 @@ func runReleasesPush(ctx context.Context, configPath, env, svc, sha, deployDir s
 // --- releases deploy ----------------------------------------------------------
 
 func newReleasesDeployCmd(configPath *string) *cobra.Command {
-	var env, svc, sha, deployDir, stackConfig, sshKeyPath string
+	var svc, sha, deployDir, stackConfig, sshKeyPath string
 	var dryRun bool
 	cmd := &cobra.Command{
-		Use:           "deploy",
+		Use:           "deploy <env>",
 		Short:         "Deploy a stored artifact SHA to its host(s) and record it in the manifest",
+		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReleasesDeploy(cmd.Context(), *configPath, env, svc, sha, deployDir, stackConfig, sshKeyPath, dryRun)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runReleasesDeploy(cmd.Context(), *configPath, args[0], svc, sha, deployDir, stackConfig, sshKeyPath, dryRun)
 		},
 	}
-	cmd.Flags().StringVarP(&env, "env", "e", "", "target environment (e.g. qa, prd) (required)")
 	cmd.Flags().StringVarP(&svc, "service", "s", "", "service name to deploy (required)")
 	cmd.Flags().StringVar(&sha, "sha", "", "artifact SHA to deploy (required; default: $GITHUB_SHA)")
 	cmd.Flags().StringVar(&deployDir, "deploy-dir", "./deployments", "path to the deployments directory")
 	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to the infra stack config file (default: inforge.<env>.yaml)")
 	cmd.Flags().StringVar(&sshKeyPath, "ssh-key", "", "path to the SSH deploy key (overrides INFORGE_DEPLOY_KEY)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve targets and verify the artifact without delivering")
-	mustRequire(cmd, "env", "service")
+	mustRequire(cmd, "service")
 	return cmd
 }
 
@@ -205,19 +205,19 @@ func runReleasesDeploy(ctx context.Context, configPath, env, svc, sha, deployDir
 // --- releases list ------------------------------------------------------------
 
 func newReleasesListCmd(configPath *string) *cobra.Command {
-	var env, svc string
+	var svc string
 	cmd := &cobra.Command{
-		Use:           "list",
+		Use:           "list <env>",
 		Short:         "List the artifact SHA deployed to each host for a service+env",
+		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReleasesList(cmd.Context(), *configPath, env, svc)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runReleasesList(cmd.Context(), *configPath, args[0], svc)
 		},
 	}
-	cmd.Flags().StringVarP(&env, "env", "e", "", "environment to list (e.g. qa, prd) (required)")
 	cmd.Flags().StringVarP(&svc, "service", "s", "", "service name (required)")
-	mustRequire(cmd, "env", "service")
+	mustRequire(cmd, "service")
 	return cmd
 }
 

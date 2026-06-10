@@ -15,27 +15,24 @@ import (
 )
 
 func newPreviewCmd(configPath *string) *cobra.Command {
-	var stack, stackConfig, format, report string
+	var stackConfig, format, report string
 	var allowMultiple bool
 
 	cmd := &cobra.Command{
-		Use:           "preview",
-		Short:         "Preview infrastructure changes for a stack",
+		Use:           "preview <env>",
+		Short:         "Preview infrastructure changes for an environment",
+		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runPreview(cmd.Context(), stack, stackConfig, *configPath, format, report, allowMultiple)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPreview(cmd.Context(), args[0], stackConfig, *configPath, format, report, allowMultiple)
 		},
 	}
 
-	cmd.Flags().StringVarP(&stack, "stack", "s", "", "stack name / environment (required)")
-	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to stack config (default: inforge.<stack>.yaml)")
+	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to stack config (default: inforge.<env>.yaml)")
 	cmd.Flags().StringVarP(&format, "output", "o", "", "output format: '' (default human) or 'json'")
 	cmd.Flags().StringVar(&report, "report", "", "write a markdown run report to this path (default: a temp file)")
 	cmd.Flags().BoolVar(&allowMultiple, "allow-multiple", false, "allow running when multiple environments have changes")
-	if err := cmd.MarkFlagRequired("stack"); err != nil {
-		panic(err)
-	}
 	return cmd
 }
 
