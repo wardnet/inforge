@@ -29,8 +29,8 @@ is never touched during provisioning.
 - **deploy** — a chosen SHA is downloaded, SCP'd to the host, the inforge-managed unit is restarted,
   and the SHA is recorded per host in `manifest.<env>.yaml`
 
-Both run from the service repo's CI via the `service-release` reusable workflow. See
-[`inforge releases`](/cli/releases).
+Both run from the service repo's CI via `inforge releases` (see the [service release
+starter](/github-actions/overview#service-release-optional)). See [`inforge releases`](/cli/releases).
 
 Deployment is **independent** of provisioning. A service can deploy code dozens of
 times without touching infrastructure. Infrastructure can change (e.g. resize a VM)
@@ -47,7 +47,7 @@ back is re-deploying a previous SHA.
 
 ## Target resolution
 
-`service-release` resolves the deploy target (host DNS, folder, systemd unit) live from
+`inforge releases deploy` resolves the deploy target (host DNS, folder, systemd unit) live from
 the Pulumi stack in the platform repo at release time. No descriptor file needs to be
 committed or kept in sync. The service repo only needs a `deployments/` directory that
 names the platform repo and the artifact path per environment.

@@ -6,7 +6,7 @@ sidebar_position: 6
 
 A **Service** resource defines an application hosted on a Compute VM. inforge provisions
 the host-side scaffolding (folder + systemd unit); the service repo deploys code separately
-via the `service-release` reusable workflow.
+via `inforge releases` from its own CI workflow.
 
 ## Schema
 
@@ -71,12 +71,12 @@ deploy the unit exists but fails to start until [code lands](#releasing-code) �
 
 ## Releasing code
 
-`inforge deploy` provisions the scaffolding above; `inforge releases` (the `service-release`
-workflow) then delivers the payload and starts the service. Release resolves the deploy target
+`inforge deploy` provisions the scaffolding above; `inforge releases` then delivers the payload
+and starts the service. Release resolves the deploy target
 (host DNS, folder, unit, SSH user) live from the Pulumi stack — no descriptor file is committed —
 then SSHes in as the host's deploy user, extracts the payload into the folder, and
-`systemctl restart`s the unit (the first restart is the service's first real start). See
-[`service-release.yml`](/github-actions/service-release) for the full setup.
+`systemctl restart`s the unit (the first restart is the service's first real start). See the
+[service release starter](/github-actions/overview#service-release-optional) for the full setup.
 
 ## Service user
 
