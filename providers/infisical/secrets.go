@@ -9,6 +9,7 @@ package infisical
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -304,7 +305,19 @@ func resolveRef(source, region string, all types.AllOutputs) (pulumi.StringOutpu
 
 	switch src.Kind {
 	case validate.SourceGHA:
-		return pulumi.String("__GHA_SECRET:" + src.GHAName + "__").ToStringOutput(), nil
+		// A GitHub Actions secret is injected into the deploy process as an env var
+		// of the same name (the workflow's env: block), exactly like the ${ENV_VAR}
+		// references the loader resolves. Resolve it here; an unset/empty value is a
+		// misconfiguration (the secret is missing from the repo/environment or the
+		// deploy step's env) and must fail loudly rather than write the placeholder
+		// verbatim into Infisical.
+		val := os.Getenv(src.GHAName)
+		if val == "" {
+			return pulumi.StringOutput{}, fmt.Errorf(
+				"resolveRef %q: GitHub Actions secret %s is empty or unset — set it as a repository/environment secret and pass it to the deploy step's env",
+				source, src.GHAName)
+		}
+		return pulumi.String(val).ToStringOutput(), nil
 
 	case validate.SourceStatic:
 		return pulumi.String(src.StaticValue).ToStringOutput(), nil
