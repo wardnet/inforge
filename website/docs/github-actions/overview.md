@@ -84,8 +84,8 @@ jobs:
       - uses: wardnet/inforge@v1
         with:
           version: v1.6.0          # pin the CLI for reproducible runs
-      - run: inforge validate --stack prd
-      - run: inforge preview --stack prd --report report.md
+      - run: inforge validate prd
+      - run: inforge preview prd --report report.md
       - if: github.event_name == 'pull_request'
         run: gh pr comment "${{ github.event.pull_request.number }}" --body-file report.md
         env:
@@ -119,7 +119,7 @@ jobs:
       - uses: wardnet/inforge@v1
         with:
           version: v1.6.0
-      - run: inforge deploy --yes --stack prd
+      - run: inforge deploy prd --yes
 ```
 
 ### Scheduled drift reconcile (optional)
@@ -171,7 +171,7 @@ jobs:
       - uses: wardnet/inforge@v1
         with:
           version: v1.6.0
-      - run: inforge deploy --yes --stack "${{ matrix.environment }}"
+      - run: inforge deploy "${{ matrix.environment }}" --yes
 ```
 
 ### Service release (optional)
@@ -204,8 +204,8 @@ jobs:
       - uses: wardnet/inforge@v1
         with:
           version: v1.6.0
-      - run: inforge releases push   --service api-server --env prd --sha "$GITHUB_SHA"
-      - run: inforge releases deploy --service api-server --env prd --sha "$GITHUB_SHA"
+      - run: inforge releases push   prd --service api-server --sha "$GITHUB_SHA"
+      - run: inforge releases deploy prd --service api-server --sha "$GITHUB_SHA"
 ```
 
 `inforge releases deploy` resolves the host, folder, and systemd unit from the infra Pulumi stack at
@@ -218,8 +218,9 @@ CLI never calls the GitHub API itself.
 
 ## Notes
 
-- The environment is the Pulumi **stack name** (`--stack prd`); you do not need an `inforge.<env>.yaml`
-  just to name it.
+- The environment is the first positional argument (`inforge deploy prd`) — it is the Pulumi stack
+  name. You do not need an `inforge.<env>.yaml` just to name it; if the file is absent, the run uses no
+  extra stack config.
 - `${ENV_VAR}` references that are unset fail the run loudly — only set the ones your config uses.
 - Backend credentials (`AWS_*`, `CLOUDFLARE_ACCOUNT_ID`) are needed only for an `r2`/`s3` state
   backend; a `file`/`git-branch` backend needs none.

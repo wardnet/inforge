@@ -177,3 +177,23 @@ func loadStackConfig(path string) (stackConfig, error) {
 	}
 	return cfg, nil
 }
+
+// resolveStackConfig loads the optional per-stack config for a command.
+//
+// The environment is derived from the stack name (see program/program.go), so the
+// stack config file is no longer required just to name the env — it only carries
+// optional `config:` key/value pairs pushed onto the Pulumi stack. So a *defaulted*
+// path (inforge.<stack>.yaml) that does not exist is not an error: we return empty
+// config, and applyStackConfig no-ops on it. A path the caller asked for explicitly
+// via --stack-config is still loaded strictly — a missing file there is a real
+// mistake, not an intended "no config".
+func resolveStackConfig(explicitPath, stackName string) (stackConfig, error) {
+	if explicitPath != "" {
+		return loadStackConfig(explicitPath)
+	}
+	path := "inforge." + stackName + ".yaml"
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return stackConfig{}, nil
+	}
+	return loadStackConfig(path)
+}

@@ -16,28 +16,25 @@ import (
 )
 
 func newDeployCmd(configPath *string) *cobra.Command {
-	var stack, stackConfig, format, report string
+	var stackConfig, format, report string
 	var yes, allowMultiple bool
 
 	cmd := &cobra.Command{
-		Use:           "deploy",
-		Short:         "Deploy infrastructure changes for a stack",
+		Use:           "deploy <env>",
+		Short:         "Deploy infrastructure changes for an environment",
+		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDeploy(cmd.Context(), stack, stackConfig, *configPath, format, report, yes, allowMultiple)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDeploy(cmd.Context(), args[0], stackConfig, *configPath, format, report, yes, allowMultiple)
 		},
 	}
 
-	cmd.Flags().StringVarP(&stack, "stack", "s", "", "stack name / environment (required)")
-	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to stack config (default: inforge.<stack>.yaml)")
+	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to stack config (default: inforge.<env>.yaml)")
 	cmd.Flags().StringVarP(&format, "output", "o", "", "output format: '' (default human) or 'json'")
 	cmd.Flags().StringVar(&report, "report", "", "write a markdown run report to this path (default: a temp file)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "auto-approve without prompt")
 	cmd.Flags().BoolVar(&allowMultiple, "allow-multiple", false, "allow running when multiple environments have changes")
-	if err := cmd.MarkFlagRequired("stack"); err != nil {
-		panic(err)
-	}
 	return cmd
 }
 
@@ -65,10 +62,7 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 		return fmt.Errorf("set INFORGE_VERSION: %w", err)
 	}
 
-	if stackConfigPath == "" {
-		stackConfigPath = "inforge." + stackName + ".yaml"
-	}
-	stackCfg, err := loadStackConfig(stackConfigPath)
+	stackCfg, err := resolveStackConfig(stackConfigPath, stackName)
 	if err != nil {
 		return err
 	}

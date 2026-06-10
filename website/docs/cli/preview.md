@@ -9,15 +9,16 @@ Preview infrastructure changes for a stack using the Pulumi Automation API.
 ## Usage
 
 ```bash
-inforge preview --stack <env> [flags]
+inforge preview <env> [flags]
 ```
+
+The environment is a required positional argument (e.g. `prd`) — it is the Pulumi stack name.
 
 ## Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--stack` / `-s` | (required) | Stack name / environment (e.g. `prd`) |
-| `--stack-config` | `inforge.<stack>.yaml` | Path to the stack config file |
+| `--stack-config` | `inforge.<env>.yaml` | Path to the stack config file (optional; a missing default file means no extra config) |
 | `--output` / `-o` | `""` (human) | Output format: `""` for human-readable, `json` for structured JSON |
 | `--allow-multiple` | `false` | Allow running when multiple environments have changes detected |
 | `--config` / `-c` | `./inforge.yaml` | Path to the project config file |
