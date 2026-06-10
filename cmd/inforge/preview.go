@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -59,55 +61,77 @@ func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, for
 		return fmt.Errorf("set stack config: %w", err)
 	}
 
-	if format == "json" {
-		// JSON mode: route Pulumi progress to stderr so stdout carries only the
-		// JSON summary (> /tmp/preview.json in CI).
-		result, previewErr := s.Preview(ctx,
-			optpreview.ProgressStreams(os.Stderr),
-			optpreview.ErrorProgressStreams(os.Stderr),
-		)
-		if previewErr != nil {
-			return fmt.Errorf("preview: %w", previewErr)
-		}
-		counts := make(map[string]int, len(result.ChangeSummary))
-		for op, n := range result.ChangeSummary {
-			counts[string(op)] = n
-		}
-		return printChangeSummaryJSON(stackName, counts)
+	// A single Printer renders the engine's event stream (per-resource lines plus
+	// an end-of-run summary), replacing Pulumi's raw progress tree. ProgressStreams
+	// is discarded and ErrorProgressStreams is buffered (not streamed live) so the
+	// two renderers can't duplicate each other. In human mode the Printer owns
+	// stdout; in JSON mode the machine summary owns stdout, so the human log goes
+	// to stderr. The buffered channel decouples the engine's blocking event sends
+	// from the consumer goroutine so a slow writer never stalls the engine.
+	jsonMode := format == "json"
+	humanW := io.Writer(os.Stdout)
+	if jsonMode {
+		humanW = os.Stderr
 	}
 
-	// Human mode: stream structured per-resource output.
-	// The buffered channel decouples the Pulumi engine's blocking event sends
-	// from the consumer goroutine so a slow writer never stalls the engine.
+	p := output.NewPrinter(humanW)
 	ch := output.NewEventChannel()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		output.Stream(ch, os.Stdout)
+		for ev := range ch {
+			p.Handle(ev)
+		}
 	}()
 
-	_, _ = fmt.Fprintf(os.Stdout, "Previewing (%s):\n\n", stackName)
+	if !jsonMode {
+		_, _ = fmt.Fprintf(os.Stdout, "Previewing (%s):\n\n", stackName)
+	}
+	var errBuf bytes.Buffer
 	_, previewErr := s.Preview(ctx,
 		optpreview.EventStreams(ch),
-		optpreview.ErrorProgressStreams(os.Stderr),
+		optpreview.ProgressStreams(io.Discard),
+		optpreview.ErrorProgressStreams(&errBuf),
 	)
 	wg.Wait()
+	p.Finish()
 
 	if previewErr != nil {
+		if jsonMode {
+			_ = printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
+		}
+		if len(p.Failures()) == 0 && errBuf.Len() > 0 {
+			_, _ = fmt.Fprint(os.Stderr, errBuf.String())
+		}
 		return fmt.Errorf("preview: %w", previewErr)
+	}
+	if jsonMode {
+		return printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
 	}
 	return nil
 }
 
-// changeSummaryOutput is the JSON structure emitted by --output json.
+// changeSummaryOutput is the JSON structure emitted by --output json. Failures
+// is populated when one or more resource operations failed, so the deploy
+// workflow can report what failed — not just the success counts.
 type changeSummaryOutput struct {
-	Environment string         `json:"environment"`
-	Summary     map[string]int `json:"summary"`
+	Environment string           `json:"environment"`
+	Summary     map[string]int   `json:"summary"`
+	Failed      int              `json:"failed,omitempty"`
+	Failures    []output.Failure `json:"failures,omitempty"`
 }
 
-func printChangeSummaryJSON(env string, counts map[string]int) error {
-	out := changeSummaryOutput{Environment: env, Summary: counts}
+func printChangeSummaryJSON(env string, counts map[string]int, failures []output.Failure) error {
+	if counts == nil {
+		counts = map[string]int{}
+	}
+	out := changeSummaryOutput{
+		Environment: env,
+		Summary:     counts,
+		Failed:      len(failures),
+		Failures:    failures,
+	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)

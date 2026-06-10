@@ -68,19 +68,33 @@ jobs:
           UPDATE=$(jq -r '.summary.update // 0' /tmp/deploy.json 2>/dev/null || echo 0)
           DELETE=$(jq -r '.summary.delete // 0' /tmp/deploy.json 2>/dev/null || echo 0)
           SAME=$(jq -r '.summary.same // 0' /tmp/deploy.json 2>/dev/null || echo 0)
+          FAILED=$(jq -r '.failed // 0' /tmp/deploy.json 2>/dev/null || echo 0)
+
+          # Per-resource failure list (type, name, error) for the report, if any.
+          FAILURES=$(jq -r '.failures[]? | "<li><code>\(.type) \(.name)</code> — \(.message)</li>"' \
+            /tmp/deploy.json 2>/dev/null || echo "")
 
           HUMAN=$(cat /tmp/deploy-human.txt 2>/dev/null || echo "No output captured.")
 
           HTML="<h3>${ICON} inforge deploy — <code>${ENV}</code></h3>
           <table>
-          <tr><th>➕ Created</th><th>✏️ Updated</th><th>🗑️ Deleted</th><th>= Unchanged</th></tr>
+          <tr><th>➕ Created</th><th>✏️ Updated</th><th>🗑️ Deleted</th><th>= Unchanged</th><th>❌ Failed</th></tr>
           <tr>
             <td style='color:green;font-weight:bold'>${CREATE}</td>
             <td style='color:orange;font-weight:bold'>${UPDATE}</td>
             <td style='color:red;font-weight:bold'>${DELETE}</td>
             <td>${SAME}</td>
+            <td style='color:red;font-weight:bold'>${FAILED}</td>
           </tr>
-          </table>
+          </table>"
+
+          if [[ -n "$FAILURES" ]]; then
+            HTML="${HTML}
+          <p><strong>Failed resources</strong> (resources depending on these were skipped, not applied):</p>
+          <ul>${FAILURES}</ul>"
+          fi
+
+          HTML="${HTML}
           <details><summary>Full output</summary>
 
           <pre>${HUMAN}</pre>
