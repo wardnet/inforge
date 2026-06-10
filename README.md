@@ -36,7 +36,7 @@ The provider plugins are installed automatically by `inforge plugins install`, a
 ## In GitHub Actions
 
 ```yaml
-- uses: wardnet/inforge/.github/actions/install@v1
+- uses: wardnet/inforge@v1
 ```
 
 Then call the reusable workflows for validate/preview/deploy/reconcile.

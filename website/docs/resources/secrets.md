@@ -19,7 +19,7 @@ secrets:
   db_url:
     source: ref:database/main.connectionUrl   # from another resource's output
   api_key:
-    source: gha:API_KEY                        # from a GitHub Actions secret
+    source: ${API_KEY}                          # from an environment variable
   log_level:
     source: static:info                        # a literal (non-secret config) value
 ```
@@ -67,16 +67,19 @@ compute output. The reference resolves against the global slice regardless of wh
 consuming service runs in. Referencing a global resource from `service.host` or `compute.network` is
 **rejected** — see [Global resources](../concepts/global-resources) for the full rules.
 
-### `gha:<NAME>`
+### `${NAME}`
 
-References a GitHub Actions secret:
+References an environment variable — the same `${ENV_VAR}` convention used in
+`variables.yaml`/`regions.yaml`:
 
 ```yaml
-source: gha:MY_SECRET_NAME
+source: ${MY_SECRET_NAME}
 ```
 
-The GitHub Actions secret `MY_SECRET_NAME` is injected as a secret value. It must be
-set as a secret in the repository or environment.
+The value is read from the deploy process environment. You inject it however you like — e.g. a CI
+secret mapped to an env var in your workflow (`env: { MY_SECRET_NAME: ${{ secrets.MY_SECRET_NAME }} }`).
+An unset or empty value fails the deploy loudly rather than materialising an empty secret. The name
+must be upper-snake-case (`[A-Z_][A-Z0-9_]*`).
 
 ### `static:<value>` (alias `value:<value>`)
 
@@ -93,7 +96,7 @@ non-empty.
 
 :::warning Not for real secrets
 A `static:`/`value:` value is committed **in plaintext** in the resource file (it lives in git). Use it
-for non-secret configuration only; use [`gha:`](#ghaname) or [`ref:`](#reftypenameoutput) for anything
+for non-secret configuration only; use [`${NAME}`](#name) or [`ref:`](#reftypenameoutput) for anything
 sensitive.
 :::
 
@@ -127,7 +130,7 @@ secrets:
   database_url:
     source: ref:database/main.connectionUrl
   stripe_key:
-    source: gha:STRIPE_SECRET_KEY
+    source: ${STRIPE_SECRET_KEY}
 ```
 
 ## Provider requirements
