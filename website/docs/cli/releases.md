@@ -11,7 +11,8 @@ recorded in a per-environment **manifest** (`<service>/manifest.<env>.yaml`). Se
 and [provision vs deploy](/concepts/provision-vs-deploy).
 
 Releasing is two steps: **push** the artifact to the store, then **deploy** a chosen SHA to the
-host(s). The [`service-release.yml`](/github-actions/service-release) workflow runs both.
+host(s). The [service release starter](/github-actions/overview#service-release-optional) runs both
+from your service repo's CI.
 
 ## Subcommands
 
@@ -125,4 +126,4 @@ The key must correspond to `ssh.deployPublicKey` set in `variables.yaml` of the 
 
 ## Related
 
-- [`service-release.yml`](/github-actions/service-release) — the GHA wrapper that runs push + deploy
+- [Service release starter](/github-actions/overview#service-release-optional) — the GHA workflow that runs push + deploy

@@ -41,5 +41,5 @@ inforge plugins install --version v1.2.0
 
 ### In GitHub Actions
 
-The [install action](/github-actions/overview#install-action) runs `inforge plugins install`
+The [install action](/github-actions/overview#the-install-action) runs `inforge plugins install`
 automatically after downloading the binary.
