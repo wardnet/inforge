@@ -37,7 +37,14 @@ const globalScope = "global"
 // inline program source.
 func Run(ctx *pulumi.Context) error {
 	cfg := config.New(ctx, "")
-	env := cfg.Require("environment")
+	// The environment is the Pulumi stack name (deploy/preview/reconcile upsert
+	// the stack as the env). Default to it so a per-env inforge.<env>.yaml is not
+	// required just to restate the env; an explicit `environment` config still
+	// wins for anyone who sets it.
+	env := cfg.Get("environment")
+	if env == "" {
+		env = ctx.Stack()
+	}
 	dir := "./resources"
 	if d := cfg.Get("dir"); d != "" {
 		dir = d
