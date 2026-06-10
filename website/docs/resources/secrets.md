@@ -20,6 +20,8 @@ secrets:
     source: ref:database/main.connectionUrl   # from another resource's output
   api_key:
     source: ${API_KEY}                          # from an environment variable
+  stripe_key:
+    source: encrypted                          # from the git-committed encrypted store
   log_level:
     source: static:info                        # a literal (non-secret config) value
 ```
@@ -96,9 +98,33 @@ non-empty.
 
 :::warning Not for real secrets
 A `static:`/`value:` value is committed **in plaintext** in the resource file (it lives in git). Use it
-for non-secret configuration only; use [`${NAME}`](#name) or [`ref:`](#reftypenameoutput) for anything
-sensitive.
+for non-secret configuration only; use [`encrypted`](#encrypted), [`${NAME}`](#name) or
+[`ref:`](#reftypenameoutput) for anything sensitive.
 :::
+
+### `encrypted`
+
+The value lives **age-encrypted in git**, in the environment's committed secret store
+(`resources/<env>/secrets.enc.yaml`), keyed by the spec's `container` and the secret's key:
+
+```yaml
+source: encrypted
+```
+
+The bare token carries no payload — the store entry is addressed by `(container, KEY)`. Values are
+written with the [`inforge secret` CLI](/cli/secret) (the only writer of the store) and encrypted to
+the store's committed public *recipient*, so **anyone with commit access can add or rotate a secret
+without any private key**. At deploy, inforge decrypts the values in CI with the master identity from
+the `INFORGE_SECRETS_KEY` environment variable and writes the plaintext into the provider under
+`infra/<KEY>` — exactly where the other source kinds land. The provider is a *derived cache*: it is
+written only by the deploy, never by the CLI, so the provider always reflects the last deployed git
+state (see [ADR-0017](https://github.com/wardnet/inforge/blob/main/docs/adr/0017-git-native-encrypted-secret-store.md)).
+
+`encrypted` is the right default for app secrets that should live in git (API keys, signing keys,
+tokens). `${NAME}` remains correct for values genuinely external to the deploy.
+
+`inforge validate` fails if a declared `encrypted` secret has no ciphertext entry in the env's store,
+so a missing value is caught before any deploy.
 
 ## How secrets reach a service
 

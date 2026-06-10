@@ -113,6 +113,7 @@ jobs:
       NEON_API_KEY:               ${{ secrets.NEON_API_KEY }}
       INFISICAL_CLIENT_ID:        ${{ secrets.INFISICAL_CLIENT_ID }}
       INFISICAL_CLIENT_SECRET:    ${{ secrets.INFISICAL_CLIENT_SECRET }}
+      INFORGE_SECRETS_KEY:        ${{ secrets.INFORGE_SECRETS_KEY }}
       INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
@@ -121,6 +122,11 @@ jobs:
           version: v1.6.0
       - run: inforge deploy prd --yes
 ```
+
+`INFORGE_SECRETS_KEY` is only needed when the environment uses
+[`encrypted` secret sources](/resources/secrets#encrypted) — it is the age master identity printed by
+[`inforge secret init`](/cli/secret). The PR validate/preview workflow does **not** need it: previews
+substitute a placeholder for encrypted values.
 
 ### Scheduled drift reconcile (optional)
 
@@ -165,6 +171,7 @@ jobs:
       NEON_API_KEY:               ${{ secrets.NEON_API_KEY }}
       INFISICAL_CLIENT_ID:        ${{ secrets.INFISICAL_CLIENT_ID }}
       INFISICAL_CLIENT_SECRET:    ${{ secrets.INFISICAL_CLIENT_SECRET }}
+      INFORGE_SECRETS_KEY:        ${{ secrets.INFORGE_SECRETS_KEY }}
       INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
