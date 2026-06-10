@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -247,6 +248,14 @@ func (c *Client) EnsureReadPrivilege(ctx context.Context, projectID, identityID,
 		return err
 	}
 	if status == http.StatusConflict || (status >= 200 && status < 300) {
+		return nil
+	}
+	// On a re-run the privilege already exists, which Infisical reports as HTTP
+	// 400 (not 409) with an "...exists" message. That is the desired end state,
+	// not a failure — but a genuine bad request (e.g. a malformed permission
+	// body) is also a 400, so tolerate only the already-exists message and let
+	// every other 400 fail loudly.
+	if status == http.StatusBadRequest && bytes.Contains(data, []byte("exists")) {
 		return nil
 	}
 	return fmt.Errorf("infisical: grant read privilege failed (HTTP %d): %s", status, data)

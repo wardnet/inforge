@@ -164,6 +164,19 @@ func TestEnsureReadPrivilegeFailsLoudOnBadRequest(t *testing.T) {
 	require.Error(t, authed(srv.URL).EnsureReadPrivilege(context.Background(), "ws", "id", "prod", "/ghost"))
 }
 
+// TestEnsureReadPrivilegeToleratesExisting asserts the re-run case: Infisical
+// reports an already-existing privilege as HTTP 400 with an "...exists" message
+// (not 409), which must be tolerated so a second deploy does not fail. Caught by
+// the live integration test, which mocks could not surface.
+func TestEnsureReadPrivilegeToleratesExisting(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"statusCode":400,"message":"Additional privilege with name inforge-read-ghost exists","error":"BadRequest"}`))
+	}))
+	defer srv.Close()
+	require.NoError(t, authed(srv.URL).EnsureReadPrivilege(context.Background(), "ws", "id", "prod", "/ghost"))
+}
+
 // TestEnsureProjectMembershipSkipsWhenMember asserts an existing membership (GET
 // 200) creates nothing.
 func TestEnsureProjectMembershipSkipsWhenMember(t *testing.T) {
