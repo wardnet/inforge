@@ -16,7 +16,7 @@ import (
 )
 
 func newDeployCmd(configPath *string) *cobra.Command {
-	var stack, stackConfig, format string
+	var stack, stackConfig, format, report string
 	var yes, allowMultiple bool
 
 	cmd := &cobra.Command{
@@ -25,13 +25,14 @@ func newDeployCmd(configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDeploy(cmd.Context(), stack, stackConfig, *configPath, format, yes, allowMultiple)
+			return runDeploy(cmd.Context(), stack, stackConfig, *configPath, format, report, yes, allowMultiple)
 		},
 	}
 
 	cmd.Flags().StringVarP(&stack, "stack", "s", "", "stack name / environment (required)")
 	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to stack config (default: inforge.<stack>.yaml)")
 	cmd.Flags().StringVarP(&format, "output", "o", "", "output format: '' (default human) or 'json'")
+	cmd.Flags().StringVar(&report, "report", "", "write a markdown run report to this path (default: a temp file)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "auto-approve without prompt")
 	cmd.Flags().BoolVar(&allowMultiple, "allow-multiple", false, "allow running when multiple environments have changes")
 	if err := cmd.MarkFlagRequired("stack"); err != nil {
@@ -40,7 +41,7 @@ func newDeployCmd(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, format string, yes, allowMultiple bool) error {
+func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, format, reportPath string, yes, allowMultiple bool) error {
 	if !yes {
 		fmt.Printf("Deploy stack %q? Type 'yes' to confirm: ", stackName)
 		scanner := bufio.NewScanner(os.Stdin)
@@ -119,9 +120,13 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 	wg.Wait()
 	p.Finish()
 
+	// Always produce the run report (file + $GITHUB_STEP_SUMMARY if set), on
+	// success or failure, so CI can surface it without any GitHub API call here.
+	writeReport("deploy", stackName, p, reportPath)
+
 	if upErr != nil {
-		// Still emit the JSON summary on failure so the deploy workflow's report
-		// renders the counts and the failure list (stdout is otherwise empty).
+		// Still emit the JSON summary on failure so a consumer parsing stdout gets
+		// the counts and the failure list (stdout is otherwise empty).
 		if jsonMode {
 			_ = printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
 		}
