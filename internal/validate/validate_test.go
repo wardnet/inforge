@@ -54,6 +54,30 @@ func TestValidateResourcesGlobalBad(t *testing.T) {
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
+// TestValidateResourcesEncryptedOK: a `source: encrypted` secret whose
+// (container, KEY) ciphertext exists in the env's secrets.enc.yaml validates
+// cleanly — the check is presence-only, so the fixture ciphertext is a dummy.
+func TestValidateResourcesEncryptedOK(t *testing.T) {
+	err := ValidateResources("encrypted-ok", testdataDir)
+	assert.NoError(t, err, "an encrypted source with a matching store entry should validate cleanly")
+}
+
+// TestValidateResourcesEncryptedMissingKey: the store exists but holds no
+// ciphertext for the declared KEY under the spec's container.
+func TestValidateResourcesEncryptedMissingKey(t *testing.T) {
+	err := ValidateResources("encrypted-bad", testdataDir)
+	require.Error(t, err, "an encrypted source without a store entry should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
+// TestValidateResourcesEncryptedNoStore: a `source: encrypted` declaration with
+// no secrets.enc.yaml at all must fail and point at `inforge secret init`.
+func TestValidateResourcesEncryptedNoStore(t *testing.T) {
+	err := ValidateResources("encrypted-nostore", testdataDir)
+	require.Error(t, err, "an encrypted source without a store file should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
 // TestCheckComputeGlobalNetworkRejected: a compute attaching to a global network
 // is recognized but rejected (cross-region networking not supported yet).
 func TestCheckComputeGlobalNetworkRejected(t *testing.T) {

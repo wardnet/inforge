@@ -1,0 +1,5 @@
+base_domain: example.com
+
+ssh:
+  authorizedKeys: ssh-ed25519 AAAA...authorized
+  deployPublicKey: ssh-ed25519 AAAA...deploy

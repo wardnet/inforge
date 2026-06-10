@@ -1,0 +1,7 @@
+name: bridge
+container: bridge
+provider: neon
+engine: postgresql
+branch: main
+database: bridge
+owner: app

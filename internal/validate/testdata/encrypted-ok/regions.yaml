@@ -1,0 +1,24 @@
+regions:
+  us-east-1:
+    slug: use1
+    dns:
+      provider: cloudflare
+      # Regression guard: an unset ${ENV_VAR} zone must still pass structural
+      # validation (raw load keeps the literal ref; it is not emptied to "" and
+      # so does not read as a missing zone). This env var is intentionally never
+      # set in tests.
+      zone: ${INFORGE_TEST_OK_ZONE}
+    providers:
+      hetzner:
+        apiToken: test-token
+        location: ash
+        network_zone: us-east
+        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+        images: {ubuntu-24.04: ubuntu-24.04}
+      cloudflare:
+        apiToken: test-token
+      neon:
+        apiKey: test-key
+      infisical:
+        clientId: test-id
+        clientSecret: test-secret

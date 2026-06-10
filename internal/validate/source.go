@@ -22,6 +22,12 @@ const (
 	// value:<value> alias). The value is stored in plaintext in the resource file,
 	// so it is for non-secret configuration, not real secrets.
 	SourceStatic
+	// SourceEncrypted is a value stored age-encrypted in the environment's
+	// committed secret store (resources/<env>/secrets.enc.yaml), keyed by the
+	// spec's container and the secret's KEY — the bare token `encrypted` carries
+	// no payload. The deploy decrypts it with the INFORGE_SECRETS_KEY master
+	// identity (see internal/secretstore / ADR-0017).
+	SourceEncrypted
 )
 
 // Source is a parsed secrets source DSL value.
@@ -64,6 +70,12 @@ func ParseSource(s string) (Source, error) {
 	if m := envPattern.FindStringSubmatch(s); m != nil {
 		return Source{Kind: SourceEnv, EnvName: m[1]}, nil
 	}
+	// encrypted — the bare token only: the value's address is implied by the
+	// spec's container and the secret's KEY, so any payload (encrypted:foo) is a
+	// grammar error caught by the fallthrough below.
+	if s == "encrypted" {
+		return Source{Kind: SourceEncrypted}, nil
+	}
 	// static:<value> / value:<value> — a literal. The value is taken verbatim (any
 	// characters), so prefix-strip rather than pattern-match; reject an empty value,
 	// which is always a mistake and would fail the service start later anyway.
@@ -75,5 +87,5 @@ func ParseSource(s string) (Source, error) {
 			return Source{Kind: SourceStatic, StaticValue: v}, nil
 		}
 	}
-	return Source{}, fmt.Errorf("invalid source %q: want ref:<database|compute>/<name>.<output>, ${ENV_VAR}, or static:<value>", s)
+	return Source{}, fmt.Errorf("invalid source %q: want ref:<database|compute>/<name>.<output>, ${ENV_VAR}, static:<value>, or encrypted", s)
 }
