@@ -24,6 +24,13 @@ Downloads the `inforge` binary and runs `inforge plugins install`. Pin the CLI v
     version: v1.6.0   # default: latest release
 ```
 
+:::warning `@v1` pins the action, not the CLI
+`wardnet/inforge@v1` pins the *action* to the rolling `v1` tag; on its own it installs the **latest**
+`inforge` release, which can move under you. For reproducible runs, also pin the CLI with the
+`version:` input (e.g. `version: v1.6.0`). The two are independent: the action ref controls the
+install glue, `version:` controls the binary it downloads.
+:::
+
 That is the whole toolkit-provided surface. Everything else is a normal `run:` step calling the CLI.
 
 ## How secrets reach inforge
@@ -75,6 +82,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: wardnet/inforge@v1
+        with:
+          version: v1.6.0          # pin the CLI for reproducible runs
       - run: inforge validate --stack prd
       - run: inforge preview --stack prd --report report.md
       - if: github.event_name == 'pull_request'
@@ -108,8 +117,99 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: wardnet/inforge@v1
+        with:
+          version: v1.6.0
       - run: inforge deploy --yes --stack prd
 ```
+
+### Scheduled drift reconcile (optional)
+
+`inforge matrix` prints the environments whose resources changed between two git refs, so a scheduled
+job can re-deploy only what drifted. Run it on a cron and feed the result into a matrix:
+
+```yaml title=".github/workflows/reconcile.yml"
+name: Reconcile
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      environments: ${{ steps.m.outputs.environments }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: wardnet/inforge@v1
+        with:
+          version: v1.6.0
+      - id: m
+        run: echo "environments=$(inforge matrix --base main --head HEAD)" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: matrix
+    if: needs.matrix.outputs.environments != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.matrix.outputs.environments) }}
+    env:                                       # your providers' secrets
+      PULUMI_CONFIG_PASSPHRASE:   ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+      HCLOUD_TOKEN:               ${{ secrets.HCLOUD_TOKEN }}
+      CLOUDFLARE_API_TOKEN:       ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      NEON_API_KEY:               ${{ secrets.NEON_API_KEY }}
+      INFISICAL_CLIENT_ID:        ${{ secrets.INFISICAL_CLIENT_ID }}
+      INFISICAL_CLIENT_SECRET:    ${{ secrets.INFISICAL_CLIENT_SECRET }}
+      INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: wardnet/inforge@v1
+        with:
+          version: v1.6.0
+      - run: inforge deploy --yes --stack "${{ matrix.environment }}"
+```
+
+### Service release (optional)
+
+A **service** repo builds its own artifact, then uses inforge to push it to the release store and roll
+it out. This lives in the service repo, not the infra repo:
+
+```yaml title=".github/workflows/release.yml"
+name: Release
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:                                   # one release per service+env at a time
+  group: inforge-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+      INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      # ...your build steps produce the artifact under ./deployments...
+      - uses: wardnet/inforge@v1
+        with:
+          version: v1.6.0
+      - run: inforge releases push   --service api-server --env prd --sha "$GITHUB_SHA"
+      - run: inforge releases deploy --service api-server --env prd --sha "$GITHUB_SHA"
+```
+
+`inforge releases deploy` resolves the host, folder, and systemd unit from the infra Pulumi stack at
+runtime — nothing about the deploy target needs to be committed to the service repo.
 
 `inforge deploy`/`preview` always write a markdown run report to `--report <path>` (or a temp file,
 whose path they print) and, when `$GITHUB_STEP_SUMMARY` is set, append it to the job summary
@@ -123,3 +223,25 @@ CLI never calls the GitHub API itself.
 - `${ENV_VAR}` references that are unset fail the run loudly — only set the ones your config uses.
 - Backend credentials (`AWS_*`, `CLOUDFLARE_ACCOUNT_ID`) are needed only for an `r2`/`s3` state
   backend; a `file`/`git-branch` backend needs none.
+
+## Migrating to 1.6
+
+1.6 makes inforge a provider-agnostic toolkit: it stops shipping reusable workflows that enumerated a
+fixed set of provider secrets. Three things change for consumers.
+
+**Reusable workflows → your own workflow + the action.** Replace every
+`uses: wardnet/inforge/.github/workflows/<name>.yml@v1` caller with a normal job that installs the CLI
+via `wardnet/inforge@v1` and runs `inforge <command>` directly. Start from the [starter
+workflows](#starter-workflows) above — the `deploy`, `preview`, `reconcile`, and `service-release`
+reusable workflows all map onto one of them.
+
+**`secrets:` → job `env:`.** The reusable workflows took a `secrets:` block and mapped it to env vars
+for you. Now you set the `env:` block yourself, naming only the variables your config references. A
+provider you don't use is simply a line you don't add.
+
+**`gha:NAME` → `${NAME}`.** The `gha:` secrets-DSL source is gone. In your `secrets/*.yaml` resource
+files, rewrite each `source: gha:CLOUDFLARE_API_TOKEN` as `source: ${CLOUDFLARE_API_TOKEN}` — the same
+`${ENV_VAR}` form already used in `variables.yaml`/`regions.yaml`. The value still comes from the
+process environment, so the matching `env:` line in your workflow is what supplies it. The name must be
+upper-snake-case (`[A-Z_][A-Z0-9_]*`); an unset or empty value fails the run rather than writing an
+empty secret.

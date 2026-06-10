@@ -45,6 +45,13 @@ var (
 // ParseSource parses a secrets source value into its structured form. It only
 // checks grammar; whether a ref resolves to a real resource/output is checked
 // separately during cross-resource validation.
+//
+// The ${NAME} env reference must reach this parser UN-substituted: resolution
+// happens later (resolveRef → os.Getenv), keyed on the parsed EnvName. Do NOT
+// run resource specs through loader.substituteEnvVars — that is for
+// variables.yaml/regions.yaml only; doing it here would resolve ${NAME} away
+// before ParseSource ever sees it, turning every env secret into a silent
+// literal.
 func ParseSource(s string) (Source, error) {
 	if m := refPattern.FindStringSubmatch(s); m != nil {
 		return Source{
