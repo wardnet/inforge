@@ -161,16 +161,22 @@ func TestMintClientSecret(t *testing.T) {
 // conflict (409) is fine and the slug is derived per secret path.
 func TestEnsureReadPrivilegeToleratesConflict(t *testing.T) {
 	var gotSlug string
+	var gotType any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		var body map[string]any
 		_ = json.Unmarshal(b, &body)
 		gotSlug, _ = body["slug"].(string)
+		gotType = body["type"]
 		w.WriteHeader(http.StatusConflict) // privilege already exists
 	}))
 	defer srv.Close()
 	require.NoError(t, ensureReadPrivilege(context.Background(), srv.URL, "tok", "ws", "id", "prod", "/ghost"))
 	assert.Equal(t, "inforge-read-ghost", gotSlug, "slug must be derived per secret path, not fixed")
+	// type is a required object on this endpoint; a permanent grant sends
+	// {isTemporary: false}. Omitting it returns HTTP 422 ("type Required").
+	assert.Equal(t, map[string]any{"isTemporary": false}, gotType,
+		"the required type discriminator must be sent for a permanent privilege")
 }
 
 // TestEnsureReadPrivilegeFailsLoudOnBadRequest asserts a 400 (e.g. a malformed

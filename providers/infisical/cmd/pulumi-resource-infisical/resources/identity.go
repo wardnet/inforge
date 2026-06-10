@@ -269,6 +269,11 @@ func ensureReadPrivilege(ctx context.Context, siteURL, token, projectId, identit
 		"identityId": identityId,
 		"projectId":  projectId,
 		"slug":       privilegeSlug(secretPath),
+		// type is a required discriminated union on isTemporary; a permanent grant
+		// is {isTemporary: false}. The API rejects the request (HTTP 422, "type
+		// Required") without it — the field is mandatory even though the public API
+		// docs omit it.
+		"type": map[string]any{"isTemporary": false},
 		"permissions": []map[string]any{
 			{
 				"subject": "secrets",
