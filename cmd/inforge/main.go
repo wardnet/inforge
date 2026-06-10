@@ -39,6 +39,7 @@ func rootCmd() *cobra.Command {
 		newDeployCmd(&cfg),
 		newReleasesCmd(&cfg),
 		newSecretCmd(&dir),
+		newServiceCmd(&cfg),
 	)
 
 	return root
