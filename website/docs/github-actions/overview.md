@@ -4,55 +4,59 @@ sidebar_position: 1
 
 # GitHub Actions Overview
 
-inforge ships a set of reusable GitHub Actions workflows and a composite install action.
-Consumer repos call these with a single `uses:` line — no inforge-specific tooling needs to
-be installed manually.
+inforge is a toolkit, not a set of opinionated pipelines. It ships **one** GitHub Action — a
+composite action that installs the `inforge` CLI — and you own your workflows. Your workflow injects
+your secrets as environment variables and runs `inforge <command>`; inforge never enumerates a fixed
+list of provider secrets, so it stays decoupled from which clouds you use.
 
-## Install action
+## The install action
 
 ```yaml
-- uses: wardnet/inforge/.github/actions/install@v1
+- uses: wardnet/inforge@v1
 ```
 
-Downloads the latest `inforge` binary and runs `inforge plugins install`. Accepts a
-`version` input to pin to a specific release.
+Downloads the `inforge` binary and runs `inforge plugins install`. Pin the CLI version with the
+`version` input:
 
 ```yaml
-- uses: wardnet/inforge/.github/actions/install@v1
+- uses: wardnet/inforge@v1
   with:
-    version: v1.2.0   # pin to a specific release
+    version: v1.6.0   # default: latest release
 ```
 
-## Reusable workflows
-
-| Workflow | Trigger | Description |
-|----------|---------|-------------|
-| `validate.yml` | `workflow_call` | Validate changed environments |
-| `preview.yml` | `workflow_call` | Preview infrastructure changes |
-| `deploy.yml` | `workflow_call` | Deploy infrastructure changes |
-| `reconcile.yml` | `workflow_call` + schedule | Detect and fix drift |
-| `service-release.yml` | `workflow_call` | Release service code to a provisioned VM |
-
-## Required permissions
-
-:::caution
-The reusable workflows declare their own `permissions` internally, but GitHub only grants what the
-**caller** explicitly allows. Your calling workflows **must** declare `permissions` at the workflow
-level — otherwise GitHub blocks the run with a permission error.
-
-| Permission | Required by |
-|------------|-------------|
-| `contents: read` | All workflows (checkout) |
-| `pull-requests: write` | `preview.yml`, `deploy.yml` (PR comment reports) |
-| `issues: write` | `reconcile.yml` (drift issue creation) |
-
-See [GitHub docs on default permissions](https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token)
-for background.
+:::warning `@v1` pins the action, not the CLI
+`wardnet/inforge@v1` pins the *action* to the rolling `v1` tag; on its own it installs the **latest**
+`inforge` release, which can move under you. For reproducible runs, also pin the CLI with the
+`version:` input (e.g. `version: v1.6.0`). The two are independent: the action ref controls the
+install glue, `version:` controls the binary it downloads.
 :::
 
-## Typical consumer setup
+That is the whole toolkit-provided surface. Everything else is a normal `run:` step calling the CLI.
 
-In your infrastructure repo, create three workflow files:
+## How secrets reach inforge
+
+inforge resolves `${ENV_VAR}` references in your `regions.yaml`, `variables.yaml`, and secret
+`source:` fields from the **process environment**. So you decide the vocabulary: set whatever
+environment variables your config references, from whatever secrets you keep next to your infra
+definition. inforge does not know — and does not need to know — that a secret is named
+`CLOUDFLARE_API_TOKEN`.
+
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:                                       # your names, your secrets
+      HCLOUD_TOKEN:         ${{ secrets.HCLOUD_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      NEON_API_KEY:         ${{ secrets.NEON_API_KEY }}
+      # ...only what your regions.yaml / secrets reference
+```
+
+Add a provider → add one `env:` line. Drop one → delete a line. The toolkit never changes.
+
+## Starter workflows
+
+Copy these into your infrastructure repo and adjust the `env:` block to your providers.
 
 ```yaml title=".github/workflows/pr.yml"
 name: PR Checks
@@ -65,21 +69,27 @@ permissions:
   pull-requests: write
 
 jobs:
-  validate:
-    uses: wardnet/inforge/.github/workflows/validate.yml@v1
-
   preview:
-    needs: validate
-    strategy:
-      matrix:
-        include:
-          - environment: prd
-            stack_config: inforge.prd.yaml
-    uses: wardnet/inforge/.github/workflows/preview.yml@v1
-    with:
-      environment: ${{ matrix.environment }}
-      stack_config: ${{ matrix.stack_config }}
-    secrets: inherit
+    runs-on: ubuntu-latest
+    env:
+      PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+      HCLOUD_TOKEN:             ${{ secrets.HCLOUD_TOKEN }}
+      CLOUDFLARE_API_TOKEN:     ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ZONE_ID:       ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      NEON_API_KEY:             ${{ secrets.NEON_API_KEY }}
+      INFISICAL_CLIENT_ID:      ${{ secrets.INFISICAL_CLIENT_ID }}
+      INFISICAL_CLIENT_SECRET:  ${{ secrets.INFISICAL_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: wardnet/inforge@v1
+        with:
+          version: v1.6.0          # pin the CLI for reproducible runs
+      - run: inforge validate --stack prd
+      - run: inforge preview --stack prd --report report.md
+      - if: github.event_name == 'pull_request'
+        run: gh pr comment "${{ github.event.pull_request.number }}" --body-file report.md
+        env:
+          GH_TOKEN: ${{ github.token }}
 ```
 
 ```yaml title=".github/workflows/deploy.yml"
@@ -91,22 +101,31 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  id-token: write
 
 jobs:
   deploy:
-    strategy:
-      matrix:
-        include:
-          - environment: prd
-            stack_config: inforge.prd.yaml
-    uses: wardnet/inforge/.github/workflows/deploy.yml@v1
-    with:
-      environment: ${{ matrix.environment }}
-      stack_config: ${{ matrix.stack_config }}
-    secrets: inherit
+    runs-on: ubuntu-latest
+    env:
+      PULUMI_CONFIG_PASSPHRASE:   ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+      HCLOUD_TOKEN:               ${{ secrets.HCLOUD_TOKEN }}
+      CLOUDFLARE_API_TOKEN:       ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ZONE_ID:         ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      NEON_API_KEY:               ${{ secrets.NEON_API_KEY }}
+      INFISICAL_CLIENT_ID:        ${{ secrets.INFISICAL_CLIENT_ID }}
+      INFISICAL_CLIENT_SECRET:    ${{ secrets.INFISICAL_CLIENT_SECRET }}
+      INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: wardnet/inforge@v1
+        with:
+          version: v1.6.0
+      - run: inforge deploy --yes --stack prd
 ```
+
+### Scheduled drift reconcile (optional)
+
+`inforge matrix` prints the environments whose resources changed between two git refs, so a scheduled
+job can re-deploy only what drifted. Run it on a cron and feed the result into a matrix:
 
 ```yaml title=".github/workflows/reconcile.yml"
 name: Reconcile
@@ -117,31 +136,112 @@ on:
 
 permissions:
   contents: read
-  id-token: write
-  issues: write
 
 jobs:
-  reconcile:
-    uses: wardnet/inforge/.github/workflows/reconcile.yml@v1
-    secrets: inherit
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      environments: ${{ steps.m.outputs.environments }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: wardnet/inforge@v1
+        with:
+          version: v1.6.0
+      - id: m
+        run: echo "environments=$(inforge matrix --base main --head HEAD)" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: matrix
+    if: needs.matrix.outputs.environments != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.matrix.outputs.environments) }}
+    env:                                       # your providers' secrets
+      PULUMI_CONFIG_PASSPHRASE:   ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+      HCLOUD_TOKEN:               ${{ secrets.HCLOUD_TOKEN }}
+      CLOUDFLARE_API_TOKEN:       ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      NEON_API_KEY:               ${{ secrets.NEON_API_KEY }}
+      INFISICAL_CLIENT_ID:        ${{ secrets.INFISICAL_CLIENT_ID }}
+      INFISICAL_CLIENT_SECRET:    ${{ secrets.INFISICAL_CLIENT_SECRET }}
+      INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: wardnet/inforge@v1
+        with:
+          version: v1.6.0
+      - run: inforge deploy --yes --stack "${{ matrix.environment }}"
 ```
 
-## Required repository secrets
+### Service release (optional)
 
-Set these secrets in your repository (Settings → Secrets → Actions):
+A **service** repo builds its own artifact, then uses inforge to push it to the release store and roll
+it out. This lives in the service repo, not the infra repo:
 
-| Secret | Description | Required for |
-|--------|-------------|-------------|
-| `HCLOUD_TOKEN` | Hetzner Cloud API token | Compute, Network |
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API token | DNS |
-| `NEON_API_KEY` | Neon API key | Database |
-| `INFISICAL_CLIENT_ID` | Infisical client ID | Secrets |
-| `INFISICAL_CLIENT_SECRET` | Infisical client secret | Secrets |
+```yaml title=".github/workflows/release.yml"
+name: Release
+on:
+  push:
+    branches: [main]
 
-## Secret delivery
+permissions:
+  contents: read
 
-Secrets are delivered to services at deploy time without any OIDC token or key broker: inforge writes
-each service's provider coordinates and a host-key-encrypted machine-identity credential to the host
-over SSH, and the service fetches its own secrets at runtime. The deploy workflow needs the
-`INFISICAL_CLIENT_ID` / `INFISICAL_CLIENT_SECRET` credentials (above) and the deploy SSH key — no
-`id-token: write` permission.
+concurrency:                                   # one release per service+env at a time
+  group: inforge-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+      INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      # ...your build steps produce the artifact under ./deployments...
+      - uses: wardnet/inforge@v1
+        with:
+          version: v1.6.0
+      - run: inforge releases push   --service api-server --env prd --sha "$GITHUB_SHA"
+      - run: inforge releases deploy --service api-server --env prd --sha "$GITHUB_SHA"
+```
+
+`inforge releases deploy` resolves the host, folder, and systemd unit from the infra Pulumi stack at
+runtime — nothing about the deploy target needs to be committed to the service repo.
+
+`inforge deploy`/`preview` always write a markdown run report to `--report <path>` (or a temp file,
+whose path they print) and, when `$GITHUB_STEP_SUMMARY` is set, append it to the job summary
+automatically. Posting it as a PR comment is a one-liner (`gh pr comment --body-file`) you own — the
+CLI never calls the GitHub API itself.
+
+## Notes
+
+- The environment is the Pulumi **stack name** (`--stack prd`); you do not need an `inforge.<env>.yaml`
+  just to name it.
+- `${ENV_VAR}` references that are unset fail the run loudly — only set the ones your config uses.
+- Backend credentials (`AWS_*`, `CLOUDFLARE_ACCOUNT_ID`) are needed only for an `r2`/`s3` state
+  backend; a `file`/`git-branch` backend needs none.
+
+## Migrating to 1.6
+
+1.6 makes inforge a provider-agnostic toolkit: it stops shipping reusable workflows that enumerated a
+fixed set of provider secrets. Three things change for consumers.
+
+**Reusable workflows → your own workflow + the action.** Replace every
+`uses: wardnet/inforge/.github/workflows/<name>.yml@v1` caller with a normal job that installs the CLI
+via `wardnet/inforge@v1` and runs `inforge <command>` directly. Start from the [starter
+workflows](#starter-workflows) above — the `deploy`, `preview`, `reconcile`, and `service-release`
+reusable workflows all map onto one of them.
+
+**`secrets:` → job `env:`.** The reusable workflows took a `secrets:` block and mapped it to env vars
+for you. Now you set the `env:` block yourself, naming only the variables your config references. A
+provider you don't use is simply a line you don't add.
+
+**`gha:NAME` → `${NAME}`.** The `gha:` secrets-DSL source is gone. In your `secrets/*.yaml` resource
+files, rewrite each `source: gha:CLOUDFLARE_API_TOKEN` as `source: ${CLOUDFLARE_API_TOKEN}` — the same
+`${ENV_VAR}` form already used in `variables.yaml`/`regions.yaml`. The value still comes from the
+process environment, so the matching `env:` line in your workflow is what supplies it. The name must be
+upper-snake-case (`[A-Z_][A-Z0-9_]*`); an unset or empty value fails the run rather than writing an
+empty secret.

@@ -119,7 +119,7 @@ func TestCheckSecretsRejectsReservedEnvName(t *testing.T) {
 	errs, _ := checkSecrets(types.SecretsSpec{
 		Provider: "infisical",
 		Secrets: map[string]types.SecretsEntry{
-			"INFORGE_DEPLOYMENT_REGION": {Source: "gha:SOME_SECRET"},
+			"INFORGE_DEPLOYMENT_REGION": {Source: "${SOME_SECRET}"},
 		},
 	}, ctx)
 	require.NotEmpty(t, errs)

@@ -35,9 +35,15 @@ The provider plugins are installed automatically by `inforge plugins install`, a
 
 ## In GitHub Actions
 
+inforge ships **one** action — it installs the CLI. You own your workflow and inject your providers'
+secrets as env vars:
+
 ```yaml
-- uses: wardnet/inforge/.github/actions/install@v1
+- uses: wardnet/inforge@v1
+  with:
+    version: v1.6.0   # pin the CLI; default is the latest release
+- run: inforge deploy --yes --stack prd
 ```
 
-Then call the reusable workflows for validate/preview/deploy/reconcile.
-See [GitHub Actions: Overview](https://wardnet.github.io/inforge/github-actions/overview).
+See [GitHub Actions: Overview](https://wardnet.github.io/inforge/github-actions/overview) for starter
+workflows and the bring-your-own-workflow model.

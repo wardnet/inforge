@@ -290,7 +290,7 @@ func envToSlug(env string) string {
 //   - ref:compute/<name>.<output>         — looks up compute output (publicIp)
 //   - ref:database/global/<name>.<output> — looks up a GLOBAL database output
 //   - ref:compute/global/<name>.<output>  — looks up a GLOBAL compute output
-//   - gha:<NAME>                          — returns the GHA placeholder string
+//   - ${NAME}                             — reads environment variable NAME
 //   - static:<value> / value:<value>      — returns the literal value verbatim
 //
 // A `global/` prefix on the referenced name (RefName == "global/<name>") is the
@@ -304,18 +304,18 @@ func resolveRef(source, region string, all types.AllOutputs) (pulumi.StringOutpu
 	}
 
 	switch src.Kind {
-	case validate.SourceGHA:
-		// A GitHub Actions secret is injected into the deploy process as an env var
-		// of the same name (the workflow's env: block), exactly like the ${ENV_VAR}
-		// references the loader resolves. Resolve it here; an unset/empty value is a
-		// misconfiguration (the secret is missing from the repo/environment or the
-		// deploy step's env) and must fail loudly rather than write the placeholder
-		// verbatim into Infisical.
-		val := os.Getenv(src.GHAName)
+	case validate.SourceEnv:
+		// The value is read from the deploy process environment — the same
+		// ${ENV_VAR} convention the loader applies to variables.yaml/regions.yaml.
+		// The consumer injects it however they like (e.g. a GitHub Actions secret
+		// mapped to an env var in their workflow). An unset/empty value is a
+		// misconfiguration and must fail loudly rather than materialise an empty
+		// secret.
+		val := os.Getenv(src.EnvName)
 		if val == "" {
 			return pulumi.StringOutput{}, fmt.Errorf(
-				"resolveRef %q: GitHub Actions secret %s is empty or unset — set it as a repository/environment secret and pass it to the deploy step's env",
-				source, src.GHAName)
+				"resolveRef %q: environment variable %s is empty or unset — inject it into the deploy step's environment (e.g. from a CI secret)",
+				source, src.EnvName)
 		}
 		return pulumi.String(val).ToStringOutput(), nil
 

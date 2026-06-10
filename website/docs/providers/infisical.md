@@ -8,7 +8,7 @@ The Infisical provider implements **Secrets** resources using
 [Infisical](https://infisical.com) for secret management.
 
 :::note Status
-Core secret materialisation is available. The provider resolves `ref:` and `gha:` sources,
+Core secret materialisation is available. The provider resolves `ref:` and `${ENV_VAR}` sources,
 encrypts them into the VM manifest, and triggers bootstrap.
 :::
 

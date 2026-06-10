@@ -25,11 +25,11 @@ func TestParseSourceRefExpandedComputeKey(t *testing.T) {
 	assert.Equal(t, "publicIp", s.RefOutput)
 }
 
-func TestParseSourceGHA(t *testing.T) {
-	s, err := ParseSource("gha:CLOUDFLARE_API_TOKEN")
+func TestParseSourceEnv(t *testing.T) {
+	s, err := ParseSource("${CLOUDFLARE_API_TOKEN}")
 	require.NoError(t, err)
-	assert.Equal(t, SourceGHA, s.Kind)
-	assert.Equal(t, "CLOUDFLARE_API_TOKEN", s.GHAName)
+	assert.Equal(t, SourceEnv, s.Kind)
+	assert.Equal(t, "CLOUDFLARE_API_TOKEN", s.EnvName)
 }
 
 func TestParseSourceStatic(t *testing.T) {
@@ -52,8 +52,10 @@ func TestParseSourceMalformed(t *testing.T) {
 		"nonsense",
 		"ref:storage/bridge.url", // unknown ref type
 		"ref:database/bridge",    // missing output
-		"gha:lowercase",          // gha names must be upper snake
-		"gha:1LEADINGDIGIT",      // must start with letter/underscore
+		"${lowercase}",           // env names must be upper snake
+		"${1LEADINGDIGIT}",       // must start with letter/underscore
+		"$NOBRACES",              // must be wrapped in ${...}
+		"gha:OLD_FORM",           // the retired gha: form is no longer valid
 		"",                       // empty
 		"ref:compute/bridge-01.", // empty output
 		"static:",                // empty static value

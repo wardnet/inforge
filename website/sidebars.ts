@@ -82,11 +82,6 @@ const sidebars: SidebarsConfig = {
       label: 'GitHub Actions',
       items: [
         'github-actions/overview',
-        'github-actions/validate',
-        'github-actions/preview',
-        'github-actions/deploy',
-        'github-actions/reconcile',
-        'github-actions/service-release',
       ],
     },
   ],

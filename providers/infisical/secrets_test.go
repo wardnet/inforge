@@ -65,7 +65,7 @@ func TestProvisionServiceScopesPaths(t *testing.T) {
 				Name:      "ghost-secrets",
 				Container: "ghost",
 				Provider:  "infisical",
-				Secrets:   map[string]types.SecretsEntry{"DATABASE_URL": {Source: "gha:DATABASE_URL"}},
+				Secrets:   map[string]types.SecretsEntry{"DATABASE_URL": {Source: "${DATABASE_URL}"}},
 			}},
 		}
 		svc := types.ServiceSpec{Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost"}
@@ -95,7 +95,7 @@ func TestProvisionServicePassesOrganizationId(t *testing.T) {
 				Name:      "ghost-secrets",
 				Container: "ghost",
 				Provider:  "infisical",
-				Secrets:   map[string]types.SecretsEntry{"DATABASE_URL": {Source: "gha:DATABASE_URL"}},
+				Secrets:   map[string]types.SecretsEntry{"DATABASE_URL": {Source: "${DATABASE_URL}"}},
 			}},
 		}
 		svc := types.ServiceSpec{Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost"}
@@ -126,17 +126,17 @@ func TestProvisionServiceNoSecretsReturnsNil(t *testing.T) {
 func TestInfraSecretEntries(t *testing.T) {
 	res := types.Resources{
 		Secrets: []types.SecretsSpec{
-			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"A": {Source: "gha:A"}}},
-			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"B": {Source: "gha:B"}}},
-			{Container: "ghost", Provider: "other", Secrets: map[string]types.SecretsEntry{"SKIP": {Source: "gha:SKIP"}}},
-			{Container: "other", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"NOPE": {Source: "gha:NOPE"}}},
+			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"A": {Source: "${A}"}}},
+			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"B": {Source: "${B}"}}},
+			{Container: "ghost", Provider: "other", Secrets: map[string]types.SecretsEntry{"SKIP": {Source: "${SKIP}"}}},
+			{Container: "other", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"NOPE": {Source: "${NOPE}"}}},
 		},
 	}
 	got, err := infraSecretEntries(types.ServiceSpec{Name: "ghost", Container: "ghost"}, res)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]types.SecretsEntry{
-		"A": {Source: "gha:A"},
-		"B": {Source: "gha:B"},
+		"A": {Source: "${A}"},
+		"B": {Source: "${B}"},
 	}, got)
 }
 
@@ -145,8 +145,8 @@ func TestInfraSecretEntries(t *testing.T) {
 func TestInfraSecretEntriesRejectsDuplicateKey(t *testing.T) {
 	res := types.Resources{
 		Secrets: []types.SecretsSpec{
-			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"DUP": {Source: "gha:ONE"}}},
-			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"DUP": {Source: "gha:TWO"}}},
+			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"DUP": {Source: "${ONE}"}}},
+			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"DUP": {Source: "${TWO}"}}},
 		},
 	}
 	_, err := infraSecretEntries(types.ServiceSpec{Name: "ghost", Container: "ghost"}, res)
@@ -164,7 +164,7 @@ func bridgeServiceWithSecret() (types.ServiceSpec, types.Resources) {
 			Name:      "bridge",
 			Container: "bridge",
 			Provider:  "infisical",
-			Secrets:   map[string]types.SecretsEntry{"MY_SECRET": {Source: "gha:MY_SECRET"}},
+			Secrets:   map[string]types.SecretsEntry{"MY_SECRET": {Source: "${MY_SECRET}"}},
 		}},
 	}
 	return svc, res
@@ -280,13 +280,12 @@ func TestResolveRefStatic(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestResolveRefGHA verifies a gha: source resolves to the matching environment
-// variable's value (the GitHub Actions secret injected into the deploy process),
-// not the literal placeholder that used to be written into Infisical verbatim.
-func TestResolveRefGHA(t *testing.T) {
-	t.Setenv("MY_GHA_SECRET", "s3cr3t-value")
+// TestResolveRefEnv verifies a ${ENV_VAR} source resolves to the matching
+// environment variable's value (injected into the deploy process), not a literal.
+func TestResolveRefEnv(t *testing.T) {
+	t.Setenv("MY_ENV_SECRET", "s3cr3t-value")
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		out, err := resolveRef("gha:MY_GHA_SECRET", "us-east-1", types.AllOutputs{})
+		out, err := resolveRef("${MY_ENV_SECRET}", "us-east-1", types.AllOutputs{})
 		require.NoError(t, err)
 		assert.Equal(t, "s3cr3t-value", awaitString(t, out))
 		return nil
@@ -294,11 +293,11 @@ func TestResolveRefGHA(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestResolveRefGHAUnsetErrors verifies an unset/empty GHA secret fails loudly
-// rather than silently materialising an empty (or placeholder) secret.
-func TestResolveRefGHAUnsetErrors(t *testing.T) {
-	t.Setenv("INFORGE_TEST_GHA_UNSET", "")
-	_, err := resolveRef("gha:INFORGE_TEST_GHA_UNSET", "us-east-1", types.AllOutputs{})
+// TestResolveRefEnvUnsetErrors verifies an unset/empty env var fails loudly
+// rather than silently materialising an empty secret.
+func TestResolveRefEnvUnsetErrors(t *testing.T) {
+	t.Setenv("INFORGE_TEST_ENV_UNSET", "")
+	_, err := resolveRef("${INFORGE_TEST_ENV_UNSET}", "us-east-1", types.AllOutputs{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty or unset")
 }
