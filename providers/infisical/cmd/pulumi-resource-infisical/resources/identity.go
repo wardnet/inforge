@@ -2,14 +2,10 @@ package resources
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
 	"log"
-	"net/http"
-	"strings"
 
 	"github.com/pulumi/pulumi-go-provider/infer"
+	"github.com/wardnet/inforge/providers/infisical/internal/client"
 )
 
 // InfisicalIdentityArgs are the inputs for a per-service Infisical machine
@@ -33,7 +29,7 @@ type InfisicalIdentityArgs struct {
 	// OrganizationId optionally pins the Infisical organization to provision the
 	// identity under. When empty it is derived from the access token's JWT; it
 	// must be set for deployments whose universal-auth token carries no
-	// organizationId claim (see resolveOrgID).
+	// organizationId claim.
 	OrganizationId string `pulumi:"organizationId,optional"`
 }
 
@@ -49,12 +45,10 @@ type InfisicalIdentityState struct {
 }
 
 // InfisicalIdentity provisions a per-service Infisical machine identity scoped
-// read-only to a single secret path: adopt-or-create the org identity, attach
-// universal auth, add it to the project, grant a read privilege on SecretPath,
-// then mint a client secret. It is idempotent for everything except the client
-// secret — minting is inherently one-shot, so the minted credential is persisted
-// in state and never re-minted on refresh. Identities are never deleted on
-// destroy (no-delete policy), matching the workspace/secrets resources.
+// read-only to a single secret path (see client.ProvisionIdentity for the
+// chain). Minting is one-shot, so the minted credential is persisted in state on
+// Create and never re-minted on refresh. Identities are never deleted on destroy
+// (no-delete policy), matching the workspace/secrets resources.
 type InfisicalIdentity struct{}
 
 func (*InfisicalIdentity) Create(
@@ -68,41 +62,29 @@ func (*InfisicalIdentity) Create(
 	}
 
 	in := req.Inputs
-	token, err := authenticate(ctx, in.SiteUrl, in.ClientId, in.ClientSecret)
-	if err != nil {
-		return infer.CreateResponse[InfisicalIdentityState]{}, err
-	}
-	orgId, err := resolveOrgID(in.OrganizationId, token)
-	if err != nil {
+	c := client.New(in.SiteUrl)
+	if err := c.Authenticate(ctx, in.ClientId, in.ClientSecret); err != nil {
 		return infer.CreateResponse[InfisicalIdentityState]{}, err
 	}
 
-	identityId, err := adoptOrCreateIdentity(ctx, in.SiteUrl, token, orgId, in.Name)
-	if err != nil {
-		return infer.CreateResponse[InfisicalIdentityState]{}, err
-	}
-	authClientId, err := ensureUniversalAuth(ctx, in.SiteUrl, token, identityId)
-	if err != nil {
-		return infer.CreateResponse[InfisicalIdentityState]{}, err
-	}
-	if err := ensureProjectMembership(ctx, in.SiteUrl, token, in.WorkspaceId, identityId); err != nil {
-		return infer.CreateResponse[InfisicalIdentityState]{}, err
-	}
-	if err := ensureReadPrivilege(ctx, in.SiteUrl, token, in.WorkspaceId, identityId, in.EnvSlug, in.SecretPath); err != nil {
-		return infer.CreateResponse[InfisicalIdentityState]{}, err
-	}
-	authClientSecret, err := mintClientSecret(ctx, in.SiteUrl, token, identityId)
+	creds, err := c.ProvisionIdentity(ctx, client.IdentityParams{
+		Name:           in.Name,
+		WorkspaceID:    in.WorkspaceId,
+		EnvSlug:        in.EnvSlug,
+		SecretPath:     in.SecretPath,
+		OrganizationID: in.OrganizationId,
+	})
 	if err != nil {
 		return infer.CreateResponse[InfisicalIdentityState]{}, err
 	}
 
 	return infer.CreateResponse[InfisicalIdentityState]{
-		ID: identityId,
+		ID: creds.IdentityID,
 		Output: InfisicalIdentityState{
 			InfisicalIdentityArgs: in,
-			IdentityId:            identityId,
-			AuthClientId:          authClientId,
-			AuthClientSecret:      authClientSecret,
+			IdentityId:            creds.IdentityID,
+			AuthClientId:          creds.AuthClientID,
+			AuthClientSecret:      creds.AuthClientSecret,
 		},
 	}, nil
 }
@@ -122,257 +104,4 @@ func (*InfisicalIdentity) Delete(
 	// Deliberate no-op: identities are never deleted on destroy (no-delete policy).
 	log.Printf("infisical: skipping delete of identity %q (no-delete policy)\n", req.ID)
 	return infer.DeleteResponse{}, nil
-}
-
-// adoptOrCreateIdentity returns the ID of the org identity named name, creating
-// it with role no-access if it does not already exist.
-func adoptOrCreateIdentity(ctx context.Context, siteURL, token, orgId, name string) (string, error) {
-	// limit is set high so adoption sees every identity in one page; without it a
-	// large org could paginate, miss the existing identity, and create a duplicate
-	// on every deploy (max page size is 20000). This is the v2 org identity-
-	// memberships route — the v1 path does not exist and 404s ("Route not found").
-	listURL := siteURL + "/api/v2/organizations/" + orgId + "/identity-memberships?limit=10000"
-	data, status, err := infisicalDo(ctx, http.MethodGet, listURL, token, nil)
-	if err != nil {
-		return "", err
-	}
-	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("infisical: list identity memberships failed (HTTP %d): %s", status, data)
-	}
-	var list struct {
-		IdentityMemberships []struct {
-			Identity struct {
-				Id   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"identity"`
-		} `json:"identityMemberships"`
-	}
-	if err := json.Unmarshal(data, &list); err != nil {
-		return "", fmt.Errorf("infisical: parse identity memberships: %w", err)
-	}
-	for _, m := range list.IdentityMemberships {
-		if m.Identity.Name == name {
-			return m.Identity.Id, nil
-		}
-	}
-
-	createBody := map[string]any{
-		"name":           name,
-		"organizationId": orgId,
-		"role":           "no-access",
-	}
-	data, status, err = infisicalDo(ctx, http.MethodPost, siteURL+"/api/v1/identities", token, createBody)
-	if err != nil {
-		return "", err
-	}
-	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("infisical: create identity %q failed (HTTP %d): %s", name, status, data)
-	}
-	var resp struct {
-		Identity struct {
-			Id string `json:"id"`
-		} `json:"identity"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("infisical: parse create identity response: %w", err)
-	}
-	if resp.Identity.Id == "" {
-		return "", fmt.Errorf("infisical: create identity %q returned empty id", name)
-	}
-	return resp.Identity.Id, nil
-}
-
-// ensureUniversalAuth returns the identity's universal-auth clientId, attaching
-// universal auth first if it is not already configured. It reads before writing
-// (rather than POST-then-tolerate-conflict) so a genuine attach failure — bad
-// permissions, server error — surfaces as an error instead of silently falling
-// through to whatever the read returns.
-func ensureUniversalAuth(ctx context.Context, siteURL, token, identityId string) (string, error) {
-	uaURL := siteURL + "/api/v1/auth/universal-auth/identities/" + identityId
-
-	data, status, err := infisicalDo(ctx, http.MethodGet, uaURL, token, nil)
-	if err != nil {
-		return "", err
-	}
-	if status >= 200 && status < 300 {
-		return parseUniversalAuthClientId(data) // already configured
-	}
-	if status != http.StatusNotFound {
-		return "", fmt.Errorf("infisical: read universal auth failed (HTTP %d)", status)
-	}
-
-	data, status, err = infisicalDo(ctx, http.MethodPost, uaURL, token, map[string]any{})
-	if err != nil {
-		return "", err
-	}
-	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("infisical: attach universal auth failed (HTTP %d): %s", status, data)
-	}
-	return parseUniversalAuthClientId(data)
-}
-
-func parseUniversalAuthClientId(data []byte) (string, error) {
-	var resp struct {
-		IdentityUniversalAuth struct {
-			ClientId string `json:"clientId"`
-		} `json:"identityUniversalAuth"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("infisical: parse universal auth response: %w", err)
-	}
-	if resp.IdentityUniversalAuth.ClientId == "" {
-		return "", fmt.Errorf("infisical: empty universal auth clientId")
-	}
-	return resp.IdentityUniversalAuth.ClientId, nil
-}
-
-// ensureProjectMembership adds the identity to the project as no-access (its read
-// scope comes from the additional privilege). It checks membership first and
-// creates only when absent, so a real create error is never mistaken for an
-// already-member case — a swallowed failure here would leave the identity
-// unscoped and surface only as a runtime 403.
-func ensureProjectMembership(ctx context.Context, siteURL, token, projectId, identityId string) error {
-	url := siteURL + "/api/v1/projects/" + projectId + "/memberships/identities/" + identityId
-
-	_, status, err := infisicalDo(ctx, http.MethodGet, url, token, nil)
-	if err != nil {
-		return err
-	}
-	if status >= 200 && status < 300 {
-		return nil // already a member
-	}
-	if status != http.StatusNotFound {
-		return fmt.Errorf("infisical: check identity project membership failed (HTTP %d)", status)
-	}
-
-	data, status, err := infisicalDo(ctx, http.MethodPost, url, token, map[string]any{"role": "no-access"})
-	if err != nil {
-		return err
-	}
-	// Tolerate only a genuine already-exists conflict (a TOCTOU with a concurrent
-	// run); any other non-2xx is a real failure.
-	if status == http.StatusConflict || (status >= 200 && status < 300) {
-		return nil
-	}
-	return fmt.Errorf("infisical: add identity to project failed (HTTP %d): %s", status, data)
-}
-
-// ensureReadPrivilege grants the identity read access to secretPath within the
-// project's environment. The slug is derived per secretPath so each service's
-// privilege is distinct within the shared project (broadcast semantics put
-// multiple services in one project) — a fixed slug would collide. Only a genuine
-// already-exists conflict is tolerated; any other non-2xx (e.g. a malformed
-// permission body) fails loudly at deploy rather than silently leaving the
-// identity without a read grant.
-func ensureReadPrivilege(ctx context.Context, siteURL, token, projectId, identityId, envSlug, secretPath string) error {
-	body := map[string]any{
-		"identityId": identityId,
-		"projectId":  projectId,
-		"slug":       privilegeSlug(secretPath),
-		// type is a required discriminated union on isTemporary; a permanent grant
-		// is {isTemporary: false}. The API rejects the request (HTTP 422, "type
-		// Required") without it — the field is mandatory even though the public API
-		// docs omit it.
-		"type": map[string]any{"isTemporary": false},
-		"permissions": []map[string]any{
-			{
-				"subject": "secrets",
-				"action":  "read",
-				"conditions": map[string]any{
-					"environment": envSlug,
-					"secretPath":  secretPath,
-				},
-			},
-		},
-	}
-	url := siteURL + "/api/v2/identity-project-additional-privilege"
-	data, status, err := infisicalDo(ctx, http.MethodPost, url, token, body)
-	if err != nil {
-		return err
-	}
-	if status == http.StatusConflict || (status >= 200 && status < 300) {
-		return nil
-	}
-	return fmt.Errorf("infisical: grant read privilege failed (HTTP %d): %s", status, data)
-}
-
-// privilegeSlug builds a project-unique, slug-safe identifier for a service's
-// read privilege from its secret path (e.g. "/ghost" -> "inforge-read-ghost").
-func privilegeSlug(secretPath string) string {
-	s := strings.Trim(secretPath, "/")
-	s = strings.ReplaceAll(s, "/", "-")
-	if s == "" {
-		s = "root"
-	}
-	slug := "inforge-read-" + s
-	if len(slug) > 60 {
-		slug = slug[:60]
-	}
-	return slug
-}
-
-// mintClientSecret creates a non-expiring, unlimited-use client secret for the
-// identity's universal auth and returns the plaintext value (returned only once
-// by Infisical).
-func mintClientSecret(ctx context.Context, siteURL, token, identityId string) (string, error) {
-	url := siteURL + "/api/v1/auth/universal-auth/identities/" + identityId + "/client-secrets"
-	body := map[string]any{
-		"description":  "inforge-managed",
-		"ttl":          0,
-		"numUsesLimit": 0,
-	}
-	data, status, err := infisicalDo(ctx, http.MethodPost, url, token, body)
-	if err != nil {
-		return "", err
-	}
-	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("infisical: mint client secret failed (HTTP %d): %s", status, data)
-	}
-	var resp struct {
-		ClientSecret string `json:"clientSecret"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("infisical: parse client secret response: %w", err)
-	}
-	if resp.ClientSecret == "" {
-		return "", fmt.Errorf("infisical: empty client secret in mint response")
-	}
-	return resp.ClientSecret, nil
-}
-
-// resolveOrgID returns the organization ID to provision the identity under. It
-// prefers an explicitly-configured value (providers.infisical.organizationId)
-// and falls back to the organizationId claim in the access token's JWT. The
-// explicit knob exists because not every Infisical deployment's universal-auth
-// token carries that claim — Infisical Cloud tokens, in particular, do not — so
-// orgIdFromToken alone would have no source there.
-func resolveOrgID(explicit, token string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	return orgIdFromToken(token)
-}
-
-// orgIdFromToken extracts the organization ID from the JWT payload of an
-// Infisical universal-auth access token, avoiding a separate API call to the
-// organizations endpoint which is not available on all Infisical deployments.
-func orgIdFromToken(token string) (string, error) {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) != 3 {
-		return "", fmt.Errorf("infisical: malformed JWT token")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", fmt.Errorf("infisical: decode JWT payload: %w", err)
-	}
-	var claims struct {
-		OrganizationId string `json:"organizationId"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", fmt.Errorf("infisical: parse JWT claims: %w", err)
-	}
-	if claims.OrganizationId == "" {
-		return "", fmt.Errorf("infisical: no organizationId in JWT claims")
-	}
-	return claims.OrganizationId, nil
 }

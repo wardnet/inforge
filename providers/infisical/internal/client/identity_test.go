@@ -1,8 +1,7 @@
-package resources
+package client
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,38 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOrgIdFromToken(t *testing.T) {
-	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"organizationId":"org-abc"}`))
-	token := "header." + payload + ".sig"
-	got, err := orgIdFromToken(token)
-	require.NoError(t, err)
-	assert.Equal(t, "org-abc", got)
-
-	_, err = orgIdFromToken("not-a-jwt")
-	assert.Error(t, err)
-}
-
-func TestResolveOrgID(t *testing.T) {
-	jwtWithOrg := func(org string) string {
-		return "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"organizationId":"`+org+`"}`)) + ".sig"
-	}
-
-	// Explicit org wins and the token is not consulted (a token with no claim
-	// would otherwise error).
-	got, err := resolveOrgID("org-explicit", "not-a-jwt")
-	require.NoError(t, err)
-	assert.Equal(t, "org-explicit", got)
-
-	// Empty explicit falls back to the JWT claim.
-	got, err = resolveOrgID("", jwtWithOrg("org-from-jwt"))
-	require.NoError(t, err)
-	assert.Equal(t, "org-from-jwt", got)
-
-	// Empty explicit and a token without the claim is the failure this knob
-	// exists to fix — it must surface the orgIdFromToken error.
-	noClaim := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{}`)) + ".sig"
-	_, err = resolveOrgID("", noClaim)
-	assert.Error(t, err)
+// authed returns a Client pointed at srv with a fixed bearer token, for testing
+// the calls that run after authentication.
+func authed(url string) *Client {
+	c := New(url)
+	c.SetToken("tok")
+	return c
 }
 
 // TestAdoptOrCreateIdentityAdoptsExisting asserts that when an identity with the
@@ -65,7 +38,7 @@ func TestAdoptOrCreateIdentityAdoptsExisting(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	id, err := adoptOrCreateIdentity(context.Background(), srv.URL, "tok", "org-1", "wardnet-prd-use1-identity-ghost")
+	id, err := authed(srv.URL).AdoptOrCreateIdentity(context.Background(), "org-1", "wardnet-prd-use1-identity-ghost")
 	require.NoError(t, err)
 	assert.Equal(t, "id-existing", id)
 	assert.False(t, createCalled, "create must not be called when the identity already exists")
@@ -86,7 +59,7 @@ func TestAdoptOrCreateIdentityCreatesWhenAbsent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	id, err := adoptOrCreateIdentity(context.Background(), srv.URL, "tok", "org-1", "ghost")
+	id, err := authed(srv.URL).AdoptOrCreateIdentity(context.Background(), "org-1", "ghost")
 	require.NoError(t, err)
 	assert.Equal(t, "id-new", id)
 }
@@ -104,7 +77,7 @@ func TestEnsureUniversalAuthReadsExisting(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cid, err := ensureUniversalAuth(context.Background(), srv.URL, "tok", "id-1")
+	cid, err := authed(srv.URL).EnsureUniversalAuth(context.Background(), "id-1")
 	require.NoError(t, err)
 	assert.Equal(t, "client-xyz", cid)
 	assert.False(t, postCalled, "must not re-attach when universal auth already exists")
@@ -123,7 +96,7 @@ func TestEnsureUniversalAuthAttachesWhenAbsent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cid, err := ensureUniversalAuth(context.Background(), srv.URL, "tok", "id-1")
+	cid, err := authed(srv.URL).EnsureUniversalAuth(context.Background(), "id-1")
 	require.NoError(t, err)
 	assert.Equal(t, "client-new", cid)
 }
@@ -140,7 +113,7 @@ func TestEnsureUniversalAuthFailsLoudOnReadError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := ensureUniversalAuth(context.Background(), srv.URL, "tok", "id-1")
+	_, err := authed(srv.URL).EnsureUniversalAuth(context.Background(), "id-1")
 	require.Error(t, err)
 }
 
@@ -152,13 +125,14 @@ func TestMintClientSecret(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cs, err := mintClientSecret(context.Background(), srv.URL, "tok", "id-1")
+	cs, err := authed(srv.URL).MintClientSecret(context.Background(), "id-1")
 	require.NoError(t, err)
 	assert.Equal(t, "secret-value", cs)
 }
 
 // TestEnsureReadPrivilegeToleratesConflict asserts a genuine already-exists
-// conflict (409) is fine and the slug is derived per secret path.
+// conflict (409) is fine, the slug is derived per secret path, and the required
+// type discriminator is sent.
 func TestEnsureReadPrivilegeToleratesConflict(t *testing.T) {
 	var gotSlug string
 	var gotType any
@@ -171,7 +145,7 @@ func TestEnsureReadPrivilegeToleratesConflict(t *testing.T) {
 		w.WriteHeader(http.StatusConflict) // privilege already exists
 	}))
 	defer srv.Close()
-	require.NoError(t, ensureReadPrivilege(context.Background(), srv.URL, "tok", "ws", "id", "prod", "/ghost"))
+	require.NoError(t, authed(srv.URL).EnsureReadPrivilege(context.Background(), "ws", "id", "prod", "/ghost"))
 	assert.Equal(t, "inforge-read-ghost", gotSlug, "slug must be derived per secret path, not fixed")
 	// type is a required object on this endpoint; a permanent grant sends
 	// {isTemporary: false}. Omitting it returns HTTP 422 ("type Required").
@@ -187,7 +161,7 @@ func TestEnsureReadPrivilegeFailsLoudOnBadRequest(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	defer srv.Close()
-	require.Error(t, ensureReadPrivilege(context.Background(), srv.URL, "tok", "ws", "id", "prod", "/ghost"))
+	require.Error(t, authed(srv.URL).EnsureReadPrivilege(context.Background(), "ws", "id", "prod", "/ghost"))
 }
 
 // TestEnsureProjectMembershipSkipsWhenMember asserts an existing membership (GET
@@ -201,7 +175,7 @@ func TestEnsureProjectMembershipSkipsWhenMember(t *testing.T) {
 		w.WriteHeader(http.StatusOK) // GET 200 => already a member
 	}))
 	defer srv.Close()
-	require.NoError(t, ensureProjectMembership(context.Background(), srv.URL, "tok", "ws", "id"))
+	require.NoError(t, authed(srv.URL).EnsureProjectMembership(context.Background(), "ws", "id"))
 	assert.False(t, postCalled, "must not create membership when one already exists")
 }
 
@@ -218,6 +192,6 @@ func TestEnsureProjectMembershipCreatesWhenAbsent(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	require.NoError(t, ensureProjectMembership(context.Background(), srv.URL, "tok", "ws", "id"))
+	require.NoError(t, authed(srv.URL).EnsureProjectMembership(context.Background(), "ws", "id"))
 	assert.True(t, postCalled)
 }

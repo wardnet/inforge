@@ -1,4 +1,4 @@
-package resources
+package client
 
 import (
 	"context"
@@ -31,7 +31,7 @@ func TestUpsertSecretIncludesSecretPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := upsertSecret(context.Background(), srv.URL, "tok", "ws-1", "prod", "/ghost/infra", "DATABASE_URL", "postgres://x")
+	err := authed(srv.URL).upsertSecret(context.Background(), "ws-1", "prod", "/ghost/infra", "DATABASE_URL", "postgres://x")
 	require.NoError(t, err)
 
 	assert.Equal(t, http.MethodPost, got.method)
@@ -59,7 +59,7 @@ func TestUpsertSecretPatchOnConflict(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := upsertSecret(context.Background(), srv.URL, "tok", "ws-1", "prod", "/ghost/infra", "KEY", "v")
+	err := authed(srv.URL).upsertSecret(context.Background(), "ws-1", "prod", "/ghost/infra", "KEY", "v")
 	require.NoError(t, err)
 
 	require.Len(t, reqs, 2)
@@ -79,7 +79,7 @@ func TestUpsertSecretEmptyPathDefaultsToRoot(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	require.NoError(t, upsertSecret(context.Background(), srv.URL, "tok", "ws", "prod", "", "K", "v"))
+	require.NoError(t, authed(srv.URL).upsertSecret(context.Background(), "ws", "prod", "", "K", "v"))
 	assert.Equal(t, "/", got.body["secretPath"])
 }
 
@@ -96,7 +96,7 @@ func TestEnsureFolderPathCreatesEachLevel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := ensureFolderPath(context.Background(), srv.URL, "tok", "ws", "prod", "/ghost/infra")
+	err := authed(srv.URL).ensureFolderPath(context.Background(), "ws", "prod", "/ghost/infra")
 	require.NoError(t, err)
 
 	require.Len(t, reqs, 2)
@@ -113,6 +113,6 @@ func TestEnsureFolderPathRootIsNoop(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	require.NoError(t, ensureFolderPath(context.Background(), srv.URL, "tok", "ws", "prod", "/"))
-	require.NoError(t, ensureFolderPath(context.Background(), srv.URL, "tok", "ws", "prod", ""))
+	require.NoError(t, authed(srv.URL).ensureFolderPath(context.Background(), "ws", "prod", "/"))
+	require.NoError(t, authed(srv.URL).ensureFolderPath(context.Background(), "ws", "prod", ""))
 }
