@@ -129,8 +129,9 @@ func (*InfisicalIdentity) Delete(
 func adoptOrCreateIdentity(ctx context.Context, siteURL, token, orgId, name string) (string, error) {
 	// limit is set high so adoption sees every identity in one page; without it a
 	// large org could paginate, miss the existing identity, and create a duplicate
-	// on every deploy. Confirm the page shape against a real instance at E2E.
-	listURL := siteURL + "/api/v1/organizations/" + orgId + "/identity-memberships?limit=10000"
+	// on every deploy (max page size is 20000). This is the v2 org identity-
+	// memberships route — the v1 path does not exist and 404s ("Route not found").
+	listURL := siteURL + "/api/v2/organizations/" + orgId + "/identity-memberships?limit=10000"
 	data, status, err := infisicalDo(ctx, http.MethodGet, listURL, token, nil)
 	if err != nil {
 		return "", err

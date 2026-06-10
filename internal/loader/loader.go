@@ -109,14 +109,17 @@ func LoadVariablesLenient(env, dir string) (types.EnvironmentVariables, error) {
 	return loadVariables(env, dir, true)
 }
 
-// loadRegionTable parses resources/<env>/regions.yaml, substituting ${ENV_VAR}
-// references in every value (notably the provider credentials) — the same
-// substitution loadVariables applies to variables.yaml. Without this, a literal
-// `apiToken: ${HCLOUD_TOKEN}` reaches the provider verbatim. When lenient is
-// false, a missing/empty referenced env var is an error; when true, it is
-// replaced with an empty string so structural validation can run without
-// credentials. A missing file yields an empty table and nil global.
-func loadRegionTable(env, dir string, lenient bool) (regions.Table, *regions.Global, error) {
+// loadRegionTable parses resources/<env>/regions.yaml: the per-region table and
+// optional global block. When substitute is true, ${ENV_VAR} references in every
+// value (notably the provider credentials) are resolved — the same substitution
+// loadVariables applies to variables.yaml — and a missing/empty referenced env
+// var is an error; without it a literal `apiToken: ${HCLOUD_TOKEN}` would reach
+// the provider verbatim. When substitute is false, the references are left as
+// literals: structural validation reads only the shape (slugs, providers, dns
+// authority presence), not credential values, so it must not require — nor be
+// tripped by the absence of — a real env var. A missing file yields an empty
+// table and nil global.
+func loadRegionTable(env, dir string, substitute bool) (regions.Table, *regions.Global, error) {
 	path := filepath.Join(envDir(env, dir), "regions.yaml")
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -129,11 +132,13 @@ func loadRegionTable(env, dir string, lenient bool) (regions.Table, *regions.Glo
 	if err := yaml.Unmarshal(b, &raw); err != nil {
 		return nil, nil, fmt.Errorf("parse regions table: %w", err)
 	}
-	subbed, err := substituteEnvVars(raw, lenient)
-	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", path, err)
+	if substitute {
+		raw, err = substituteEnvVars(raw, false)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", path, err)
+		}
 	}
-	rb, err := yaml.Marshal(subbed)
+	rb, err := yaml.Marshal(raw)
 	if err != nil {
 		return nil, nil, fmt.Errorf("re-encode regions table: %w", err)
 	}
@@ -152,16 +157,20 @@ func loadRegionTable(env, dir string, lenient bool) (regions.Table, *regions.Glo
 // plus the optional region-less `global:` block. regions.yaml is the single
 // authority for which regions deploy and all provider config. ${ENV_VAR}
 // references (e.g. provider credentials) are substituted; a missing one is an
-// error. Use LoadRegionTableLenient for credential-free structural validation.
+// error. Use LoadRegionTableRaw for credential-free structural validation.
 func LoadRegionTable(env, dir string) (regions.Table, *regions.Global, error) {
-	return loadRegionTable(env, dir, false)
+	return loadRegionTable(env, dir, true)
 }
 
-// LoadRegionTableLenient is like LoadRegionTable but replaces a missing ${ENV_VAR}
-// with an empty string rather than erroring. Use this for structural validation
-// that does not require actual credential values.
-func LoadRegionTableLenient(env, dir string) (regions.Table, *regions.Global, error) {
-	return loadRegionTable(env, dir, true)
+// LoadRegionTableRaw is like LoadRegionTable but leaves ${ENV_VAR} references as
+// literals instead of substituting them. Use this for structural validation,
+// which checks the region/provider shape (including that a declared dns
+// authority carries a zone) without needing — or being tripped by the absence
+// of — real credential values: an unset `zone: ${CLOUDFLARE_ZONE_ID}` stays a
+// non-empty literal and passes the presence check, while a genuinely empty zone
+// is still caught.
+func LoadRegionTableRaw(env, dir string) (regions.Table, *regions.Global, error) {
+	return loadRegionTable(env, dir, false)
 }
 
 // LoadSizeTable returns the size table for an environment: the per-env

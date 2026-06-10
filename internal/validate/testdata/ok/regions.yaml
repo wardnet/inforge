@@ -3,7 +3,11 @@ regions:
     slug: use1
     dns:
       provider: cloudflare
-      zone: test-zone
+      # Regression guard: an unset ${ENV_VAR} zone must still pass structural
+      # validation (raw load keeps the literal ref; it is not emptied to "" and
+      # so does not read as a missing zone). This env var is intentionally never
+      # set in tests.
+      zone: ${INFORGE_TEST_OK_ZONE}
     providers:
       hetzner:
         apiToken: test-token

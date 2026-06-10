@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -79,48 +81,64 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 		return fmt.Errorf("set stack config: %w", err)
 	}
 
-	if format == "json" {
-		// JSON mode: route Pulumi progress to stderr so stdout carries only the
-		// JSON summary (> /tmp/deploy.json in CI).
-		result, upErr := s.Up(ctx,
-			optup.ProgressStreams(os.Stderr),
-			optup.ErrorProgressStreams(os.Stderr),
-		)
-		if upErr != nil {
-			return fmt.Errorf("deploy: %w", upErr)
-		}
-		if pushErr := pushState(); pushErr != nil {
-			return fmt.Errorf("push state: %w", pushErr)
-		}
-		counts := make(map[string]int)
-		if result.Summary.ResourceChanges != nil {
-			for op, n := range *result.Summary.ResourceChanges {
-				counts[string(op)] = n
-			}
-		}
-		return printChangeSummaryJSON(stackName, counts)
+	// A single Printer renders the engine's event stream — per-resource lines plus
+	// an end-of-run summary (counts + failures) — replacing Pulumi's raw progress
+	// tree. ProgressStreams is explicitly discarded so the tree never appears
+	// regardless of SDK defaults, and ErrorProgressStreams is captured into a
+	// buffer (never streamed live) so the two renderers can't duplicate each
+	// other's output. In human mode the Printer owns stdout; in JSON mode the
+	// machine summary owns stdout, so the human log goes to stderr.
+	jsonMode := format == "json"
+	humanW := io.Writer(os.Stdout)
+	if jsonMode {
+		humanW = os.Stderr
 	}
 
-	// Human mode: stream structured per-resource output.
 	// The buffered channel decouples the Pulumi engine's blocking event sends
 	// from the consumer goroutine so a slow writer never stalls the engine.
+	p := output.NewPrinter(humanW)
 	ch := output.NewEventChannel()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		output.Stream(ch, os.Stdout)
+		for ev := range ch {
+			p.Handle(ev)
+		}
 	}()
 
-	_, _ = fmt.Fprintf(os.Stdout, "Deploying (%s):\n\n", stackName)
+	if !jsonMode {
+		_, _ = fmt.Fprintf(os.Stdout, "Deploying (%s):\n\n", stackName)
+	}
+	var errBuf bytes.Buffer
 	_, upErr := s.Up(ctx,
 		optup.EventStreams(ch),
-		optup.ErrorProgressStreams(os.Stderr),
+		optup.ProgressStreams(io.Discard),
+		optup.ErrorProgressStreams(&errBuf),
 	)
 	wg.Wait()
+	p.Finish()
 
 	if upErr != nil {
+		// Still emit the JSON summary on failure so the deploy workflow's report
+		// renders the counts and the failure list (stdout is otherwise empty).
+		if jsonMode {
+			_ = printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
+		}
+		// A per-resource failure is already explained in the Printer summary; only
+		// dump the raw engine error stream when nothing else accounts for the
+		// failure (e.g. a config error or plugin crash before any resource op).
+		if len(p.Failures()) == 0 && errBuf.Len() > 0 {
+			_, _ = fmt.Fprint(os.Stderr, errBuf.String())
+		}
 		return fmt.Errorf("deploy: %w", upErr)
 	}
-	return pushState()
+
+	if pushErr := pushState(); pushErr != nil {
+		return fmt.Errorf("push state: %w", pushErr)
+	}
+	if jsonMode {
+		return printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
+	}
+	return nil
 }

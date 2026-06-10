@@ -104,6 +104,10 @@ func TestLoadGlobalResourcesMissing(t *testing.T) {
 // TestLoadRegionTableFromFile exercises the nested regions.yaml: the per-region
 // slug + provider config under `regions:`, plus the optional `global:` block.
 func TestLoadRegionTableFromFile(t *testing.T) {
+	// The ok fixture's dns.zone is an ${ENV_VAR} ref; the strict (deploy) load
+	// resolves it, so the var must be set here. Validation loads the same fixture
+	// raw and deliberately leaves it unset (see TestValidateResourcesOK).
+	t.Setenv("INFORGE_TEST_OK_ZONE", "test-zone")
 	rt, global, err := LoadRegionTable("ok", testdataDir)
 	require.NoError(t, err)
 	slug, err := rt.Slug("us-east-1")
@@ -173,15 +177,17 @@ func TestLoadRegionTableMissingEnvVarErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "missing required env var")
 }
 
-// TestLoadRegionTableLenient: the lenient load (used by validation) replaces an
-// unset credential with "" so structural validation runs without credentials.
-func TestLoadRegionTableLenient(t *testing.T) {
+// TestLoadRegionTableRaw: the raw load (used by validation) leaves a ${ENV_VAR}
+// reference as a literal — even when the env var is unset — so structural
+// validation runs without credentials and an unresolved credential never reads
+// as an (empty) missing value.
+func TestLoadRegionTableRaw(t *testing.T) {
 	t.Setenv("INFORGE_TEST_HCLOUD_TOKEN", "")
 	dir := writeRegionsYAML(t)
 
-	rt, _, err := LoadRegionTableLenient("prd", dir)
+	rt, _, err := LoadRegionTableRaw("prd", dir)
 	require.NoError(t, err)
-	assert.Equal(t, "", rt["us-east-1"].Providers["hetzner"]["apiToken"])
+	assert.Equal(t, "${INFORGE_TEST_HCLOUD_TOKEN}", rt["us-east-1"].Providers["hetzner"]["apiToken"])
 }
 
 // TestLoadSizeTableFromFile exercises the on-disk size table: a YAML list of

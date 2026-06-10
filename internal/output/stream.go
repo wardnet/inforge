@@ -1,7 +1,9 @@
 // Package output formats Pulumi engine events into structured human-readable
 // output for the inforge CLI. It is used in place of ProgressStreams so that
-// resource operations and errors are presented clearly without the full Pulumi
-// progress tree.
+// resource operations, failures, and an end-of-run summary are presented
+// clearly without the full Pulumi progress tree (and without the duplication
+// that results from pointing ProgressStreams and ErrorProgressStreams at the
+// same writer).
 package output
 
 import (
@@ -25,89 +27,231 @@ func NewEventChannel() chan events.EngineEvent {
 	return make(chan events.EngineEvent, eventBufSize)
 }
 
-// Stream reads Pulumi engine events from ch and writes formatted output to w.
-// It blocks until ch is closed. Intended to run in a goroutine alongside
-// s.Up() or s.Preview().
-func Stream(ch <-chan events.EngineEvent, w io.Writer) {
-	for ev := range ch {
-		if ev.Error != nil {
-			_, _ = fmt.Fprintf(w, "  error: %v\n", ev.Error)
-			continue
-		}
-		dispatch(ev.EngineEvent, w)
+// Failure describes a resource whose create/update/delete operation failed. It
+// is also serialised into the --output json summary so the deploy workflow can
+// report failures, not just success counts.
+type Failure struct {
+	Op      string `json:"op"`
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Message string `json:"message,omitempty"`
+}
+
+// Printer formats Pulumi engine events into human-readable output and records
+// the run outcome — per-op change counts (from the engine's SummaryEvent) and
+// per-resource failures — so it can print a consolidated end-of-run summary and
+// expose the structured failure list.
+//
+// A Printer consumes exactly one run's event stream. Its methods are not safe
+// for concurrent use: drive Handle from a single goroutine, and call Finish,
+// Changes, or Failures only after that goroutine has drained the channel.
+type Printer struct {
+	w       io.Writer
+	summary *apitype.SummaryEvent
+	// completed tallies finished operations from ResOutputsEvent as they arrive
+	// (OpSame and system resources excluded). This is the authoritative count of
+	// what actually completed: it is emitted per resource regardless of whether
+	// the run reaches a final SummaryEvent, so a run that aborts mid-way still
+	// reports the resources that did succeed. SummaryEvent is used only as a
+	// fallback when no ResOutputsEvents were seen (e.g. a preview that emits a
+	// summary but no per-resource outputs).
+	completed map[apitype.OpType]int
+	failures  []Failure
+	// errByURN holds the most recent error diagnostic message per resource URN.
+	// A ResOpFailedEvent carries no message of its own — the root cause arrives
+	// just before it as a DiagnosticEvent — so we stash it here and attach it
+	// when the failure event lands.
+	errByURN map[string]string
+}
+
+// NewPrinter returns a Printer that writes formatted output to w.
+func NewPrinter(w io.Writer) *Printer {
+	return &Printer{
+		w:         w,
+		completed: map[apitype.OpType]int{},
+		errByURN:  map[string]string{},
 	}
 }
 
-func dispatch(ev apitype.EngineEvent, w io.Writer) {
+// Stream drives a Printer over ch until it is closed, then prints the summary.
+// Retained for callers that only need the rendered output and not the
+// structured change counts / failure list.
+func Stream(ch <-chan events.EngineEvent, w io.Writer) {
+	p := NewPrinter(w)
+	for ev := range ch {
+		p.Handle(ev)
+	}
+	p.Finish()
+}
+
+// Handle processes a single engine event: it prints per-resource progress and
+// inline diagnostics, and accumulates the success/failure tallies Finish prints.
+func (p *Printer) Handle(ev events.EngineEvent) {
+	if ev.Error != nil {
+		_, _ = fmt.Fprintf(p.w, "  error: %v\n", ev.Error)
+		return
+	}
+	e := ev.EngineEvent
 	switch {
-	case ev.ResourcePreEvent != nil:
-		pre := ev.ResourcePreEvent
-		if isSystemResource(pre.Metadata.Type) || pre.Metadata.Op == apitype.OpSame {
+	case e.ResourcePreEvent != nil:
+		m := e.ResourcePreEvent.Metadata
+		if isSystemResource(m.Type) || m.Op == apitype.OpSame {
 			return
 		}
-		_, _ = fmt.Fprintf(w, "  %s %-36s  %s\n",
-			opSymbol(pre.Metadata.Op),
-			shortType(pre.Metadata.Type),
-			urnName(pre.Metadata.URN),
-		)
+		_, _ = fmt.Fprintf(p.w, "  %s %-36s  %s\n",
+			opSymbol(m.Op), shortType(m.Type), urnName(m.URN))
 
-	case ev.DiagnosticEvent != nil:
-		diag := ev.DiagnosticEvent
-		if diag.Ephemeral {
+	case e.ResOutputsEvent != nil:
+		m := e.ResOutputsEvent.Metadata
+		if isSystemResource(m.Type) || m.Op == apitype.OpSame {
 			return
 		}
-		switch diag.Severity {
+		p.completed[m.Op]++
+
+	case e.ResOpFailedEvent != nil:
+		m := e.ResOpFailedEvent.Metadata
+		if isSystemResource(m.Type) {
+			return
+		}
+		p.failures = append(p.failures, Failure{
+			Op:      string(m.Op),
+			Type:    shortType(m.Type),
+			Name:    urnName(m.URN),
+			Message: p.errByURN[m.URN],
+		})
+
+	case e.DiagnosticEvent != nil:
+		d := e.DiagnosticEvent
+		if d.Ephemeral {
+			return
+		}
+		switch d.Severity {
 		case "error", "warning", "info#err":
-			msg := strings.TrimSpace(diag.Message)
-			if msg != "" {
-				_, _ = fmt.Fprintf(w, "      %s: %s\n", diag.Severity, msg)
+			msg := strings.TrimSpace(d.Message)
+			if msg == "" {
+				return
 			}
+			if d.Severity == "error" && d.URN != "" {
+				p.errByURN[d.URN] = firstLine(msg)
+			}
+			_, _ = fmt.Fprintf(p.w, "      %s: %s\n", d.Severity, msg)
 		}
 
-	case ev.StdoutEvent != nil:
+	case e.StdoutEvent != nil:
 		// StdoutEvent carries generic CLI-level messages from the Pulumi engine
 		// (plugin notices, auth warnings, deprecation notices). Print them so
 		// they are not silently lost.
-		msg := strings.TrimSpace(ev.StdoutEvent.Message)
-		if msg != "" {
-			_, _ = fmt.Fprintf(w, "  %s\n", msg)
+		if msg := strings.TrimSpace(e.StdoutEvent.Message); msg != "" {
+			_, _ = fmt.Fprintf(p.w, "  %s\n", msg)
 		}
 
-	case ev.SummaryEvent != nil:
-		printSummary(ev.SummaryEvent, w)
+	case e.SummaryEvent != nil:
+		p.summary = e.SummaryEvent
 	}
 }
 
-func printSummary(sum *apitype.SummaryEvent, w io.Writer) {
-	_, _ = fmt.Fprintln(w)
-	if len(sum.ResourceChanges) == 0 {
-		_, _ = fmt.Fprintln(w, "No changes.")
-		return
+// effectiveChanges returns the per-op counts to report: the live ResOutputsEvent
+// tally when any operation completed, otherwise the SummaryEvent's counts (with
+// OpSame and zero entries dropped). Preferring the live tally is what makes the
+// counts correct on an aborted run, where a final SummaryEvent may never arrive.
+func (p *Printer) effectiveChanges() map[apitype.OpType]int {
+	if len(p.completed) > 0 {
+		return p.completed
 	}
+	if p.summary == nil {
+		return nil
+	}
+	out := make(map[apitype.OpType]int, len(p.summary.ResourceChanges))
+	for op, n := range p.summary.ResourceChanges {
+		if op == apitype.OpSame || n == 0 {
+			continue
+		}
+		out[op] = n
+	}
+	return out
+}
 
-	// Print in semantic priority order (create → update → delete → replace).
-	// Iterate the fixed priority list so unknown future OpTypes appear last but
-	// consistently, regardless of their string value.
-	seen := make(map[apitype.OpType]bool)
+// Changes returns the per-op change counts (keyed by OpType string) for the
+// JSON summary, or nil if nothing changed. OpSame is omitted. See
+// effectiveChanges for the source.
+func (p *Printer) Changes() map[string]int {
+	changes := p.effectiveChanges()
+	if len(changes) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(changes))
+	for op, n := range changes {
+		out[string(op)] = n
+	}
+	return out
+}
+
+// Failures returns the resources whose operation failed during the run.
+func (p *Printer) Failures() []Failure { return p.failures }
+
+// abortBanner explains, after a failed run, that absence from the change counts
+// does not mean a resource is healthy — Pulumi stops a dependency chain at the
+// first error, so dependents of a failed resource are skipped, not applied.
+const abortBanner = "Update did not complete: the resources above failed, and any resources that\n" +
+	"depend on them were skipped (not created or updated). A resource missing from\n" +
+	"the counts above was not necessarily applied — fix the errors and re-run."
+
+// Finish prints the consolidated end-of-run summary: the per-op change counts,
+// a failed count and per-resource failure list (with the captured error), and —
+// when anything failed — the abort banner. Call exactly once, after the event
+// stream has been fully drained.
+func (p *Printer) Finish() {
+	preview := p.summary != nil && p.summary.IsPreview
+	changes := p.effectiveChanges()
+
+	_, _ = fmt.Fprintln(p.w)
+	_, _ = fmt.Fprintln(p.w, "Summary:")
+
+	// Fixed priority order (create → update → delete → replace) so the output is
+	// stable; any unknown future OpType prints last but consistently.
+	total := 0
+	seen := map[apitype.OpType]bool{}
 	ordered := []apitype.OpType{
-		apitype.OpCreate,
-		apitype.OpUpdate,
-		apitype.OpDelete,
-		apitype.OpCreateReplacement,
-		apitype.OpDeleteReplaced,
+		apitype.OpCreate, apitype.OpUpdate, apitype.OpDelete,
+		apitype.OpCreateReplacement, apitype.OpDeleteReplaced,
 	}
 	for _, op := range ordered {
-		if count, ok := sum.ResourceChanges[op]; ok && count > 0 {
-			_, _ = fmt.Fprintf(w, "  %d %s\n", count, opLabel(op))
+		if n := changes[op]; n > 0 {
+			_, _ = fmt.Fprintf(p.w, "  %s %d %s\n", opSymbol(op), n, opLabel(op, preview))
 			seen[op] = true
+			total += n
 		}
 	}
-	// Any OpType not in the known list (future additions) falls through here.
-	for op, count := range sum.ResourceChanges {
-		if !seen[op] && op != apitype.OpSame && count > 0 {
-			_, _ = fmt.Fprintf(w, "  %d %s\n", count, opLabel(op))
+	for op, n := range changes {
+		if !seen[op] && op != apitype.OpSame && n > 0 {
+			_, _ = fmt.Fprintf(p.w, "  %s %d %s\n", opSymbol(op), n, opLabel(op, preview))
+			total += n
 		}
 	}
+	if total == 0 && len(p.failures) == 0 {
+		_, _ = fmt.Fprintln(p.w, "  no changes")
+	}
+
+	if len(p.failures) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(p.w, "  ✗ %d failed\n\n", len(p.failures))
+	_, _ = fmt.Fprintln(p.w, "Failed:")
+	for _, f := range p.failures {
+		_, _ = fmt.Fprintf(p.w, "  ✗ %-36s  %s\n", f.Type, f.Name)
+		if f.Message != "" {
+			_, _ = fmt.Fprintf(p.w, "      %s\n", f.Message)
+		}
+	}
+	_, _ = fmt.Fprintln(p.w)
+	_, _ = fmt.Fprintln(p.w, abortBanner)
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
 }
 
 func opSymbol(op apitype.OpType) string {
@@ -125,18 +269,36 @@ func opSymbol(op apitype.OpType) string {
 	}
 }
 
-func opLabel(op apitype.OpType) string {
+// opLabel renders an OpType for the summary. preview selects future tense
+// ("to create") for `inforge preview`; an applied update reads past tense
+// ("created").
+func opLabel(op apitype.OpType, preview bool) string {
 	switch op {
 	case apitype.OpCreate:
-		return "to create"
+		if preview {
+			return "to create"
+		}
+		return "created"
 	case apitype.OpUpdate:
-		return "to update"
+		if preview {
+			return "to update"
+		}
+		return "updated"
 	case apitype.OpDelete:
-		return "to delete"
+		if preview {
+			return "to delete"
+		}
+		return "deleted"
 	case apitype.OpCreateReplacement:
-		return "to replace"
+		if preview {
+			return "to replace"
+		}
+		return "replaced"
 	case apitype.OpDeleteReplaced:
-		return "to delete (replaced)"
+		if preview {
+			return "to delete (replaced)"
+		}
+		return "deleted (replaced)"
 	default:
 		return string(op)
 	}
