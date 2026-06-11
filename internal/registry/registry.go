@@ -28,6 +28,9 @@ type ProviderRegistry interface {
 	DNS(name string) (types.DnsProvider, error)
 	Database(name string) (types.DatabaseProvider, error)
 	ServiceSecretsProvisioner(name string) (types.ServiceSecretsProvisioner, error)
+	// SecretsProviderName returns the name of the secrets provider configured
+	// for this region (e.g. "infisical"), or "" if none is configured.
+	SecretsProviderName() string
 }
 
 type registry struct {
@@ -209,6 +212,14 @@ func (r *registry) ServiceSecretsProvisioner(name string) (types.ServiceSecretsP
 	default:
 		return nil, unknownProvider(name)
 	}
+}
+
+func (r *registry) SecretsProviderName() string {
+	// Keep this list in sync with the cases in ServiceSecretsProvisioner.
+	if _, ok := r.config["infisical"]; ok {
+		return "infisical"
+	}
+	return ""
 }
 
 // infisicalAdapter lazily creates the shared InfisicalSecretsAdapter.

@@ -272,9 +272,6 @@ func loadResourceSet(base string) (types.Resources, error) {
 	if res.Database, err = loadType[types.DatabaseSpec](filepath.Join(base, "database")); err != nil {
 		return types.Resources{}, err
 	}
-	if res.Secrets, err = loadType[types.SecretsSpec](filepath.Join(base, "secrets")); err != nil {
-		return types.Resources{}, err
-	}
 	if res.Service, err = loadType[types.ServiceSpec](filepath.Join(base, "service")); err != nil {
 		return types.Resources{}, err
 	}

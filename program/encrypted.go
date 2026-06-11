@@ -30,18 +30,16 @@ func decryptEncryptedSecrets(res, globalRes types.Resources, dir, env string, dr
 	// key is stored (and decrypted) once per container.
 	wanted := map[string]map[string]bool{}
 	for _, set := range []types.Resources{res, globalRes} {
-		for _, spec := range set.Secrets {
-			for key, entry := range spec.Secrets {
-				src, err := validate.ParseSource(entry.Source)
-				if err != nil || src.Kind != validate.SourceEncrypted {
-					// Malformed sources are validate's concern; resolveRef re-parses and
-					// reports them in context.
+		for _, svc := range set.Service {
+			for _, src := range svc.Secrets {
+				parsed, err := validate.ParseSource(src)
+				if err != nil || parsed.Kind != validate.SourceVault {
 					continue
 				}
-				if wanted[spec.Container] == nil {
-					wanted[spec.Container] = map[string]bool{}
+				if wanted[svc.Container] == nil {
+					wanted[svc.Container] = map[string]bool{}
 				}
-				wanted[spec.Container][key] = true
+				wanted[svc.Container][parsed.VaultKey] = true
 			}
 		}
 	}

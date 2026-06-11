@@ -105,20 +105,6 @@ type DatabaseSpec struct {
 	Owner     string `yaml:"owner"` // PostgreSQL role that owns the database
 }
 
-// SecretsEntry is one entry in a secrets resource, naming where the value comes
-// from via the source DSL (see internal/validate for the grammar).
-type SecretsEntry struct {
-	Source string `yaml:"source"`
-}
-
-// SecretsSpec is one secrets resource: a named set of secrets to materialise.
-type SecretsSpec struct {
-	Name      string                  `yaml:"name"`
-	Container string                  `yaml:"container"`
-	Provider  string                  `yaml:"provider"`
-	Secrets   map[string]SecretsEntry `yaml:"secrets"`
-}
-
 // DeployUserSpec configures the deploy user provisioned on a compute instance
 // at VM-init time. The SSH key material comes from SSHConfig.DeployPublicKey.
 type DeployUserSpec struct {
@@ -162,13 +148,14 @@ const (
 
 // ServiceSpec is one service resource — a workload hosted on a compute.
 type ServiceSpec struct {
-	Name      string        `yaml:"name"`
-	Container string        `yaml:"container"`
-	Provider  string        `yaml:"provider"`
-	Host      string        `yaml:"host"`              // FK -> an expanded compute specKey whose kind=vm
-	Type      string        `yaml:"type"`              // "raw" (built) | "container" (reserved)
-	User      string        `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
-	Ingress   []IngressSpec `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx
+	Name      string                  `yaml:"name"`
+	Container string                  `yaml:"container"`
+	Provider  string                  `yaml:"provider"`
+	Host      string                  `yaml:"host"`              // FK -> an expanded compute specKey whose kind=vm
+	Type      string                  `yaml:"type"`              // "raw" (built) | "container" (reserved)
+	User      string                  `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
+	Ingress   []IngressSpec           `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx
+	Secrets   map[string]string `yaml:"secrets,omitempty"` // optional runtime secrets: env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); provider derived from region
 }
 
 // IngressRoute is one typed inbound routing entry the host ingress proxy (nginx)
@@ -297,7 +284,7 @@ type ServiceSecretsBundle struct {
 // program needs to write the descriptor + host-key-encrypted credential. It
 // returns a nil bundle (no error) when the service has no secrets to deliver.
 type ServiceSecretsProvisioner interface {
-	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, res Resources, env, region string, all AllOutputs) (*ServiceSecretsBundle, error)
+	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, env, region string, all AllOutputs) (*ServiceSecretsBundle, error)
 }
 
 // ManifestContribution is a set of non-secret fields a contributor adds to a
@@ -335,6 +322,5 @@ type Resources struct {
 	Network  []NetworkSpec
 	Compute  []ComputeSpec
 	Database []DatabaseSpec
-	Secrets  []SecretsSpec
 	Service  []ServiceSpec
 }

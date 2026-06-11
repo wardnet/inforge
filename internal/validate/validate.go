@@ -133,7 +133,7 @@ func buildGlobalRefs(global types.Resources) *globalRefs {
 // globalHasResources reports whether the global slice declares any resource.
 func globalHasResources(g types.Resources) bool {
 	return len(g.Network)+len(g.Compute)+len(g.Database)+
-		len(g.Secrets)+len(g.Service) > 0
+		len(g.Service) > 0
 }
 
 // regionContext holds the foreign-key targets and tables a region's semantic
@@ -270,10 +270,6 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	if err != nil {
 		return err
 	}
-	secretsFiles, err := readFiles[types.SecretsSpec](filepath.Join(base, "secrets"))
-	if err != nil {
-		return err
-	}
 	serviceFiles, err := readFiles[types.ServiceSpec](filepath.Join(base, "service"))
 	if err != nil {
 		return err
@@ -377,9 +373,6 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	validateType(r, schemaSet["database"], databaseFiles, func(s types.DatabaseSpec) ([]string, []string) {
 		return checkDatabase(s, ctx)
 	})
-	validateType(r, schemaSet["secrets"], secretsFiles, func(s types.SecretsSpec) ([]string, []string) {
-		return checkSecrets(s, ctx)
-	})
 	validateType(r, schemaSet["service"], serviceFiles, func(s types.ServiceSpec) ([]string, []string) {
 		return checkService(s, ctx)
 	})
@@ -408,7 +401,7 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 
 // compileSchemas compiles every embedded JSON Schema, keyed by resource type.
 func compileSchemas() (map[string]*jsonschema.Schema, error) {
-	names := []string{"network", "compute", "database", "secrets", "service"}
+	names := []string{"network", "compute", "database", "service"}
 	c := jsonschema.NewCompiler()
 	for _, n := range names {
 		b, err := schemas.FS.ReadFile(n + ".json")
@@ -570,11 +563,6 @@ func collectProviderRefs(base string) ([]providerRef, error) {
 	} else {
 		refs = append(refs, rs...)
 	}
-	if rs, err := refsOf[types.SecretsSpec](filepath.Join(base, "secrets"), func(s types.SecretsSpec) string { return s.Provider }); err != nil {
-		return nil, err
-	} else {
-		refs = append(refs, rs...)
-	}
 	if rs, err := refsOf[types.ServiceSpec](filepath.Join(base, "service"), func(s types.ServiceSpec) string { return s.Provider }); err != nil {
 		return nil, err
 	} else {
@@ -718,61 +706,6 @@ func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []strin
 	return errs, warns
 }
 
-func checkSecrets(s types.SecretsSpec, ctx regionContext) (errs, warns []string) {
-	errs = append(errs, providerErr(s.Provider, ctx.available)...)
-	// Iterate entries in a stable order for deterministic output.
-	keys := make([]string, 0, len(s.Secrets))
-	for k := range s.Secrets {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		// A secret key is also the env var name the bootstrapper sets, so it must not
-		// claim the reserved INFORGE_* namespace inforge injects (the deployment
-		// context) — that would collide with an injected var at runtime.
-		if strings.HasPrefix(k, bootstrapper.ReservedEnvPrefix) {
-			errs = append(errs, fmt.Sprintf("%s: env var name uses the reserved %s* namespace owned by inforge", k, bootstrapper.ReservedEnvPrefix))
-		}
-		src := s.Secrets[k].Source
-		parsed, err := ParseSource(src)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %s", k, err.Error()))
-			continue
-		}
-		// An encrypted source's value must already exist in the committed store —
-		// fail at validate time, not at deploy, when the fix (run `inforge secret
-		// set` and commit) is cheapest.
-		if parsed.Kind == SourceEncrypted {
-			if ctx.encStore == nil {
-				errs = append(errs, fmt.Sprintf("%s: source is encrypted but resources/<env>/%s does not exist — run `inforge secret init <env>`, then `inforge secret set <env> <service> %s`", k, secretstore.FileName, k))
-			} else if _, ok := ctx.encStore.Get(s.Container, k); !ok {
-				errs = append(errs, fmt.Sprintf("%s: no ciphertext for container %q in %s — run `inforge secret set <env> <service> %s` and commit the store", k, s.Container, secretstore.FileName, k))
-			}
-			continue
-		}
-		if parsed.Kind != SourceRef {
-			continue
-		}
-		switch parsed.RefType {
-		case "database":
-			if parsed.RefOutput != "connectionUrl" {
-				errs = append(errs, fmt.Sprintf("%s: unknown database output %q (want connectionUrl)", k, parsed.RefOutput))
-			}
-			if !ctx.databaseNames[parsed.RefName] {
-				errs = append(errs, fmt.Sprintf("%s: database %q not found", k, parsed.RefName))
-			}
-		case "compute":
-			if parsed.RefOutput != "publicIp" {
-				errs = append(errs, fmt.Sprintf("%s: unknown compute output %q (want publicIp)", k, parsed.RefOutput))
-			}
-			if _, ok := ctx.computeKind[parsed.RefName]; !ok {
-				errs = append(errs, fmt.Sprintf("%s: compute %q does not resolve to a compute instance", k, parsed.RefName))
-			}
-		}
-	}
-	return errs, warns
-}
-
 func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string) {
 	errs = append(errs, providerErr(s.Provider, ctx.available)...)
 	// A service on a global host (host: global/<name>) is rejected: a service that
@@ -866,6 +799,53 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 				if in.Listen == 80 && ctx.tlsTermIngressByHost[host] {
 					errs = append(errs, fmt.Sprintf("ingress: forward on :80 conflicts with a tls-termination on host %q (ACME owns :80 for HTTP-01 challenges)", s.Host))
 				}
+			}
+		}
+	}
+	// Validate inline secrets: key namespace, source DSL, vault store presence.
+	// Provider is not checked here — it is derived from the region config and
+	// validated as part of provider availability checks, not per-secret.
+	secKeys := make([]string, 0, len(s.Secrets))
+	for k := range s.Secrets {
+		secKeys = append(secKeys, k)
+	}
+	sort.Strings(secKeys)
+	for _, k := range secKeys {
+		if strings.HasPrefix(k, bootstrapper.ReservedEnvPrefix) {
+			errs = append(errs, fmt.Sprintf("secrets.%s: env var name uses the reserved %s* namespace owned by inforge", k, bootstrapper.ReservedEnvPrefix))
+		}
+		parsed, err := ParseSource(s.Secrets[k])
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("secrets.%s: %s", k, err.Error()))
+			continue
+		}
+		if parsed.Kind == SourceVault {
+			// A vault source's ciphertext must already exist in the committed store —
+			// fail at validate time so the fix is cheap (run inforge secret set, commit).
+			if ctx.encStore == nil {
+				errs = append(errs, fmt.Sprintf("secrets.%s: source is vault but resources/<env>/%s does not exist — run `inforge secret init <env>`, then `inforge secret set <env> %s %s`", k, secretstore.FileName, s.Name, parsed.VaultKey))
+			} else if _, ok := ctx.encStore.Get(s.Container, parsed.VaultKey); !ok {
+				errs = append(errs, fmt.Sprintf("secrets.%s: no ciphertext for key %q in container %q in %s — run `inforge secret set <env> %s %s` and commit", k, parsed.VaultKey, s.Container, secretstore.FileName, s.Name, parsed.VaultKey))
+			}
+			continue
+		}
+		if parsed.Kind != SourceRef {
+			continue
+		}
+		switch parsed.RefType {
+		case "database":
+			if parsed.RefOutput != "connectionUrl" {
+				errs = append(errs, fmt.Sprintf("secrets.%s: unknown database output %q (want connectionUrl)", k, parsed.RefOutput))
+			}
+			if !ctx.databaseNames[parsed.RefName] {
+				errs = append(errs, fmt.Sprintf("secrets.%s: database %q not found", k, parsed.RefName))
+			}
+		case "compute":
+			if parsed.RefOutput != "publicIp" {
+				errs = append(errs, fmt.Sprintf("secrets.%s: unknown compute output %q (want publicIp)", k, parsed.RefOutput))
+			}
+			if _, ok := ctx.computeKind[parsed.RefName]; !ok {
+				errs = append(errs, fmt.Sprintf("secrets.%s: compute %q does not resolve to a compute instance", k, parsed.RefName))
 			}
 		}
 	}

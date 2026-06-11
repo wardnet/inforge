@@ -352,10 +352,3 @@ func TestRenderDescriptorSecretLess(t *testing.T) {
 	assert.Equal(t, "prd.use1.ghost", d.Deployment.Namespace)
 }
 
-func TestServiceSecretsProviderName(t *testing.T) {
-	res := types.Resources{
-		Secrets: []types.SecretsSpec{{Container: "ghost", Provider: "infisical"}},
-	}
-	assert.Equal(t, "infisical", serviceSecretsProviderName(types.ServiceSpec{Container: "ghost"}, res))
-	assert.Equal(t, "", serviceSecretsProviderName(types.ServiceSpec{Container: "other"}, res))
-}

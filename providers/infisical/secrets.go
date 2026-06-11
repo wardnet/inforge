@@ -154,13 +154,9 @@ func New(clientId, clientSecret, siteUrl, organizationId, slug string) *Infisica
 // path and identity (the container's secrets are broadcast to every consuming
 // service), so a leaked credential exposes only that one service's path.
 func (a *InfisicalSecretsAdapter) ProvisionService(
-	ctx *pulumi.Context, svc types.ServiceSpec, res types.Resources, env, region string, all types.AllOutputs,
+	ctx *pulumi.Context, svc types.ServiceSpec, env, region string, all types.AllOutputs,
 ) (*types.ServiceSecretsBundle, error) {
-	entries, err := infraSecretEntries(svc, res)
-	if err != nil {
-		return nil, err
-	}
-	if len(entries) == 0 {
+	if len(svc.Secrets) == 0 {
 		return nil, nil
 	}
 
@@ -172,19 +168,29 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 	secretPath := "/" + svc.Name
 	infraPath := secretPath + "/infra"
 
-	keys := sortedStringKeys(entries)
-	ifaces := make([]interface{}, len(keys))
+	// Pre-compute the Infisical key for each env var. For vault: sources the key
+	// stored in Infisical is the VaultKey (decoupled from the env var name); for
+	// all other sources the env var name doubles as the Infisical key.
+	keys := sortedStringKeys(svc.Secrets)
+	infisicalKeys := make([]string, len(keys))
+	ifaces := make([]any, len(keys))
 	for i, key := range keys {
-		resolved, err := resolveRef(key, entries[key].Source, svc.Container, region, all)
+		src, _ := validate.ParseSource(svc.Secrets[key])
+		if src.Kind == validate.SourceVault {
+			infisicalKeys[i] = src.VaultKey
+		} else {
+			infisicalKeys[i] = key
+		}
+		resolved, err := resolveRef(svc.Secrets[key], svc.Container, region, all)
 		if err != nil {
 			return nil, fmt.Errorf("resolve ref for service %q secret %q: %w", svc.Name, key, err)
 		}
 		ifaces[i] = resolved
 	}
-	secretsJson := pulumi.All(ifaces...).ApplyT(func(args []interface{}) (string, error) {
-		m := make(map[string]string, len(keys))
-		for i, key := range keys {
-			m[key] = args[i].(string)
+	secretsJson := pulumi.All(ifaces...).ApplyT(func(args []any) (string, error) {
+		m := make(map[string]string, len(infisicalKeys))
+		for i, k := range infisicalKeys {
+			m[k] = args[i].(string)
 		}
 		b, err := json.Marshal(m)
 		if err != nil {
@@ -212,8 +218,8 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 	}
 
 	envMap := make(map[string]string, len(keys))
-	for _, key := range keys {
-		envMap[key] = "infra/" + key
+	for i, key := range keys {
+		envMap[key] = "infra/" + infisicalKeys[i]
 	}
 
 	return &types.ServiceSecretsBundle{
@@ -226,29 +232,6 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 		SecretPath:   secretPath,
 		Env:          envMap,
 	}, nil
-}
-
-// infraSecretEntries returns the secret entries a service consumes, merged from
-// every infisical SecretsSpec in the service's container. The map key is both the
-// vault key written under infra/ and the env var name the bootstrapper sets, so
-// all services in a container share the same secret set (broadcast semantics —
-// the schema links services to secrets only by container). Two specs in the same
-// container declaring the same key is ambiguous (which value wins?), so it is an
-// error rather than a silent last-write-wins.
-func infraSecretEntries(svc types.ServiceSpec, res types.Resources) (map[string]types.SecretsEntry, error) {
-	out := map[string]types.SecretsEntry{}
-	for _, s := range res.Secrets {
-		if s.Container != svc.Container || s.Provider != "infisical" {
-			continue
-		}
-		for k, v := range s.Secrets {
-			if _, dup := out[k]; dup {
-				return nil, fmt.Errorf("service %q: secret key %q is declared by more than one secrets spec in container %q", svc.Name, k, svc.Container)
-			}
-			out[k] = v
-		}
-	}
-	return out, nil
 }
 
 // ensureWorkspace returns the workspaceId output for the (container, env)
@@ -300,10 +283,10 @@ func envToSlug(env string) string {
 // slot (all.Database["global"] / all.Compute["global"]) regardless of the
 // service's own region. The lookup region and the bare name are derived once here.
 //
-// key and container address an `encrypted` source's value in all.Encrypted —
-// the program decrypts the env's committed store once, provider-neutrally, and
-// this adapter only ever sees plaintext (ADR-0017).
-func resolveRef(key, source, container, region string, all types.AllOutputs) (pulumi.StringOutput, error) {
+// container addresses a vault: source's value in all.Encrypted — the program
+// decrypts the env's committed store once, provider-neutrally, and this adapter
+// only ever sees plaintext (ADR-0017).
+func resolveRef(source, container, region string, all types.AllOutputs) (pulumi.StringOutput, error) {
 	src, err := validate.ParseSource(source)
 	if err != nil {
 		return pulumi.StringOutput{}, err
@@ -325,19 +308,18 @@ func resolveRef(key, source, container, region string, all types.AllOutputs) (pu
 		}
 		return pulumi.String(val).ToStringOutput(), nil
 
-	case validate.SourceStatic:
-		return pulumi.String(src.StaticValue).ToStringOutput(), nil
+	case validate.SourceLiteral:
+		return pulumi.String(src.LiteralValue).ToStringOutput(), nil
 
-	case validate.SourceEncrypted:
-		val, ok := all.Encrypted[container][key]
+	case validate.SourceVault:
+		val, ok := all.Encrypted[container][src.VaultKey]
 		if !ok {
 			return pulumi.StringOutput{}, fmt.Errorf(
-				"resolveRef %q: no decrypted value for container %q key %q — is the entry in resources/<env>/secrets.enc.yaml and %s set?",
-				source, container, key, secretstore.IdentityEnvVar)
+				"resolveRef %q: no decrypted value for vault key %q in container %q — is it in resources/<env>/secrets.enc.yaml and %s set?",
+				source, src.VaultKey, container, secretstore.IdentityEnvVar)
 		}
 		// Marked secret so the plaintext is encrypted in Pulumi state and masked
-		// in console/diff output (the other kinds reference values that already
-		// live elsewhere; this one exists only as ciphertext in git).
+		// in console/diff output.
 		return pulumi.ToSecret(pulumi.String(val)).(pulumi.StringOutput), nil
 
 	case validate.SourceRef:

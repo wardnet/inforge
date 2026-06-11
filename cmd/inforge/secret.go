@@ -409,8 +409,8 @@ func resolveServiceContainer(dir, env, svcName string) (string, []types.ServiceS
 	return container, siblings, nil
 }
 
-// declaredEncryptedKeys returns the KEYs declared with `source: encrypted` for
-// a container across the env's regional and global secrets specs.
+// declaredEncryptedKeys returns the vault key names declared with `vault:KEY`
+// for a container across the env's regional and global service specs.
 func declaredEncryptedKeys(dir, env, container string) (map[string]bool, error) {
 	declared := map[string]bool{}
 	for _, load := range []func(string, string) (types.Resources, error){loader.LoadResources, loader.LoadGlobalResources} {
@@ -418,13 +418,13 @@ func declaredEncryptedKeys(dir, env, container string) (map[string]bool, error) 
 		if err != nil {
 			return nil, err
 		}
-		for _, spec := range res.Secrets {
-			if spec.Container != container {
+		for _, svc := range res.Service {
+			if svc.Container != container {
 				continue
 			}
-			for key, entry := range spec.Secrets {
-				if src, err := validate.ParseSource(entry.Source); err == nil && src.Kind == validate.SourceEncrypted {
-					declared[key] = true
+			for _, src := range svc.Secrets {
+				if parsed, err := validate.ParseSource(src); err == nil && parsed.Kind == validate.SourceVault {
+					declared[parsed.VaultKey] = true
 				}
 			}
 		}

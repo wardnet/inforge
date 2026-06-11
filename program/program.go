@@ -386,16 +386,19 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 // deliverServiceDescriptor).
 func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, all types.AllOutputs, env, region string) (map[string]*types.ServiceSecretsBundle, error) {
 	bundles := map[string]*types.ServiceSecretsBundle{}
+	provName := reg.SecretsProviderName()
 	for _, svc := range res.Service {
-		provName := serviceSecretsProviderName(svc, res)
-		if provName == "" {
+		if len(svc.Secrets) == 0 {
 			continue
+		}
+		if provName == "" {
+			return nil, fmt.Errorf("service %q has secrets but region %q has no secrets provider configured", svc.Name, region)
 		}
 		prov, err := reg.ServiceSecretsProvisioner(provName)
 		if err != nil {
 			return nil, err
 		}
-		bundle, err := prov.ProvisionService(ctx, svc, res, env, region, all)
+		bundle, err := prov.ProvisionService(ctx, svc, env, region, all)
 		if err != nil {
 			return nil, fmt.Errorf("service %q: provision secrets: %w", svc.Name, err)
 		}
@@ -404,21 +407,6 @@ func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry,
 		}
 	}
 	return bundles, nil
-}
-
-// serviceSecretsProviderName returns the secrets provider a service's secrets are
-// delivered through — the provider of the first SecretsSpec in the service's
-// container — or "" when the container declares no secrets. It returns the
-// declared provider verbatim (not a hardcoded "infisical") so an unsupported
-// provider fails loudly at the registry lookup rather than being silently
-// skipped.
-func serviceSecretsProviderName(svc types.ServiceSpec, res types.Resources) string {
-	for _, s := range res.Secrets {
-		if s.Container == svc.Container {
-			return s.Provider
-		}
-	}
-	return ""
 }
 
 // deliverServiceSecrets writes a service's bootstrapper inputs onto its host: the
