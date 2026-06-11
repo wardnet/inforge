@@ -1,0 +1,12 @@
+name: web
+container: bridge
+provider: hetzner
+host: bridge-01
+type: raw
+user: web
+ingress:
+  # web shares listen 443 with api: two tls-termination services on one host are
+  # demuxed by nginx server_name (SNI), so a shared port is legal here.
+  - type: tls-termination
+    listen: 443
+    target: 3000

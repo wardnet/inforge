@@ -214,6 +214,11 @@ type DatabaseOutputs struct {
 type AllOutputs struct {
 	Compute  map[string]map[string]ComputeOutputs
 	Database map[string]map[string]DatabaseOutputs
+	// Encrypted maps container -> KEY -> plaintext for `source: encrypted`
+	// secrets, decrypted once per deploy from resources/<env>/secrets.enc.yaml
+	// (ADR-0017). Region-independent — the store is env-scoped. Nil when the
+	// environment declares no encrypted sources.
+	Encrypted map[string]map[string]string
 }
 
 // NetworkProvider creates a network for one spec in one region. Returns a map

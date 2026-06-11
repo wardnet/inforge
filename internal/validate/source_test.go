@@ -47,6 +47,12 @@ func TestParseSourceStatic(t *testing.T) {
 	}
 }
 
+func TestParseSourceEncrypted(t *testing.T) {
+	s, err := ParseSource("encrypted")
+	require.NoError(t, err)
+	assert.Equal(t, SourceEncrypted, s.Kind)
+}
+
 func TestParseSourceMalformed(t *testing.T) {
 	cases := []string{
 		"nonsense",
@@ -60,6 +66,8 @@ func TestParseSourceMalformed(t *testing.T) {
 		"ref:compute/bridge-01.", // empty output
 		"static:",                // empty static value
 		"value:",                 // empty value alias
+		"encrypted:foo",          // encrypted carries no payload — bare token only
+		"Encrypted",              // case-sensitive
 	}
 	for _, c := range cases {
 		_, err := ParseSource(c)

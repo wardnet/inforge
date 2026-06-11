@@ -254,7 +254,7 @@ func TestResolveRefGlobalDatabase(t *testing.T) {
 				"global":    {"shared": {ConnectionURL: pulumi.String("global-url").ToStringOutput()}},
 			},
 		}
-		out, err := resolveRef("ref:database/global/shared.connectionUrl", "us-east-1", all)
+		out, err := resolveRef("KEY", "ref:database/global/shared.connectionUrl", "container", "us-east-1", all)
 		require.NoError(t, err)
 		assert.Equal(t, "global-url", awaitString(t, out), "global/ must resolve against the global slot, not the service's region")
 		return nil
@@ -267,12 +267,12 @@ func TestResolveRefGlobalDatabase(t *testing.T) {
 func TestResolveRefStatic(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		for _, src := range []string{"static:info", "value:info"} {
-			out, err := resolveRef(src, "us-east-1", types.AllOutputs{})
+			out, err := resolveRef("KEY", src, "container", "us-east-1", types.AllOutputs{})
 			require.NoError(t, err)
 			assert.Equal(t, "info", awaitString(t, out), src)
 		}
 		// A value with special characters (URL) is preserved verbatim.
-		out, err := resolveRef("value:https://api.example.com:443/v1", "us-east-1", types.AllOutputs{})
+		out, err := resolveRef("KEY", "value:https://api.example.com:443/v1", "container", "us-east-1", types.AllOutputs{})
 		require.NoError(t, err)
 		assert.Equal(t, "https://api.example.com:443/v1", awaitString(t, out))
 		return nil
@@ -285,7 +285,7 @@ func TestResolveRefStatic(t *testing.T) {
 func TestResolveRefEnv(t *testing.T) {
 	t.Setenv("MY_ENV_SECRET", "s3cr3t-value")
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		out, err := resolveRef("${MY_ENV_SECRET}", "us-east-1", types.AllOutputs{})
+		out, err := resolveRef("KEY", "${MY_ENV_SECRET}", "container", "us-east-1", types.AllOutputs{})
 		require.NoError(t, err)
 		assert.Equal(t, "s3cr3t-value", awaitString(t, out))
 		return nil
@@ -297,7 +297,7 @@ func TestResolveRefEnv(t *testing.T) {
 // rather than silently materialising an empty secret.
 func TestResolveRefEnvUnsetErrors(t *testing.T) {
 	t.Setenv("INFORGE_TEST_ENV_UNSET", "")
-	_, err := resolveRef("${INFORGE_TEST_ENV_UNSET}", "us-east-1", types.AllOutputs{})
+	_, err := resolveRef("KEY", "${INFORGE_TEST_ENV_UNSET}", "container", "us-east-1", types.AllOutputs{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty or unset")
 }
@@ -310,7 +310,7 @@ func TestResolveRefGlobalCompute(t *testing.T) {
 				"global": {"edge-01": {PublicIP: pulumi.String("203.0.113.7").ToStringOutput()}},
 			},
 		}
-		out, err := resolveRef("ref:compute/global/edge-01.publicIp", "us-east-1", all)
+		out, err := resolveRef("KEY", "ref:compute/global/edge-01.publicIp", "container", "us-east-1", all)
 		require.NoError(t, err)
 		assert.Equal(t, "203.0.113.7", awaitString(t, out))
 		return nil
@@ -327,12 +327,66 @@ func TestResolveRefGlobalMissing(t *testing.T) {
 				"global": {},
 			},
 		}
-		_, err := resolveRef("ref:database/global/missing.connectionUrl", "us-east-1", all)
+		_, err := resolveRef("KEY", "ref:database/global/missing.connectionUrl", "container", "us-east-1", all)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `no database "missing" in region "global"`)
 		return nil
 	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
 	require.NoError(t, err)
+}
+
+// TestResolveRefEncrypted verifies an `encrypted` source serves the value the
+// program pre-decrypted into all.Encrypted, addressed by (container, KEY).
+func TestResolveRefEncrypted(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		all := types.AllOutputs{
+			Encrypted: map[string]map[string]string{"ghost": {"API_KEY": "plain-value"}},
+		}
+		out, err := resolveRef("API_KEY", "encrypted", "ghost", "us-east-1", all)
+		require.NoError(t, err)
+		assert.Equal(t, "plain-value", awaitString(t, out))
+		return nil
+	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
+	require.NoError(t, err)
+}
+
+// TestResolveRefEncryptedMissing verifies an `encrypted` source with no
+// pre-decrypted value fails loudly — the adapter never decrypts on its own.
+func TestResolveRefEncryptedMissing(t *testing.T) {
+	_, err := resolveRef("API_KEY", "encrypted", "ghost", "us-east-1", types.AllOutputs{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no decrypted value")
+}
+
+// TestProvisionServiceEncryptedSource verifies an encrypted source flows
+// through ProvisionService into the same env-var -> infra/<key> bundle mapping
+// as every other source kind.
+func TestProvisionServiceEncryptedSource(t *testing.T) {
+	mocks := newNamingMocks()
+	var bundle *types.ServiceSecretsBundle
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		adapter := New("cid", "csec", "", "", "use1")
+		res := types.Resources{
+			Secrets: []types.SecretsSpec{{
+				Name:      "ghost-secrets",
+				Container: "ghost",
+				Provider:  "infisical",
+				Secrets:   map[string]types.SecretsEntry{"API_KEY": {Source: "encrypted"}},
+			}},
+		}
+		svc := types.ServiceSpec{Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost"}
+		all := types.AllOutputs{
+			Encrypted: map[string]map[string]string{"ghost": {"API_KEY": "plain-value"}},
+		}
+		var err error
+		bundle, err = adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", all)
+		return err
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	assert.Equal(t, "/ghost/infra", mocks.captured[infisicalSecretsBatchType].inputs["secretPath"].StringValue())
+	require.NotNil(t, bundle)
+	assert.Equal(t, map[string]string{"API_KEY": "infra/API_KEY"}, bundle.Env)
 }
 
 // TestEnsureWorkspaceIdempotent verifies that the same (container, env) pair

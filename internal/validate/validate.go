@@ -21,6 +21,7 @@ import (
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/regions"
+	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/sizes"
 	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/schemas"
@@ -160,6 +161,11 @@ type regionContext struct {
 	// tls-termination ingress entry across its services — so a forward on :80
 	// (which ACME needs) can be rejected.
 	tlsTermIngressByHost map[string]bool
+	// encStore is the environment's committed encrypted secret store
+	// (resources/<env>/secrets.enc.yaml), nil when the file does not exist. A
+	// `source: encrypted` entry must have a ciphertext under (container, KEY);
+	// the check is presence-only so validation stays credential-free.
+	encStore *secretstore.Store
 }
 
 // ValidateResources validates the single shared resource set under <dir>/<env>/
@@ -200,6 +206,15 @@ func ValidateResources(env, dir string) error {
 
 	r := &reporter{}
 	base := filepath.Join(dir, env)
+	// The encrypted secret store is optional (absent until `inforge secret init`);
+	// a present-but-broken store is reported against its own path so the rest of
+	// the resource set still validates. One env-scoped store serves both slices —
+	// secrets are container-keyed, not region-keyed.
+	encStore, err := secretstore.Load(secretstore.Path(dir, env))
+	if err != nil && !errors.Is(err, secretstore.ErrNotFound) {
+		r.fail(secretstore.Path(dir, env), err.Error())
+		encStore = nil
+	}
 	globalBase := filepath.Join(base, "global")
 	checkVariables(r, vars, filepath.Join(base, "variables.yaml"))
 	checkRegionsFile(r, regionTable, global, filepath.Join(base, "regions.yaml"))
@@ -208,7 +223,7 @@ func ValidateResources(env, dir string) error {
 	// graph resolves only against global resources, so a global resource
 	// referencing a regional one fails as not-found — enforcing "global → global
 	// only". A global slice with resources but no global providers block is an error.
-	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil); err != nil {
+	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil, encStore); err != nil {
 		return err
 	}
 	if global == nil && globalHasResources(globalRes) {
@@ -219,7 +234,7 @@ func ValidateResources(env, dir string) error {
 	// graph, with the global outputs injected so a regional secrets `ref:` may
 	// resolve a global/<name> target. Provider availability is region-specific, so
 	// it is skipped here (available nil) and checked separately per region below.
-	if err := validateResourceSet(r, schemaSet, base, nil, sizeTable, buildGlobalRefs(globalRes)); err != nil {
+	if err := validateResourceSet(r, schemaSet, base, nil, sizeTable, buildGlobalRefs(globalRes), encStore); err != nil {
 		return err
 	}
 
@@ -241,7 +256,7 @@ func ValidateResources(env, dir string) error {
 	return nil
 }
 
-func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs) error {
+func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, encStore *secretstore.Store) error {
 	networkFiles, err := readFiles[types.NetworkSpec](filepath.Join(base, "network"))
 	if err != nil {
 		return err
@@ -290,6 +305,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		portUsersByHost:      map[string]map[int][]string{},
 		targetUsersByHost:    map[string]map[int][]string{},
 		tlsTermIngressByHost: map[string]bool{},
+		encStore:             encStore,
 	}
 	for _, f := range networkFiles {
 		ctx.networks[f.spec.Name] = f.spec
@@ -721,6 +737,17 @@ func checkSecrets(s types.SecretsSpec, ctx regionContext) (errs, warns []string)
 		parsed, err := ParseSource(src)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %s", k, err.Error()))
+			continue
+		}
+		// An encrypted source's value must already exist in the committed store —
+		// fail at validate time, not at deploy, when the fix (run `inforge secret
+		// set` and commit) is cheapest.
+		if parsed.Kind == SourceEncrypted {
+			if ctx.encStore == nil {
+				errs = append(errs, fmt.Sprintf("%s: source is encrypted but resources/<env>/%s does not exist — run `inforge secret init <env>`, then `inforge secret set <env> <service> %s`", k, secretstore.FileName, k))
+			} else if _, ok := ctx.encStore.Get(s.Container, k); !ok {
+				errs = append(errs, fmt.Sprintf("%s: no ciphertext for container %q in %s — run `inforge secret set <env> <service> %s` and commit the store", k, s.Container, secretstore.FileName, k))
+			}
 			continue
 		}
 		if parsed.Kind != SourceRef {

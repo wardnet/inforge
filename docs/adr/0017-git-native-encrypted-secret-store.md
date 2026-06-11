@@ -45,17 +45,19 @@ the provider only ever holds a *projection* inforge writes, changing the provide
 and re-running `inforge deploy` repopulates a fresh provider from git. The data was never canonically *in*
 the provider.
 
-**The provider also earns its keep beyond delivery, and `secret rotate` is why.** A common objection is
-that in a git-as-truth model you forfeit the provider's best everyday feature — rotate centrally without a
-full deploy. `inforge secret rotate` buys it back *without* breaking the invariant: it writes the new value
-to **both** git and the provider in one operation (git first — see Decisions), so the live service can pick
-it up on restart with no `inforge deploy`, while git stays canonical and the next deploy reconciles. Without
-a provider there is nothing to write the hot value into, so an emergency rotation would require re-keying
-ciphertext to every host and redeploying. So the provider's standing value in this model is concretely:
-(1) no secret values at rest on the host — only a revocable, least-privilege identity credential (ADR-0010);
-(2) deploy-free rotation that stays consistent with git (`secret rotate`); (3) audit of fetches; and
-(4) the option of dynamic/short-lived secrets later. Confidentiality from a host-root attacker is *not* on
-that list — nothing on the host can provide it, and this ADR does not pretend otherwise.
+**Value replacement rides the same single-writer path — deliberately.** An earlier draft of this ADR gave
+hot value replacement a "git-first dual-write": commit the new ciphertext, then write the provider directly
+so the value goes live without a deploy. That design is unsound under a protected main branch: git-first
+only orders the two writes on the operator's *clone*, while deploys read *main* — so between the direct
+provider write and the commit merging, any routine deploy from main **rolls the provider back to the old
+value**, silently re-exposing the credential just replaced. It would also have spread the deploy-grade
+provider credentials to operator machines. So replacing a value is git-only like every other store write:
+`set` (an upsert) updates the ciphertext, the change merges through a reviewed PR, the deploy on merge
+writes the provider, and `inforge service restart` makes the running service pick it up. The provider's standing
+value in this model is concretely: (1) no secret values at rest on the host — only a revocable,
+least-privilege identity credential (ADR-0010); (2) audit of fetches; and (3) the option of
+dynamic/short-lived secrets later. Confidentiality from a host-root attacker is *not* on that list —
+nothing on the host can provide it, and this ADR does not pretend otherwise.
 
 ## Decisions
 
@@ -70,9 +72,11 @@ that list — nothing on the host can provide it, and this ADR does not pretend 
   here.
 
 - **The store is age ciphertext in git, per environment.** Values live in the consumer repo at
-  `resources/<env>/secrets.enc.yaml` as a `container → { KEY → armored-age-ciphertext }` map. Per-value
-  encryption (not a single encrypted blob) so a diff shows exactly which secret changed and a single key can
-  be rotated independently.
+  `resources/<env>/secrets.enc.yaml`: a `recipient:` header (the env's committed public key) and a
+  `containers:` map of `container → { KEY → armored-age-ciphertext }`. Carrying the recipient in the store
+  file keeps each env's store self-contained — `set` knows what to encrypt to with no further configuration,
+  and `rotate <env>` swaps the recipient and re-encrypts in one file. Per-value encryption (not a single
+  encrypted blob) so a diff shows exactly which secret changed and a single value can be replaced independently.
 
 - **A committed age *recipient* (public key); a single private *identity* at deploy.** The consumer repo
   commits the age recipient (public key) so **anyone with commit access can add a secret with no private
@@ -94,23 +98,33 @@ that list — nothing on the host can provide it, and this ADR does not pretend 
   ciphertext or the master key. A future Vault provider reuses the same resolver unchanged. (This is the
   property that makes the headline provider-swap claim true.)
 
-- **`secret rotate` is a dual-write that keeps git canonical.** `inforge secret rotate <env> <service> <KEY>`
-  changes a secret *now*, without a full `inforge deploy`: it writes the new value to **git first** (commit
-  the new ciphertext), **then** to the provider. The order is load-bearing — git-first means a failed provider
-  write leaves git ahead and the next deploy reconciles git → provider; provider-first would risk the next
-  deploy silently reverting the provider to git's old value. `--generate` mints a fresh random value; otherwise
-  the value is read from stdin. Rotation updates the stored value but does **not** restart the running process,
-  so the service still holds the old value until it restarts — `rotate` restarts the affected service(s) (or
-  reports that a restart is required). Writing the provider needs the deploy-level provider write credentials;
-  writing git needs only the public recipient (never the master key). The direct provider write happens outside
-  a full `pulumi up`; git keeps it canonical and the next deploy reconciles Pulumi's state.
+- **The deploy is the provider's single writer; the CLI writes only git.** No `inforge secret` subcommand
+  touches the provider. `inforge secret set <env> <service> <KEY>` writes or replaces a value in the store
+  (`--generate` mints a fresh random value; otherwise the value is read from stdin) and the operator commits
+  and merges it like any other resources change; the deploy on merge projects it into the provider. This is
+  what makes the headline invariant *enforceable*: with exactly one writer ordered by main's history, the
+  provider can never be ahead of (or behind) the git state a deploy reads, and there is no window in which a
+  deploy reverts a hot value (see Context for why the dual-write variant had one). A replaced value reaches
+  the running process via `inforge service restart <env> <service>` after the deploy lands — services fetch
+  secrets at start (ADR-0010), so a restart is the pickup. Writing git needs only the public recipient
+  (never the master key and never provider credentials).
 
-- **`inforge secret` CLI takes env + service.** `set <env> <service> <KEY>` (reads the value from stdin,
-  encrypts to the recipient, writes ciphertext into the consumer repo's `resources/<env>/secrets.enc.yaml`),
-  `rotate <env> <service> <KEY> [--generate]` (above), plus `ls <env> <service>`, `rm <env> <service> <KEY>`,
-  and a repo-wide `rekey` (re-encrypt every env to a new recipient). The service argument resolves to its
-  container (secrets are container-scoped, broadcast to every service in the container). The CLI is the only
-  writer of the store. `static:` remains for non-secret inline config only.
+- **`rotate` rotates the master key pair, not a value.** `inforge secret rotate <env>` (alias `rekey` —
+  Vault's and the age/SOPS community's word for this) mints a new identity/recipient pair (or takes
+  `--recipient`), decrypts every stored value with the current `INFORGE_SECRETS_KEY` and re-encrypts to the
+  new recipient. Values are unchanged, so no deploy or restart is needed — just the GitHub secret update and
+  a commit. Replacing a *value* is `set`: an upsert, so a leaked credential is fixed by setting it again.
+  The two compromise runbooks follow from the split: a leaked **value** → `set` that key (new key material
+  does nothing for a plaintext already out); a leaked **identity** → `rotate` first (so replacements are
+  encrypted to a clean recipient), **then `set` every stored value** — re-encryption alone cannot un-expose
+  them, because the old ciphertexts remain decryptable in git history with the leaked identity. `rotate`
+  prints exactly this guidance with a per-key command list.
+
+- **`inforge secret` CLI takes env + service.** `set <env> <service> <KEY> [--generate]` (above), plus
+  `ls <env> <service>`, `rm <env> <service> <KEY>`, `init <env>` (creates the store, minting the master key
+  pair unless an existing recipient is given), and the per-env `rotate <env>` (above). The service argument
+  resolves to its container (secrets are container-scoped, broadcast to every service in the container). The
+  CLI is the only writer of the store. `static:` remains for non-secret inline config only.
 
 - **`validate` checks the store.** Every `source: encrypted` must have a matching ciphertext entry for the
   env being validated; a missing entry fails `validate`, turning a late runtime miss into an early error.
@@ -163,7 +177,5 @@ that list — nothing on the host can provide it, and this ADR does not pretend 
   party.) Rejected because it puts secret values at rest on every host and gives up three properties we want:
   a leaked host key would mean re-keying every secret on that host and redeploying everywhere (vs. revoking
   one scoped identity), there is no fetch audit, and there is no path to dynamic/short-lived secrets.
-  Decisively, it has nowhere to land a hot value, so **`secret rotate`'s deploy-free rotation is impossible** —
-  and rotation-without-redeploy is exactly the property that, combined with git-as-truth, made the provider
-  worth keeping. The sealed-to-host model remains a reasonable choice for a deployment that values simplicity
-  over those properties; this ADR does not foreclose it as a future provider-less mode.
+  The sealed-to-host model remains a reasonable choice for a deployment that values simplicity over those
+  properties; this ADR does not foreclose it as a future provider-less mode.

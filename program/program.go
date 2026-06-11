@@ -100,6 +100,14 @@ func Run(ctx *pulumi.Context) error {
 		return err
 	}
 
+	// Encrypted secret values (ADR-0017) are decrypted once, up front and
+	// provider-neutrally, then threaded to every region's secrets provisioning
+	// via AllOutputs. Nil unless some spec declares `source: encrypted`.
+	encSecrets, err := decryptEncryptedSecrets(res, globalRes, dir, env, ctx.DryRun())
+	if err != nil {
+		return err
+	}
+
 	desc, err := service.BuildDeployDescriptor(env, vars.BaseDomain, res, regionTable)
 	if err != nil {
 		return err
@@ -157,7 +165,7 @@ func Run(ctx *pulumi.Context) error {
 		if err := realizeIngress(ctx, reg, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain); err != nil {
 			return err
 		}
-		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs}
+		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
 		bundles, err := provisionServiceSecrets(ctx, reg, res, all, env, region)
 		if err != nil {
 			return err
