@@ -31,10 +31,9 @@ func newSecretCmd(dir *string) *cobra.Command {
 	cmd.AddCommand(
 		newSecretInitCmd(dir),
 		newSecretSetCmd(dir),
-		newSecretRotateCmd(dir),
 		newSecretLsCmd(dir),
 		newSecretRmCmd(dir),
-		newSecretRekeyCmd(dir),
+		newSecretRotateCmd(dir),
 	)
 	return cmd
 }
@@ -58,7 +57,7 @@ func newSecretInitCmd(dir *string) *cobra.Command {
 func runSecretInit(dir, env, recipient string) error {
 	path := secretstore.Path(dir, env)
 	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("%s already exists — use `inforge secret rekey %s` to change its recipient", path, env)
+		return fmt.Errorf("%s already exists — use `inforge secret rotate %s` to change its recipient", path, env)
 	}
 	if info, err := os.Stat(filepath.Dir(path)); err != nil || !info.IsDir() {
 		return fmt.Errorf("environment directory %s does not exist", filepath.Dir(path))
@@ -92,23 +91,10 @@ func runSecretInit(dir, env, recipient string) error {
 }
 
 func newSecretSetCmd(dir *string) *cobra.Command {
-	return &cobra.Command{
-		Use:           "set <env> <service> <KEY>",
-		Short:         "Encrypt a secret value (read from stdin) into the store",
-		Args:          cobra.ExactArgs(3),
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE: func(_ *cobra.Command, args []string) error {
-			return runSecretWrite(*dir, args[0], args[1], args[2], false)
-		},
-	}
-}
-
-func newSecretRotateCmd(dir *string) *cobra.Command {
 	var generate bool
 	cmd := &cobra.Command{
-		Use:           "rotate <env> <service> <KEY>",
-		Short:         "Replace a secret's value (stdin, or --generate for a fresh random value)",
+		Use:           "set <env> <service> <KEY>",
+		Short:         "Encrypt a secret value into the store (stdin, or --generate for a fresh random value)",
 		Args:          cobra.ExactArgs(3),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -120,8 +106,9 @@ func newSecretRotateCmd(dir *string) *cobra.Command {
 	return cmd
 }
 
-// runSecretWrite is the single write path behind both `set` and `rotate`:
-// encrypt one value to the store's recipient and save the store. Git-only by
+// runSecretWrite is the single value-write path (`set`): encrypt one value to
+// the store's recipient and save the store. Set is an upsert — replacing a
+// leaked value is the same operation as writing the first one. Git-only by
 // design — the new value reaches the provider when the committed store change
 // merges and `inforge deploy` runs.
 func runSecretWrite(dir, env, svcName, key string, generate bool) error {
@@ -269,33 +256,38 @@ func runSecretRm(dir, env, svcName, key string) error {
 	return nil
 }
 
-func newSecretRekeyCmd(dir *string) *cobra.Command {
+// newSecretRotateCmd rotates the env's master KEY PAIR (the age identity and
+// recipient), not a secret value — values are replaced with `set`, which is an
+// upsert. `rekey` is kept as an alias: Vault and the age/SOPS community use
+// that word for exactly this operation.
+func newSecretRotateCmd(dir *string) *cobra.Command {
 	var recipient string
 	cmd := &cobra.Command{
-		Use:           "rekey <env>",
-		Short:         "Re-encrypt every stored value to a new recipient",
+		Use:           "rotate <env>",
+		Aliases:       []string{"rekey"},
+		Short:         "Rotate the env's master key pair and re-encrypt every stored value",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runSecretRekey(*dir, args[0], recipient)
+			return runSecretRotate(*dir, args[0], recipient)
 		},
 	}
 	cmd.Flags().StringVar(&recipient, "recipient", "", "new age recipient (age1…) to re-encrypt to; default generates a fresh key pair")
 	return cmd
 }
 
-func runSecretRekey(dir, env, recipient string) error {
+func runSecretRotate(dir, env, recipient string) error {
 	path := secretstore.Path(dir, env)
 	store, err := secretstore.Load(path)
 	if err != nil {
 		return err
 	}
-	// Rekeying needs the CURRENT identity: every value is decrypted and
-	// re-encrypted, so a lost master key cannot be rekeyed away from.
+	// Rotation needs the CURRENT identity: every value is decrypted and
+	// re-encrypted, so a lost master key cannot be rotated away from.
 	identity, err := secretstore.IdentityFromEnv()
 	if err != nil {
-		return fmt.Errorf("rekey decrypts every stored value with the current master identity: %w", err)
+		return fmt.Errorf("rotate decrypts every stored value with the current master identity: %w", err)
 	}
 
 	var newIdentity string
@@ -334,7 +326,53 @@ func runSecretRekey(dir, env, recipient string) error {
 		fmt.Println(newIdentity)
 	}
 	fmt.Fprintln(os.Stderr, "\ncommit the store file; plaintext values are unchanged, so no service restart is needed")
+
+	// A hygiene rotation ends here. A compromise rotation does not: the OLD
+	// identity still decrypts the OLD ciphertexts, which live on in git history,
+	// so re-encryption cannot un-expose the current values.
+	if lines, err := compromisedValueGuidance(dir, env, store); err == nil && len(lines) > 0 {
+		fmt.Fprintln(os.Stderr, "\nif the OLD identity may have been compromised, re-encryption alone does NOT protect the")
+		fmt.Fprintln(os.Stderr, "stored values: old ciphertexts remain decryptable from git history. treat every value")
+		fmt.Fprintln(os.Stderr, "below as exposed and replace it (reissue externally-issued credentials at their vendor;")
+		fmt.Fprintln(os.Stderr, "use --generate for internally-consumed random secrets), then merge, deploy, and restart:")
+		for _, line := range lines {
+			fmt.Fprintf(os.Stderr, "  %s\n", line)
+		}
+	}
 	return nil
+}
+
+// compromisedValueGuidance returns one ready-to-paste `inforge secret set`
+// line per stored (container, KEY), using the alphabetically-first service of
+// each container as the CLI handle (any service sharing the container
+// addresses the same entry).
+func compromisedValueGuidance(dir, env string, store *secretstore.Store) ([]string, error) {
+	services, err := loadAllServices(dir, env)
+	if err != nil {
+		return nil, err
+	}
+	handle := map[string]string{}
+	for _, svc := range services {
+		if cur, ok := handle[svc.Container]; !ok || svc.Name < cur {
+			handle[svc.Container] = svc.Name
+		}
+	}
+	containers := make([]string, 0, len(store.Containers))
+	for c := range store.Containers {
+		containers = append(containers, c)
+	}
+	sort.Strings(containers)
+	var lines []string
+	for _, container := range containers {
+		for _, key := range store.Keys(container) {
+			if svcName, ok := handle[container]; ok {
+				lines = append(lines, fmt.Sprintf("inforge secret set %s %s %s", env, svcName, key))
+			} else {
+				lines = append(lines, fmt.Sprintf("# container %q has no declared service for key %s", container, key))
+			}
+		}
+	}
+	return lines, nil
 }
 
 // resolveServiceContainer maps a service name to its container — secrets are

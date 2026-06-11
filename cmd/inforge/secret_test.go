@@ -67,7 +67,7 @@ func TestRunSecretInitAndWriteRoundTrip(t *testing.T) {
 	err = runSecretInit(dir, "prd", recipient)
 	require.ErrorContains(t, err, "already exists")
 
-	// rotate --generate writes a decryptable 43-char base64url value.
+	// set --generate writes a decryptable 43-char base64url value.
 	require.NoError(t, runSecretWrite(dir, "prd", "api", "API_TOKEN", true))
 	store, err := secretstore.Load(secretstore.Path(dir, "prd"))
 	require.NoError(t, err)
@@ -77,7 +77,8 @@ func TestRunSecretInitAndWriteRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, plaintext, 43, "32 random bytes base64url without padding")
 
-	// rotate again: the value changes (fresh randomness, fresh nonce).
+	// set --generate again: the value changes (fresh randomness, fresh nonce) —
+	// replacing a leaked value is just another set.
 	require.NoError(t, runSecretWrite(dir, "prd", "api", "API_TOKEN", true))
 	store, err = secretstore.Load(secretstore.Path(dir, "prd"))
 	require.NoError(t, err)
@@ -110,32 +111,51 @@ func TestRunSecretRm(t *testing.T) {
 	require.ErrorContains(t, err, "no secret")
 }
 
-func TestRunSecretRekey(t *testing.T) {
+func TestRunSecretRotate(t *testing.T) {
 	dir := secretFixture(t)
 	oldIdentity, oldRecipient, err := secretstore.GenerateIdentity()
 	require.NoError(t, err)
 	require.NoError(t, runSecretInit(dir, "prd", oldRecipient))
 	require.NoError(t, runSecretWrite(dir, "prd", "api", "API_TOKEN", true))
 
-	// Rekey requires the current identity.
+	// Key rotation requires the current identity.
 	t.Setenv(secretstore.IdentityEnvVar, "")
 	newIdentity, newRecipient, err := secretstore.GenerateIdentity()
 	require.NoError(t, err)
-	err = runSecretRekey(dir, "prd", newRecipient)
+	err = runSecretRotate(dir, "prd", newRecipient)
 	require.ErrorContains(t, err, secretstore.IdentityEnvVar)
 
 	t.Setenv(secretstore.IdentityEnvVar, oldIdentity)
-	require.NoError(t, runSecretRekey(dir, "prd", newRecipient))
+	require.NoError(t, runSecretRotate(dir, "prd", newRecipient))
 
 	store, err := secretstore.Load(secretstore.Path(dir, "prd"))
 	require.NoError(t, err)
 	assert.Equal(t, newRecipient, store.Recipient)
 	ct, ok := store.Get("bridge", "API_TOKEN")
 	require.True(t, ok)
-	// Decryptable with the NEW identity only; the plaintext survived the rekey.
+	// Decryptable with the NEW identity only; the plaintext survived the rotation.
 	plaintext, err := secretstore.Decrypt(ct, newIdentity)
 	require.NoError(t, err)
 	assert.Len(t, plaintext, 43)
 	_, err = secretstore.Decrypt(ct, oldIdentity)
 	require.Error(t, err)
+}
+
+// TestCompromisedValueGuidance: rotate's post-rotation warning addresses every
+// stored entry by a real service handle, flagging containers with none.
+func TestCompromisedValueGuidance(t *testing.T) {
+	dir := secretFixture(t)
+	store := &secretstore.Store{Recipient: "age1test"}
+	store.Set("bridge", "API_TOKEN", "ct")
+	store.Set("bridge", "SESSION_KEY", "ct")
+	store.Set("orphan", "TOKEN", "ct")
+
+	lines, err := compromisedValueGuidance(dir, "prd", store)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		// api, not web: alphabetically-first service of the container.
+		"inforge secret set prd api API_TOKEN",
+		"inforge secret set prd api SESSION_KEY",
+		`# container "orphan" has no declared service for key TOKEN`,
+	}, lines)
 }
