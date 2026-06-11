@@ -17,6 +17,9 @@ before:
     - go mod tidy
 
 builds:
+  # The CLI also ships for darwin/arm64 — developers run it on their own
+  # machines (and self-update via `inforge update`); everything else only ever
+  # runs on Linux hosts or CI.
   - id: inforge
     main: ./cmd/inforge
     binary: inforge
@@ -24,9 +27,13 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
+      - darwin
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
     ldflags:
       - -s -w -X main.version={{ .Version }}
 
@@ -123,6 +130,10 @@ release:
   github:
     owner: wardnet
     name: inforge
+  # The curl|sh installer ships with every release so it can be fetched from
+  # the stable releases/latest/download/install.sh URL.
+  extra_files:
+    - glob: scripts/install.sh
   # When a draft release already exists for the tag, goreleaser uses its body
   # as the release description and appends the auto-generated changelog.
   # Workflow: create a draft release on GitHub with your notes → push the tag.

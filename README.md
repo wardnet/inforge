@@ -11,12 +11,15 @@
 ## Quick install
 
 ```bash
-# macOS (Apple Silicon)
-curl -L https://github.com/wardnet/inforge/releases/latest/download/inforge_latest_darwin_arm64.tar.gz \
-  | tar -xz inforge && chmod +x inforge && sudo mv inforge /usr/local/bin/
+# macOS (Apple Silicon) and Linux — installs to ~/.local/bin by default
+curl -fsSL https://github.com/wardnet/inforge/releases/latest/download/install.sh | sh
 
 inforge plugins install
 ```
+
+Set `INFORGE_VERSION` / `INFORGE_INSTALL_DIR` to pin a version or change the destination. Once
+installed, `inforge update` upgrades the CLI in place (and inforge prints a notice when a newer
+release exists, at most once a day, never in CI).
 
 See [Installation](https://wardnet.github.io/inforge/getting-started/installation) for all platforms.
 
@@ -24,12 +27,12 @@ See [Installation](https://wardnet.github.io/inforge/getting-started/installatio
 
 This repository builds four statically-linked, fully self-contained binaries:
 
-| Binary | Purpose |
-|--------|---------|
-| `inforge` | The CLI you invoke directly |
-| `inforge-bootstrap` | Runtime secret bootstrapper — the systemd ExecStart for every service; fetches secrets at start, drops privilege, execs the service |
-| `pulumi-resource-neon` | Pulumi provider plugin for Neon PostgreSQL |
-| `pulumi-resource-infisical` | Pulumi provider plugin for Infisical secrets |
+| Binary | Purpose | Platforms |
+|--------|---------|-----------|
+| `inforge` | The CLI you invoke directly | linux amd64/arm64, darwin arm64 |
+| `inforge-bootstrap` | Runtime secret bootstrapper — the systemd ExecStart for every service; fetches secrets at start, drops privilege, execs the service | linux amd64/arm64 |
+| `pulumi-resource-neon` | Pulumi provider plugin for Neon PostgreSQL | linux amd64/arm64 |
+| `pulumi-resource-infisical` | Pulumi provider plugin for Infisical secrets | linux amd64/arm64 |
 
 The provider plugins are installed automatically by `inforge plugins install`, and `inforge-bootstrap` is downloaded onto each host by `inforge deploy` (pinned to the deploying inforge version) — you never invoke either directly.
 

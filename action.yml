@@ -9,35 +9,19 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Resolve version
-      id: ver
+    - name: Install inforge
       shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
       run: |
-        if [[ "${{ inputs.version }}" == "latest" ]]; then
-          VERSION=$(curl -fsSL https://api.github.com/repos/wardnet/inforge/releases/latest \
-            | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
-        else
-          VERSION="${{ inputs.version }}"
-          VERSION="${VERSION#v}"
+        # install.sh is always fetched from the latest release; INFORGE_VERSION
+        # pins which inforge binary it installs.
+        if [[ "${VERSION}" != "latest" ]]; then
+          export INFORGE_VERSION="${VERSION}"
         fi
-        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-    - name: Download inforge
-      shell: bash
-      run: |
-        VERSION="${{ steps.ver.outputs.version }}"
-        OS="${{ runner.os }}"
-        ARCH="${{ runner.arch }}"
-        case "${ARCH}" in
-          X64)   ARCH="amd64" ;;
-          ARM64) ARCH="arm64" ;;
-        esac
-        OS="${OS,,}"
-        ARCHIVE="inforge_${VERSION}_${OS}_${ARCH}.tar.gz"
-        URL="https://github.com/wardnet/inforge/releases/download/v${VERSION}/${ARCHIVE}"
-        curl -fsSL "${URL}" | tar -xz inforge
-        chmod +x inforge
-        echo "$PWD" >> "$GITHUB_PATH"
+        export INFORGE_INSTALL_DIR="${RUNNER_TEMP}/inforge-bin"
+        curl -fsSL https://github.com/wardnet/inforge/releases/latest/download/install.sh | sh
+        echo "${INFORGE_INSTALL_DIR}" >> "$GITHUB_PATH"
 
     - name: Install provider plugins
       shell: bash
