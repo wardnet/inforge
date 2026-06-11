@@ -113,8 +113,8 @@ source: encrypted
 
 The bare token carries no payload — the store entry is addressed by `(container, KEY)`. Values are
 written with the [`inforge secret` CLI](/cli/secret) (the only writer of the store) and encrypted to
-the store's committed public *recipient*, so **anyone with commit access can add or rotate a secret
-without any private key**. At deploy, inforge decrypts the values in CI with the master identity from
+the store's committed public *recipient*, so **anyone with commit access can add or replace a secret
+value without any private key** (and cannot decrypt what they wrote). At deploy, inforge decrypts the values in CI with the master identity from
 the `INFORGE_SECRETS_KEY` environment variable and writes the plaintext into the provider under
 `infra/<KEY>` — exactly where the other source kinds land. The provider is a *derived cache*: it is
 written only by the deploy, never by the CLI, so the provider always reflects the last deployed git

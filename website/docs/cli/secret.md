@@ -22,15 +22,15 @@ service pick it up** (services fetch secrets at start).
 | Command | Purpose |
 |---------|---------|
 | `inforge secret init <env>` | Create the env's store; generates the master key pair (or takes `--recipient`). |
-| `inforge secret set <env> <service> <KEY>` | Encrypt a value (from stdin) into the store. |
-| `inforge secret rotate <env> <service> <KEY>` | Replace a value — stdin, or `--generate` for a fresh random one. |
+| `inforge secret set <env> <service> <KEY>` | Write or replace a **value** — stdin, or `--generate` for a fresh random one. |
 | `inforge secret ls <env> <service>` | List the keys stored for the service's container. |
 | `inforge secret rm <env> <service> <KEY>` | Remove a value from the store. |
-| `inforge secret rekey <env>` | Re-encrypt every stored value to a new recipient. |
+| `inforge secret rotate <env>` | Rotate the **master key pair** and re-encrypt the store (alias: `rekey`). |
 
-The `<service>` argument resolves to its **container**: secrets are container-scoped, so every
-service sharing the container consumes the same values, and the commands tell you which services are
-affected.
+Note the split: `set` changes a *value* (it is an upsert — fixing a leaked credential is just setting
+it again), `rotate` changes the *key pair* the store is encrypted to. The `<service>` argument
+resolves to its **container**: secrets are container-scoped, so every service sharing the container
+consumes the same values, and the commands tell you which services are affected.
 
 ## The store file
 
@@ -45,10 +45,10 @@ containers:
       -----END AGE ENCRYPTED FILE-----
 ```
 
-Per-value armored ciphertext means a diff shows exactly which secret changed, and one key rotates
-without touching its neighbours. The committed `recipient` is a *public* key: anyone with commit
-access can add or overwrite a value (PR review is the control), but **reading** any value requires
-the master identity, which is never committed.
+Per-value armored ciphertext means a diff shows exactly which secret changed, and one value can be
+replaced without touching its neighbours. The committed `recipient` is a *public* key: anyone with
+commit access can add or overwrite a value (PR review is the control) **with no key material on
+their machine**, but *reading* any value requires the master identity, which is never committed.
 
 ## `inforge secret init`
 
@@ -60,22 +60,23 @@ Creates `resources/<env>/secrets.enc.yaml`. Without `--recipient` it generates a
 pair, writes the public half into the store, and prints the private **master identity**
 (`AGE-SECRET-KEY-…`) — to stdout, once, never stored by inforge:
 
-- save it as the `INFORGE_SECRETS_KEY` GitHub Actions secret (the deploy decrypts with it — see the
-  [deploy starter](/github-actions/overview));
+- save it as the `INFORGE_SECRETS_KEY` GitHub Actions secret **in the consumer repo** (the deploy
+  decrypts with it — see the [deploy starter](/github-actions/overview));
 - keep an out-of-band backup: losing it means re-setting every secret in the env.
 
-## `inforge secret set` / `inforge secret rotate`
+## `inforge secret set`
 
 ```
 pbpaste | inforge secret set prd bridge STRIPE_API_KEY
-inforge secret rotate prd bridge SESSION_KEY --generate
+inforge secret set prd bridge SESSION_KEY --generate
 ```
 
-Both encrypt one value to the store's recipient and save the store — `rotate` is the
-intent-revealing form for replacing an existing value. The value comes from **stdin** (pipe it; one
-trailing newline is stripped), or for `rotate --generate` the CLI mints 32 random bytes
-(base64url, 43 chars) in-process — the plaintext is never displayed, which is ideal for secrets
-nothing external needs to know (session/signing keys, HMAC secrets, internal tokens).
+Encrypts one value to the store's recipient and saves the store — needing **no private key**: the
+committed public recipient is all it takes, and the writer cannot decrypt what they (or anyone else)
+wrote. The value comes from **stdin** (pipe it; one trailing newline is stripped), or `--generate`
+mints 32 random bytes (base64url, 43 chars) in-process — the plaintext is never displayed, which is
+ideal for secrets nothing external needs to know (session/signing keys, HMAC secrets, internal
+tokens).
 
 Declare the key with `source: encrypted` in the container's `secrets/*.yaml` spec —
 [`inforge validate`](/cli/validate) cross-checks declarations against the store in both directions
@@ -87,14 +88,34 @@ After merging, the deploy writes the provider; then restart the consumers:
 inforge service restart prd api
 ```
 
-## `inforge secret rekey`
+## `inforge secret rotate`
 
 ```
-inforge secret rekey <env> [--recipient age1…]
+inforge secret rotate <env> [--recipient age1…]      # alias: rekey
 ```
 
-Decrypts every value in the env's store with the **current** master identity (read from
-`INFORGE_SECRETS_KEY`) and re-encrypts to a new recipient — freshly generated (the new identity is
-printed once; update the `INFORGE_SECRETS_KEY` GitHub secret before the next deploy) or given via
-`--recipient`. Plaintext values are unchanged, so no service restart is needed; commit the rewritten
-store.
+Rotates the env's **master key pair**: decrypts every value in the store with the *current* identity
+(read from `INFORGE_SECRETS_KEY`) and re-encrypts to a new recipient — freshly generated (the new
+identity is printed once; update the `INFORGE_SECRETS_KEY` GitHub secret before the next deploy) or
+given via `--recipient`. Plaintext values are unchanged, so no deploy or service restart is needed;
+commit the rewritten store.
+
+## Incident response
+
+**A secret value leaked** (shows up in a log, a paste, a breach). Key rotation does nothing here —
+the plaintext is out and still valid. Reissue the credential at its vendor (or `--generate` an
+internal one) and `set` it; merge, deploy, restart:
+
+```
+pbpaste | inforge secret set prd bridge STRIPE_API_KEY
+inforge service restart prd api        # after the deploy lands
+```
+
+**The master identity leaked** (`INFORGE_SECRETS_KEY` exposed). Two steps, in this order:
+
+1. `inforge secret rotate <env>` — new key pair, so everything you write next is encrypted to a
+   clean recipient. Update the GitHub secret.
+2. **`set` every value in the store.** Re-encryption alone does **not** protect the existing values:
+   the old ciphertexts remain in git history, decryptable with the leaked identity, and you must
+   assume they were already read. `rotate` prints the full per-key command list to make this step
+   mechanical; externally-issued credentials must also be reissued at their vendor.
