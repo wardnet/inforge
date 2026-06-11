@@ -119,7 +119,7 @@ func selfUpdate(ctx context.Context, ver, exe string) error {
 	if err := downloadBinary(ctx, url, tmpPath, 0o755); err != nil {
 		return err
 	}
-	if err := verifyChecksum(ctx, ver, asset, tmpPath); err != nil {
+	if err := verifyChecksum(ctx, http.DefaultClient, ver, asset, tmpPath); err != nil {
 		return err
 	}
 	// CreateTemp made the file 0600 and OpenFile's mode is ignored for existing
@@ -136,13 +136,13 @@ func selfUpdate(ctx context.Context, ver, exe string) error {
 
 // verifyChecksum fetches the release's checksums.txt and compares the named
 // asset's SHA-256 against the file at path.
-func verifyChecksum(ctx context.Context, ver, asset, path string) error {
+func verifyChecksum(ctx context.Context, client *http.Client, ver, asset, path string) error {
 	url := releaseAssetURL(ver, "checksums.txt")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

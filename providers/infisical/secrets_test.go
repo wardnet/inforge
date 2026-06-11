@@ -60,17 +60,12 @@ func TestProvisionServiceScopesPaths(t *testing.T) {
 	var bundle *types.ServiceSecretsBundle
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
-		res := types.Resources{
-			Secrets: []types.SecretsSpec{{
-				Name:      "ghost-secrets",
-				Container: "ghost",
-				Provider:  "infisical",
-				Secrets:   map[string]types.SecretsEntry{"DATABASE_URL": {Source: "${DATABASE_URL}"}},
-			}},
+		svc := types.ServiceSpec{
+			Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost",
+			Secrets: map[string]string{"DATABASE_URL": "env:DATABASE_URL"},
 		}
-		svc := types.ServiceSpec{Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost"}
 		var err error
-		bundle, err = adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", types.AllOutputs{})
+		bundle, err = adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
@@ -90,16 +85,11 @@ func TestProvisionServicePassesOrganizationId(t *testing.T) {
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "org-explicit", "use1")
-		res := types.Resources{
-			Secrets: []types.SecretsSpec{{
-				Name:      "ghost-secrets",
-				Container: "ghost",
-				Provider:  "infisical",
-				Secrets:   map[string]types.SecretsEntry{"DATABASE_URL": {Source: "${DATABASE_URL}"}},
-			}},
+		svc := types.ServiceSpec{
+			Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost",
+			Secrets: map[string]string{"DATABASE_URL": "env:DATABASE_URL"},
 		}
-		svc := types.ServiceSpec{Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost"}
-		_, err := adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", types.AllOutputs{})
+		_, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
@@ -107,13 +97,13 @@ func TestProvisionServicePassesOrganizationId(t *testing.T) {
 	assert.Equal(t, "org-explicit", mocks.captured[infisicalIdentityType].inputs["organizationId"].StringValue())
 }
 
-// TestProvisionServiceNoSecretsReturnsNil verifies a service whose container has
-// no infisical secrets yields no bundle and provisions nothing.
+// TestProvisionServiceNoSecretsReturnsNil verifies a service with no secrets
+// yields no bundle and provisions nothing.
 func TestProvisionServiceNoSecretsReturnsNil(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
 		svc := types.ServiceSpec{Name: "ghost", Container: "ghost"}
-		bundle, err := adapter.ProvisionService(ctx, svc, types.Resources{}, "prd", "us-east-1", types.AllOutputs{})
+		bundle, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
 		require.NoError(t, err)
 		assert.Nil(t, bundle)
 		return nil
@@ -121,53 +111,14 @@ func TestProvisionServiceNoSecretsReturnsNil(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestInfraSecretEntries verifies the derivation merges only infisical
-// SecretsSpecs in the service's own container.
-func TestInfraSecretEntries(t *testing.T) {
-	res := types.Resources{
-		Secrets: []types.SecretsSpec{
-			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"A": {Source: "${A}"}}},
-			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"B": {Source: "${B}"}}},
-			{Container: "ghost", Provider: "other", Secrets: map[string]types.SecretsEntry{"SKIP": {Source: "${SKIP}"}}},
-			{Container: "other", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"NOPE": {Source: "${NOPE}"}}},
-		},
+// bridgeServiceWithSecret is a single-service fixture for the naming tests: a
+// service named "bridge" in container "bridge" with one infra secret declared
+// inline, so ProvisionService creates the workspace + batch + identity.
+func bridgeServiceWithSecret() types.ServiceSpec {
+	return types.ServiceSpec{
+		Name: "bridge", Container: "bridge", Provider: "raw", User: "bridge",
+		Secrets: map[string]string{"MY_SECRET": "env:MY_SECRET"},
 	}
-	got, err := infraSecretEntries(types.ServiceSpec{Name: "ghost", Container: "ghost"}, res)
-	require.NoError(t, err)
-	assert.Equal(t, map[string]types.SecretsEntry{
-		"A": {Source: "${A}"},
-		"B": {Source: "${B}"},
-	}, got)
-}
-
-// TestInfraSecretEntriesRejectsDuplicateKey: the same key declared by two specs
-// in the same container is ambiguous and must error, not silently last-win.
-func TestInfraSecretEntriesRejectsDuplicateKey(t *testing.T) {
-	res := types.Resources{
-		Secrets: []types.SecretsSpec{
-			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"DUP": {Source: "${ONE}"}}},
-			{Container: "ghost", Provider: "infisical", Secrets: map[string]types.SecretsEntry{"DUP": {Source: "${TWO}"}}},
-		},
-	}
-	_, err := infraSecretEntries(types.ServiceSpec{Name: "ghost", Container: "ghost"}, res)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `secret key "DUP"`)
-}
-
-// bridgeServiceWithSecret is a single-service / single-secret fixture for the
-// naming tests: a service named "bridge" in container "bridge" with one infra
-// secret, so ProvisionService creates the workspace + batch + identity.
-func bridgeServiceWithSecret() (types.ServiceSpec, types.Resources) {
-	svc := types.ServiceSpec{Name: "bridge", Container: "bridge", Provider: "raw", User: "bridge"}
-	res := types.Resources{
-		Secrets: []types.SecretsSpec{{
-			Name:      "bridge",
-			Container: "bridge",
-			Provider:  "infisical",
-			Secrets:   map[string]types.SecretsEntry{"MY_SECRET": {Source: "${MY_SECRET}"}},
-		}},
-	}
-	return svc, res
 }
 
 // TestWorkspaceNamePassedToAPIMatchesNamingConvention verifies that the name
@@ -179,9 +130,9 @@ func TestWorkspaceNamePassedToAPIMatchesNamingConvention(t *testing.T) {
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
-		svc, res := bridgeServiceWithSecret()
+		svc := bridgeServiceWithSecret()
 		// env="prd", region="us-east-1" — workspace name must use env, not region.
-		_, err := adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", types.AllOutputs{})
+		_, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
@@ -200,8 +151,8 @@ func TestSecretsBatchNameMatchesNamingConvention(t *testing.T) {
 	mocks := newNamingMocks()
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
-		svc, res := bridgeServiceWithSecret()
-		_, err := adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", types.AllOutputs{})
+		svc := bridgeServiceWithSecret()
+		_, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
@@ -254,7 +205,7 @@ func TestResolveRefGlobalDatabase(t *testing.T) {
 				"global":    {"shared": {ConnectionURL: pulumi.String("global-url").ToStringOutput()}},
 			},
 		}
-		out, err := resolveRef("KEY", "ref:database/global/shared.connectionUrl", "container", "us-east-1", all)
+		out, err := resolveRef("ref:database/global/shared.connectionUrl", "container", "us-east-1", all)
 		require.NoError(t, err)
 		assert.Equal(t, "global-url", awaitString(t, out), "global/ must resolve against the global slot, not the service's region")
 		return nil
@@ -262,17 +213,15 @@ func TestResolveRefGlobalDatabase(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestResolveRefStatic verifies a static/value source resolves to its literal,
-// verbatim — no resource lookup, no placeholder.
-func TestResolveRefStatic(t *testing.T) {
+// TestResolveRefLiteral verifies a bare string (no recognised prefix) resolves
+// to its verbatim value — no resource lookup, no placeholder.
+func TestResolveRefLiteral(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		for _, src := range []string{"static:info", "value:info"} {
-			out, err := resolveRef("KEY", src, "container", "us-east-1", types.AllOutputs{})
-			require.NoError(t, err)
-			assert.Equal(t, "info", awaitString(t, out), src)
-		}
+		out, err := resolveRef("info", "container", "us-east-1", types.AllOutputs{})
+		require.NoError(t, err)
+		assert.Equal(t, "info", awaitString(t, out))
 		// A value with special characters (URL) is preserved verbatim.
-		out, err := resolveRef("KEY", "value:https://api.example.com:443/v1", "container", "us-east-1", types.AllOutputs{})
+		out, err = resolveRef("https://api.example.com:443/v1", "container", "us-east-1", types.AllOutputs{})
 		require.NoError(t, err)
 		assert.Equal(t, "https://api.example.com:443/v1", awaitString(t, out))
 		return nil
@@ -280,12 +229,12 @@ func TestResolveRefStatic(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestResolveRefEnv verifies a ${ENV_VAR} source resolves to the matching
-// environment variable's value (injected into the deploy process), not a literal.
+// TestResolveRefEnv verifies an env: source resolves to the matching environment
+// variable's value (injected into the deploy process), not a literal.
 func TestResolveRefEnv(t *testing.T) {
 	t.Setenv("MY_ENV_SECRET", "s3cr3t-value")
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		out, err := resolveRef("KEY", "${MY_ENV_SECRET}", "container", "us-east-1", types.AllOutputs{})
+		out, err := resolveRef("env:MY_ENV_SECRET", "container", "us-east-1", types.AllOutputs{})
 		require.NoError(t, err)
 		assert.Equal(t, "s3cr3t-value", awaitString(t, out))
 		return nil
@@ -297,7 +246,7 @@ func TestResolveRefEnv(t *testing.T) {
 // rather than silently materialising an empty secret.
 func TestResolveRefEnvUnsetErrors(t *testing.T) {
 	t.Setenv("INFORGE_TEST_ENV_UNSET", "")
-	_, err := resolveRef("KEY", "${INFORGE_TEST_ENV_UNSET}", "container", "us-east-1", types.AllOutputs{})
+	_, err := resolveRef("env:INFORGE_TEST_ENV_UNSET", "container", "us-east-1", types.AllOutputs{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty or unset")
 }
@@ -310,7 +259,7 @@ func TestResolveRefGlobalCompute(t *testing.T) {
 				"global": {"edge-01": {PublicIP: pulumi.String("203.0.113.7").ToStringOutput()}},
 			},
 		}
-		out, err := resolveRef("KEY", "ref:compute/global/edge-01.publicIp", "container", "us-east-1", all)
+		out, err := resolveRef("ref:compute/global/edge-01.publicIp", "container", "us-east-1", all)
 		require.NoError(t, err)
 		assert.Equal(t, "203.0.113.7", awaitString(t, out))
 		return nil
@@ -327,7 +276,7 @@ func TestResolveRefGlobalMissing(t *testing.T) {
 				"global": {},
 			},
 		}
-		_, err := resolveRef("KEY", "ref:database/global/missing.connectionUrl", "container", "us-east-1", all)
+		_, err := resolveRef("ref:database/global/missing.connectionUrl", "container", "us-east-1", all)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `no database "missing" in region "global"`)
 		return nil
@@ -335,14 +284,14 @@ func TestResolveRefGlobalMissing(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestResolveRefEncrypted verifies an `encrypted` source serves the value the
-// program pre-decrypted into all.Encrypted, addressed by (container, KEY).
-func TestResolveRefEncrypted(t *testing.T) {
+// TestResolveRefVault verifies a vault: source serves the value the program
+// pre-decrypted into all.Encrypted, addressed by (container, vaultKey).
+func TestResolveRefVault(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		all := types.AllOutputs{
 			Encrypted: map[string]map[string]string{"ghost": {"API_KEY": "plain-value"}},
 		}
-		out, err := resolveRef("API_KEY", "encrypted", "ghost", "us-east-1", all)
+		out, err := resolveRef("vault:API_KEY", "ghost", "us-east-1", all)
 		require.NoError(t, err)
 		assert.Equal(t, "plain-value", awaitString(t, out))
 		return nil
@@ -350,36 +299,31 @@ func TestResolveRefEncrypted(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestResolveRefEncryptedMissing verifies an `encrypted` source with no
-// pre-decrypted value fails loudly — the adapter never decrypts on its own.
-func TestResolveRefEncryptedMissing(t *testing.T) {
-	_, err := resolveRef("API_KEY", "encrypted", "ghost", "us-east-1", types.AllOutputs{})
+// TestResolveRefVaultMissing verifies a vault: source with no pre-decrypted
+// value fails loudly — the adapter never decrypts on its own.
+func TestResolveRefVaultMissing(t *testing.T) {
+	_, err := resolveRef("vault:API_KEY", "ghost", "us-east-1", types.AllOutputs{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no decrypted value")
 }
 
-// TestProvisionServiceEncryptedSource verifies an encrypted source flows
-// through ProvisionService into the same env-var -> infra/<key> bundle mapping
-// as every other source kind.
-func TestProvisionServiceEncryptedSource(t *testing.T) {
+// TestProvisionServiceVaultSource verifies a vault: source flows through
+// ProvisionService into the env-var -> infra/<key> bundle mapping. The vault
+// key may differ from the env var name (decoupled naming).
+func TestProvisionServiceVaultSource(t *testing.T) {
 	mocks := newNamingMocks()
 	var bundle *types.ServiceSecretsBundle
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
-		res := types.Resources{
-			Secrets: []types.SecretsSpec{{
-				Name:      "ghost-secrets",
-				Container: "ghost",
-				Provider:  "infisical",
-				Secrets:   map[string]types.SecretsEntry{"API_KEY": {Source: "encrypted"}},
-			}},
+		svc := types.ServiceSpec{
+			Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost",
+			Secrets: map[string]string{"API_KEY": "vault:API_KEY"},
 		}
-		svc := types.ServiceSpec{Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost"}
 		all := types.AllOutputs{
 			Encrypted: map[string]map[string]string{"ghost": {"API_KEY": "plain-value"}},
 		}
 		var err error
-		bundle, err = adapter.ProvisionService(ctx, svc, res, "prd", "us-east-1", all)
+		bundle, err = adapter.ProvisionService(ctx, svc, "prd", "us-east-1", all)
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)

@@ -26,48 +26,40 @@ func TestParseSourceRefExpandedComputeKey(t *testing.T) {
 }
 
 func TestParseSourceEnv(t *testing.T) {
-	s, err := ParseSource("${CLOUDFLARE_API_TOKEN}")
+	s, err := ParseSource("env:CLOUDFLARE_API_TOKEN")
 	require.NoError(t, err)
 	assert.Equal(t, SourceEnv, s.Kind)
 	assert.Equal(t, "CLOUDFLARE_API_TOKEN", s.EnvName)
 }
 
-func TestParseSourceStatic(t *testing.T) {
-	// Both keywords parse to a literal, verbatim (special characters preserved).
+func TestParseSourceVault(t *testing.T) {
+	s, err := ParseSource("vault:MY_KEY")
+	require.NoError(t, err)
+	assert.Equal(t, SourceVault, s.Kind)
+	assert.Equal(t, "MY_KEY", s.VaultKey)
+}
+
+func TestParseSourceLiteral(t *testing.T) {
+	// Any string that does not carry a recognised prefix is a verbatim literal.
 	for _, in := range []struct{ src, want string }{
-		{"static:info", "info"},
-		{"value:info", "info"},
-		{"value:https://api.example.com:443/v1", "https://api.example.com:443/v1"},
-		{"static:ref:database/x.y", "ref:database/x.y"}, // a literal that looks like a ref
+		{"info", "info"},
+		{"https://api.example.com:443/v1", "https://api.example.com:443/v1"},
+		{"plain text with spaces", "plain text with spaces"},
 	} {
 		s, err := ParseSource(in.src)
 		require.NoError(t, err, in.src)
-		assert.Equal(t, SourceStatic, s.Kind, in.src)
-		assert.Equal(t, in.want, s.StaticValue, in.src)
+		assert.Equal(t, SourceLiteral, s.Kind, in.src)
+		assert.Equal(t, in.want, s.LiteralValue, in.src)
 	}
 }
 
-func TestParseSourceEncrypted(t *testing.T) {
-	s, err := ParseSource("encrypted")
-	require.NoError(t, err)
-	assert.Equal(t, SourceEncrypted, s.Kind)
-}
-
+// TestParseSourceMalformed verifies that the two prefixes requiring a suffix
+// (vault: and env:) reject an empty suffix — other strings either parse as
+// SourceRef or fall through to SourceLiteral without an error.
 func TestParseSourceMalformed(t *testing.T) {
 	cases := []string{
-		"nonsense",
-		"ref:storage/bridge.url", // unknown ref type
-		"ref:database/bridge",    // missing output
-		"${lowercase}",           // env names must be upper snake
-		"${1LEADINGDIGIT}",       // must start with letter/underscore
-		"$NOBRACES",              // must be wrapped in ${...}
-		"gha:OLD_FORM",           // the retired gha: form is no longer valid
-		"",                       // empty
-		"ref:compute/bridge-01.", // empty output
-		"static:",                // empty static value
-		"value:",                 // empty value alias
-		"encrypted:foo",          // encrypted carries no payload — bare token only
-		"Encrypted",              // case-sensitive
+		"vault:", // vault: requires a key name
+		"env:",   // env: requires a variable name
 	}
 	for _, c := range cases {
 		_, err := ParseSource(c)

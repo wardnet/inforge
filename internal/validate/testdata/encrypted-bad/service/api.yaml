@@ -4,6 +4,8 @@ provider: hetzner
 host: bridge-01
 type: raw
 user: api
+secrets:
+  API_TOKEN: "vault:API_TOKEN"
 ingress:
   # tls-termination and a forward on one service: nginx terminates ACME TLS on
   # 443 and reverse-proxies to 8080, and stream-forwards 853 to a local backend.

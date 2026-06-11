@@ -5,7 +5,7 @@ package schemas
 import "embed"
 
 // FS holds the embedded JSON Schema documents, one per resource type
-// (network.json, compute.json, database.json, secrets.json, service.json).
+// (network.json, compute.json, database.json, service.json).
 // Each file's "$id" matches its filename.
 //
 //go:embed *.json

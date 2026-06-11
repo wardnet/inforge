@@ -54,8 +54,8 @@ func TestValidateResourcesGlobalBad(t *testing.T) {
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
-// TestValidateResourcesEncryptedOK: a `source: encrypted` secret whose
-// (container, KEY) ciphertext exists in the env's secrets.enc.yaml validates
+// TestValidateResourcesEncryptedOK: a `vault:KEY` secret whose (container, KEY)
+// ciphertext exists in the env's secrets.enc.yaml validates
 // cleanly — the check is presence-only, so the fixture ciphertext is a dummy.
 func TestValidateResourcesEncryptedOK(t *testing.T) {
 	err := ValidateResources("encrypted-ok", testdataDir)
@@ -63,15 +63,15 @@ func TestValidateResourcesEncryptedOK(t *testing.T) {
 }
 
 // TestValidateResourcesEncryptedMissingKey: the store exists but holds no
-// ciphertext for the declared KEY under the spec's container.
+// ciphertext for the `vault:KEY` under the service's container.
 func TestValidateResourcesEncryptedMissingKey(t *testing.T) {
 	err := ValidateResources("encrypted-bad", testdataDir)
 	require.Error(t, err, "an encrypted source without a store entry should fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
-// TestValidateResourcesEncryptedNoStore: a `source: encrypted` declaration with
-// no secrets.enc.yaml at all must fail and point at `inforge secret init`.
+// TestValidateResourcesEncryptedNoStore: a `vault:KEY` secret with no
+// secrets.enc.yaml must fail and point at `inforge secret init`.
 func TestValidateResourcesEncryptedNoStore(t *testing.T) {
 	err := ValidateResources("encrypted-nostore", testdataDir)
 	require.Error(t, err, "an encrypted source without a store file should fail validation")
@@ -106,18 +106,16 @@ func TestCheckServiceGlobalHostRejected(t *testing.T) {
 	assert.Contains(t, errs[0], "defined in the global slice itself")
 }
 
-// TestCheckSecretsGlobalDatabaseRef: a regional secret resolves a global database
-// when the regional context is seeded with the global/<name> key (as
-// validateResourceSet does from buildGlobalRefs).
+// TestCheckSecretsGlobalDatabaseRef: a regional service secret may resolve a
+// global database when the regional context is seeded with the global/<name>
+// key (as validateResourceSet does from buildGlobalRefs).
 func TestCheckSecretsGlobalDatabaseRef(t *testing.T) {
 	ctx := baseCtx()
 	ctx.available = nil // provider availability is checked separately, per region
 	ctx.databaseNames = map[string]bool{"global/shared": true}
-	errs, _ := checkSecrets(types.SecretsSpec{
-		Provider: "infisical",
-		Secrets: map[string]types.SecretsEntry{
-			"DB": {Source: "ref:database/global/shared.connectionUrl"},
-		},
+	errs, _ := checkService(types.ServiceSpec{
+		Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Container: "ghost",
+		Secrets: map[string]string{"DB": "ref:database/global/shared.connectionUrl"},
 	}, ctx)
 	assert.Empty(t, errs, "a regional secret may reference a global database output")
 
@@ -125,26 +123,22 @@ func TestCheckSecretsGlobalDatabaseRef(t *testing.T) {
 	ctx2 := baseCtx()
 	ctx2.available = nil
 	ctx2.databaseNames = map[string]bool{}
-	errs, _ = checkSecrets(types.SecretsSpec{
-		Provider: "infisical",
-		Secrets: map[string]types.SecretsEntry{
-			"DB": {Source: "ref:database/global/shared.connectionUrl"},
-		},
+	errs, _ = checkService(types.ServiceSpec{
+		Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Container: "ghost",
+		Secrets: map[string]string{"DB": "ref:database/global/shared.connectionUrl"},
 	}, ctx2)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], `database "global/shared" not found`)
 }
 
-// TestCheckSecretsRejectsReservedEnvName: a secret key (which becomes the service's
-// env var name) must not claim the reserved INFORGE_* namespace inforge injects.
+// TestCheckSecretsRejectsReservedEnvName: a secret key (which becomes the
+// service's env var name) must not claim the reserved INFORGE_* namespace.
 func TestCheckSecretsRejectsReservedEnvName(t *testing.T) {
 	ctx := baseCtx()
 	ctx.available = nil
-	errs, _ := checkSecrets(types.SecretsSpec{
-		Provider: "infisical",
-		Secrets: map[string]types.SecretsEntry{
-			"INFORGE_DEPLOYMENT_REGION": {Source: "${SOME_SECRET}"},
-		},
+	errs, _ := checkService(types.ServiceSpec{
+		Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "svc", Container: "ghost",
+		Secrets: map[string]string{"INFORGE_DEPLOYMENT_REGION": "env:SOME_SECRET"},
 	}, ctx)
 	require.NotEmpty(t, errs)
 	assert.Contains(t, strings.Join(errs, "\n"), "reserved")

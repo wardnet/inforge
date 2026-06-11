@@ -35,19 +35,25 @@ func encryptedFixture(t *testing.T, env string, values map[string]map[string]str
 }
 
 func encryptedSpec(container string, keys ...string) types.Resources {
-	entries := map[string]types.SecretsEntry{}
-	for _, k := range keys {
-		entries[k] = types.SecretsEntry{Source: "encrypted"}
+	svc := types.ServiceSpec{
+		Name:      container + "-svc",
+		Container: container,
+		Provider:  "raw",
+		User:      container,
+		Secrets:   map[string]string{},
 	}
-	return types.Resources{Secrets: []types.SecretsSpec{{
-		Name: container + "-secrets", Container: container, Provider: "infisical", Secrets: entries,
-	}}}
+	for _, k := range keys {
+		svc.Secrets[k] = "vault:" + k
+	}
+	return types.Resources{Service: []types.ServiceSpec{svc}}
 }
 
 func TestDecryptEncryptedSecretsNoneDeclared(t *testing.T) {
-	res := types.Resources{Secrets: []types.SecretsSpec{{
-		Name: "ghost-secrets", Container: "ghost", Provider: "infisical",
-		Secrets: map[string]types.SecretsEntry{"K": {Source: "static:v"}},
+	// A service with only literal secrets (no vault: prefix) must not require
+	// a store or key.
+	res := types.Resources{Service: []types.ServiceSpec{{
+		Name: "ghost-svc", Container: "ghost", Provider: "raw", User: "ghost",
+		Secrets: map[string]string{"K": "v"},
 	}}}
 	got, err := decryptEncryptedSecrets(res, types.Resources{}, t.TempDir(), "prd", false)
 	require.NoError(t, err)

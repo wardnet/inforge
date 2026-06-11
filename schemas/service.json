@@ -12,6 +12,11 @@
     "host": { "type": "string", "minLength": 1 },
     "type": { "type": "string", "enum": ["raw", "container"] },
     "user": { "type": "string", "minLength": 1 },
+    "secrets": {
+      "type": "object",
+      "description": "Optional runtime secrets. Each key is the env-var name set in the service process; the value is a source DSL string: ref:<database|compute>/<name>.<output>, vault:<KEY>, env:<VAR>, or a literal string.",
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
     "ingress": {
       "type": "array",
       "description": "typed inbound routes realized on the host's nginx. Each entry binds a public listen port; tls-termination entries may share a port (SNI demux), a forward port is single-service-exclusive.",
