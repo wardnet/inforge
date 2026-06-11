@@ -4,7 +4,6 @@
 # validation fails with "database not found".
 name: g
 container: shared
-provider: hetzner
 host: edge-01
 type: raw
 user: g

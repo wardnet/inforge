@@ -126,7 +126,7 @@ func runSecretWrite(dir, env, svcName, key string, generate bool) error {
 	}
 
 	if declared, err := declaredEncryptedKeys(dir, env, container); err == nil && !declared[key] {
-		fmt.Fprintf(os.Stderr, "warning: %s is not declared with `source: encrypted` for container %q in secrets/*.yaml — the stored value will not be provisioned until it is\n", key, container)
+		fmt.Fprintf(os.Stderr, "warning: vault key %s is not referenced by any `vault:%s` secret on a service in container %q (service/*.yaml) — the stored value will not be provisioned until a service declares it\n", key, key, container)
 	}
 
 	var value []byte
@@ -217,7 +217,7 @@ func runSecretLs(dir, env, svcName string) error {
 		if declared[k] {
 			fmt.Println(k)
 		} else {
-			fmt.Printf("%s (not declared with `source: encrypted` in secrets/*.yaml)\n", k)
+			fmt.Printf("%s (not referenced by any `vault:%s` secret on a service in service/*.yaml)\n", k, k)
 		}
 	}
 	return nil
@@ -252,7 +252,7 @@ func runSecretRm(dir, env, svcName, key string) error {
 	if err := store.Save(path); err != nil {
 		return err
 	}
-	fmt.Printf("removed %s for container %q — also drop its `source: encrypted` entry from secrets/*.yaml, or validation will fail\n", key, container)
+	fmt.Printf("removed %s for container %q — also drop any `vault:%s` secret from the container's service specs (service/*.yaml), or validation will fail\n", key, container, key)
 	return nil
 }
 

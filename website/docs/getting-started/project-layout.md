@@ -26,8 +26,8 @@ resources/
     ├── network/             # NetworkSpec files
     ├── compute/             # ComputeSpec files
     ├── database/            # DatabaseSpec files
-    ├── secrets/             # SecretsSpec files
-    └── service/             # ServiceSpec files (with typed nginx ingress)
+    ├── secrets.enc.yaml     # optional: git-encrypted store for `vault:` secrets (inforge secret)
+    └── service/             # ServiceSpec files (typed nginx ingress + inline secrets)
 ```
 
 The resource set is defined **once** per environment and instantiated into every region listed in

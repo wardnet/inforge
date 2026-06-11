@@ -14,15 +14,15 @@ import (
 // resolved value only feeds a provider write that a preview never performs.
 const encryptedPlaceholder = "(encrypted)"
 
-// decryptEncryptedSecrets collects every (container, KEY) pair declared with
-// `source: encrypted` across the regional and global secrets specs, loads the
+// decryptEncryptedSecrets collects every (container, KEY) pair declared with a
+// `vault:<KEY>` source across the regional and global service specs, loads the
 // environment's committed store (resources/<env>/secrets.enc.yaml), and
 // decrypts each value with the INFORGE_SECRETS_KEY master identity. The result
-// feeds types.AllOutputs.Encrypted, the map resolveRef serves encrypted
-// sources from — decryption happens once per deploy, here, provider-neutrally;
+// feeds types.AllOutputs.Encrypted, the map resolveRef serves vault: sources
+// from — decryption happens once per deploy, here, provider-neutrally;
 // providers only ever see plaintext.
 //
-// Returns (nil, nil) when no spec uses an encrypted source, so envs that don't
+// Returns (nil, nil) when no service uses a vault: source, so envs that don't
 // opt in never require the store or the key. On a dry run without the key the
 // values are placeholders; a real up without the key fails.
 func decryptEncryptedSecrets(res, globalRes types.Resources, dir, env string, dryRun bool) (map[string]map[string]string, error) {
@@ -51,7 +51,7 @@ func decryptEncryptedSecrets(res, globalRes types.Resources, dir, env string, dr
 	store, err := secretstore.Load(storePath)
 	if err != nil {
 		if errors.Is(err, secretstore.ErrNotFound) {
-			return nil, fmt.Errorf("environment %q declares `source: encrypted` secrets but %s does not exist — run `inforge validate %s` for details", env, storePath, env)
+			return nil, fmt.Errorf("environment %q declares `vault:` secrets but %s does not exist — run `inforge validate %s` for details", env, storePath, env)
 		}
 		return nil, err
 	}

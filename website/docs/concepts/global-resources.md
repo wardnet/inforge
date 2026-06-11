@@ -20,9 +20,9 @@ The global slice lives under `resources/<env>/global/`, mirroring the regional t
 resources/<env>/
   variables.yaml
   regions.yaml
-  network/ compute/ database/ secrets/ service/   # the regional set (per region)
+  network/ compute/ database/ service/   # the regional set (per region)
   global/
-    network/ compute/ database/ secrets/ service/ # the global slice (once)
+    network/ compute/ database/ service/ # the global slice (once)
 ```
 
 The slice is **optional** — an environment with no `global/` directory deploys nothing globally.
@@ -66,16 +66,17 @@ References between scopes are narrow and **direction-enforced**.
 
 ### Allowed: a regional secret → a global database/compute output
 
-A regional [secret](../resources/secrets) may resolve a global database or compute output by prefixing
-the referenced name with `global/`:
+A regional [service secret](../resources/secrets) may resolve a global database or compute output by
+prefixing the referenced name with `global/`:
 
-```yaml title="resources/prd/secrets/app.yaml"
+```yaml title="resources/prd/us-east-1/service/app.yaml"
 name: app
 container: app
-provider: infisical
+host: app-01
+type: raw
+user: app
 secrets:
-  DATABASE_URL:
-    source: ref:database/global/shared.connectionUrl   # the global database
+  DATABASE_URL: ref:database/global/shared.connectionUrl   # the global database
 ```
 
 This is the **one** cross-region path: a service in any region reads a database (or compute IP) that

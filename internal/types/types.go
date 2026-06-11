@@ -148,14 +148,13 @@ const (
 
 // ServiceSpec is one service resource — a workload hosted on a compute.
 type ServiceSpec struct {
-	Name      string                  `yaml:"name"`
-	Container string                  `yaml:"container"`
-	Provider  string                  `yaml:"provider"`
-	Host      string                  `yaml:"host"`              // FK -> an expanded compute specKey whose kind=vm
-	Type      string                  `yaml:"type"`              // "raw" (built) | "container" (reserved)
-	User      string                  `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
-	Ingress   []IngressSpec           `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx
-	Secrets   map[string]string `yaml:"secrets,omitempty"` // optional runtime secrets: env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); provider derived from region
+	Name      string            `yaml:"name"`
+	Container string            `yaml:"container"`
+	Host      string            `yaml:"host"`              // FK -> an expanded compute specKey whose kind=vm
+	Type      string            `yaml:"type"`              // "raw" (built) | "container" (reserved)
+	User      string            `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
+	Ingress   []IngressSpec     `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx
+	Secrets   map[string]string `yaml:"secrets,omitempty"` // optional runtime secrets: env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); the secrets provider is derived from the region, not the service
 }
 
 // IngressRoute is one typed inbound routing entry the host ingress proxy (nginx)
@@ -201,10 +200,10 @@ type DatabaseOutputs struct {
 type AllOutputs struct {
 	Compute  map[string]map[string]ComputeOutputs
 	Database map[string]map[string]DatabaseOutputs
-	// Encrypted maps container -> KEY -> plaintext for `source: encrypted`
-	// secrets, decrypted once per deploy from resources/<env>/secrets.enc.yaml
+	// Encrypted maps container -> KEY -> plaintext for `vault:<KEY>` secrets,
+	// decrypted once per deploy from resources/<env>/secrets.enc.yaml
 	// (ADR-0017). Region-independent — the store is env-scoped. Nil when the
-	// environment declares no encrypted sources.
+	// environment declares no vault: sources.
 	Encrypted map[string]map[string]string
 }
 

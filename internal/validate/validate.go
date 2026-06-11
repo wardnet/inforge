@@ -163,8 +163,9 @@ type regionContext struct {
 	tlsTermIngressByHost map[string]bool
 	// encStore is the environment's committed encrypted secret store
 	// (resources/<env>/secrets.enc.yaml), nil when the file does not exist. A
-	// `source: encrypted` entry must have a ciphertext under (container, KEY);
-	// the check is presence-only so validation stays credential-free.
+	// `vault:<KEY>` secret on a service must have a ciphertext under
+	// (container, KEY); the check is presence-only so validation stays
+	// credential-free.
 	encStore *secretstore.Store
 }
 
@@ -563,11 +564,6 @@ func collectProviderRefs(base string) ([]providerRef, error) {
 	} else {
 		refs = append(refs, rs...)
 	}
-	if rs, err := refsOf[types.ServiceSpec](filepath.Join(base, "service"), func(s types.ServiceSpec) string { return s.Provider }); err != nil {
-		return nil, err
-	} else {
-		refs = append(refs, rs...)
-	}
 	return refs, nil
 }
 
@@ -589,6 +585,43 @@ func refsOf[T any](dir string, providerOf func(T) string) ([]providerRef, error)
 	return refs, nil
 }
 
+// secretsProviderNames are the providers that can serve a service's runtime
+// secrets. Keep in sync with registry.SecretsProviderName and the cases in
+// registry.ServiceSecretsProvisioner.
+var secretsProviderNames = []string{"infisical"}
+
+// hasSecretsProvider reports whether an available provider set includes any
+// secrets-capable provider.
+func hasSecretsProvider(available map[string]bool) bool {
+	for _, name := range secretsProviderNames {
+		if available[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// servicesWithSecrets returns the path of every parsed service file under base
+// that declares at least one secret. A service with any secrets needs a secrets
+// provider to write them to at deploy (program.provisionServiceSecrets fails
+// otherwise), regardless of the secrets' source kind.
+func servicesWithSecrets(base string) ([]string, error) {
+	files, err := readFiles[types.ServiceSpec](filepath.Join(base, "service"))
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, f := range files {
+		if f.parseErr != nil {
+			continue
+		}
+		if len(f.spec.Secrets) > 0 {
+			paths = append(paths, f.path)
+		}
+	}
+	return paths, nil
+}
+
 // checkProviderAvailability verifies, for every region in the table, that each
 // resource's declared provider is present in that region's providers block. The
 // shared set deploys into every region, so a provider missing from any region is
@@ -599,6 +632,10 @@ func refsOf[T any](dir string, providerOf func(T) string) ([]providerRef, error)
 // files within each are reported in sorted order for deterministic output.
 func checkProviderAvailability(r *reporter, base string, table regions.Table) error {
 	refs, err := collectProviderRefs(base)
+	if err != nil {
+		return err
+	}
+	secretSvcPaths, err := servicesWithSecrets(base)
 	if err != nil {
 		return err
 	}
@@ -614,6 +651,11 @@ func checkProviderAvailability(r *reporter, base string, table regions.Table) er
 		for _, ref := range refs {
 			if !available[ref.provider] {
 				msgs = append(msgs, fmt.Sprintf("%s: provider %q not defined in this region's regions.yaml providers block", ref.path, ref.provider))
+			}
+		}
+		if len(secretSvcPaths) > 0 && !hasSecretsProvider(available) {
+			for _, path := range secretSvcPaths {
+				msgs = append(msgs, fmt.Sprintf("%s: declares secrets but this region's regions.yaml providers block has no secrets provider (one of: %s)", path, strings.Join(secretsProviderNames, ", ")))
 			}
 		}
 		if len(msgs) > 0 {
@@ -633,11 +675,20 @@ func checkGlobalProviderAvailability(r *reporter, globalBase string, global *reg
 	if err != nil {
 		return err
 	}
+	secretSvcPaths, err := servicesWithSecrets(globalBase)
+	if err != nil {
+		return err
+	}
 	available := availableProviders(global.Providers)
 	var msgs []string
 	for _, ref := range refs {
 		if !available[ref.provider] {
 			msgs = append(msgs, fmt.Sprintf("%s: provider %q not defined in regions.yaml global providers block", ref.path, ref.provider))
+		}
+	}
+	if len(secretSvcPaths) > 0 && !hasSecretsProvider(available) {
+		for _, path := range secretSvcPaths {
+			msgs = append(msgs, fmt.Sprintf("%s: declares secrets but regions.yaml global providers block has no secrets provider (one of: %s)", path, strings.Join(secretsProviderNames, ", ")))
 		}
 	}
 	if len(msgs) > 0 {
@@ -707,7 +758,6 @@ func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []strin
 }
 
 func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string) {
-	errs = append(errs, providerErr(s.Provider, ctx.available)...)
 	// A service on a global host (host: global/<name>) is rejected: a service that
 	// runs on a global host is defined in the global slice itself, not referenced
 	// from a region. Detected before host resolution so the message is specific.

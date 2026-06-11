@@ -12,9 +12,9 @@ import (
 )
 
 // secretFixture builds a minimal consumer resources dir: a regional service
-// (api, container bridge), a sibling on the same container (web), a global
-// service (edge, container edge), and a secrets spec declaring API_TOKEN as
-// `source: encrypted` for container bridge.
+// (api, container bridge) that declares API_TOKEN as a `vault:` secret, a
+// sibling on the same container (web), and a global service (edge, container
+// edge).
 func secretFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -24,10 +24,9 @@ func secretFixture(t *testing.T) string {
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 	}
-	write("prd/service/api.yaml", "name: api\ncontainer: bridge\nprovider: hetzner\nhost: bridge-01\ntype: raw\nuser: api\n")
-	write("prd/service/web.yaml", "name: web\ncontainer: bridge\nprovider: hetzner\nhost: bridge-01\ntype: raw\nuser: web\n")
-	write("prd/global/service/edge.yaml", "name: edge\ncontainer: edge\nprovider: hetzner\nhost: edge-01\ntype: raw\nuser: edge\n")
-	write("prd/secrets/bridge.yaml", "name: bridge\ncontainer: bridge\nprovider: infisical\nsecrets:\n  API_TOKEN:\n    source: \"encrypted\"\n")
+	write("prd/service/api.yaml", "name: api\ncontainer: bridge\nhost: bridge-01\ntype: raw\nuser: api\nsecrets:\n  API_TOKEN: \"vault:API_TOKEN\"\n")
+	write("prd/service/web.yaml", "name: web\ncontainer: bridge\nhost: bridge-01\ntype: raw\nuser: web\n")
+	write("prd/global/service/edge.yaml", "name: edge\ncontainer: edge\nhost: edge-01\ntype: raw\nuser: edge\n")
 	return dir
 }
 

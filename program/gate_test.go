@@ -140,7 +140,7 @@ func TestProvisioningDependsOnGate(t *testing.T) {
 				{Name: "bridge", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
 			},
 			Service: []types.ServiceSpec{
-				{Name: "ghost", Container: "ghost", Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "ghost"},
+				{Name: "ghost", Container: "ghost", Host: "bridge-01", Type: "raw", User: "ghost"},
 			},
 		}
 		computeOut := map[string]types.ComputeOutputs{
@@ -174,7 +174,7 @@ func TestTLSAndServiceShareOneGate(t *testing.T) {
 			},
 			Service: []types.ServiceSpec{
 				// Ingress on the host drives nginx realization (no separate resource).
-				{Name: "ghost", Container: "ghost", Provider: "hetzner", Host: "bridge-01", Type: "raw", User: "ghost",
+				{Name: "ghost", Container: "ghost", Host: "bridge-01", Type: "raw", User: "ghost",
 					Ingress: []types.IngressSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}},
 			},
 		}

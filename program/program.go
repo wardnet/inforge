@@ -102,7 +102,7 @@ func Run(ctx *pulumi.Context) error {
 
 	// Encrypted secret values (ADR-0017) are decrypted once, up front and
 	// provider-neutrally, then threaded to every region's secrets provisioning
-	// via AllOutputs. Nil unless some spec declares `source: encrypted`.
+	// via AllOutputs. Nil unless some service declares a `vault:` secret.
 	encSecrets, err := decryptEncryptedSecrets(res, globalRes, dir, env, ctx.DryRun())
 	if err != nil {
 		return err
