@@ -36,7 +36,10 @@ case "$ARCH" in
 esac
 
 ASSET="inforge_${VERSION}_${OS}_${ARCH}"
-STAGE=$(mktemp -d)
+# Stage inside the install dir so the final rename is atomic and never
+# truncates a running binary (mv across filesystems degrades to copy+truncate).
+mkdir -p "$INSTALL_DIR"
+STAGE=$(mktemp -d "$INSTALL_DIR/.inforge-install.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 
 echo "downloading inforge v${VERSION} (${OS}/${ARCH})..."
@@ -58,7 +61,6 @@ if [ "$GOT" != "$WANT" ]; then
   exit 1
 fi
 
-mkdir -p "$INSTALL_DIR"
 chmod 0755 "$STAGE/inforge"
 mv "$STAGE/inforge" "$INSTALL_DIR/inforge"
 echo "installed inforge v${VERSION} to $INSTALL_DIR/inforge"

@@ -133,10 +133,10 @@ func TestSelfUpdateChecksumMismatch(t *testing.T) {
 }
 
 func TestUpdateCmdRefusesDevBuild(t *testing.T) {
-	// Test binaries always run with the default version; assert that so this
-	// test fails loudly if the assumption ever breaks.
+	// Test binaries always run with the default version; fail loudly if that
+	// assumption ever breaks, since this is the refusal path's only coverage.
 	if version != "dev" {
-		t.Skipf("version is %q, not dev", version)
+		t.Fatalf("test binary has version %q, expected dev", version)
 	}
 	cmd := newUpdateCmd()
 	cmd.SetArgs([]string{})

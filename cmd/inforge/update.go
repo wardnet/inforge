@@ -25,6 +25,11 @@ var releaseBaseURL = "https://github.com/wardnet/inforge"
 // updateCheckTTL bounds how often the background update nudge hits GitHub.
 const updateCheckTTL = 24 * time.Hour
 
+// releaseAssetURL returns the download URL for a named asset of release ver.
+func releaseAssetURL(ver, asset string) string {
+	return fmt.Sprintf("%s/releases/download/v%s/%s", releaseBaseURL, ver, asset)
+}
+
 func newUpdateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:           "update",
@@ -98,7 +103,7 @@ func latestReleaseVersion(ctx context.Context, client *http.Client) (string, err
 // binary at exe.
 func selfUpdate(ctx context.Context, ver, exe string) error {
 	asset := fmt.Sprintf("inforge_%s_%s_%s", ver, runtime.GOOS, runtime.GOARCH)
-	url := fmt.Sprintf("%s/releases/download/v%s/%s", releaseBaseURL, ver, asset)
+	url := releaseAssetURL(ver, asset)
 
 	// Stage in the same directory so the final rename is atomic.
 	tmp, err := os.CreateTemp(filepath.Dir(exe), ".inforge-update-*")
@@ -117,6 +122,9 @@ func selfUpdate(ctx context.Context, ver, exe string) error {
 	if err := verifyChecksum(ctx, ver, asset, tmpPath); err != nil {
 		return err
 	}
+	// CreateTemp made the file 0600 and OpenFile's mode is ignored for existing
+	// files, so this chmod — not the mode passed to downloadBinary — is what
+	// makes the binary executable.
 	if err := os.Chmod(tmpPath, 0o755); err != nil {
 		return err
 	}
@@ -129,7 +137,7 @@ func selfUpdate(ctx context.Context, ver, exe string) error {
 // verifyChecksum fetches the release's checksums.txt and compares the named
 // asset's SHA-256 against the file at path.
 func verifyChecksum(ctx context.Context, ver, asset, path string) error {
-	url := fmt.Sprintf("%s/releases/download/v%s/checksums.txt", releaseBaseURL, ver)
+	url := releaseAssetURL(ver, "checksums.txt")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -204,10 +212,12 @@ func maybeNudgeUpdate() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		latest, err := latestReleaseVersion(ctx, http.DefaultClient)
-		if err != nil {
-			return
+		// Record the attempt even when the check fails (offline, blocked) —
+		// otherwise every invocation past the TTL re-pays the network timeout.
+		st.CheckedAt = time.Now()
+		if err == nil {
+			st.Latest = latest
 		}
-		st = updateCheckState{CheckedAt: time.Now(), Latest: latest}
 		if data, err := json.Marshal(st); err == nil {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
 				_ = os.WriteFile(path, data, 0o644)

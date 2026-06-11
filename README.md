@@ -18,8 +18,9 @@ inforge plugins install
 ```
 
 Set `INFORGE_VERSION` / `INFORGE_INSTALL_DIR` to pin a version or change the destination. Once
-installed, `inforge update` upgrades the CLI in place (and inforge prints a notice when a newer
-release exists, at most once a day, never in CI).
+installed, `inforge update` upgrades the CLI in place. While a newer release exists, inforge
+prints a one-line notice after each command (the version check itself runs at most once a day,
+and never in CI or non-interactive runs).
 
 See [Installation](https://wardnet.github.io/inforge/getting-started/installation) for all platforms.
 
