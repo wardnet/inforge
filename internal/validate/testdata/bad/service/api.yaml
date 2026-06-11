@@ -1,7 +1,6 @@
 # host FK does not resolve to a compute instance -> FAIL.
 name: api
 container: bridge
-provider: hetzner
 host: ghost-01
 type: raw
 user: api

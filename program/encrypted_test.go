@@ -38,7 +38,6 @@ func encryptedSpec(container string, keys ...string) types.Resources {
 	svc := types.ServiceSpec{
 		Name:      container + "-svc",
 		Container: container,
-		Provider:  "raw",
 		User:      container,
 		Secrets:   map[string]string{},
 	}
@@ -52,7 +51,7 @@ func TestDecryptEncryptedSecretsNoneDeclared(t *testing.T) {
 	// A service with only literal secrets (no vault: prefix) must not require
 	// a store or key.
 	res := types.Resources{Service: []types.ServiceSpec{{
-		Name: "ghost-svc", Container: "ghost", Provider: "raw", User: "ghost",
+		Name: "ghost-svc", Container: "ghost", User: "ghost",
 		Secrets: map[string]string{"K": "v"},
 	}}}
 	got, err := decryptEncryptedSecrets(res, types.Resources{}, t.TempDir(), "prd", false)

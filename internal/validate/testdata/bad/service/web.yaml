@@ -1,7 +1,6 @@
 # a tls-termination ingress but no tls-termination resource targets the host -> FAIL.
 name: web
 container: bridge
-provider: hetzner
 host: bridge-01
 type: raw
 user: web

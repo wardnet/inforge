@@ -35,8 +35,8 @@ That is the whole toolkit-provided surface. Everything else is a normal `run:` s
 
 ## How secrets reach inforge
 
-inforge resolves `${ENV_VAR}` references in your `regions.yaml`, `variables.yaml`, and secret
-`source:` fields from the **process environment**. So you decide the vocabulary: set whatever
+inforge resolves `${ENV_VAR}` references in your `regions.yaml` / `variables.yaml`, and the `env:<VAR>`
+secret sources on your services, from the **process environment**. So you decide the vocabulary: set whatever
 environment variables your config references, from whatever secrets you keep next to your infra
 definition. inforge does not know — and does not need to know — that a secret is named
 `CLOUDFLARE_API_TOKEN`.
@@ -124,7 +124,7 @@ jobs:
 ```
 
 `INFORGE_SECRETS_KEY` is only needed when the environment uses
-[`encrypted` secret sources](/resources/secrets#encrypted) — it is the age master identity printed by
+[`vault:` secret sources](/resources/secrets#vaultkey) — it is the age master identity printed by
 [`inforge secret init`](/cli/secret). The PR validate/preview workflow does **not** need it: previews
 substitute a placeholder for encrypted values.
 
@@ -247,9 +247,9 @@ reusable workflows all map onto one of them.
 for you. Now you set the `env:` block yourself, naming only the variables your config references. A
 provider you don't use is simply a line you don't add.
 
-**`gha:NAME` → `${NAME}`.** The `gha:` secrets-DSL source is gone. In your `secrets/*.yaml` resource
-files, rewrite each `source: gha:CLOUDFLARE_API_TOKEN` as `source: ${CLOUDFLARE_API_TOKEN}` — the same
-`${ENV_VAR}` form already used in `variables.yaml`/`regions.yaml`. The value still comes from the
-process environment, so the matching `env:` line in your workflow is what supplies it. The name must be
-upper-snake-case (`[A-Z_][A-Z0-9_]*`); an unset or empty value fails the run rather than writing an
-empty secret.
+**`gha:NAME` → `env:NAME`.** The `gha:` secrets-DSL source is gone. Secrets are now declared
+[inline on a service](/resources/secrets#source-dsl) (there is no separate `secrets/*.yaml` resource);
+rewrite each `source: gha:CLOUDFLARE_API_TOKEN` as a `CF_TOKEN: env:CLOUDFLARE_API_TOKEN` entry in the
+service's `secrets` map. The value still comes from the process environment, so the matching `env:` line
+in your workflow is what supplies it; an unset or empty value fails the run rather than writing an empty
+secret. App secrets that should live in git move to [`vault:`](/resources/secrets#vaultkey) instead.

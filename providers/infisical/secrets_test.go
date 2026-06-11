@@ -61,7 +61,7 @@ func TestProvisionServiceScopesPaths(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
 		svc := types.ServiceSpec{
-			Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost",
+			Name: "ghost", Container: "ghost", User: "ghost",
 			Secrets: map[string]string{"DATABASE_URL": "env:DATABASE_URL"},
 		}
 		var err error
@@ -86,7 +86,7 @@ func TestProvisionServicePassesOrganizationId(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "org-explicit", "use1")
 		svc := types.ServiceSpec{
-			Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost",
+			Name: "ghost", Container: "ghost", User: "ghost",
 			Secrets: map[string]string{"DATABASE_URL": "env:DATABASE_URL"},
 		}
 		_, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
@@ -116,7 +116,7 @@ func TestProvisionServiceNoSecretsReturnsNil(t *testing.T) {
 // inline, so ProvisionService creates the workspace + batch + identity.
 func bridgeServiceWithSecret() types.ServiceSpec {
 	return types.ServiceSpec{
-		Name: "bridge", Container: "bridge", Provider: "raw", User: "bridge",
+		Name: "bridge", Container: "bridge", User: "bridge",
 		Secrets: map[string]string{"MY_SECRET": "env:MY_SECRET"},
 	}
 }
@@ -316,7 +316,7 @@ func TestProvisionServiceVaultSource(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
 		svc := types.ServiceSpec{
-			Name: "ghost", Container: "ghost", Provider: "raw", User: "ghost",
+			Name: "ghost", Container: "ghost", User: "ghost",
 			Secrets: map[string]string{"API_KEY": "vault:API_KEY"},
 		}
 		all := types.AllOutputs{

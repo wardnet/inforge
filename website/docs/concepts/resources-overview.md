@@ -15,12 +15,14 @@ in `regions.yaml`. All files are validated against embedded JSON schemas.
 | [Network](../resources/network) | `network/` | VPC / network (Hetzner) |
 | [Compute](../resources/compute) | `compute/` | Virtual machine |
 | [Database](../resources/database) | `database/` | Managed PostgreSQL (Neon) |
-| [Secrets](../resources/secrets) | `secrets/` | Secret references (Infisical) |
-| [Service](../resources/service) | `service/` | Application hosted on a VM (with typed nginx ingress) |
+| [Service](../resources/service) | `service/` | Application hosted on a VM (with typed nginx ingress and inline secrets) |
 
 [DNS](../resources/dns) is **not** an authored resource type: inforge derives every record (host,
 service, vanity) automatically and creates it on the region's
 [DNS authority](../configuration/regions-yaml#dns).
+
+[Secrets](../resources/secrets) are **not** a standalone resource either: a service declares the
+runtime values it needs inline, in its own `secrets` map. There is no `secrets/` directory.
 
 ## Common fields
 
@@ -30,7 +32,7 @@ Every resource has these required fields:
 |-------|------|-------------|
 | `name` | string | Resource name. Combined with `instance` to form the specKey. |
 | `container` | string | Logical grouping label (e.g. `bridge`, `ingress`). Used in URNs and tags. |
-| `provider` | string | Provider name (`hetzner`, `cloudflare`, `neon`, `infisical`). |
+| `provider` | string | Provider name (`hetzner`, `cloudflare`, `neon`, `infisical`). A **service** has no `provider` — it is host-managed. |
 
 :::info Container vs container runtime
 `container` is a grouping label, **not** a Docker/OCI container. Do not confuse it with

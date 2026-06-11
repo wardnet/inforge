@@ -2,7 +2,6 @@
 # (only single-instance computes get a bare-name alias) -> FAIL.
 name: api
 container: core
-provider: hetzner
 host: bridge
 type: raw
 user: api

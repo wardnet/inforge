@@ -42,13 +42,12 @@ owner: app               # required — PostgreSQL role that owns the database
 |--------|-------------|
 | `connectionUrl` | PostgreSQL connection string |
 
-This output can be referenced by a Secrets resource:
+This output can be referenced by a [service secret](./service#secrets):
 
 ```yaml
-# in secrets/bridge-01.yaml
+# in service/api.yaml
 secrets:
-  db_url:
-    source: ref:database/main.connectionUrl
+  DATABASE_URL: ref:database/main.connectionUrl
 ```
 
 ## Example

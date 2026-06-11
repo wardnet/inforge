@@ -5,7 +5,7 @@ sidebar_position: 6
 # inforge secret
 
 Manage an environment's **git-committed encrypted secret store** — the file behind the
-[`encrypted` source kind](/resources/secrets#encrypted). Values live age-encrypted at
+[`vault:` source kind](/resources/secrets#vaultkey). Values live age-encrypted at
 `resources/<env>/secrets.enc.yaml`, keyed by `(container, KEY)`; this CLI is the only writer of that
 file. See [ADR-0017](https://github.com/wardnet/inforge/blob/main/docs/adr/0017-git-native-encrypted-secret-store.md).
 
@@ -78,9 +78,10 @@ mints 32 random bytes (base64url, 43 chars) in-process — the plaintext is neve
 ideal for secrets nothing external needs to know (session/signing keys, HMAC secrets, internal
 tokens).
 
-Declare the key with `source: encrypted` in the container's `secrets/*.yaml` spec —
-[`inforge validate`](/cli/validate) cross-checks declarations against the store in both directions
-(a declared key with no ciphertext fails validation; `ls` flags stored keys that are not declared).
+Declare the key with `vault:<KEY>` on a consuming service in `service/*.yaml` (e.g.
+`API_TOKEN: vault:API_TOKEN`) — [`inforge validate`](/cli/validate) cross-checks declarations against
+the store in both directions (a declared key with no ciphertext fails validation; `ls` flags stored
+keys that no service references).
 
 After merging, the deploy writes the provider; then restart the consumers:
 
