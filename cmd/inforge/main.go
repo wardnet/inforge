@@ -30,9 +30,17 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().StringVarP(&dir, "dir", "d", "./resources", "resources directory")
 	root.PersistentFlags().StringVarP(&cfg, "config", "c", "./inforge.yaml", "project config file")
 
+	// Nudge about newer releases after any command except update itself.
+	root.PersistentPostRun = func(cmd *cobra.Command, _ []string) {
+		if cmd.Name() != "update" {
+			maybeNudgeUpdate()
+		}
+	}
+
 	root.AddCommand(
 		newValidateCmd(&dir),
 		newVersionCmd(),
+		newUpdateCmd(),
 		newMatrixCmd(),
 		newPluginsCmd(),
 		newPreviewCmd(&cfg),

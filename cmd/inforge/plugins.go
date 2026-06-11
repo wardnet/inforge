@@ -92,7 +92,7 @@ func installCustomPlugin(ctx context.Context, name, ver string) error {
 
 	// goreleaser raw binary name: <binary>_<version>_<os>_<arch>
 	filename := fmt.Sprintf("%s_%s_%s_%s", binary, ver, goos, goarch)
-	url := fmt.Sprintf("https://github.com/wardnet/inforge/releases/download/v%s/%s", ver, filename)
+	url := releaseAssetURL(ver, filename)
 
 	pluginDir, err := pulumiPluginDir(name, ver)
 	if err != nil {

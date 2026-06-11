@@ -1,0 +1,231 @@
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+)
+
+// releaseBaseURL is the GitHub project URL releases are downloaded from.
+// It is a variable so tests can point it at a local HTTP server.
+var releaseBaseURL = "https://github.com/wardnet/inforge"
+
+// updateCheckTTL bounds how often the background update nudge hits GitHub.
+const updateCheckTTL = 24 * time.Hour
+
+// releaseAssetURL returns the download URL for a named asset of release ver.
+func releaseAssetURL(ver, asset string) string {
+	return fmt.Sprintf("%s/releases/download/v%s/%s", releaseBaseURL, ver, asset)
+}
+
+func newUpdateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:           "update",
+		Short:         "Update inforge to the latest release",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if version == "dev" {
+				return errors.New("this inforge was built from source — update via git, not 'inforge update'")
+			}
+			exe, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			exe, err = filepath.EvalSymlinks(exe)
+			if err != nil {
+				return err
+			}
+			latest, err := latestReleaseVersion(cmd.Context(), http.DefaultClient)
+			if err != nil {
+				return fmt.Errorf("resolve latest release: %w", err)
+			}
+			if latest == version {
+				fmt.Printf("inforge v%s is already the latest release\n", version)
+				return nil
+			}
+			fmt.Printf("updating inforge v%s -> v%s...\n", version, latest)
+			if err := selfUpdate(cmd.Context(), latest, exe); err != nil {
+				return err
+			}
+			fmt.Printf("updated %s to v%s\n", exe, latest)
+			fmt.Println("run 'inforge plugins install' to update the matching provider plugins")
+			return nil
+		},
+	}
+}
+
+// latestReleaseVersion resolves the latest released version (without the "v"
+// prefix) by reading the redirect target of the releases/latest URL, avoiding
+// the rate-limited GitHub API.
+func latestReleaseVersion(ctx context.Context, client *http.Client) (string, error) {
+	noRedirect := *client
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releaseBaseURL+"/releases/latest", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
+		return "", fmt.Errorf("expected a redirect from %s, got HTTP %d", req.URL, resp.StatusCode)
+	}
+
+	// Location ends in .../releases/tag/v<version>.
+	loc := resp.Header.Get("Location")
+	tag := loc[strings.LastIndex(loc, "/")+1:]
+	if !strings.HasPrefix(tag, "v") {
+		return "", fmt.Errorf("cannot parse release tag from redirect %q", loc)
+	}
+	return strings.TrimPrefix(tag, "v"), nil
+}
+
+// selfUpdate downloads the raw inforge binary for the given version, verifies
+// its SHA-256 against the release's checksums.txt, and atomically replaces the
+// binary at exe.
+func selfUpdate(ctx context.Context, ver, exe string) error {
+	asset := fmt.Sprintf("inforge_%s_%s_%s", ver, runtime.GOOS, runtime.GOARCH)
+	url := releaseAssetURL(ver, asset)
+
+	// Stage in the same directory so the final rename is atomic.
+	tmp, err := os.CreateTemp(filepath.Dir(exe), ".inforge-update-*")
+	if err != nil {
+		return fmt.Errorf("stage update next to %s (is the directory writable?): %w", exe, err)
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if err := downloadBinary(ctx, url, tmpPath, 0o755); err != nil {
+		return err
+	}
+	if err := verifyChecksum(ctx, ver, asset, tmpPath); err != nil {
+		return err
+	}
+	// CreateTemp made the file 0600 and OpenFile's mode is ignored for existing
+	// files, so this chmod — not the mode passed to downloadBinary — is what
+	// makes the binary executable.
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, exe); err != nil {
+		return fmt.Errorf("replace %s (is it writable?): %w", exe, err)
+	}
+	return nil
+}
+
+// verifyChecksum fetches the release's checksums.txt and compares the named
+// asset's SHA-256 against the file at path.
+func verifyChecksum(ctx context.Context, ver, asset, path string) error {
+	url := releaseAssetURL(ver, "checksums.txt")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, url)
+	}
+	sums, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	var want string
+	for _, line := range strings.Split(string(sums), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == asset {
+			want = fields[0]
+			break
+		}
+	}
+	if want == "" {
+		return fmt.Errorf("no checksum for %s in %s", asset, url)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != want {
+		return fmt.Errorf("checksum mismatch for %s: got %s, want %s", asset, got, want)
+	}
+	return nil
+}
+
+// updateCheckState is the on-disk cache for the background update nudge.
+type updateCheckState struct {
+	CheckedAt time.Time `json:"checked_at"`
+	Latest    string    `json:"latest"`
+}
+
+// maybeNudgeUpdate prints a one-line notice on stderr when a newer release is
+// known. It contacts GitHub at most once per updateCheckTTL, never in CI,
+// non-interactive, or from-source ("dev") runs, and stays silent on any failure.
+func maybeNudgeUpdate() {
+	if version == "dev" || os.Getenv("CI") != "" {
+		return
+	}
+	if fi, err := os.Stderr.Stat(); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return
+	}
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(cacheDir, "inforge", "update-check.json")
+
+	var st updateCheckState
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &st)
+	}
+	if time.Since(st.CheckedAt) >= updateCheckTTL {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		latest, err := latestReleaseVersion(ctx, http.DefaultClient)
+		// Record the attempt even when the check fails (offline, blocked) —
+		// otherwise every invocation past the TTL re-pays the network timeout.
+		st.CheckedAt = time.Now()
+		if err == nil {
+			st.Latest = latest
+		}
+		if data, err := json.Marshal(st); err == nil {
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
+				_ = os.WriteFile(path, data, 0o644)
+			}
+		}
+	}
+	if st.Latest != "" && st.Latest != version {
+		_, _ = fmt.Fprintf(os.Stderr, "\ninforge v%s is available (you have v%s) — run 'inforge update'\n",
+			st.Latest, version)
+	}
+}
