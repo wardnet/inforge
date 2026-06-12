@@ -134,7 +134,23 @@ release:
   # the stable releases/latest/download/install.sh URL.
   extra_files:
     - glob: scripts/install.sh
-  # When a draft release already exists for the tag, goreleaser uses its body
-  # as the release description and appends the auto-generated changelog.
-  # Workflow: create a draft release on GitHub with your notes → push the tag.
-  replace_existing_draft: true
+  # Standing description prepended to every release; the auto-generated
+  # changelog (see `changelog:` above) is appended below it.
+  header: |
+    ## inforge
+
+    A Go toolchain that turns declarative infrastructure definitions into real
+    deployments via Pulumi and GitHub Actions.
+
+    This release ships four statically-linked binaries: the `inforge` CLI, the
+    `inforge-bootstrap` runtime secret bootstrapper, and the `pulumi-resource-neon`
+    and `pulumi-resource-infisical` provider plugins.
+
+    **Install / update**
+
+    ```sh
+    curl -fsSL https://github.com/wardnet/inforge/releases/latest/download/install.sh | sh
+    ```
+
+    `inforge plugins install` pulls the provider plugins it needs from the matching
+    release; `inforge update` self-updates the CLI in place.
