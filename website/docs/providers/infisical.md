@@ -26,6 +26,10 @@ inforge plugins install
 |----------|--------|
 | Secrets | Available |
 
+The Infisical provider is selected as the project's secrets store via `providers.secretsStore:
+infisical` in [`inforge.yaml`](/configuration/inforge-yaml#providers). There is no per-resource
+override — the secrets store is a project-wide choice.
+
 ## Configuration
 
 Provider config lives in `resources/<env>/regions.yaml` — under each region's

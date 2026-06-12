@@ -7,12 +7,21 @@ sidebar_position: 1
 A **Network** resource defines a VPC and its subnets for a region. Networks must be created before
 Compute resources that reference them.
 
+A network resource lives in a folder under `regional/network/<name>/`:
+
+```
+regional/network/ingress/
+  manifest.yaml       # required — the network spec
+```
+
 ## Schema
+
+`manifest.yaml`:
 
 ```yaml
 name: ingress            # required — used as a foreign key by compute resources
 container: ingress       # required — logical grouping label
-provider: hetzner        # required — only "hetzner" is currently supported
+provider: hetzner        # optional — inherits from inforge.yaml providers.compute if omitted
 cidr: 10.0.0.0/16        # required — CIDR block for the network
 
 subnets:                 # optional — list of subnets within the network
@@ -26,13 +35,13 @@ subnets:                 # optional — list of subnets within the network
 |-------|------|----------|-------------|
 | `name` | string | Yes | Resource name. Used as the foreign key in compute specs. |
 | `container` | string | Yes | Grouping label. Used in URNs and tags. |
-| `provider` | string | Yes | Must be `hetzner`. |
+| `provider` | string | No | Must be `hetzner`. Inherits from `inforge.yaml` `providers.compute` if omitted. |
 | `cidr` | string | Yes | CIDR block for the network. |
 | `subnets` | array | No | List of subnets. Each entry requires `name` and `cidr`. |
 
 ## Example
 
-```yaml title="resources/prd/us-east-1/network/ingress.yaml"
+```yaml title="regional/network/ingress/manifest.yaml"
 name: ingress
 container: ingress
 provider: hetzner

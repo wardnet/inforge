@@ -60,7 +60,9 @@ naming.ResourceInstance(env, slug, "vm", "bridge", 1)   // wardnet-prd-use1-vm-b
 naming.GlobalResource(env, "key", "user")               // wardnet-prd-key-user
 ```
 
-`naming.SpecKey(name, instance)` produces `bridge-01` etc. and is used as an internal map key / foreign key in compute and DNS specs — it is NOT a cloud resource name.
+`naming.SpecKey(name, instance)` produces `bridge-01` etc. and is used as an internal map key and
+in derived names (DNS records, display names). It is NOT a cloud resource name and is NOT written in
+resource specs — foreign references use the resource `name` directly (e.g. `service.host: bridge`).
 
 ## Conventions
 

@@ -14,6 +14,10 @@ The Hetzner provider implements **Network** and **Compute** resources using
 | Network | Available |
 | Compute | Available |
 
+Network and Compute resources may omit their `provider:` field when `providers.compute: hetzner` is
+set in [`inforge.yaml`](/configuration/inforge-yaml#providers). An explicit `provider: hetzner` on a
+resource always takes precedence over the project default.
+
 ## Configuration
 
 Hetzner configuration lives in each region's `providers.hetzner` block in

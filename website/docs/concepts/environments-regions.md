@@ -27,14 +27,14 @@ A **region target** is an abstract region an environment deploys into, declared 
 `us-east-1`), a `slug`, and a `providers` block (credentials + that region's realization). The set of
 keys under `regions:` *is* the set of regions the environment deploys into.
 
-Resource files live **once** under `resources/<env>/` — there are no per-region directories. The
-single shared set is instantiated into every region in `regions.yaml`, and the region slug baked into
-each cloud name keeps instances unique per region:
+Resource folders live **once** under `resources/<env>/regional/` — there are no per-region
+directories. The single shared set is instantiated into every region in `regions.yaml`, and the
+region slug baked into each cloud name keeps instances unique per region:
 
 ```
-resources/prd/compute/bridge.yaml        # defined once
-  → wardnet-prd-use1-vm-bridge           # instantiated in us-east-1
-  → wardnet-prd-euc1-vm-bridge           # instantiated in eu-central-1
+resources/prd/regional/compute/bridge/manifest.yaml   # defined once
+  → wardnet-prd-use1-vm-bridge                        # instantiated in us-east-1
+  → wardnet-prd-euc1-vm-bridge                        # instantiated in eu-central-1
 ```
 
 The only legitimate per-region difference — the provider realization (location, server types,

@@ -27,18 +27,22 @@ The short location code an abstract region maps to (`us-east-1` → `use1`), hel
 **region table**. Used to build display names and the `<slug>` segment of DNS names.
 
 **Region table**:
-The per-environment `regions.yaml`: a map from abstract region to its `{slug, providers}`. It is the
-single authority for which regions deploy and all provider config. The built-in slugs in
-`internal/regions` are naming vocabulary only; there is no default fallback table.
+The per-environment `regions.yaml`: a map from abstract region to its `{slug, providers}`, plus an
+optional top-level `global:` block for the global slice. It is the single authority for which regions
+deploy and all provider config. The built-in slugs in `internal/regions` are naming vocabulary only;
+there is no default fallback table.
 
 **Global slice**:
 The reserved, region-less scope under `resources/<env>/global/`: resources deployed **once** instead
 of into every region. Not a new resource kind — the same types and schemas — with **region-less
 naming** (`wardnet-<env>-<type>-<name>`, empty slug) and its own provider config in the top-level
-`global:` block of `regions.yaml` (providers, no slug). A regional **Secrets** `ref:` may target a
-global database/compute output via a `global/` name prefix (`ref:database/global/<name>.<output>`) —
-the one allowed cross-region reference; `service.host`/`compute.network` to global are rejected, and a
-global resource may reference only other global resources.
+`global:` block of `regions.yaml`. The `global:` block carries a required `placementRegion` naming
+one of the abstract regions under `regions:` — used only to look up provider credentials and
+realizations for global-slice resources; it does not affect resource names (see ADR-0023). A regional
+**Secrets** `ref:` may target a global database/compute output via a `global/` name prefix
+(`ref:database/global/<name>.<output>`) — the one allowed cross-region reference; `service.host`/
+`compute.network` to global are rejected, and a global resource may reference only other global
+resources.
 _Avoid_: "global resource type" (global is a scope, not a kind).
 
 **Container**:
@@ -47,8 +51,10 @@ the basis of URN namespaces and tags.
 _Avoid_: group (old name), and do not confuse with a service delivery `type: container`.
 
 **specKey**:
-A resource instance's identity, `"<name>-<NN>"` zero-padded (e.g. `bridge-01`). The value other
-resources use as a foreign key.
+A resource instance's identity, `"<name>-<NN>"` zero-padded (e.g. `bridge-01`). Used internally as
+a map key and in derived names (DNS records, display names). Not written in resource specs — foreign
+references use the resource `name` directly (e.g. `service.host: bridge`, not `bridge-01`).
+_Avoid_: using specKey as a user-visible foreign key in any spec field.
 
 **Display name**:
 The fully-qualified resource name `wardnet-<env>-<resourceType>-<slug>-<specKey>`.
@@ -57,8 +63,17 @@ The fully-qualified resource name `wardnet-<env>-<resourceType>-<slug>-<specKey>
 
 **Resource**:
 One of the declarative types under a region: **Network**, **Compute**, **Database**, **Secrets**,
-**Service**. Each is one YAML file validated against an embedded JSON schema. DNS is **not** an authored
+**Service**. Each is a named **folder** containing a `manifest.yaml` validated against an embedded JSON
+schema, plus optional sidecar files in the same folder (e.g. `cloud-init.sh` for compute,
+`environment.yaml` for service — see **Resource folder** and ADR-0018). DNS is **not** an authored
 resource (see **DNS authority**); nor is the host ingress proxy (see **Ingress**).
+
+**Resource folder**:
+The on-disk shape of a resource: `<type>/<name>/manifest.yaml`, with sidecars alongside the manifest
+in the same folder. Regional resources live under `resources/<env>/regional/<type>/<name>/`;
+global resources under `resources/<env>/global/<type>/<name>/`. The env-root directory holds only
+environment-scoped config (`regions.yaml`, `variables.yaml`, `inforge.yaml`, `secrets.enc.yaml`).
+See ADR-0018 and ADR-0019.
 
 **Compute**:
 A host/runtime resource with a `kind`: `vm` (built now) or `cluster` (k8s, reserved). VM sizing is
@@ -71,10 +86,13 @@ provider maps the name to a concrete SKU; see **Region realization**). Defaults 
 `LARGE`) in `internal/sizes`; a per-environment `sizes.yaml` **replaces** them wholesale.
 
 **Service**:
-A component hosted *on* a compute (its `host` foreign key). On a `kind=vm` host its delivery `type`
-is `raw` (a gzip of files + scripts; built now) or `container` (pull-based; reserved). May declare an
-**Ingress** to be exposed for inbound traffic.
-_Avoid_: app, workload (acceptable informally), daemon.
+A component hosted *on* a compute, referenced by its `host` field — the compute's `name` (e.g.
+`host: bridge`), not its specKey. The host must have `instance_count: 1`; a multi-instance host is a
+validation error. On a `kind=vm` host its delivery `type` is `raw` (a gzip of files + scripts; built
+now) or `container` (pull-based; reserved). May declare an **Ingress** to be exposed for inbound
+traffic. The service's runtime environment variables are declared in a sibling `environment.yaml`
+sidecar (under the service's folder), not in the manifest — see **Resource folder** and ADR-0020.
+_Avoid_: app, workload (acceptable informally), daemon; `host: bridge-01` (specKey form, removed).
 
 **Ingress**:
 The optional `ingress` **list** on a Service: each entry is **typed** — `type` (`tls-termination` |
@@ -129,7 +147,9 @@ plaintext). Anything else is invalid.
 
 **Provider**:
 A named cloud/service integration (`hetzner`, `cloudflare`, `neon`, `infisical`) selected per
-resource by its `provider` field.
+resource by its `provider` field. The `provider` field is optional when a project-level default is
+set for the resource's class in `inforge.yaml`'s `providers:` block; an explicit field always takes
+precedence (see ADR-0021).
 _Avoid_: confusing with a Pulumi provider object (an implementation detail inside a provider).
 
 **Provider registry**:
@@ -235,9 +255,10 @@ The number of *unpinned* (historical, rollback) artifacts a service retains. Pru
 
 ## Example dialogue
 
-> **Dev:** For `bridge` in `prd`, the tls-termination points at `compute: bridge-01`. Is that the file name?
-> **Expert:** It's the specKey — `bridge` with instance `01`. If `bridge`'s `instance_count` were 2,
-> you'd have `bridge-01` and `bridge-02`, and the resource targets one of them.
+> **Dev:** For the `api` service in `prd`, `host: bridge` — is that the folder name?
+> **Expert:** It's the compute resource's `name` field, which matches its folder name by convention:
+> `regional/compute/bridge/manifest.yaml` declares `name: bridge`. inforge expands it to the specKey
+> `bridge-01` internally for DNS and display names, but users always write the bare name.
 > **Dev:** And `bridge` lives in `us-east-1` — that's the region target?
 > **Expert:** Right, the region target. Its slug `use1` is what shows up in the display name and the
 > DNS subdomain. How `us-east-1` becomes a real Hetzner datacenter and server type — that's the region
