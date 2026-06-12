@@ -173,8 +173,9 @@ cat > /etc/wardnet/manifest.yaml << 'EOF'
 EOF
 ```
 
-inforge appends the deploy-user provisioning step and the secret bootstrap step automatically
-— no need to write `useradd` or key-installation logic in your cloud-init template.
+inforge appends the deploy-user provisioning step automatically — no need to write `useradd` or
+key-installation logic in your cloud-init template. Secrets are not a first-boot concern; each service
+fetches its own at runtime via `inforge-bootstrap`.
 
 ## Outputs
 

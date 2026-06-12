@@ -250,6 +250,6 @@ provider you don't use is simply a line you don't add.
 **`gha:NAME` → `env:NAME`.** The `gha:` secrets-DSL source is gone. Secrets are now declared
 [inline on a service](/resources/secrets#source-dsl) (there is no separate `secrets/*.yaml` resource);
 rewrite each `source: gha:CLOUDFLARE_API_TOKEN` as a `CF_TOKEN: env:CLOUDFLARE_API_TOKEN` entry in the
-service's `secrets` map. The value still comes from the process environment, so the matching `env:` line
+service's `environment.yaml`. The value still comes from the process environment, so the matching `env:` line
 in your workflow is what supplies it; an unset or empty value fails the run rather than writing an empty
 secret. App secrets that should live in git move to [`vault:`](/resources/secrets#vaultkey) instead.

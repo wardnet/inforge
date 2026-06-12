@@ -41,7 +41,6 @@ providers:            # project-level defaults — resources can omit provider:
   compute: hetzner
   database:
     postgresql: neon
-  secretsStore: infisical
 ```
 
 See [inforge.yaml reference](/configuration/inforge-yaml) for all backend types (file, git-branch, s3, r2).

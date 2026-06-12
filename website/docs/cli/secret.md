@@ -78,8 +78,8 @@ mints 32 random bytes (base64url, 43 chars) in-process — the plaintext is neve
 ideal for secrets nothing external needs to know (session/signing keys, HMAC secrets, internal
 tokens).
 
-Declare the key with `vault:<KEY>` on a consuming service in `service/*.yaml` (e.g.
-`API_TOKEN: vault:API_TOKEN`) — [`inforge validate`](/cli/validate) cross-checks declarations against
+Declare the key with `vault:<KEY>` on a consuming service in its `environment.yaml` (e.g.
+`resources/<env>/regional/service/<name>/environment.yaml`, with `API_TOKEN: vault:API_TOKEN`) — [`inforge validate`](/cli/validate) cross-checks declarations against
 the store in both directions (a declared key with no ciphertext fails validation; `ls` flags stored
 keys that no service references).
 

@@ -1,9 +1,10 @@
 // Package loader reads a project's on-disk resource definitions for a single
 // environment: variables.yaml, the optional per-env region/size tables, and
-// the single shared resource set under resources/<env>/{network,compute,…},
-// instantiated into every region. It applies the defaults that yaml.v3 cannot,
-// substitutes ${ENV_VAR} references in variables.yaml, and resolves cloud-init
-// paths. Cross-resource and semantic validation lives in internal/validate.
+// the folder-based resource set under resources/<env>/regional/<type>/<name>/
+// manifest.yaml (plus sidecars), instantiated into every region. It applies the
+// defaults that yaml.v3 cannot, substitutes ${ENV_VAR} references in
+// variables.yaml, loads each service's environment.yaml sidecar, and resolves
+// cloud-init paths. Cross-resource and semantic validation lives in internal/validate.
 package loader
 
 import (

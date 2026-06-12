@@ -180,7 +180,7 @@ variables, drops privilege to the service's `user`, and execs the real binary. S
 only in the service process's environment — never on disk, in the journal, or in argv. A service that
 declares no secrets gets a descriptor with no provider and starts with no fetch at all.
 
-The secrets provider a service's values are written to is the project's **`secretsStore`** setting in
-`inforge.yaml` (see [Provider defaults](/configuration/inforge-yaml#providers)). A service that
-declares environment variables in a region (or global slice) with no matching secrets provider fails
-`inforge validate`, before any deploy.
+The secrets provider a service's values are written to is selected per region by the `infisical` block
+in that region's `providers:` in [`regions.yaml`](/configuration/regions-yaml) — there is no
+`secretsStore` key in `inforge.yaml`. A service that declares environment variables in a region (or
+global slice) with no matching secrets provider fails `inforge validate`, before any deploy.

@@ -1,7 +1,8 @@
 # Context Map
 
-This repository builds three statically-linked binaries that form three bounded contexts: the
-`inforge` toolkit/CLI and two Pulumi provider plugins. Only the **Toolkit** context has a resolved
+This repository builds four statically-linked binaries across three bounded contexts: the
+`inforge` toolkit/CLI (which also ships the `inforge-bootstrap` runtime secret bootstrapper) and two
+Pulumi provider plugins. Only the **Toolkit** context has a resolved
 domain language today; the provider contexts are stubs and gain their own `CONTEXT.md` when
 implemented.
 

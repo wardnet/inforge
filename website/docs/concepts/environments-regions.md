@@ -50,9 +50,9 @@ each region's provider config. Built-in slugs in `internal/regions` provide the 
 
 ## Display name
 
-The canonical resource name format is `wardnet-<env>-<resourceType>-<slug>-<specKey>`.
+The canonical resource name format is `wardnet-<env>-<slug>-<type>-<name>[-<NN>]`.
 
-Example: `wardnet-prd-compute-use1-bridge-01`
+Example: `wardnet-prd-use1-vm-bridge-01`
 
 ## Region table
 
