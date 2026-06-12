@@ -36,8 +36,8 @@ type Table map[string]AbstractRegion
 // plus the provider config used to realise global resources. Resources defined
 // under resources/<env>/global/ realize against it with region-less naming.
 // placementRegion must name one of the regions declared under regions: — it
-// selects the provider-registration lookup key for the global slice but does
-// not affect resource names.
+// is validated now and will be used to select the provider-registration lookup
+// key for the global slice; it does not affect resource names.
 type Global struct {
 	PlacementRegion string                    `yaml:"placementRegion"`
 	Providers       map[string]map[string]any `yaml:"providers"`
