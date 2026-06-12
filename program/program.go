@@ -83,6 +83,15 @@ func Run(ctx *pulumi.Context) error {
 	if err != nil {
 		return err
 	}
+	// Decode project-level provider defaults from stack config. The defaults are
+	// serialised by the CLI (setProviderDefaults) so the program can resolve effective
+	// providers without the project file.
+	var providerDefaults types.ProviderDefaults
+	if raw := cfg.Get("provider_defaults"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &providerDefaults); err != nil {
+			return fmt.Errorf("decode provider_defaults: %w", err)
+		}
+	}
 	// Which regions deploy comes from regions.yaml. Iterate in sorted order so
 	// resource creation is deterministic across runs (the table is a map).
 	regionNames := sortedKeys(regionTable)
@@ -133,7 +142,7 @@ func Run(ctx *pulumi.Context) error {
 	if globalBlock != nil {
 		// The region-less global slice has no DNS authority (records are per-region).
 		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, nil, vars.SSH, regionTable, ctx.Project(), env, globalScope)
-		if err := createInfra(ctx, globalReg, globalRes, env, globalScope, "", vars.BaseDomain, networkOutputs, computeOutputs, databaseOutputs); err != nil {
+		if err := createInfra(ctx, globalReg, globalRes, env, globalScope, "", vars.BaseDomain, providerDefaults, networkOutputs, computeOutputs, databaseOutputs); err != nil {
 			return err
 		}
 	}
@@ -143,7 +152,7 @@ func Run(ctx *pulumi.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := createInfra(ctx, registries[region], res, env, region, slug, vars.BaseDomain, networkOutputs, computeOutputs, databaseOutputs); err != nil {
+		if err := createInfra(ctx, registries[region], res, env, region, slug, vars.BaseDomain, providerDefaults, networkOutputs, computeOutputs, databaseOutputs); err != nil {
 			return err
 		}
 	}
@@ -162,7 +171,7 @@ func Run(ctx *pulumi.Context) error {
 		// Both ingress realization and service provisioning SSH the same hosts, so
 		// the gate they each depend on must be the same resource — share the map.
 		gates := map[string]pulumi.Resource{}
-		if err := realizeIngress(ctx, reg, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain); err != nil {
+		if err := realizeIngress(ctx, reg, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain, providerDefaults); err != nil {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
@@ -187,6 +196,7 @@ func Run(ctx *pulumi.Context) error {
 // slug-scoped ones.
 func createInfra(
 	ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, env, region, slug, baseDomain string,
+	defaults types.ProviderDefaults,
 	networkOutputs map[string]map[string]types.NetworkOutputs,
 	computeOutputs map[string]map[string]types.ComputeOutputs,
 	databaseOutputs map[string]map[string]types.DatabaseOutputs,
@@ -201,7 +211,7 @@ func createInfra(
 	ingressPorts := ingressPortsByHost(res)
 
 	for _, spec := range res.Network {
-		np, err := reg.Network(spec.Provider)
+		np, err := reg.Network(types.ResolveProvider(spec.Provider, "network", "", defaults))
 		if err != nil {
 			return err
 		}
@@ -225,7 +235,7 @@ func createInfra(
 			return fmt.Errorf("compute %s/%s: %w", region, spec.Name, err)
 		}
 
-		cp, err := reg.Compute(spec.Provider)
+		cp, err := reg.Compute(types.ResolveProvider(spec.Provider, "compute", "", defaults))
 		if err != nil {
 			return err
 		}
@@ -243,7 +253,7 @@ func createInfra(
 	}
 
 	for _, spec := range res.Database {
-		dp, err := reg.Database(spec.Provider)
+		dp, err := reg.Database(types.ResolveProvider(spec.Provider, "database", spec.Engine, defaults))
 		if err != nil {
 			return err
 		}
@@ -642,7 +652,7 @@ func serviceDeprovisionScript(svc types.ServiceSpec) string {
 // through the same canonicalization validation uses, so `host: bridge` and
 // `host: bridge-01` agree on the host. Hosts are realized in sorted order so the
 // resource graph is stable across runs.
-func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, deployPrivateKey, env, slug, baseDomain string) error {
+func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, deployPrivateKey, env, slug, baseDomain string, defaults types.ProviderDefaults) error {
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	routesByCompute, err := routesByHost(res, canonical, env, slug, baseDomain)
 	if err != nil {
@@ -653,7 +663,7 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 	}
 
 	deployUserByCompute := deployUsersByHost(res.Compute)
-	providerByCompute := ingressProvidersByHost(res.Compute)
+	providerByCompute := ingressProvidersByHost(res.Compute, defaults)
 
 	for _, hostKey := range sortedKeys(routesByCompute) {
 		host, ok := computeOut[hostKey]
@@ -679,11 +689,11 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 // ingressProvidersByHost maps each expanded compute specKey to the provider that
 // realizes its ingress proxy — the host's own compute provider (services have no
 // provider; the proxy runs on the host).
-func ingressProvidersByHost(computes []types.ComputeSpec) map[string]string {
+func ingressProvidersByHost(computes []types.ComputeSpec, defaults types.ProviderDefaults) map[string]string {
 	byHost := map[string]string{}
 	for _, c := range computes {
 		for i := 1; i <= c.InstanceCount; i++ {
-			byHost[naming.SpecKey(c.Name, i)] = c.Provider
+			byHost[naming.SpecKey(c.Name, i)] = types.ResolveProvider(c.Provider, "compute", "", defaults)
 		}
 	}
 	return byHost

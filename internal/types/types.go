@@ -323,3 +323,32 @@ type Resources struct {
 	Database []DatabaseSpec
 	Service  []ServiceSpec
 }
+
+// ProviderDefaults are project-level provider fallbacks. When a resource spec omits
+// its provider field, the effective provider is resolved from this block.
+type ProviderDefaults struct {
+	Compute      string            `yaml:"compute"`
+	Database     map[string]string `yaml:"database"` // engine -> provider (e.g. "postgresql": "neon")
+	SecretsStore string            `yaml:"secrets_store"`
+}
+
+// ResolveProvider returns the effective provider for a resource: override wins if
+// non-empty, then the class default (engine-keyed for databases). Returns "" when
+// no provider is configured.
+func ResolveProvider(override, class, engine string, d ProviderDefaults) string {
+	if override != "" {
+		return override
+	}
+	switch class {
+	case "compute", "network":
+		return d.Compute
+	case "database":
+		if p, ok := d.Database[engine]; ok && p != "" {
+			return p
+		}
+		return ""
+	case "secrets":
+		return d.SecretsStore
+	}
+	return ""
+}

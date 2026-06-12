@@ -1,0 +1,6 @@
+name: internal
+container: ingress
+cidr: 10.0.1.0/24
+subnets:
+  - name: main
+    cidr: 10.0.1.0/26

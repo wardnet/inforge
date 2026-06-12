@@ -182,7 +182,7 @@ func TestTLSAndServiceShareOneGate(t *testing.T) {
 			"bridge-01": {PublicIP: pulumi.String("1.2.3.4").ToStringOutput()},
 		}
 		gates := map[string]pulumi.Resource{}
-		if err := realizeIngress(ctx, reg, res, computeOut, gates, "priv", "prd", "use1", "example.com"); err != nil {
+		if err := realizeIngress(ctx, reg, res, computeOut, gates, "priv", "prd", "use1", "example.com", types.ProviderDefaults{}); err != nil {
 			return err
 		}
 		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", "us-east-1", "use1", "example.com", "1.2.3")

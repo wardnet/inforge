@@ -4,7 +4,7 @@
   "title": "Compute resource",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "container", "provider", "network", "size", "image"],
+  "required": ["name", "container", "network", "size", "image"],
   "properties": {
     "name": { "type": "string", "minLength": 1 },
     "kind": { "type": "string", "enum": ["vm", "cluster"] },

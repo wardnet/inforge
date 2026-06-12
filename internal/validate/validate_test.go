@@ -15,23 +15,42 @@ import (
 const testdataDir = "testdata"
 
 func TestValidateResourcesOK(t *testing.T) {
-	err := ValidateResources("ok", testdataDir)
+	err := ValidateResources("ok", testdataDir, types.ProviderDefaults{})
 	assert.NoError(t, err, "the ok environment should validate cleanly")
 }
 
 func TestValidateResourcesBad(t *testing.T) {
-	err := ValidateResources("bad", testdataDir)
+	err := ValidateResources("bad", testdataDir, types.ProviderDefaults{})
 	require.Error(t, err, "the bad environment should fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
+// TestValidateResourcesProviderDefaultsOK: specs that omit provider: pass when
+// project-level defaults cover all resource classes.
+func TestValidateResourcesProviderDefaultsOK(t *testing.T) {
+	defaults := types.ProviderDefaults{
+		Compute:  "hetzner",
+		Database: map[string]string{"postgresql": "neon"},
+	}
+	err := ValidateResources("provider-defaults-ok", testdataDir, defaults)
+	assert.NoError(t, err, "specs without provider: should pass when defaults cover all classes")
+}
+
+// TestValidateResourcesProviderDefaultsFail: specs that omit provider: fail when
+// no defaults are configured.
+func TestValidateResourcesProviderDefaultsFail(t *testing.T) {
+	err := ValidateResources("provider-defaults-ok", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "specs without provider: should fail when no defaults are configured")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
 func TestValidateResourcesNamingAlias(t *testing.T) {
-	err := ValidateResources("naming-alias", testdataDir)
+	err := ValidateResources("naming-alias", testdataDir, types.ProviderDefaults{})
 	assert.NoError(t, err, "the naming-alias environment should validate cleanly")
 }
 
 func TestValidateResourcesNamingAliasMulti(t *testing.T) {
-	err := ValidateResources("naming-alias-multi", testdataDir)
+	err := ValidateResources("naming-alias-multi", testdataDir, types.ProviderDefaults{})
 	require.Error(t, err, "the naming-alias-multi environment should fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 }
@@ -40,7 +59,7 @@ func TestValidateResourcesNamingAliasMulti(t *testing.T) {
 // resolves a GLOBAL database output (ref:database/global/shared.connectionUrl) —
 // the one allowed cross-region reference.
 func TestValidateResourcesGlobalOK(t *testing.T) {
-	err := ValidateResources("global-ok", testdataDir)
+	err := ValidateResources("global-ok", testdataDir, types.ProviderDefaults{})
 	assert.NoError(t, err, "a regional secret referencing a global database should validate cleanly")
 }
 
@@ -49,7 +68,7 @@ func TestValidateResourcesGlobalOK(t *testing.T) {
 // context, so the regional database is not found and validation fails — enforcing
 // "global → global only".
 func TestValidateResourcesGlobalBad(t *testing.T) {
-	err := ValidateResources("global-bad", testdataDir)
+	err := ValidateResources("global-bad", testdataDir, types.ProviderDefaults{})
 	require.Error(t, err, "a global resource referencing a regional one should fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 }
@@ -58,14 +77,14 @@ func TestValidateResourcesGlobalBad(t *testing.T) {
 // ciphertext exists in the env's secrets.enc.yaml validates
 // cleanly — the check is presence-only, so the fixture ciphertext is a dummy.
 func TestValidateResourcesEncryptedOK(t *testing.T) {
-	err := ValidateResources("encrypted-ok", testdataDir)
+	err := ValidateResources("encrypted-ok", testdataDir, types.ProviderDefaults{})
 	assert.NoError(t, err, "an encrypted source with a matching store entry should validate cleanly")
 }
 
 // TestValidateResourcesEncryptedMissingKey: the store exists but holds no
 // ciphertext for the `vault:KEY` under the service's container.
 func TestValidateResourcesEncryptedMissingKey(t *testing.T) {
-	err := ValidateResources("encrypted-bad", testdataDir)
+	err := ValidateResources("encrypted-bad", testdataDir, types.ProviderDefaults{})
 	require.Error(t, err, "an encrypted source without a store entry should fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 }
@@ -73,7 +92,7 @@ func TestValidateResourcesEncryptedMissingKey(t *testing.T) {
 // TestValidateResourcesEncryptedNoStore: a `vault:KEY` secret with no
 // secrets.enc.yaml must fail and point at `inforge secret init`.
 func TestValidateResourcesEncryptedNoStore(t *testing.T) {
-	err := ValidateResources("encrypted-nostore", testdataDir)
+	err := ValidateResources("encrypted-nostore", testdataDir, types.ProviderDefaults{})
 	require.Error(t, err, "an encrypted source without a store file should fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 }
@@ -243,7 +262,7 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 			"us-east-1":    {Slug: "use1", Providers: full},
 			"eu-central-1": {Slug: "euc1", Providers: full},
 		}
-		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table))
+		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table, types.ProviderDefaults{}))
 		assert.False(t, r.failed, "every region declares every provider the shared set uses")
 	})
 
@@ -257,7 +276,7 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 			"us-east-1":    {Slug: "use1", Providers: full},
 			"eu-central-1": {Slug: "euc1", Providers: noNeon},
 		}
-		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table))
+		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table, types.ProviderDefaults{}))
 		assert.True(t, r.failed, "neon is unavailable in eu-central-1")
 	})
 
@@ -272,7 +291,7 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 		table := regions.Table{
 			"us-east-1": {Slug: "use1", Providers: noSecrets},
 		}
-		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table))
+		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table, types.ProviderDefaults{}))
 		assert.True(t, r.failed, "a service declares secrets but the region has no secrets provider")
 	})
 }

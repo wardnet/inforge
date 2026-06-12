@@ -1,0 +1,9 @@
+name: bridge
+container: bridge
+network: ingress
+size: SMALL
+image: ubuntu-24.04
+cloud_init: bridge.cloud-init.sh
+instance_count: 1
+deploy_user:
+  name: deploy

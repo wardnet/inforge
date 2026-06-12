@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/wardnet/inforge/internal/types"
 	"gopkg.in/yaml.v3"
 )
 
@@ -26,6 +27,9 @@ type projectConfig struct {
 	// Artifacts configures the release artifact store (ADR-0016). Optional —
 	// only `inforge releases` reads it.
 	Artifacts artifactsConfig `yaml:"artifacts"`
+	// Providers carries project-level provider defaults applied when a resource
+	// spec omits its provider field.
+	Providers types.ProviderDefaults `yaml:"providers"`
 }
 
 // artifactsConfig is the inforge.yaml `artifacts:` block: the release-store

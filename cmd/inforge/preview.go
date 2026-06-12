@@ -56,6 +56,10 @@ func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, for
 		return fmt.Errorf("set stack config: %w", err)
 	}
 
+	if err := setProviderDefaults(ctx, s, projCfg.Providers); err != nil {
+		return fmt.Errorf("set provider defaults: %w", err)
+	}
+
 	// A single Printer renders the engine's event stream (per-resource lines plus
 	// an end-of-run summary), replacing Pulumi's raw progress tree. ProgressStreams
 	// is discarded and ErrorProgressStreams is buffered (not streamed live) so the
