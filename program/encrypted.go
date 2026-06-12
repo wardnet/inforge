@@ -31,7 +31,7 @@ func decryptEncryptedSecrets(res, globalRes types.Resources, dir, env string, dr
 	wanted := map[string]map[string]bool{}
 	for _, set := range []types.Resources{res, globalRes} {
 		for _, svc := range set.Service {
-			for _, src := range svc.Secrets {
+			for _, src := range svc.Environment {
 				parsed, err := validate.ParseSource(src)
 				if err != nil || parsed.Kind != validate.SourceVault {
 					continue

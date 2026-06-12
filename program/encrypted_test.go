@@ -36,13 +36,13 @@ func encryptedFixture(t *testing.T, env string, values map[string]map[string]str
 
 func encryptedSpec(container string, keys ...string) types.Resources {
 	svc := types.ServiceSpec{
-		Name:      container + "-svc",
-		Container: container,
-		User:      container,
-		Secrets:   map[string]string{},
+		Name:        container + "-svc",
+		Container:   container,
+		User:        container,
+		Environment: map[string]string{},
 	}
 	for _, k := range keys {
-		svc.Secrets[k] = "vault:" + k
+		svc.Environment[k] = "vault:" + k
 	}
 	return types.Resources{Service: []types.ServiceSpec{svc}}
 }
@@ -52,7 +52,7 @@ func TestDecryptEncryptedSecretsNoneDeclared(t *testing.T) {
 	// a store or key.
 	res := types.Resources{Service: []types.ServiceSpec{{
 		Name: "ghost-svc", Container: "ghost", User: "ghost",
-		Secrets: map[string]string{"K": "v"},
+		Environment: map[string]string{"K": "v"},
 	}}}
 	got, err := decryptEncryptedSecrets(res, types.Resources{}, t.TempDir(), "prd", false)
 	require.NoError(t, err)

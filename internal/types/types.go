@@ -153,8 +153,8 @@ type ServiceSpec struct {
 	Host      string            `yaml:"host"`              // FK -> bare compute name (e.g. "bridge", not "bridge-01"); kind must be vm
 	Type      string            `yaml:"type"`              // "raw" (built) | "container" (reserved)
 	User      string            `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
-	Ingress   []IngressSpec     `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx
-	Secrets   map[string]string `yaml:"secrets,omitempty"` // optional runtime secrets: env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); the secrets provider is derived from the region, not the service
+	Ingress     []IngressSpec     `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx
+	Environment map[string]string `yaml:"-"`                 // env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); loaded from the service's sibling environment.yaml, not the manifest; the secrets provider is derived from the region, not the service
 }
 
 // IngressRoute is one typed inbound routing entry the host ingress proxy (nginx)

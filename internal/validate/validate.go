@@ -66,37 +66,49 @@ type fileOf[T any] struct {
 	parseErr error
 }
 
-func readFiles[T any](dir string) ([]fileOf[T], error) {
+// readFolders reads every named sub-folder under dir: each folder must contain
+// a manifest.yaml. The path field of the returned fileOf is set to the
+// manifest.yaml path. A missing directory yields nil (same as readFiles).
+func readFolders[T any](dir string) ([]fileOf[T], []string, error) {
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var out []fileOf[T]
+	var folders []string
 	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || (!strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml")) {
+		if !e.IsDir() {
 			continue
 		}
-		path := filepath.Join(dir, name)
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", path, err)
+		folder := filepath.Join(dir, e.Name())
+		manifest := filepath.Join(folder, "manifest.yaml")
+		b, err := os.ReadFile(manifest)
+		f := fileOf[T]{path: manifest}
+		if os.IsNotExist(err) {
+			f.parseErr = fmt.Errorf("resource folder %q has no manifest.yaml", folder)
+			out = append(out, f)
+			folders = append(folders, folder)
+			continue
 		}
-		f := fileOf[T]{path: path}
+		if err != nil {
+			return nil, nil, fmt.Errorf("read %s: %w", manifest, err)
+		}
 		if err := yaml.Unmarshal(b, &f.raw); err != nil {
 			f.parseErr = err
 			out = append(out, f)
+			folders = append(folders, folder)
 			continue
 		}
 		if err := yaml.Unmarshal(b, &f.spec); err != nil {
 			f.parseErr = err
 		}
 		out = append(out, f)
+		folders = append(folders, folder)
 	}
-	return out, nil
+	return out, folders, nil
 }
 
 // globalRefs carries the global slice's referenceable outputs so a regional
@@ -211,6 +223,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 
 	r := &reporter{}
 	base := filepath.Join(dir, env)
+	regionalBase := filepath.Join(base, "regional")
 	// The encrypted secret store is optional (absent until `inforge secret init`);
 	// a present-but-broken store is reported against its own path so the rest of
 	// the resource set still validates. One env-scoped store serves both slices —
@@ -239,13 +252,13 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	// graph, with the global outputs injected so a regional secrets `ref:` may
 	// resolve a global/<name> target. Provider availability is region-specific, so
 	// it is skipped here (available nil) and checked separately per region below.
-	if err := validateResourceSet(r, schemaSet, base, nil, sizeTable, buildGlobalRefs(globalRes), encStore, defaults); err != nil {
+	if err := validateResourceSet(r, schemaSet, regionalBase, nil, sizeTable, buildGlobalRefs(globalRes), encStore, defaults); err != nil {
 		return err
 	}
 
 	// Per-region provider availability: the same set deploys into every region, so
 	// each resource's provider must be declared in that region's providers block.
-	if err := checkProviderAvailability(r, base, regionTable, defaults); err != nil {
+	if err := checkProviderAvailability(r, regionalBase, regionTable, defaults); err != nil {
 		return err
 	}
 	// The global slice realizes against the regions.yaml global providers block.
@@ -262,20 +275,19 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 }
 
 func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, encStore *secretstore.Store, defaults types.ProviderDefaults) error {
-	networkFiles, err := readFiles[types.NetworkSpec](filepath.Join(base, "network"))
+	networkFiles, _, err := readFolders[types.NetworkSpec](filepath.Join(base, "network"))
 	if err != nil {
 		return err
 	}
-	computeDir := filepath.Join(base, "compute")
-	computeFiles, err := readFiles[types.ComputeSpec](computeDir)
+	computeFiles, computeFolders, err := readFolders[types.ComputeSpec](filepath.Join(base, "compute"))
 	if err != nil {
 		return err
 	}
-	databaseFiles, err := readFiles[types.DatabaseSpec](filepath.Join(base, "database"))
+	databaseFiles, _, err := readFolders[types.DatabaseSpec](filepath.Join(base, "database"))
 	if err != nil {
 		return err
 	}
-	serviceFiles, err := readFiles[types.ServiceSpec](filepath.Join(base, "service"))
+	serviceFiles, svcFolders, err := readFolders[types.ServiceSpec](filepath.Join(base, "service"))
 	if err != nil {
 		return err
 	}
@@ -285,13 +297,28 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		loader.NormalizeNetwork(&networkFiles[i].spec)
 	}
 	for i := range computeFiles {
-		loader.NormalizeCompute(&computeFiles[i].spec, computeDir)
+		loader.NormalizeCompute(&computeFiles[i].spec, computeFolders[i])
 	}
 	for i := range databaseFiles {
 		loader.NormalizeDatabase(&databaseFiles[i].spec)
 	}
 	for i := range serviceFiles {
+		if serviceFiles[i].parseErr != nil {
+			continue
+		}
+		env, err := loader.LoadEnvironmentFile(svcFolders[i])
+		if err != nil {
+			return err
+		}
+		serviceFiles[i].spec.Environment = env
 		loader.NormalizeService(&serviceFiles[i].spec)
+		// Validate the environment.yaml sidecar against its own schema when present
+		// (a service may have no env contract). Reported against the sidecar's path
+		// so a schema error is attributed to the file the user edits.
+		if env != nil {
+			envPath := filepath.Join(svcFolders[i], "environment.yaml")
+			r.report(envPath, schemaErrors(schemaSet["environment"], env), nil)
+		}
 	}
 
 	ctx := regionContext{
@@ -409,7 +436,7 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 
 // compileSchemas compiles every embedded JSON Schema, keyed by resource type.
 func compileSchemas() (map[string]*jsonschema.Schema, error) {
-	names := []string{"network", "compute", "database", "service"}
+	names := []string{"network", "compute", "database", "service", "environment"}
 	c := jsonschema.NewCompiler()
 	for _, n := range names {
 		b, err := schemas.FS.ReadFile(n + ".json")
@@ -591,7 +618,7 @@ func collectProviderRefs(base string, defaults types.ProviderDefaults) ([]provid
 // spec's path + provider (extracted via providerOf). Parse failures are skipped
 // here — validateResourceSet reports them.
 func refsOf[T any](dir string, providerOf func(T) string) ([]providerRef, error) {
-	files, err := readFiles[T](dir)
+	files, _, err := readFolders[T](dir)
 	if err != nil {
 		return nil, err
 	}
@@ -630,16 +657,20 @@ func hasSecretsProvider(available map[string]bool) bool {
 // provider to write them to at deploy (program.provisionServiceSecrets fails
 // otherwise), regardless of the secrets' source kind.
 func servicesWithSecrets(base string) ([]string, error) {
-	files, err := readFiles[types.ServiceSpec](filepath.Join(base, "service"))
+	files, folders, err := readFolders[types.ServiceSpec](filepath.Join(base, "service"))
 	if err != nil {
 		return nil, err
 	}
 	var paths []string
-	for _, f := range files {
+	for i, f := range files {
 		if f.parseErr != nil {
 			continue
 		}
-		if len(f.spec.Secrets) > 0 {
+		env, err := loader.LoadEnvironmentFile(folders[i])
+		if err != nil {
+			return nil, err
+		}
+		if len(env) > 0 {
 			paths = append(paths, f.path)
 		}
 	}
@@ -901,30 +932,30 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 			}
 		}
 	}
-	// Validate inline secrets: key namespace, source DSL, vault store presence.
-	// Provider is not checked here — it is derived from the region config and
-	// validated as part of provider availability checks, not per-secret.
-	secKeys := make([]string, 0, len(s.Secrets))
-	for k := range s.Secrets {
-		secKeys = append(secKeys, k)
+	// Validate the environment contract: key namespace, source DSL, vault store
+	// presence. Provider is not checked here — it is derived from the region config
+	// and validated as part of provider availability checks, not per-entry.
+	envKeys := make([]string, 0, len(s.Environment))
+	for k := range s.Environment {
+		envKeys = append(envKeys, k)
 	}
-	sort.Strings(secKeys)
-	for _, k := range secKeys {
+	sort.Strings(envKeys)
+	for _, k := range envKeys {
 		if strings.HasPrefix(k, bootstrapper.ReservedEnvPrefix) {
-			errs = append(errs, fmt.Sprintf("secrets.%s: env var name uses the reserved %s* namespace owned by inforge", k, bootstrapper.ReservedEnvPrefix))
+			errs = append(errs, fmt.Sprintf("environment.%s: env var name uses the reserved %s* namespace owned by inforge", k, bootstrapper.ReservedEnvPrefix))
 		}
-		parsed, err := ParseSource(s.Secrets[k])
+		parsed, err := ParseSource(s.Environment[k])
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("secrets.%s: %s", k, err.Error()))
+			errs = append(errs, fmt.Sprintf("environment.%s: %s", k, err.Error()))
 			continue
 		}
 		if parsed.Kind == SourceVault {
 			// A vault source's ciphertext must already exist in the committed store —
 			// fail at validate time so the fix is cheap (run inforge secret set, commit).
 			if ctx.encStore == nil {
-				errs = append(errs, fmt.Sprintf("secrets.%s: source is vault but resources/<env>/%s does not exist — run `inforge secret init <env>`, then `inforge secret set <env> %s %s`", k, secretstore.FileName, s.Name, parsed.VaultKey))
+				errs = append(errs, fmt.Sprintf("environment.%s: source is vault but resources/<env>/%s does not exist — run `inforge secret init <env>`, then `inforge secret set <env> %s %s`", k, secretstore.FileName, s.Name, parsed.VaultKey))
 			} else if _, ok := ctx.encStore.Get(s.Container, parsed.VaultKey); !ok {
-				errs = append(errs, fmt.Sprintf("secrets.%s: no ciphertext for key %q in container %q in %s — run `inforge secret set <env> %s %s` and commit", k, parsed.VaultKey, s.Container, secretstore.FileName, s.Name, parsed.VaultKey))
+				errs = append(errs, fmt.Sprintf("environment.%s: no ciphertext for key %q in container %q in %s — run `inforge secret set <env> %s %s` and commit", k, parsed.VaultKey, s.Container, secretstore.FileName, s.Name, parsed.VaultKey))
 			}
 			continue
 		}
@@ -934,17 +965,17 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 		switch parsed.RefType {
 		case "database":
 			if parsed.RefOutput != "connectionUrl" {
-				errs = append(errs, fmt.Sprintf("secrets.%s: unknown database output %q (want connectionUrl)", k, parsed.RefOutput))
+				errs = append(errs, fmt.Sprintf("environment.%s: unknown database output %q (want connectionUrl)", k, parsed.RefOutput))
 			}
 			if !ctx.databaseNames[parsed.RefName] {
-				errs = append(errs, fmt.Sprintf("secrets.%s: database %q not found", k, parsed.RefName))
+				errs = append(errs, fmt.Sprintf("environment.%s: database %q not found", k, parsed.RefName))
 			}
 		case "compute":
 			if parsed.RefOutput != "publicIp" {
-				errs = append(errs, fmt.Sprintf("secrets.%s: unknown compute output %q (want publicIp)", k, parsed.RefOutput))
+				errs = append(errs, fmt.Sprintf("environment.%s: unknown compute output %q (want publicIp)", k, parsed.RefOutput))
 			}
 			if _, ok := ctx.computeKind[parsed.RefName]; !ok {
-				errs = append(errs, fmt.Sprintf("secrets.%s: compute %q does not resolve to a compute instance", k, parsed.RefName))
+				errs = append(errs, fmt.Sprintf("environment.%s: compute %q does not resolve to a compute instance", k, parsed.RefName))
 			}
 		}
 	}

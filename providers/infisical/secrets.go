@@ -156,7 +156,7 @@ func New(clientId, clientSecret, siteUrl, organizationId, slug string) *Infisica
 func (a *InfisicalSecretsAdapter) ProvisionService(
 	ctx *pulumi.Context, svc types.ServiceSpec, env, region string, all types.AllOutputs,
 ) (*types.ServiceSecretsBundle, error) {
-	if len(svc.Secrets) == 0 {
+	if len(svc.Environment) == 0 {
 		return nil, nil
 	}
 
@@ -171,17 +171,17 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 	// Pre-compute the Infisical key for each env var. For vault: sources the key
 	// stored in Infisical is the VaultKey (decoupled from the env var name); for
 	// all other sources the env var name doubles as the Infisical key.
-	keys := sortedStringKeys(svc.Secrets)
+	keys := sortedStringKeys(svc.Environment)
 	infisicalKeys := make([]string, len(keys))
 	ifaces := make([]any, len(keys))
 	for i, key := range keys {
-		src, _ := validate.ParseSource(svc.Secrets[key])
+		src, _ := validate.ParseSource(svc.Environment[key])
 		if src.Kind == validate.SourceVault {
 			infisicalKeys[i] = src.VaultKey
 		} else {
 			infisicalKeys[i] = key
 		}
-		resolved, err := resolveRef(svc.Secrets[key], svc.Container, region, all)
+		resolved, err := resolveRef(svc.Environment[key], svc.Container, region, all)
 		if err != nil {
 			return nil, fmt.Errorf("resolve ref for service %q secret %q: %w", svc.Name, key, err)
 		}
