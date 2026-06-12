@@ -66,7 +66,7 @@ Compute resources reference their network by name. When a network has multiple s
 `subnet` to the desired subnet name; otherwise the first declared subnet is used:
 
 ```yaml
-# in compute/bridge.yaml
+# in regional/compute/bridge/manifest.yaml
 network: ingress
 subnet: main    # optional when there is only one subnet
 ```

@@ -70,7 +70,7 @@ type ComputeSpec struct {
 	Subnet        string          `yaml:"subnet,omitempty"` // optional FK -> subnet name within the network
 	Size          string          `yaml:"size"`             // resolved against the size table
 	Image         string          `yaml:"image"`
-	CloudInit     string          `yaml:"cloud_init,omitempty"` // path relative to the compute dir
+	CloudInit     string          `yaml:"cloud_init,omitempty"` // sidecar filename, resolved relative to the compute's resource folder
 	InstanceCount int             `yaml:"instance_count"`       // default 1; expands into specKeys name-01..name-NN
 	Firewall      *FirewallSpec   `yaml:"firewall,omitempty"`
 	DeployUser    *DeployUserSpec `yaml:"deploy_user,omitempty"`

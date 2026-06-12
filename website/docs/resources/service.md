@@ -67,8 +67,8 @@ inforge injects when the service starts. If absent the service has no environmen
 
 :::note No `provider` field
 A service has **no `provider`** — it is host-managed, not realized by a cloud provider. The secrets
-provider a service's environment variables are written to is the project's `secretsStore` from
-`inforge.yaml`, not declared on the service.
+provider a service's environment variables are written to is selected per region by the `infisical`
+block in that region's `providers:` in `regions.yaml`, not declared on the service.
 :::
 
 ## Folder layout

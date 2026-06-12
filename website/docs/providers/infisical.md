@@ -8,8 +8,9 @@ The Infisical provider implements **Secrets** resources using
 [Infisical](https://infisical.com) for secret management.
 
 :::note Status
-Core secret materialisation is available. The provider resolves `ref:` and `${ENV_VAR}` sources,
-encrypts them into the VM manifest, and triggers bootstrap.
+Core secret materialisation is available. The provider resolves `ref:` and `env:` sources from a
+service's `environment.yaml`, writes them under the service's scoped path, and triggers runtime
+bootstrap.
 :::
 
 ## Installation
@@ -26,9 +27,10 @@ inforge plugins install
 |----------|--------|
 | Secrets | Available |
 
-The Infisical provider is selected as the project's secrets store via `providers.secretsStore:
-infisical` in [`inforge.yaml`](/configuration/inforge-yaml#providers). There is no per-resource
-override — the secrets store is a project-wide choice.
+The Infisical provider is selected per region by adding an `infisical` block to that region's
+`providers:` in [`regions.yaml`](/configuration/regions-yaml). inforge uses it automatically for any
+service that declares `vault:`/`ref:` env vars in its `environment.yaml` — there is no `secretsStore`
+key in `inforge.yaml` and no per-resource override.
 
 ## Configuration
 

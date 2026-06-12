@@ -21,7 +21,6 @@ providers:                # optional — project-level provider defaults
   compute: hetzner        # default provider for all Compute resources
   database:
     postgresql: neon      # default provider for postgresql Database resources
-  secretsStore: infisical # authoritative secrets provider for this project
 ```
 
 ## Fields
@@ -94,16 +93,16 @@ providers:
   compute: hetzner
   database:
     postgresql: neon
-  secretsStore: infisical
 ```
 
-- **`compute`** — default provider name for all Compute resources.
+- **`compute`** — default provider name for all Compute resources. Network resources inherit this
+  same default (there is no separate `network` key).
 - **`database.<engine>`** — default provider for databases of that engine (e.g. `postgresql: neon`).
-- **`secretsStore`** — the project's authoritative secrets provider. There is no per-resource
-  override; this is a project-wide selection. `inforge validate` checks that the named provider's
-  credentials appear in every region that has secret-bearing services.
 
-When `providers:` is omitted every resource must declare `provider:` explicitly.
+When `providers:` is omitted every Compute, Network, and Database resource must declare `provider:`
+explicitly. The secrets provider is **not** configured here — it is selected per region by adding an
+`infisical` block to that region's `providers:` in [`regions.yaml`](/configuration/regions-yaml), and
+inforge uses it automatically for any service with `vault:`/`ref:` env vars.
 
 ## Minimal example
 

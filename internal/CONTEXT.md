@@ -38,8 +38,8 @@ of into every region. Not a new resource kind — the same types and schemas —
 naming** (`wardnet-<env>-<type>-<name>`, empty slug) and its own provider config in the top-level
 `global:` block of `regions.yaml`. The `global:` block carries a required `placementRegion` naming
 one of the abstract regions under `regions:` — used only to look up provider credentials and
-realizations for global-slice resources; it does not affect resource names (see ADR-0023). A regional
-**Secrets** `ref:` may target a global database/compute output via a `global/` name prefix
+realizations for global-slice resources; it does not affect resource names (see ADR-0023). A regional service's
+`environment.yaml` `ref:` may target a global database/compute output via a `global/` name prefix
 (`ref:database/global/<name>.<output>`) — the one allowed cross-region reference; `service.host`/
 `compute.network` to global are rejected, and a global resource may reference only other global
 resources.
@@ -57,22 +57,24 @@ references use the resource `name` directly (e.g. `service.host: bridge`, not `b
 _Avoid_: using specKey as a user-visible foreign key in any spec field.
 
 **Display name**:
-The fully-qualified resource name `wardnet-<env>-<resourceType>-<slug>-<specKey>`.
+The fully-qualified resource name `wardnet-<env>-<slug>-<type>-<name>[-<NN>]`.
 
 ### Resources
 
 **Resource**:
-One of the declarative types under a region: **Network**, **Compute**, **Database**, **Secrets**,
+One of the declarative types under a region: **Network**, **Compute**, **Database**,
 **Service**. Each is a named **folder** containing a `manifest.yaml` validated against an embedded JSON
 schema, plus optional sidecar files in the same folder (e.g. `cloud-init.sh` for compute,
-`environment.yaml` for service — see **Resource folder** and ADR-0018). DNS is **not** an authored
-resource (see **DNS authority**); nor is the host ingress proxy (see **Ingress**).
+`environment.yaml` for service — see **Resource folder** and ADR-0018). Secrets are **not** a resource
+type — a service's secret/non-secret env vars live in its `environment.yaml` sidecar (ADR-0020). DNS is
+**not** an authored resource (see **DNS authority**); nor is the host ingress proxy (see **Ingress**).
 
 **Resource folder**:
 The on-disk shape of a resource: `<type>/<name>/manifest.yaml`, with sidecars alongside the manifest
 in the same folder. Regional resources live under `resources/<env>/regional/<type>/<name>/`;
 global resources under `resources/<env>/global/<type>/<name>/`. The env-root directory holds only
-environment-scoped config (`regions.yaml`, `variables.yaml`, `inforge.yaml`, `secrets.enc.yaml`).
+environment-scoped config (`regions.yaml`, `variables.yaml`, `inforge.yaml`, `secrets.enc.yaml`,
+`sizes.yaml`).
 See ADR-0018 and ADR-0019.
 
 **Compute**:
@@ -138,10 +140,10 @@ environment, base domain, `namespace` (`<env>.<slug>.<service>`), and `fqdn` (th
 for every service (secret-bearing or not). Derived, never authored.
 
 **Source DSL**:
-A Secrets `source` value: `ref:<type>/<name>.<output>` (a reference to another resource's output),
-`${NAME}` (an environment variable, resolved from the deploy process env via `os.Getenv`), or
-`static:<value>` / `value:<value>` (a verbatim literal, for non-secret config — committed in
-plaintext). Anything else is invalid.
+A value in a service's `environment.yaml`: `ref:<type>/<name>.<output>` (a reference to another
+resource's output), `vault:KEY` (a secret from the age-encrypted committed store `secrets.enc.yaml`),
+`env:NAME` (an environment variable, resolved from the deploy process env via `os.Getenv`), or a bare
+literal string (anything else — a verbatim non-secret value, committed in plaintext).
 
 ### Providers
 
@@ -177,9 +179,9 @@ coordinates (version, region, namespace). Secrets are no longer baked into it �
 runtime by `inforge-bootstrap`.
 
 **Secret value**:
-A secret a service consumes, declared in a Secrets resource by container. inforge never bakes secret
-values into the manifest or any other artifact; it writes them to the secrets provider under the
-service's scoped path, and the service fetches them at runtime.
+A secret a service consumes, declared in the service's `environment.yaml` sidecar via a `vault:KEY` or
+`ref:` source. inforge never bakes secret values into the manifest or any other artifact; it writes them
+to the secrets provider under the service's scoped path, and the service fetches them at runtime.
 
 **Runtime secret fetch** (`inforge-bootstrap`):
 Every inforge-managed service's systemd `ExecStart` is `inforge-bootstrap`, a small statically-linked
