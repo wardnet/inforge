@@ -692,8 +692,9 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 func ingressProvidersByHost(computes []types.ComputeSpec, defaults types.ProviderDefaults) map[string]string {
 	byHost := map[string]string{}
 	for _, c := range computes {
+		provider := types.ResolveProvider(c.Provider, "compute", "", defaults)
 		for i := 1; i <= c.InstanceCount; i++ {
-			byHost[naming.SpecKey(c.Name, i)] = types.ResolveProvider(c.Provider, "compute", "", defaults)
+			byHost[naming.SpecKey(c.Name, i)] = provider
 		}
 	}
 	return byHost

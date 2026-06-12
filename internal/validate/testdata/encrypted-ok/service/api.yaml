@@ -1,6 +1,6 @@
 name: api
 container: bridge
-host: bridge-01
+host: bridge
 type: raw
 user: api
 secrets:

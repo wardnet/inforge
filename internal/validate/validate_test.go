@@ -133,7 +133,7 @@ func TestCheckSecretsGlobalDatabaseRef(t *testing.T) {
 	ctx.available = nil // provider availability is checked separately, per region
 	ctx.databaseNames = map[string]bool{"global/shared": true}
 	errs, _ := checkService(types.ServiceSpec{
-		Host: "bridge-01", Type: "raw", User: "svc", Container: "ghost",
+		Host: "bridge", Type: "raw", User: "svc", Container: "ghost",
 		Secrets: map[string]string{"DB": "ref:database/global/shared.connectionUrl"},
 	}, ctx)
 	assert.Empty(t, errs, "a regional secret may reference a global database output")
@@ -143,7 +143,7 @@ func TestCheckSecretsGlobalDatabaseRef(t *testing.T) {
 	ctx2.available = nil
 	ctx2.databaseNames = map[string]bool{}
 	errs, _ = checkService(types.ServiceSpec{
-		Host: "bridge-01", Type: "raw", User: "svc", Container: "ghost",
+		Host: "bridge", Type: "raw", User: "svc", Container: "ghost",
 		Secrets: map[string]string{"DB": "ref:database/global/shared.connectionUrl"},
 	}, ctx2)
 	require.Len(t, errs, 1)
@@ -156,7 +156,7 @@ func TestCheckSecretsRejectsReservedEnvName(t *testing.T) {
 	ctx := baseCtx()
 	ctx.available = nil
 	errs, _ := checkService(types.ServiceSpec{
-		Host: "bridge-01", Type: "raw", User: "svc", Container: "ghost",
+		Host: "bridge", Type: "raw", User: "svc", Container: "ghost",
 		Secrets: map[string]string{"INFORGE_DEPLOYMENT_REGION": "env:SOME_SECRET"},
 	}, ctx)
 	require.NotEmpty(t, errs)
@@ -296,13 +296,14 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 	})
 }
 
-// baseCtx returns a regionContext with one vm host (bridge-01) and hetzner
+// baseCtx returns a regionContext with one vm host (bridge) and hetzner
 // available, for exercising the per-spec semantic checks directly.
 func baseCtx() regionContext {
 	return regionContext{
 		available:        map[string]bool{"hetzner": true},
+		computeNames:     map[string]bool{"bridge": true},
 		computeKind:      map[string]string{"bridge-01": "vm"},
-		computeCanonical: map[string]string{"bridge-01": "bridge-01"},
+		computeCanonical: map[string]string{"bridge-01": "bridge-01", "bridge": "bridge-01"},
 		computeDeployer:  map[string]bool{"bridge-01": true},
 	}
 }
@@ -312,14 +313,21 @@ func baseCtx() regionContext {
 func TestCheckServiceRejectsMultiInstanceHost(t *testing.T) {
 	ctx := baseCtx()
 	ctx.computeInstances = map[string]int{"bridge-01": 2}
-	errs, _ := checkService(types.ServiceSpec{Name: "api", Host: "bridge-01", Type: "raw", User: "svc"}, ctx)
+	errs, _ := checkService(types.ServiceSpec{Name: "api", Host: "bridge", Type: "raw", User: "svc"}, ctx)
 	require.NotEmpty(t, errs)
 	assert.Contains(t, strings.Join(errs, "\n"), "multi-instance")
 }
 
+func TestCheckServiceRejectsSpecKeyHost(t *testing.T) {
+	ctx := baseCtx()
+	errs, _ := checkService(types.ServiceSpec{Name: "api", Host: "bridge-01", Type: "raw", User: "svc"}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "specKey")
+}
+
 func TestCheckServiceIngress(t *testing.T) {
 	svc := func(in ...types.IngressSpec) types.ServiceSpec {
-		return types.ServiceSpec{Host: "bridge-01", Type: "raw", User: "svc", Ingress: in}
+		return types.ServiceSpec{Host: "bridge", Type: "raw", User: "svc", Ingress: in}
 	}
 
 	// tls-termination needs no host resource — nginx is realized from ingress -> OK.
@@ -334,7 +342,7 @@ func TestCheckServiceIngress(t *testing.T) {
 
 	// No ingress -> OK.
 	ctx = baseCtx()
-	errs, _ = checkService(types.ServiceSpec{Host: "bridge-01", Type: "raw", User: "svc"}, ctx)
+	errs, _ = checkService(types.ServiceSpec{Host: "bridge", Type: "raw", User: "svc"}, ctx)
 	assert.Empty(t, errs)
 }
 
@@ -347,7 +355,7 @@ func TestCheckServiceIngressRules(t *testing.T) {
 		return c
 	}
 	svc := func(in ...types.IngressSpec) types.ServiceSpec {
-		return types.ServiceSpec{Name: "svc", Host: "bridge-01", Type: "raw", User: "svc", Ingress: in}
+		return types.ServiceSpec{Name: "svc", Host: "bridge", Type: "raw", User: "svc", Ingress: in}
 	}
 
 	// A tls-termination + a forward entry on one service is the bridge shape -> OK.
@@ -421,7 +429,7 @@ func TestCheckServiceDeployUser(t *testing.T) {
 	// A service whose host declares no deploy_user can't be provisioned over SSH.
 	ctx := baseCtx()
 	ctx.computeDeployer = map[string]bool{"bridge-01": false}
-	errs, _ := checkService(types.ServiceSpec{Host: "bridge-01", Type: "raw", User: "svc"}, ctx)
+	errs, _ := checkService(types.ServiceSpec{Host: "bridge", Type: "raw", User: "svc"}, ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "no deploy_user")
 }
@@ -430,7 +438,7 @@ func TestCheckServiceUser(t *testing.T) {
 	// A service that declares no user has no account for the bootstrapper to drop
 	// privilege to before exec.
 	ctx := baseCtx()
-	errs, _ := checkService(types.ServiceSpec{Host: "bridge-01", Type: "raw"}, ctx)
+	errs, _ := checkService(types.ServiceSpec{Host: "bridge", Type: "raw"}, ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "must declare the no-login user")
 }
