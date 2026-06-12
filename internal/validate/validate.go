@@ -534,8 +534,15 @@ func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, 
 			}
 		}
 	}
-	if global != nil && len(global.Providers) == 0 {
-		errs = append(errs, "global: providers block required when global is defined")
+	if global != nil {
+		if len(global.Providers) == 0 {
+			errs = append(errs, "global: providers block required when global is defined")
+		}
+		if strings.TrimSpace(global.PlacementRegion) == "" {
+			errs = append(errs, "global.placementRegion: required when a global block is present")
+		} else if _, err := table.Slug(global.PlacementRegion); err != nil {
+			errs = append(errs, fmt.Sprintf("global.placementRegion: %q is not a defined region", global.PlacementRegion))
+		}
 	}
 	r.report(path, errs, nil)
 }

@@ -37,8 +37,8 @@ The slice is **optional** — an environment with no `global/` directory deploys
 
 A global resource realizes against a top-level `global:` block in `regions.yaml`. It carries a
 required **`placementRegion`** and a `providers` block. There is **no `slug`** — global resources are
-region-less — but `placementRegion` tells inforge which region's provider credentials and
-realizations to use when deploying global resources:
+region-less — but `placementRegion` names the region whose provider credentials and realizations will
+be used when deploying global resources (validated now; runtime wiring in a follow-up):
 
 ```yaml title="resources/prd/regions.yaml"
 regions:

@@ -11,9 +11,8 @@ regions:
 # The global slot carries provider config only (no slug): the global slice
 # realizes against it with region-less naming.
 global:
+  placementRegion: us-east-1
   providers:
     neon:
       apiKey: test-key
-      # The region-less global slice has no abstract region to map, so its Neon
-      # region is given explicitly here (see ADR-0013).
       region: aws-us-east-2

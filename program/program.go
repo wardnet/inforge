@@ -141,6 +141,8 @@ func Run(ctx *pulumi.Context) error {
 	// hetzner per-region config lookup (ExtractRegionConfigs) still resolves.
 	if globalBlock != nil {
 		// The region-less global slice has no DNS authority (records are per-region).
+		// TODO(ADR-0023): pass globalBlock.PlacementRegion as the region once the
+		// global registry is wired to use it for provider-realization lookups.
 		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, nil, vars.SSH, regionTable, ctx.Project(), env, globalScope)
 		if err := createInfra(ctx, globalReg, globalRes, env, globalScope, "", vars.BaseDomain, providerDefaults, networkOutputs, computeOutputs, databaseOutputs); err != nil {
 			return err

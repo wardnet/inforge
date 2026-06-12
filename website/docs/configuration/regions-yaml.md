@@ -88,10 +88,10 @@ every region. Resources under `resources/<env>/global/` realize against it with 
 (`wardnet-<env>-<type>-<name>`). When omitted, the environment has no global resources.
 
 The `global:` block requires a **`placementRegion`** field naming one of the abstract regions
-declared under `regions:` (e.g. `us-east-1`). inforge uses it to look up the provider credentials
-and realization for global-slice resources. It does not affect resource names — the slug from
-`placementRegion` is used internally only, never in a global cloud name. Omitting `placementRegion`
-when a `global:` block is present is a validation error.
+declared under `regions:` (e.g. `us-east-1`). It is validated now and will be used to select the
+provider credentials and realization for global-slice resources. It does not affect resource names —
+no slug is inserted into global cloud names. Omitting `placementRegion` when a `global:` block is
+present is a validation error.
 
 :::caution
 `regions.yaml` replaces the built-in region table entirely. There is no default fallback: an

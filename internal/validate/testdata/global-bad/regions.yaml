@@ -8,6 +8,7 @@ regions:
         clientId: test-id
         clientSecret: test-secret
 global:
+  placementRegion: us-east-1
   providers:
     neon:
       apiKey: test-key
