@@ -802,17 +802,26 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 			errs = append(errs, fmt.Sprintf("host: %q does not resolve to a compute", s.Host))
 		}
 	} else {
-		kind := ctx.computeKind[ctx.computeCanonical[s.Host]]
+		// s.Host is a bare compute name. The canonical map has a bare-name
+		// entry only for single-instance computes; for multi-instance fall
+		// back to instance 1 so the specKey-keyed maps are always reachable.
+		canonical := ctx.computeCanonical[s.Host]
+		if canonical == "" {
+			canonical = naming.SpecKey(s.Host, 1)
+		}
+		kind := ctx.computeKind[canonical]
 		if kind != "vm" {
 			errs = append(errs, fmt.Sprintf("host: %q has kind %q; services require a vm host", s.Host, kind))
 		}
-	}
-	// A service's host DNS and its host's "<compute>.vm" record are derived from the
-	// bare compute name (no instance index), so they cannot address one instance of
-	// a multi-instance compute. Reject it here rather than silently resolving every
-	// instance to instance 1's record. Multi-instance VM hosts are not supported yet.
-	if ok && ctx.computeInstances[ctx.computeCanonical[s.Host]] > 1 {
-		errs = append(errs, fmt.Sprintf("host: %q is a multi-instance compute; a service host must be single-instance (the host DNS record cannot address one instance)", s.Host))
+		// A service's host DNS and its host's "<compute>.vm" record are derived
+		// from the bare compute name (no instance index), so they cannot address
+		// one instance of a multi-instance compute.
+		if ctx.computeInstances[canonical] > 1 {
+			errs = append(errs, fmt.Sprintf("host: %q is a multi-instance compute; a service host must be single-instance (the host DNS record cannot address one instance)", s.Host))
+		}
+		if !ctx.computeDeployer[canonical] {
+			errs = append(errs, fmt.Sprintf("host: %q has no deploy_user; inforge provisions the service over SSH and requires one", s.Host))
+		}
 	}
 	if s.Type == "container" {
 		warns = append(warns, "type: \"container\" is reserved and not implemented this phase")
@@ -823,14 +832,11 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	if s.User == "" {
 		errs = append(errs, "user: a service must declare the no-login user it runs as")
 	}
-	// inforge deploy provisions the service's unit + folder over SSH as the
-	// host's deploy_user, so a service host must declare one — caught here
-	// instead of failing at pulumi up.
-	if ok && !ctx.computeDeployer[ctx.computeCanonical[s.Host]] {
-		errs = append(errs, fmt.Sprintf("host: %q has no deploy_user; inforge provisions the service over SSH and requires one", s.Host))
-	}
 	if len(s.Ingress) > 0 {
 		host := ctx.computeCanonical[s.Host]
+		if host == "" && ok {
+			host = naming.SpecKey(s.Host, 1)
+		}
 		// nginx is always the host's sole public entry point when any ingress exists;
 		// the service binds 127.0.0.1:target behind it. No host-level resource is
 		// needed — realization is driven by ingress presence (provider from compute).
