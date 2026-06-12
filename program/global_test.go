@@ -105,7 +105,7 @@ func TestCreateInfraGlobalScope(t *testing.T) {
 		}
 
 		return createInfra(ctx, reg, res, "prd", globalScope, "", "example.com",
-			networkOutputs, computeOutputs, databaseOutputs)
+			types.ProviderDefaults{}, networkOutputs, computeOutputs, databaseOutputs)
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 

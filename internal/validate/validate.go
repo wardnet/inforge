@@ -167,6 +167,9 @@ type regionContext struct {
 	// (container, KEY); the check is presence-only so validation stays
 	// credential-free.
 	encStore *secretstore.Store
+	// providerDefaults are the project-level provider fallbacks applied when a
+	// spec omits its provider field (resolved via types.ResolveProvider).
+	providerDefaults types.ProviderDefaults
 }
 
 // ValidateResources validates the single shared resource set under <dir>/<env>/
@@ -175,7 +178,7 @@ type regionContext struct {
 // graph are region-independent and checked once; provider availability is then
 // checked per region (a resource's provider must be declared in every region the
 // set deploys into).
-func ValidateResources(env, dir string) error {
+func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	schemaSet, err := compileSchemas()
 	if err != nil {
 		return fmt.Errorf("compile schemas: %w", err)
@@ -224,7 +227,7 @@ func ValidateResources(env, dir string) error {
 	// graph resolves only against global resources, so a global resource
 	// referencing a regional one fails as not-found — enforcing "global → global
 	// only". A global slice with resources but no global providers block is an error.
-	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil, encStore); err != nil {
+	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil, encStore, defaults); err != nil {
 		return err
 	}
 	if global == nil && globalHasResources(globalRes) {
@@ -235,18 +238,18 @@ func ValidateResources(env, dir string) error {
 	// graph, with the global outputs injected so a regional secrets `ref:` may
 	// resolve a global/<name> target. Provider availability is region-specific, so
 	// it is skipped here (available nil) and checked separately per region below.
-	if err := validateResourceSet(r, schemaSet, base, nil, sizeTable, buildGlobalRefs(globalRes), encStore); err != nil {
+	if err := validateResourceSet(r, schemaSet, base, nil, sizeTable, buildGlobalRefs(globalRes), encStore, defaults); err != nil {
 		return err
 	}
 
 	// Per-region provider availability: the same set deploys into every region, so
 	// each resource's provider must be declared in that region's providers block.
-	if err := checkProviderAvailability(r, base, regionTable); err != nil {
+	if err := checkProviderAvailability(r, base, regionTable, defaults); err != nil {
 		return err
 	}
 	// The global slice realizes against the regions.yaml global providers block.
 	if global != nil {
-		if err := checkGlobalProviderAvailability(r, globalBase, global); err != nil {
+		if err := checkGlobalProviderAvailability(r, globalBase, global, defaults); err != nil {
 			return err
 		}
 	}
@@ -257,7 +260,7 @@ func ValidateResources(env, dir string) error {
 	return nil
 }
 
-func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, encStore *secretstore.Store) error {
+func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, encStore *secretstore.Store, defaults types.ProviderDefaults) error {
 	networkFiles, err := readFiles[types.NetworkSpec](filepath.Join(base, "network"))
 	if err != nil {
 		return err
@@ -303,6 +306,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		targetUsersByHost:    map[string]map[int][]string{},
 		tlsTermIngressByHost: map[string]bool{},
 		encStore:             encStore,
+		providerDefaults:     defaults,
 	}
 	for _, f := range networkFiles {
 		ctx.networks[f.spec.Name] = f.spec
@@ -547,19 +551,25 @@ type providerRef struct {
 // collectProviderRefs reads every resource file under base and returns each
 // spec's path + declared provider. It only surfaces refs for files that parsed;
 // malformed files are reported by the schema/FK pass in validateResourceSet.
-func collectProviderRefs(base string) ([]providerRef, error) {
+func collectProviderRefs(base string, defaults types.ProviderDefaults) ([]providerRef, error) {
 	var refs []providerRef
-	if rs, err := refsOf[types.NetworkSpec](filepath.Join(base, "network"), func(s types.NetworkSpec) string { return s.Provider }); err != nil {
+	if rs, err := refsOf[types.NetworkSpec](filepath.Join(base, "network"), func(s types.NetworkSpec) string {
+		return types.ResolveProvider(s.Provider, "network", "", defaults)
+	}); err != nil {
 		return nil, err
 	} else {
 		refs = append(refs, rs...)
 	}
-	if rs, err := refsOf[types.ComputeSpec](filepath.Join(base, "compute"), func(s types.ComputeSpec) string { return s.Provider }); err != nil {
+	if rs, err := refsOf[types.ComputeSpec](filepath.Join(base, "compute"), func(s types.ComputeSpec) string {
+		return types.ResolveProvider(s.Provider, "compute", "", defaults)
+	}); err != nil {
 		return nil, err
 	} else {
 		refs = append(refs, rs...)
 	}
-	if rs, err := refsOf[types.DatabaseSpec](filepath.Join(base, "database"), func(s types.DatabaseSpec) string { return s.Provider }); err != nil {
+	if rs, err := refsOf[types.DatabaseSpec](filepath.Join(base, "database"), func(s types.DatabaseSpec) string {
+		return types.ResolveProvider(s.Provider, "database", s.Engine, defaults)
+	}); err != nil {
 		return nil, err
 	} else {
 		refs = append(refs, rs...)
@@ -580,7 +590,11 @@ func refsOf[T any](dir string, providerOf func(T) string) ([]providerRef, error)
 		if f.parseErr != nil {
 			continue
 		}
-		refs = append(refs, providerRef{path: f.path, provider: providerOf(f.spec)})
+		p := providerOf(f.spec)
+		if p == "" {
+			continue // empty providers caught by per-spec check; skip availability check
+		}
+		refs = append(refs, providerRef{path: f.path, provider: p})
 	}
 	return refs, nil
 }
@@ -630,8 +644,8 @@ func servicesWithSecrets(base string) ([]string, error) {
 // the region-independent once-pass (validateResourceSet), and keying these on the
 // same path would print a contradictory OK and FAIL for one file. Regions and the
 // files within each are reported in sorted order for deterministic output.
-func checkProviderAvailability(r *reporter, base string, table regions.Table) error {
-	refs, err := collectProviderRefs(base)
+func checkProviderAvailability(r *reporter, base string, table regions.Table, defaults types.ProviderDefaults) error {
+	refs, err := collectProviderRefs(base, defaults)
 	if err != nil {
 		return err
 	}
@@ -670,8 +684,8 @@ func checkProviderAvailability(r *reporter, base string, table regions.Table) er
 // provider is present in the regions.yaml global providers block. The global
 // slice is region-less, so it is checked once against the single global block
 // (mirroring the per-region check in checkProviderAvailability).
-func checkGlobalProviderAvailability(r *reporter, globalBase string, global *regions.Global) error {
-	refs, err := collectProviderRefs(globalBase)
+func checkGlobalProviderAvailability(r *reporter, globalBase string, global *regions.Global, defaults types.ProviderDefaults) error {
+	refs, err := collectProviderRefs(globalBase, defaults)
 	if err != nil {
 		return err
 	}
@@ -698,18 +712,30 @@ func checkGlobalProviderAvailability(r *reporter, globalBase string, global *reg
 	return nil
 }
 
-func providerErr(provider string, available map[string]bool) []string {
-	if available == nil {
-		return nil
+// resolvedProviderErr returns an error when the effective provider (after applying
+// defaults) is empty, or when the provider is not in the available set. It is used
+// by the per-spec semantic checks; the per-region availability pass
+// (checkProviderAvailability) is a separate step.
+func resolvedProviderErr(specProvider, class, engine string, ctx regionContext) []string {
+	effective := types.ResolveProvider(specProvider, class, engine, ctx.providerDefaults)
+	if effective == "" {
+		switch class {
+		case "network", "compute":
+			return []string{"provider: required — set provider: on this spec or add a providers.compute default in inforge.yaml"}
+		case "database":
+			return []string{fmt.Sprintf("provider: required — set provider: on this spec or add a providers.database.%s default in inforge.yaml", engine)}
+		default:
+			return []string{"provider: required"}
+		}
 	}
-	if !available[provider] {
-		return []string{fmt.Sprintf("provider: %q not defined in this region's regions.yaml providers block", provider)}
+	if ctx.available != nil && !ctx.available[effective] {
+		return []string{fmt.Sprintf("provider: %q not defined in this region's regions.yaml providers block", effective)}
 	}
 	return nil
 }
 
 func checkNetwork(s types.NetworkSpec, ctx regionContext) (errs, warns []string) {
-	errs = append(errs, providerErr(s.Provider, ctx.available)...)
+	errs = append(errs, resolvedProviderErr(s.Provider, "network", "", ctx)...)
 
 	cidr, err := parseCIDR("cidr", s.CIDR)
 	if err != nil {
@@ -727,7 +753,7 @@ func checkNetwork(s types.NetworkSpec, ctx regionContext) (errs, warns []string)
 }
 
 func checkCompute(s types.ComputeSpec, ctx regionContext) (errs, warns []string) {
-	errs = append(errs, providerErr(s.Provider, ctx.available)...)
+	errs = append(errs, resolvedProviderErr(s.Provider, "compute", "", ctx)...)
 
 	if s.Kind == "cluster" {
 		warns = append(warns, "kind: \"cluster\" is reserved and not implemented this phase")
@@ -753,7 +779,7 @@ func checkCompute(s types.ComputeSpec, ctx regionContext) (errs, warns []string)
 }
 
 func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []string) {
-	errs = append(errs, providerErr(s.Provider, ctx.available)...)
+	errs = append(errs, resolvedProviderErr(s.Provider, "database", s.Engine, ctx)...)
 	return errs, warns
 }
 

@@ -1,0 +1,6 @@
+name: bridge
+container: bridge
+engine: postgresql
+branch: main
+database: bridge
+owner: app

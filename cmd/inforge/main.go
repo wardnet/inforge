@@ -38,7 +38,7 @@ func rootCmd() *cobra.Command {
 	}
 
 	root.AddCommand(
-		newValidateCmd(&dir),
+		newValidateCmd(&dir, &cfg),
 		newVersionCmd(),
 		newUpdateCmd(),
 		newMatrixCmd(),
