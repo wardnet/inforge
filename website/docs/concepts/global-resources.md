@@ -14,23 +14,31 @@ types, the same schemas, the same providers — deployed once instead of per reg
 
 ## On-disk shape
 
-The global slice lives under `resources/<env>/global/`, mirroring the regional type directories:
+The global slice lives under `resources/<env>/global/`, mirroring the regional type directories.
+Each resource is a named folder containing `manifest.yaml`, same as regional resources:
 
 ```
 resources/<env>/
   variables.yaml
   regions.yaml
-  network/ compute/ database/ service/   # the regional set (per region)
+  regional/
+    network/ compute/ database/ service/   # the regional set (per region)
   global/
-    network/ compute/ database/ service/ # the global slice (once)
+    network/<name>/manifest.yaml           # the global slice (once)
+    compute/<name>/manifest.yaml
+    database/<name>/manifest.yaml
+    service/<name>/manifest.yaml
+            environment.yaml
 ```
 
 The slice is **optional** — an environment with no `global/` directory deploys nothing globally.
 
 ## Provider config: the `global:` block
 
-A global resource realizes against a sibling top-level `global:` block in `regions.yaml`. It carries
-provider config only — **no slug**, because global resources are region-less:
+A global resource realizes against a top-level `global:` block in `regions.yaml`. It carries a
+required **`placementRegion`** and a `providers` block. There is **no `slug`** — global resources are
+region-less — but `placementRegion` tells inforge which region's provider credentials and
+realizations to use when deploying global resources:
 
 ```yaml title="resources/prd/regions.yaml"
 regions:
@@ -39,13 +47,18 @@ regions:
     providers:
       neon: { apiKey: ${NEON_API_KEY} }
       infisical: { clientId: ${INFISICAL_CLIENT_ID}, clientSecret: ${INFISICAL_CLIENT_SECRET} }
-global:                       # no slug — region-less
+global:
+  placementRegion: us-east-1    # required — must match a key under regions:
   providers:
     # A global Neon database has no abstract region to map to a physical Neon
     # region, so the global block gives it explicitly. (Regional blocks don't
     # need this — their abstract region maps to a Neon region automatically.)
     neon: { apiKey: ${NEON_API_KEY}, region: aws-us-east-2 }
 ```
+
+`placementRegion` resolves provider-registration lookups only. It does not affect global resource
+names (no slug is inserted). Omitting it when a `global:` block is present is a validation error.
+See [ADR-0023](/docs/adr/0023-global-placement-region).
 
 ## Region-less naming
 
@@ -69,14 +82,8 @@ References between scopes are narrow and **direction-enforced**.
 A regional [service secret](../resources/secrets) may resolve a global database or compute output by
 prefixing the referenced name with `global/`:
 
-```yaml title="resources/prd/us-east-1/service/app.yaml"
-name: app
-container: app
-host: app-01
-type: raw
-user: app
-secrets:
-  DATABASE_URL: ref:database/global/shared.connectionUrl   # the global database
+```yaml title="regional/service/app/environment.yaml"
+DATABASE_URL: ref:database/global/shared.connectionUrl   # the global database
 ```
 
 This is the **one** cross-region path: a service in any region reads a database (or compute IP) that

@@ -26,6 +26,10 @@ inforge plugins install
 |----------|--------|
 | Database | Available |
 
+Database resources may omit their `provider:` field when `providers.database.postgresql: neon` is set
+in [`inforge.yaml`](/configuration/inforge-yaml#providers). An explicit `provider: neon` on a
+resource always takes precedence over the project default.
+
 ## Configuration
 
 ```yaml

@@ -8,19 +8,24 @@ A **Service** resource defines an application hosted on a Compute VM. inforge pr
 the host-side scaffolding (folder + systemd unit); the service repo deploys code separately
 via `inforge releases` from its own CI workflow.
 
+A service's definition lives in a folder under `regional/service/<name>/`:
+
+```
+regional/service/api/
+  manifest.yaml        # required — routing, identity, ingress, host
+  environment.yaml     # optional — runtime env-var contract (source DSL strings)
+```
+
 ## Schema
+
+`manifest.yaml`:
 
 ```yaml
 name: api                # required
 container: bridge        # required
-host: bridge-01          # required — specKey of the Compute VM that hosts this service
+host: bridge             # required — name of the Compute resource that hosts this service
 type: raw                # required — delivery type
 user: wardnet            # required — no-login system user the service runs as
-secrets:                  # optional — runtime secrets, env-var name → source DSL string
-  DATABASE_URL: ref:database/main.connectionUrl   # an output from another resource
-  CF_TOKEN: env:CLOUDFLARE_API_TOKEN              # a deploy-environment variable
-  API_KEY: vault:API_KEY                          # a value from the git-encrypted store
-  LOG_LEVEL: info                                 # a literal (non-secret config) value
 ingress:                  # optional — typed inbound routes realized on the host's nginx
   - type: tls-termination #   required — tls-termination | forward
     listen: 443           #   required — public port the host accepts traffic on
@@ -32,23 +37,47 @@ ingress:                  # optional — typed inbound routes realized on the ho
     target: 5353          #   optional (forward) — omit to bind the port directly (firewall only)
 ```
 
+`environment.yaml` (optional sidecar — env-var name → source DSL string):
+
+```yaml
+DATABASE_URL: ref:database/main.connectionUrl   # an output from another resource
+CF_TOKEN: env:CLOUDFLARE_API_TOKEN              # a deploy-environment variable
+API_KEY: vault:API_KEY                          # a value from the git-encrypted store
+LOG_LEVEL: info                                 # a literal (non-secret config) value
+```
+
 ## Fields
+
+**`manifest.yaml` fields:**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Service name. Also becomes the folder name (`/srv/wardnet/<name>`) and unit name (`wardnet-<name>.service`). |
-| `container` | string | Yes | Grouping label. Secrets are scoped to the container, so services sharing one receive the same values. |
-| `host` | string | Yes | specKey of the Compute VM that hosts this service. |
+| `container` | string | Yes | Grouping label. Environment variables are scoped to the container, so services sharing one receive the same values. |
+| `host` | string | Yes | **Name** of the Compute resource that hosts this service (e.g. `bridge`). The host must have `instance_count: 1`; a multi-instance host is a validation error. |
 | `type` | string | Yes | Delivery type. Currently only `raw` (SSH-push) is supported. `container` is reserved. |
 | `user` | string | Yes | No-login system user the service runs as. inforge emits `User=<name>` in the systemd unit and creates the account via SSH on first deploy; the bootstrapper drops privilege to it before exec. |
-| `secrets` | map | No | Runtime secrets injected as environment variables. Each key is the **env-var name** set in the service process; each value is a **source DSL string**. See [Secrets](#secrets) below. |
 | `ingress` | array | No | Typed inbound routes (`tls-termination` / `forward`) fronted by nginx. Each entry binds a public `listen` port; the service binds `127.0.0.1:<target>` behind nginx. See [Ingress](#ingress) below. |
+
+**`environment.yaml` sidecar:**
+
+An optional flat map of `ENV_VAR_NAME: <source>` entries declaring the runtime environment variables
+inforge injects when the service starts. If absent the service has no environment variables. See
+[Environment](#environment) below.
 
 :::note No `provider` field
 A service has **no `provider`** — it is host-managed, not realized by a cloud provider. The secrets
-provider a service's secrets are written to is derived from the region's provider config, not declared
-on the service.
+provider a service's environment variables are written to is the project's `secretsStore` from
+`inforge.yaml`, not declared on the service.
 :::
+
+## Folder layout
+
+```
+regional/service/<name>/
+  manifest.yaml       # service identity, host, type, user, ingress
+  environment.yaml    # optional — env-var name → source DSL
+```
 
 ## Delivery types
 
@@ -67,7 +96,7 @@ Pull-based container deployment. Not yet implemented.
 
 ## Provisioned on-host files
 
-For a service named `api` hosted on `bridge-01`, `inforge deploy` provisions:
+For a service named `api` hosted on `bridge`, `inforge deploy` provisions:
 
 | Path | Description |
 |------|-------------|
@@ -100,19 +129,18 @@ The user is a no-login system account, **distinct from the host's `deploy_user`*
 connects as over SSH). It is the account `inforge-bootstrap` drops privilege to before exec, so it is
 required for every service — with or without secrets.
 
-## Secrets
+## Environment
 
-A service's `secrets` map declares the runtime values inforge injects as **environment variables** when
-the service starts. Each entry is `ENV_VAR_NAME: <source>`, where the source is a small DSL string that
-says *where the value comes from* — not the value itself:
+A service's runtime environment variables are declared in the `environment.yaml` sidecar — a flat
+map of `ENV_VAR_NAME: <source>` entries. Each source is a small DSL string that says *where the
+value comes from*, not the value itself:
 
-```yaml
-secrets:
-  DATABASE_URL: ref:database/main.connectionUrl   # an output from another resource
-  SERVER_IP: ref:compute/bridge-01.publicIp
-  CF_TOKEN: env:CLOUDFLARE_API_TOKEN              # a deploy-environment variable
-  API_KEY: vault:API_KEY                          # a value from the git-encrypted store
-  LOG_LEVEL: info                                 # a literal (non-secret config) value
+```yaml title="regional/service/api/environment.yaml"
+DATABASE_URL: ref:database/main.connectionUrl   # an output from another resource
+SERVER_IP: ref:compute/bridge.publicIp
+CF_TOKEN: env:CLOUDFLARE_API_TOKEN              # a deploy-environment variable
+API_KEY: vault:API_KEY                          # a value from the git-encrypted store
+LOG_LEVEL: info                                 # a literal (non-secret config) value
 ```
 
 The source kinds are:
@@ -124,10 +152,11 @@ The source kinds are:
 | **vault** | `vault:<KEY>` | A value held **age-encrypted in git** in the env's committed store, keyed by `(container, KEY)`. Managed with the [`inforge secret`](/cli/secret) CLI. |
 | **literal** | any other string | A verbatim inline value. **Plaintext in git — non-secret config only.** |
 
-Secrets are **container-scoped**: every service sharing a `container` receives the same set. At deploy,
-inforge resolves every entry (regardless of source kind), writes the value to the secrets provider under
-the service's scoped path, and `inforge-bootstrap` injects it as an env var at start. The
-[`vault:`](/cli/secret) and full delivery mechanics are covered in [Secrets](./secrets).
+Environment variables are **container-scoped**: every service sharing a `container` receives the
+same set. At deploy, inforge resolves every entry (regardless of source kind), writes the value to
+the secrets provider under the service's scoped path, and `inforge-bootstrap` injects it as an env
+var at start. The [`vault:`](/cli/secret) and full delivery mechanics are covered in
+[Secrets](./secrets).
 
 :::warning Literals are not secrets
 A literal value (any string without a `ref:`/`env:`/`vault:` prefix) is committed **in plaintext**. Use
@@ -204,15 +233,12 @@ intend the round-robin.
 
 ## Example
 
-```yaml title="resources/prd/us-east-1/service/bridge.yaml"
+```yaml title="regional/service/bridge/manifest.yaml"
 name: bridge
 container: bridge
-host: bridge-01
+host: bridge
 type: raw
 user: bridge
-secrets:
-  DATABASE_URL: ref:database/main.connectionUrl
-  SESSION_KEY: vault:SESSION_KEY
 ingress:
   - type: tls-termination # ACME TLS on :443 for bridge.svc.<env>.<slug>.<base> + the vanity names
     listen: 443
@@ -225,12 +251,17 @@ ingress:
     target: 5353
 ```
 
+```yaml title="regional/service/bridge/environment.yaml"
+DATABASE_URL: ref:database/main.connectionUrl
+SESSION_KEY: vault:SESSION_KEY
+```
+
 ## Runtime environment
 
 Every service is started by `inforge-bootstrap` (the systemd `ExecStart`), which builds the process
 environment from a minimal base (`PATH`, `HOME`, `USER`, `LOGNAME`), then injects:
 
-- the service's **secrets** as environment variables (see [Secrets](./secrets)), and
+- the service's **environment variables** (from `environment.yaml`; see [Secrets](./secrets)), and
 - the **deployment context** as `INFORGE_DEPLOYMENT_*` variables — derived, non-secret values describing
   where the service is running. These are present for **every** service, including secret-less ones.
 

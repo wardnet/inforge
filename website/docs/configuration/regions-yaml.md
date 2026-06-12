@@ -34,6 +34,7 @@ regions:                       # required — one entry per region this env depl
         siteUrl: https://app.infisical.com
 
 global:                        # optional — region-less slot (no slug)
+  placementRegion: us-east-1   # required when global: is present — must match a key under regions:
   providers:                   # provider config for resources/<env>/global/
     neon:
       apiKey: ${NEON_API_KEY}
@@ -82,9 +83,15 @@ records for it.
 
 ### `global`
 
-An optional, region-less slot carrying only a `providers` block (no `slug`). Resources defined under
-`resources/<env>/global/` realize against it with region-less names
+An optional, region-less slot for resources that should exist once per environment rather than in
+every region. Resources under `resources/<env>/global/` realize against it with region-less names
 (`wardnet-<env>-<type>-<name>`). When omitted, the environment has no global resources.
+
+The `global:` block requires a **`placementRegion`** field naming one of the abstract regions
+declared under `regions:` (e.g. `us-east-1`). inforge uses it to look up the provider credentials
+and realization for global-slice resources. It does not affect resource names — the slug from
+`placementRegion` is used internally only, never in a global cloud name. Omitting `placementRegion`
+when a `global:` block is present is a validation error.
 
 :::caution
 `regions.yaml` replaces the built-in region table entirely. There is no default fallback: an
@@ -109,4 +116,12 @@ regions:
         images: {ubuntu-24.04: ubuntu-24.04}
       cloudflare:
         apiToken: ${CLOUDFLARE_API_TOKEN}
+      neon:
+        apiKey: ${NEON_API_KEY}
+
+global:
+  placementRegion: eu-central-1
+  providers:
+    neon:
+      apiKey: ${NEON_API_KEY}
 ```

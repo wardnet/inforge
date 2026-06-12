@@ -4,7 +4,10 @@ sidebar_position: 1
 
 # inforge validate
 
-Validate all resource definitions for an environment against their JSON schemas.
+Validate all resource definitions for an environment against their JSON schemas. Also reads
+`inforge.yaml` to resolve [project-level provider defaults](/configuration/inforge-yaml#providers):
+a resource that omits `provider:` is checked against the default for its class, and a "no provider
+configured" error is raised if neither a per-resource value nor a default is present.
 
 ## Usage
 
@@ -30,8 +33,8 @@ inforge validate <env> [flags]
 Reports each invalid file with its path and schema errors:
 
 ```
-resources/prd/us-east-1/compute/bridge-01.yaml: provider is required
-resources/prd/us-east-1/network/ingress-01.yaml: valid
+resources/prd/regional/compute/bridge/manifest.yaml: no provider configured for class "compute"
+resources/prd/regional/network/ingress/manifest.yaml: valid
 
 validation failed
 ```

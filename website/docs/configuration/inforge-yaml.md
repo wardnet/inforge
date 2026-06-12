@@ -16,6 +16,12 @@ backend:
   type: file              # required — one of: file, git-branch, s3, r2
   url: file://.pulumi     # used for "file" and "s3" types
   branch: pulumi-state    # used for "git-branch" type
+
+providers:                # optional — project-level provider defaults
+  compute: hetzner        # default provider for all Compute resources
+  database:
+    postgresql: neon      # default provider for postgresql Database resources
+  secretsStore: infisical # authoritative secrets provider for this project
 ```
 
 ## Fields
@@ -76,6 +82,28 @@ backend:
 
 Requires `CLOUDFLARE_ACCOUNT_ID` environment variable. R2 credentials are provided via
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (R2 API token).
+
+### `providers`
+
+An optional project-level block that sets default provider names for each resource class. Resources
+that omit their `provider:` field inherit from here; an explicit `provider:` on a resource always
+takes precedence.
+
+```yaml
+providers:
+  compute: hetzner
+  database:
+    postgresql: neon
+  secretsStore: infisical
+```
+
+- **`compute`** — default provider name for all Compute resources.
+- **`database.<engine>`** — default provider for databases of that engine (e.g. `postgresql: neon`).
+- **`secretsStore`** — the project's authoritative secrets provider. There is no per-resource
+  override; this is a project-wide selection. `inforge validate` checks that the named provider's
+  credentials appear in every region that has secret-bearing services.
+
+When `providers:` is omitted every resource must declare `provider:` explicitly.
 
 ## Minimal example
 

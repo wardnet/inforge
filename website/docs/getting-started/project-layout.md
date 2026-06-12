@@ -10,7 +10,7 @@ An inforge project has a fixed directory structure. Every path is relative to th
 
 | File | Purpose |
 |------|---------|
-| `inforge.yaml` | Project config: name, backend |
+| `inforge.yaml` | Project config: name, backend, optional provider defaults |
 | `inforge.<env>.yaml` | Per-environment stack config (one file per environment) |
 
 ## resources/
@@ -19,15 +19,28 @@ All infrastructure definitions live under `resources/`.
 
 ```
 resources/
-└── <env>/                   # one directory per environment (e.g. prd, dev)
-    ├── variables.yaml       # base_domain + SSH config for this env
-    ├── regions.yaml         # which regions deploy + per-region provider config
-    ├── sizes.yaml           # optional: overrides the default size table
-    ├── network/             # NetworkSpec files
-    ├── compute/             # ComputeSpec files
-    ├── database/            # DatabaseSpec files
-    ├── secrets.enc.yaml     # optional: git-encrypted store for `vault:` secrets (inforge secret)
-    └── service/             # ServiceSpec files (typed nginx ingress + inline secrets)
+└── <env>/                       # one directory per environment (e.g. prd, dev)
+    ├── variables.yaml           # base_domain + SSH config for this env
+    ├── regions.yaml             # which regions deploy + per-region provider config
+    ├── sizes.yaml               # optional: overrides the default size table
+    ├── secrets.enc.yaml         # optional: git-encrypted store for `vault:` secrets
+    ├── regional/                # resources instantiated into every region
+    │   ├── network/
+    │   │   └── <name>/
+    │   │       └── manifest.yaml
+    │   ├── compute/
+    │   │   └── <name>/
+    │   │       ├── manifest.yaml
+    │   │       └── cloud-init.sh    # optional compute sidecar
+    │   ├── database/
+    │   │   └── <name>/
+    │   │       └── manifest.yaml
+    │   └── service/
+    │       └── <name>/
+    │           ├── manifest.yaml
+    │           └── environment.yaml # optional — service env-var contract
+    └── global/                  # resources deployed once, not per-region
+        └── <type>/<name>/manifest.yaml
 ```
 
 The resource set is defined **once** per environment and instantiated into every region listed in
@@ -36,8 +49,9 @@ slug, so instances stay unique per region (`wardnet-prd-use1-vm-bridge`,
 `wardnet-prd-euc1-vm-bridge`, …). The only per-region difference is the provider realization
 (location, server types, credentials), which lives in `regions.yaml`.
 
-Each YAML file under a resource type directory contains exactly one resource spec. The filename
-is used as a display hint but the identity of the resource is its `name` + `instance` fields.
+Each resource is a **named folder** (`<type>/<name>/`) containing a `manifest.yaml` validated
+against an embedded JSON schema. Optional sidecar files live in the same folder alongside the
+manifest. The folder name and the `name:` field in the manifest should agree by convention.
 
 ## deployments/ (service repos only)
 

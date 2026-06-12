@@ -12,12 +12,21 @@ Core database provisioning is available; advanced features (branching, connectio
 are planned for a future release.
 :::
 
+A database resource lives in a folder under `regional/database/<name>/`:
+
+```
+regional/database/main/
+  manifest.yaml       # required — the database spec
+```
+
 ## Schema
+
+`manifest.yaml`:
 
 ```yaml
 name: main               # required
 container: bridge        # required
-provider: neon           # required
+provider: neon           # optional — inherits from inforge.yaml providers.database.postgresql
 engine: postgresql       # required — must be "postgresql"
 branch: main             # optional — Neon branch name (default "main")
 database: app            # required — database name within the branch
@@ -30,7 +39,7 @@ owner: app               # required — PostgreSQL role that owns the database
 |-------|------|----------|-------------|
 | `name` | string | Yes | Resource name. |
 | `container` | string | Yes | Grouping label. |
-| `provider` | string | Yes | Must be `neon`. |
+| `provider` | string | No | Must be `neon`. Inherits from `inforge.yaml` `providers.database.<engine>` if omitted. |
 | `engine` | string | Yes | Must be `postgresql`. |
 | `branch` | string | No | Neon branch name (default `main`). |
 | `database` | string | Yes | PostgreSQL database name. |
@@ -42,20 +51,18 @@ owner: app               # required — PostgreSQL role that owns the database
 |--------|-------------|
 | `connectionUrl` | PostgreSQL connection string |
 
-This output can be referenced by a [service secret](./service#secrets):
+This output can be referenced from a service's `environment.yaml`:
 
 ```yaml
-# in service/api.yaml
-secrets:
-  DATABASE_URL: ref:database/main.connectionUrl
+# in regional/service/api/environment.yaml
+DATABASE_URL: ref:database/main.connectionUrl
 ```
 
 ## Example
 
-```yaml title="resources/prd/us-east-1/database/main-01.yaml"
+```yaml title="regional/database/main/manifest.yaml"
 name: main
 container: bridge
-provider: neon
 engine: postgresql
 database: app
 owner: app

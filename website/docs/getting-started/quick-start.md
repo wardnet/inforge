@@ -10,18 +10,23 @@ This guide walks you through setting up a new inforge project from scratch.
 
 ```
 my-infra/
-├── inforge.yaml              # project config
+├── inforge.yaml              # project config (+ optional provider defaults)
 ├── inforge.prd.yaml          # stack config for prd environment
 └── resources/
     └── prd/                  # defined once, instantiated into every region
         ├── variables.yaml    # base_domain + SSH config
         ├── regions.yaml      # regions + per-region provider config
-        ├── network/
-        │   └── ingress.yaml
-        ├── compute/
-        │   └── bridge.yaml
-        └── service/
-            └── api.yaml
+        └── regional/
+            ├── network/
+            │   └── ingress/manifest.yaml
+            ├── compute/
+            │   └── bridge/
+            │       ├── manifest.yaml
+            │       └── cloud-init.sh
+            └── service/
+                └── api/
+                    ├── manifest.yaml
+                    └── environment.yaml
 ```
 
 ## 2. Write `inforge.yaml`
@@ -31,6 +36,12 @@ name: my-infra
 backend:
   type: file
   url: file://.pulumi
+
+providers:            # project-level defaults — resources can omit provider:
+  compute: hetzner
+  database:
+    postgresql: neon
+  secretsStore: infisical
 ```
 
 See [inforge.yaml reference](/configuration/inforge-yaml) for all backend types (file, git-branch, s3, r2).
@@ -75,14 +86,14 @@ regions:
 
 ## 5. Write a compute resource
 
-```yaml title="resources/prd/compute/bridge.yaml"
+```yaml title="resources/prd/regional/compute/bridge/manifest.yaml"
 name: bridge
 container: bridge
-provider: hetzner
+# provider: omitted — inherits providers.compute: hetzner from inforge.yaml
 network: ingress
 size: SMALL
 image: ubuntu-24.04
-cloud_init: bridge.cloud-init.sh
+cloud_init: cloud-init.sh
 ```
 
 ## 6. Validate

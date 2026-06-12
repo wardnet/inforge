@@ -4,33 +4,27 @@ sidebar_position: 5
 
 # Secrets
 
-Secrets are **not a standalone resource**. A service declares the runtime values it needs directly, in
-its own [`secrets`](./service#secrets) map — `ENV_VAR_NAME: <source>` — and inforge injects each as an
+Secrets are **not a standalone resource**. A service declares the runtime values it needs in its
+`environment.yaml` sidecar — an `ENV_VAR_NAME: <source>` map — and inforge injects each as an
 environment variable when the service starts. This page covers the source DSL, the git-encrypted store
-behind `vault:`, and how a resolved secret reaches a running service. Secret values are never baked
+behind `vault:`, and how a resolved value reaches a running service. Secret values are never baked
 into an artifact.
 
-```yaml title="resources/prd/us-east-1/service/api.yaml"
-name: api
-container: bridge
-host: bridge-01
-type: raw
-user: api
-secrets:
-  DATABASE_URL: ref:database/main.connectionUrl   # an output from another resource
-  CF_TOKEN: env:CLOUDFLARE_API_TOKEN              # a deploy-environment variable
-  API_KEY: vault:API_KEY                          # a value from the git-encrypted store
-  LOG_LEVEL: info                                 # a literal (non-secret config) value
+```yaml title="regional/service/api/environment.yaml"
+DATABASE_URL: ref:database/main.connectionUrl   # an output from another resource
+CF_TOKEN: env:CLOUDFLARE_API_TOKEN              # a deploy-environment variable
+API_KEY: vault:API_KEY                          # a value from the git-encrypted store
+LOG_LEVEL: info                                 # a literal (non-secret config) value
 ```
 
-Secrets are **container-scoped**: every service sharing a `container` receives the same set of values.
-The [`inforge secret`](/cli/secret) CLI keys the encrypted store by `(container, KEY)` and takes a
-service name only as a handle onto its container.
+Environment variables are **container-scoped**: every service sharing a `container` receives the same
+set of values. The [`inforge secret`](/cli/secret) CLI keys the encrypted store by `(container, KEY)`
+and takes a service name only as a handle onto its container.
 
 ## Source DSL
 
-Each `secrets` value is a source DSL string naming **where the value comes from** — never the value
-itself. There are four kinds:
+Each entry in `environment.yaml` is a source DSL string naming **where the value comes from** — never
+the value itself. There are four kinds:
 
 ### `ref:<database|compute>/<name>.<output>`
 
@@ -38,7 +32,7 @@ A runtime output of another resource:
 
 ```yaml
 DATABASE_URL: ref:database/main.connectionUrl
-SERVER_IP: ref:compute/bridge-01.publicIp
+SERVER_IP: ref:compute/bridge.publicIp
 ```
 
 The parts are the resource **type** (`database` or `compute`), the resource **name**, and the
@@ -118,11 +112,10 @@ A `vault:` value lives in the env's committed, age-encrypted store. The full lif
    inforge secret init prd
    ```
 
-2. **Declare the secret on the consuming service** in its `service/*.yaml`:
+2. **Declare the secret on the consuming service** in its `environment.yaml`:
 
    ```yaml
-   secrets:
-     API_KEY: vault:API_KEY
+   API_KEY: vault:API_KEY
    ```
 
 3. **Write the value** with the [`inforge secret`](/cli/secret) CLI (the `<service>` argument resolves
@@ -171,9 +164,9 @@ Full subcommand reference (`set`, `ls`, `rm`, `rotate`) and incident-response ru
 inforge does not bake secret values into any artifact. At deploy time, for each service that declares
 secrets, inforge:
 
-1. Resolves every `secrets` entry (`ref:` from stack outputs, `vault:` by decrypting the store, `env:`
-   from the deploy environment, literals verbatim) and writes the values to the secrets provider under
-   the service's scoped path.
+1. Resolves every `environment.yaml` entry (`ref:` from stack outputs, `vault:` by decrypting the
+   store, `env:` from the deploy environment, literals verbatim) and writes the values to the secrets
+   provider under the service's scoped path.
 2. Mints a **per-service machine identity**, scoped read-only to that service's path.
 3. Writes two files onto the host under `/etc/wardnet/services/<service>/`:
    - `descriptor.yaml` — a secret-free document with the provider coordinates and an env-var → vault-key
@@ -187,6 +180,7 @@ variables, drops privilege to the service's `user`, and execs the real binary. S
 only in the service process's environment — never on disk, in the journal, or in argv. A service that
 declares no secrets gets a descriptor with no provider and starts with no fetch at all.
 
-The secrets provider a service's values are written to is **derived from the region's provider config**
-(the `infisical` provider block in `regions.yaml`), not declared on the service. A service that declares
-secrets in a region (or global slice) with no secrets provider fails `inforge validate`, before any deploy.
+The secrets provider a service's values are written to is the project's **`secretsStore`** setting in
+`inforge.yaml` (see [Provider defaults](/configuration/inforge-yaml#providers)). A service that
+declares environment variables in a region (or global slice) with no matching secrets provider fails
+`inforge validate`, before any deploy.

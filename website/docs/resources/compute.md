@@ -7,17 +7,27 @@ sidebar_position: 2
 A **Compute** resource defines a virtual machine (or future cluster). inforge expands a single
 spec into one or more VM instances based on `instance_count`.
 
+A compute resource lives in a folder under `regional/compute/<name>/`:
+
+```
+regional/compute/bridge/
+  manifest.yaml       # required — the compute spec
+  cloud-init.sh       # optional — cloud-init script sidecar
+```
+
 ## Schema
+
+`manifest.yaml`:
 
 ```yaml
 name: bridge             # required
 instance_count: 1        # optional — defaults to 1; expands into bridge-01..bridge-NN
 container: bridge        # required
-provider: hetzner        # required
-network: ingress-01      # required — specKey of the Network to join
+provider: hetzner        # optional — inherits from inforge.yaml providers.compute if omitted
+network: ingress         # required — name of the Network resource to join
 size: SMALL              # required — resolved against the size table
 image: ubuntu-24.04      # required — canonical OS image name
-cloud_init: bridge-01.cloud-init.sh   # optional — path relative to this file's directory
+cloud_init: cloud-init.sh   # optional — path relative to the compute folder
 kind: vm                 # optional — "vm" (default) | "cluster" (reserved)
 deploy_user:             # optional — SSH deploy account provisioned at VM-init time
   name: deploy
@@ -36,11 +46,11 @@ firewall:                # optional — declarative inbound rules; omit to use d
 | `name` | string | Yes | Resource name. |
 | `instance_count` | int | No | How many VMs to create (default 1). Each gets a specKey `name-01` … `name-NN`. |
 | `container` | string | Yes | Grouping label. |
-| `provider` | string | Yes | Must be `hetzner`. |
-| `network` | string | Yes | specKey of the Network resource to attach this VM to. |
+| `provider` | string | No | Provider name (e.g. `hetzner`). Inherits from `inforge.yaml` `providers.compute` if omitted; explicit value takes precedence. A validation error is raised if neither is set. |
+| `network` | string | Yes | Name of the Network resource to attach this VM to. |
 | `size` | string | Yes | Size name from the size table: `SMALL`, `MEDIUM`, or `LARGE`. |
 | `image` | string | Yes | OS image. See [supported images](#supported-images). |
-| `cloud_init` | string | No | Path to a cloud-init script, relative to the compute YAML file. |
+| `cloud_init` | string | No | Path to a cloud-init script, relative to the compute **folder** (e.g. `cloud-init.sh`). Absolute paths are also accepted. |
 | `kind` | string | No | `vm` (default; built) or `cluster` (k8s; reserved). |
 | `deploy_user` | object | No | Deploy user provisioned at VM-init time. See [Deploy user](#deploy-user). |
 | `firewall` | object | No | Declarative inbound firewall rules. See [Firewall rules](#firewall-rules). |
@@ -117,11 +127,11 @@ The inbound rule set is **derived**, not hand-maintained:
 Outbound traffic is always fully allowed. So you only declare a `firewall.inbound` rule for a raw public
 port; ports behind nginx ingress open themselves.
 
-```yaml title="resources/prd/us-east-1/compute/bridge.yaml"
+```yaml title="regional/compute/bridge/manifest.yaml"
 name: bridge
 container: bridge
 provider: hetzner
-network: ingress-01
+network: ingress
 size: SMALL
 image: ubuntu-24.04
 firewall:
@@ -140,20 +150,19 @@ firewall:
 
 ## Example
 
-```yaml title="resources/prd/us-east-1/compute/bridge-01.yaml"
+```yaml title="regional/compute/bridge/manifest.yaml"
 name: bridge
 instance_count: 1
 container: bridge
-provider: hetzner
-network: ingress-01
+network: ingress
 size: SMALL
 image: ubuntu-24.04
-cloud_init: bridge-01.cloud-init.sh
+cloud_init: cloud-init.sh
 deploy_user:
   name: deploy
 ```
 
-```bash title="resources/prd/us-east-1/compute/bridge-01.cloud-init.sh"
+```bash title="regional/compute/bridge/cloud-init.sh"
 #!/bin/bash
 set -euo pipefail
 
