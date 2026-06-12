@@ -215,15 +215,31 @@ func TestCheckRegionsFile(t *testing.T) {
 		r := &reporter{}
 		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Slug: "use1", Providers: withProviders},
-		}, &regions.Global{}, "regions.yaml")
+		}, &regions.Global{PlacementRegion: "us-east-1"}, "regions.yaml")
 		assert.True(t, r.failed)
 	})
 
-	t.Run("global with providers", func(t *testing.T) {
+	t.Run("global missing placementRegion", func(t *testing.T) {
 		r := &reporter{}
 		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Slug: "use1", Providers: withProviders},
 		}, &regions.Global{Providers: withProviders}, "regions.yaml")
+		assert.True(t, r.failed)
+	})
+
+	t.Run("global unknown placementRegion", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: withProviders},
+		}, &regions.Global{PlacementRegion: "eu-west-1", Providers: withProviders}, "regions.yaml")
+		assert.True(t, r.failed)
+	})
+
+	t.Run("global with providers and placementRegion", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: withProviders},
+		}, &regions.Global{PlacementRegion: "us-east-1", Providers: withProviders}, "regions.yaml")
 		assert.False(t, r.failed)
 	})
 

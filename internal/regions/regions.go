@@ -32,11 +32,15 @@ type DnsAuthority struct {
 // Table maps an abstract region name (e.g. "us-east-1") to its realization.
 type Table map[string]AbstractRegion
 
-// Global is the region-less slot in regions.yaml: provider config only, no slug.
-// Resources defined under resources/<env>/global/ realize against it with
-// region-less naming. (Consumed by a later slice; parsed and validated here.)
+// Global is the region-less slot in regions.yaml: a required placementRegion
+// plus the provider config used to realise global resources. Resources defined
+// under resources/<env>/global/ realize against it with region-less naming.
+// placementRegion must name one of the regions declared under regions: — it
+// selects the provider-registration lookup key for the global slice but does
+// not affect resource names.
 type Global struct {
-	Providers map[string]map[string]any `yaml:"providers"`
+	PlacementRegion string                    `yaml:"placementRegion"`
+	Providers       map[string]map[string]any `yaml:"providers"`
 }
 
 // File is the parsed regions.yaml: the regions map under the top-level
