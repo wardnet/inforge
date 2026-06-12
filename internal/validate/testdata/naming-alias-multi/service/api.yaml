@@ -1,5 +1,4 @@
-# host: bridge is the bare name of a multi-instance compute, which is ambiguous
-# (only single-instance computes get a bare-name alias) -> FAIL.
+# host: bridge is a multi-instance compute; services require a single-instance host -> FAIL.
 name: api
 container: core
 host: bridge

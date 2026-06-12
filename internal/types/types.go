@@ -150,7 +150,7 @@ const (
 type ServiceSpec struct {
 	Name      string            `yaml:"name"`
 	Container string            `yaml:"container"`
-	Host      string            `yaml:"host"`              // FK -> an expanded compute specKey whose kind=vm
+	Host      string            `yaml:"host"`              // FK -> bare compute name (e.g. "bridge", not "bridge-01"); kind must be vm
 	Type      string            `yaml:"type"`              // "raw" (built) | "container" (reserved)
 	User      string            `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
 	Ingress   []IngressSpec     `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx

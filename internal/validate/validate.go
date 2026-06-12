@@ -146,6 +146,7 @@ type regionContext struct {
 	computeCanonical map[string]string            // any accepted compute FK form -> canonical specKey
 	computeInstances map[string]int               // canonical specKey -> the compute's instance_count
 	computeDeployer  map[string]bool              // canonical specKey -> declares a deploy_user
+	computeNames     map[string]bool              // bare compute names; service.host must be one of these
 	databaseNames    map[string]bool
 	// portUsersByHost maps a canonical host specKey to, per listen port, the names
 	// of the services with an ingress entry on that port. It enforces that a
@@ -301,6 +302,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		computeCanonical:     map[string]string{},
 		computeInstances:     map[string]int{},
 		computeDeployer:      map[string]bool{},
+		computeNames:         map[string]bool{},
 		databaseNames:        map[string]bool{},
 		portUsersByHost:      map[string]map[int][]string{},
 		targetUsersByHost:    map[string]map[int][]string{},
@@ -321,6 +323,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			ctx.computeInstances[key] = f.spec.InstanceCount
 			ctx.computeDeployer[key] = hasDeployer
 		}
+		ctx.computeNames[f.spec.Name] = true
 		if f.spec.InstanceCount == 1 {
 			// bridge and bridge-01 both reference the same host.
 			ctx.computeKind[f.spec.Name] = f.spec.Kind
@@ -791,11 +794,18 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 		errs = append(errs, fmt.Sprintf("host: %q references a global host — a service on a global host is defined in the global slice itself, not referenced from a region", s.Host))
 		return errs, warns
 	}
-	kind, ok := ctx.computeKind[s.Host]
+	_, ok := ctx.computeNames[s.Host]
 	if !ok {
-		errs = append(errs, fmt.Sprintf("host: %q does not resolve to a compute instance", s.Host))
-	} else if kind != "vm" {
-		errs = append(errs, fmt.Sprintf("host: %q has kind %q; services require a vm host", s.Host, kind))
+		if ctx.computeCanonical[s.Host] != "" {
+			errs = append(errs, fmt.Sprintf("host: %q is an expanded specKey; use the bare compute name instead", s.Host))
+		} else {
+			errs = append(errs, fmt.Sprintf("host: %q does not resolve to a compute", s.Host))
+		}
+	} else {
+		kind := ctx.computeKind[ctx.computeCanonical[s.Host]]
+		if kind != "vm" {
+			errs = append(errs, fmt.Sprintf("host: %q has kind %q; services require a vm host", s.Host, kind))
+		}
 	}
 	// A service's host DNS and its host's "<compute>.vm" record are derived from the
 	// bare compute name (no instance index), so they cannot address one instance of

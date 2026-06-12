@@ -4,7 +4,7 @@
 # validation fails with "database not found".
 name: g
 container: shared
-host: edge-01
+host: edge
 type: raw
 user: g
 secrets:

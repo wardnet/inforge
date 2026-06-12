@@ -1,6 +1,6 @@
-# host FK does not resolve to a compute instance -> FAIL.
+# host does not resolve to a compute name -> FAIL.
 name: api
 container: bridge
-host: ghost-01
+host: ghost
 type: raw
 user: api

@@ -58,7 +58,7 @@ global:
 
 `placementRegion` resolves provider-registration lookups only. It does not affect global resource
 names (no slug is inserted). Omitting it when a `global:` block is present is a validation error.
-See [ADR-0023](/docs/adr/0023-global-placement-region).
+See [ADR-0023](https://github.com/wardnet/inforge/blob/main/docs/adr/0023-global-placement-region.md).
 
 ## Region-less naming
 
