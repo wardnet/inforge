@@ -198,47 +198,72 @@ func LoadSizeTable(env, dir string) (sizes.Table, error) {
 	return tbl, nil
 }
 
-// loadType reads every .yaml/.yml file in dir into a T. A missing directory is
-// not an error (it yields no resources).
-func loadType[T any](dir string) ([]T, error) {
+// loadTypeFromFolders reads every named sub-folder under dir: each folder must
+// contain a manifest.yaml that decodes into T. A missing directory yields no
+// resources (same as the old loadType). A directory entry without a
+// manifest.yaml is an error (catches typos). Non-directory entries are ignored.
+// The parallel folders slice carries the absolute folder path for each spec,
+// letting callers resolve per-resource sidecars (cloud-init.sh, environment.yaml).
+func loadTypeFromFolders[T any](dir string) ([]T, []string, error) {
 	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	var specs []T
+	var folders []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue // ignore stray files at the type level
+		}
+		folder := filepath.Join(dir, e.Name())
+		manifest := filepath.Join(folder, "manifest.yaml")
+		b, err := os.ReadFile(manifest)
+		if os.IsNotExist(err) {
+			return nil, nil, fmt.Errorf("resource folder %q has no manifest.yaml", folder)
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("read %s: %w", manifest, err)
+		}
+		var v T
+		if err := yaml.Unmarshal(b, &v); err != nil {
+			return nil, nil, fmt.Errorf("parse %s: %w", manifest, err)
+		}
+		specs = append(specs, v)
+		folders = append(folders, folder)
+	}
+	return specs, folders, nil
+}
+
+// LoadEnvironmentFile reads the environment.yaml sidecar from a service's
+// folder. Returns nil, nil when the file is absent (a service may have no env
+// contract). Returns an error on malformed YAML.
+func LoadEnvironmentFile(folder string) (map[string]string, error) {
+	path := filepath.Join(folder, "environment.yaml")
+	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	var out []T
-	for _, e := range entries {
-		if e.IsDir() || !isYAML(e.Name()) {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", path, err)
-		}
-		var v T
-		if err := yaml.Unmarshal(b, &v); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", path, err)
-		}
-		out = append(out, v)
+	var m map[string]string
+	if err := yaml.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	return out, nil
+	return m, nil
 }
 
-func isYAML(name string) bool {
-	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
-}
-
-// LoadResources reads the single shared resource set under <dir>/<env>/{network,
-// compute,…} and returns it parsed and default-normalised. The set is defined
-// once and instantiated into every region from regions.yaml (the region slug in
-// each cloud name keeps instances unique per region), so there is no per-region
-// directory to walk. cloud_init paths are resolved to absolute paths relative to
-// the compute dir.
+// LoadResources reads the single shared resource set under
+// <dir>/<env>/regional/{network,compute,…} and returns it parsed and
+// default-normalised. The set is defined once and instantiated into every region
+// from regions.yaml (the region slug in each cloud name keeps instances unique
+// per region), so there is no per-region directory to walk. cloud_init paths are
+// resolved to absolute paths relative to the compute dir.
 func LoadResources(env, dir string) (types.Resources, error) {
-	return loadResourceSet(envDir(env, dir))
+	return loadResourceSet(filepath.Join(envDir(env, dir), "regional"))
 }
 
 // LoadGlobalResources reads the global resource set under
@@ -260,42 +285,49 @@ func LoadGlobalResources(env, dir string) (types.Resources, error) {
 // which differ only in their base directory.
 func loadResourceSet(base string) (types.Resources, error) {
 	var res types.Resources
-	var err error
 
-	if res.Network, err = loadType[types.NetworkSpec](filepath.Join(base, "network")); err != nil {
+	netSpecs, _, err := loadTypeFromFolders[types.NetworkSpec](filepath.Join(base, "network"))
+	if err != nil {
 		return types.Resources{}, err
 	}
-	computeDir := filepath.Join(base, "compute")
-	if res.Compute, err = loadType[types.ComputeSpec](computeDir); err != nil {
-		return types.Resources{}, err
+	for i := range netSpecs {
+		NormalizeNetwork(&netSpecs[i])
 	}
-	if res.Database, err = loadType[types.DatabaseSpec](filepath.Join(base, "database")); err != nil {
-		return types.Resources{}, err
-	}
-	if res.Service, err = loadType[types.ServiceSpec](filepath.Join(base, "service")); err != nil {
-		return types.Resources{}, err
-	}
+	res.Network = netSpecs
 
-	applyDefaults(&res, computeDir)
+	computeSpecs, computeFolders, err := loadTypeFromFolders[types.ComputeSpec](filepath.Join(base, "compute"))
+	if err != nil {
+		return types.Resources{}, err
+	}
+	for i := range computeSpecs {
+		NormalizeCompute(&computeSpecs[i], computeFolders[i])
+	}
+	res.Compute = computeSpecs
+
+	dbSpecs, _, err := loadTypeFromFolders[types.DatabaseSpec](filepath.Join(base, "database"))
+	if err != nil {
+		return types.Resources{}, err
+	}
+	for i := range dbSpecs {
+		NormalizeDatabase(&dbSpecs[i])
+	}
+	res.Database = dbSpecs
+
+	svcSpecs, svcFolders, err := loadTypeFromFolders[types.ServiceSpec](filepath.Join(base, "service"))
+	if err != nil {
+		return types.Resources{}, err
+	}
+	for i := range svcSpecs {
+		env, err := LoadEnvironmentFile(svcFolders[i])
+		if err != nil {
+			return types.Resources{}, err
+		}
+		svcSpecs[i].Environment = env
+		NormalizeService(&svcSpecs[i])
+	}
+	res.Service = svcSpecs
+
 	return res, nil
-}
-
-// applyDefaults fills in the defaults yaml.v3 cannot and resolves cloud_init
-// paths relative to the compute directory. The per-spec normalisers are
-// exported so internal/validate applies identical defaults.
-func applyDefaults(res *types.Resources, computeDir string) {
-	for i := range res.Network {
-		NormalizeNetwork(&res.Network[i])
-	}
-	for i := range res.Compute {
-		NormalizeCompute(&res.Compute[i], computeDir)
-	}
-	for i := range res.Database {
-		NormalizeDatabase(&res.Database[i])
-	}
-	for i := range res.Service {
-		NormalizeService(&res.Service[i])
-	}
 }
 
 // NormalizeNetwork is a no-op placeholder retained for the applyDefaults call.

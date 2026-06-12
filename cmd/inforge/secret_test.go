@@ -24,9 +24,10 @@ func secretFixture(t *testing.T) string {
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 	}
-	write("prd/service/api.yaml", "name: api\ncontainer: bridge\nhost: bridge-01\ntype: raw\nuser: api\nsecrets:\n  API_TOKEN: \"vault:API_TOKEN\"\n")
-	write("prd/service/web.yaml", "name: web\ncontainer: bridge\nhost: bridge-01\ntype: raw\nuser: web\n")
-	write("prd/global/service/edge.yaml", "name: edge\ncontainer: edge\nhost: edge-01\ntype: raw\nuser: edge\n")
+	write("prd/regional/service/api/manifest.yaml", "name: api\ncontainer: bridge\nhost: bridge-01\ntype: raw\nuser: api\n")
+	write("prd/regional/service/api/environment.yaml", "API_TOKEN: \"vault:API_TOKEN\"\n")
+	write("prd/regional/service/web/manifest.yaml", "name: web\ncontainer: bridge\nhost: bridge-01\ntype: raw\nuser: web\n")
+	write("prd/global/service/edge/manifest.yaml", "name: edge\ncontainer: edge\nhost: edge-01\ntype: raw\nuser: edge\n")
 	return dir
 }
 

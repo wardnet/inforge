@@ -400,7 +400,7 @@ func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry,
 	bundles := map[string]*types.ServiceSecretsBundle{}
 	provName := reg.SecretsProviderName()
 	for _, svc := range res.Service {
-		if len(svc.Secrets) == 0 {
+		if len(svc.Environment) == 0 {
 			continue
 		}
 		if provName == "" {

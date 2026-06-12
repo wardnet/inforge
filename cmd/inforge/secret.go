@@ -422,7 +422,7 @@ func declaredEncryptedKeys(dir, env, container string) (map[string]bool, error) 
 			if svc.Container != container {
 				continue
 			}
-			for _, src := range svc.Secrets {
+			for _, src := range svc.Environment {
 				if parsed, err := validate.ParseSource(src); err == nil && parsed.Kind == validate.SourceVault {
 					declared[parsed.VaultKey] = true
 				}

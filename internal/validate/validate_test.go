@@ -134,7 +134,7 @@ func TestCheckSecretsGlobalDatabaseRef(t *testing.T) {
 	ctx.databaseNames = map[string]bool{"global/shared": true}
 	errs, _ := checkService(types.ServiceSpec{
 		Host: "bridge", Type: "raw", User: "svc", Container: "ghost",
-		Secrets: map[string]string{"DB": "ref:database/global/shared.connectionUrl"},
+		Environment: map[string]string{"DB": "ref:database/global/shared.connectionUrl"},
 	}, ctx)
 	assert.Empty(t, errs, "a regional secret may reference a global database output")
 
@@ -144,7 +144,7 @@ func TestCheckSecretsGlobalDatabaseRef(t *testing.T) {
 	ctx2.databaseNames = map[string]bool{}
 	errs, _ = checkService(types.ServiceSpec{
 		Host: "bridge", Type: "raw", User: "svc", Container: "ghost",
-		Secrets: map[string]string{"DB": "ref:database/global/shared.connectionUrl"},
+		Environment: map[string]string{"DB": "ref:database/global/shared.connectionUrl"},
 	}, ctx2)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], `database "global/shared" not found`)
@@ -157,7 +157,7 @@ func TestCheckSecretsRejectsReservedEnvName(t *testing.T) {
 	ctx.available = nil
 	errs, _ := checkService(types.ServiceSpec{
 		Host: "bridge", Type: "raw", User: "svc", Container: "ghost",
-		Secrets: map[string]string{"INFORGE_DEPLOYMENT_REGION": "env:SOME_SECRET"},
+		Environment: map[string]string{"INFORGE_DEPLOYMENT_REGION": "env:SOME_SECRET"},
 	}, ctx)
 	require.NotEmpty(t, errs)
 	assert.Contains(t, strings.Join(errs, "\n"), "reserved")
@@ -278,7 +278,7 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 			"us-east-1":    {Slug: "use1", Providers: full},
 			"eu-central-1": {Slug: "euc1", Providers: full},
 		}
-		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table, types.ProviderDefaults{}))
+		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok", "regional"), table, types.ProviderDefaults{}))
 		assert.False(t, r.failed, "every region declares every provider the shared set uses")
 	})
 
@@ -292,7 +292,7 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 			"us-east-1":    {Slug: "use1", Providers: full},
 			"eu-central-1": {Slug: "euc1", Providers: noNeon},
 		}
-		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table, types.ProviderDefaults{}))
+		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok", "regional"), table, types.ProviderDefaults{}))
 		assert.True(t, r.failed, "neon is unavailable in eu-central-1")
 	})
 
@@ -307,7 +307,7 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 		table := regions.Table{
 			"us-east-1": {Slug: "use1", Providers: noSecrets},
 		}
-		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok"), table, types.ProviderDefaults{}))
+		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok", "regional"), table, types.ProviderDefaults{}))
 		assert.True(t, r.failed, "a service declares secrets but the region has no secrets provider")
 	})
 }
