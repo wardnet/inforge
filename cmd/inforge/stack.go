@@ -106,8 +106,12 @@ func setupGitBranchBackend(ctx context.Context, branch string) (stateDir string,
 }
 
 // setProviderDefaults injects the project-level provider defaults into stack config
-// so program.Run can resolve effective providers without the project file.
+// so program.Run can resolve effective providers without the project file. It is a
+// no-op when no defaults are configured, matching applyStackConfig's empty-guard.
 func setProviderDefaults(ctx context.Context, s auto.Stack, d types.ProviderDefaults) error {
+	if d.Compute == "" && len(d.Database) == 0 {
+		return nil
+	}
 	b, err := json.Marshal(d)
 	if err != nil {
 		return fmt.Errorf("marshal provider defaults: %w", err)

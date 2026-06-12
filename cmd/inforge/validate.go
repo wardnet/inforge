@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/types"
@@ -16,11 +18,18 @@ func newValidateCmd(dir, configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			// Provider defaults from inforge.yaml are optional; a missing or unconfigured
-			// project config is treated as zero defaults (no spec-level defaults apply).
+			// Provider defaults from inforge.yaml are optional: a missing file means
+			// no defaults (zero). A file that exists but fails to parse is a real
+			// error — propagate it so validate gives the same signal as deploy.
 			var defaults types.ProviderDefaults
-			if projCfg, err := loadProjectConfig(*configPath); err == nil {
+			if _, err := os.Stat(*configPath); err == nil {
+				projCfg, err := loadProjectConfig(*configPath)
+				if err != nil {
+					return err
+				}
 				defaults = projCfg.Providers
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("stat %s: %w", *configPath, err)
 			}
 			if err := validate.ValidateResources(args[0], *dir, defaults); err != nil {
 				return err
