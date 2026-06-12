@@ -4,5 +4,6 @@
   "title": "Service environment",
   "description": "Per-service env-var contract: env-var-name to source DSL string (ref:, vault:KEY, env:VAR, or literal value).",
   "type": "object",
+  "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
   "additionalProperties": { "type": "string", "minLength": 1 }
 }

@@ -214,6 +214,7 @@ func loadTypeFromFolders[T any](dir string) ([]T, []string, error) {
 	}
 	var specs []T
 	var folders []string
+	var missing []string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue // ignore stray files at the type level
@@ -222,7 +223,10 @@ func loadTypeFromFolders[T any](dir string) ([]T, []string, error) {
 		manifest := filepath.Join(folder, "manifest.yaml")
 		b, err := os.ReadFile(manifest)
 		if os.IsNotExist(err) {
-			return nil, nil, fmt.Errorf("resource folder %q has no manifest.yaml", folder)
+			// Accumulate all missing-manifest errors so the caller sees every
+			// broken folder at once, not just the first one.
+			missing = append(missing, fmt.Sprintf("resource folder %q has no manifest.yaml", folder))
+			continue
 		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("read %s: %w", manifest, err)
@@ -233,6 +237,9 @@ func loadTypeFromFolders[T any](dir string) ([]T, []string, error) {
 		}
 		specs = append(specs, v)
 		folders = append(folders, folder)
+	}
+	if len(missing) > 0 {
+		return nil, nil, fmt.Errorf("%s", strings.Join(missing, "\n"))
 	}
 	return specs, folders, nil
 }

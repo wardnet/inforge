@@ -306,18 +306,24 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		if serviceFiles[i].parseErr != nil {
 			continue
 		}
+		envPath := filepath.Join(svcFolders[i], "environment.yaml")
 		env, err := loader.LoadEnvironmentFile(svcFolders[i])
 		if err != nil {
-			return err
+			// Treat a malformed environment.yaml as a soft per-file failure so all
+			// other services and the provider-availability pass still run.
+			r.report(envPath, []string{err.Error()}, nil)
+			serviceFiles[i].parseErr = err
+			continue
 		}
 		serviceFiles[i].spec.Environment = env
 		loader.NormalizeService(&serviceFiles[i].spec)
-		// Validate the environment.yaml sidecar against its own schema when present
-		// (a service may have no env contract). Reported against the sidecar's path
-		// so a schema error is attributed to the file the user edits.
+		// Validate the environment.yaml sidecar against its own schema.
+		// Report even when env is nil: that means the file is present but
+		// empty/comment-only — print an OK so users know it was processed.
 		if env != nil {
-			envPath := filepath.Join(svcFolders[i], "environment.yaml")
 			r.report(envPath, schemaErrors(schemaSet["environment"], env), nil)
+		} else if _, statErr := os.Stat(envPath); statErr == nil {
+			r.report(envPath, nil, nil)
 		}
 	}
 
@@ -671,7 +677,7 @@ func servicesWithSecrets(base string) ([]string, error) {
 			return nil, err
 		}
 		if len(env) > 0 {
-			paths = append(paths, f.path)
+			paths = append(paths, filepath.Join(folders[i], "environment.yaml"))
 		}
 	}
 	return paths, nil
