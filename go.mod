@@ -13,7 +13,7 @@ require (
 	github.com/pulumi/pulumi-command/sdk v1.2.1
 	github.com/pulumi/pulumi-go-provider v1.3.2
 	github.com/pulumi/pulumi-hcloud/sdk v1.38.0
-	github.com/pulumi/pulumi/sdk/v3 v3.244.0
+	github.com/pulumi/pulumi/sdk/v3 v3.245.0
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
