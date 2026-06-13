@@ -47,6 +47,7 @@ func rootCmd() *cobra.Command {
 		newDeployCmd(&cfg),
 		newReleasesCmd(&cfg),
 		newSecretCmd(&dir),
+		newPkiCmd(&dir),
 		newServiceCmd(&cfg),
 	)
 
