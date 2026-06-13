@@ -39,6 +39,45 @@ func TestGenerateRoot(t *testing.T) {
 	require.NoError(t, cert.CheckSignatureFrom(cert))
 }
 
+func TestGenerateIntermediate(t *testing.T) {
+	rootCertPEM, rootKeyPEM, err := pki.GenerateRoot("wardnet-mesh root")
+	require.NoError(t, err)
+	rootCert, err := pki.ParseCertificate(rootCertPEM)
+	require.NoError(t, err)
+	rootSigner, err := pki.ParsePrivateKey(rootKeyPEM)
+	require.NoError(t, err)
+
+	certPEM, keyPEM, err := pki.GenerateIntermediate(rootCert, rootSigner, "wardnet-mesh global intermediate")
+	require.NoError(t, err)
+
+	cert, err := pki.ParseCertificate(certPEM)
+	require.NoError(t, err)
+	assert.True(t, cert.IsCA, "intermediate must be a CA")
+	assert.True(t, cert.BasicConstraintsValid)
+	assert.NotZero(t, cert.KeyUsage&x509.KeyUsageCertSign, "intermediate must sign leaves")
+	// Path length zero: signs leaves only, never further sub-CAs.
+	assert.True(t, cert.MaxPathLenZero)
+	assert.Equal(t, 0, cert.MaxPathLen)
+	assert.Equal(t, "wardnet-mesh global intermediate", cert.Subject.CommonName)
+	assert.IsType(t, ed25519.PublicKey{}, cert.PublicKey)
+
+	// The intermediate chains to the root (signed by the root key)...
+	require.NoError(t, cert.CheckSignatureFrom(rootCert))
+	// ...and a full chain verify succeeds.
+	roots := x509.NewCertPool()
+	roots.AddCert(rootCert)
+	_, err = cert.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
+	require.NoError(t, err)
+
+	// It never outlives the root.
+	assert.False(t, cert.NotAfter.After(rootCert.NotAfter))
+
+	// Its key round-trips and matches its own certificate.
+	signer, err := pki.ParsePrivateKey(keyPEM)
+	require.NoError(t, err)
+	assert.Equal(t, cert.PublicKey, signer.Public())
+}
+
 func TestGenerateRootUniqueSerials(t *testing.T) {
 	c1, _, err := pki.GenerateRoot("a")
 	require.NoError(t, err)

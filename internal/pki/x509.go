@@ -30,6 +30,11 @@ import (
 // rotation is a deliberate, operator-driven event (ADR-0024, slice #110).
 const rootValidity = 10 * 365 * 24 * time.Hour
 
+// intermediateValidity is how long a minted intermediate CA is valid. It sits
+// below the root (which it never outlives — GenerateIntermediate clamps to the
+// parent) and above the short-TTL leaves that deploy mints from it (#108).
+const intermediateValidity = 5 * 365 * 24 * time.Hour
+
 // RootIdentityEnvVar names the environment variable that carries the offline
 // operator identity (AGE-SECRET-KEY-…) matching a two-tier PKI's rootRecipient.
 // `inforge pki init` prints that identity once; slice #106 reads it from here
@@ -89,6 +94,51 @@ func GenerateRoot(commonName string) (certPEM, keyPEM string, err error) {
 	keyDER, err := x509.MarshalPKCS8PrivateKey(signer)
 	if err != nil {
 		return "", "", fmt.Errorf("marshal root key: %w", err)
+	}
+	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: pemTypeCertificate, Bytes: der}))
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: pemTypePrivateKey, Bytes: keyDER}))
+	return certPEM, keyPEM, nil
+}
+
+// GenerateIntermediate mints an intermediate CA signed by parent (the root
+// cert) using parentKey (the root's private key, decrypted from the offline
+// rootRecipient by the operator). It returns the intermediate certificate as
+// CERTIFICATE PEM and its private key as PKCS#8 PRIVATE KEY PEM (the caller
+// age-encrypts the key to the CI recipient). The intermediate is capped at path
+// length zero (MaxPathLenZero) — it signs only leaves, never further sub-CAs —
+// and never outlives the parent (NotAfter is clamped to the parent's).
+func GenerateIntermediate(parent *x509.Certificate, parentKey crypto.Signer, commonName string) (certPEM, keyPEM string, err error) {
+	signer, err := newCAKey()
+	if err != nil {
+		return "", "", err
+	}
+	serial, err := randomSerial()
+	if err != nil {
+		return "", "", err
+	}
+	now := time.Now()
+	notAfter := now.Add(intermediateValidity)
+	if notAfter.After(parent.NotAfter) {
+		notAfter = parent.NotAfter
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: commonName},
+		NotBefore:             now.Add(-time.Minute), // tolerate minor clock skew at verifiers
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true, // signs leaves only — no further sub-CAs
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, signer.Public(), parentKey)
+	if err != nil {
+		return "", "", fmt.Errorf("create intermediate certificate: %w", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(signer)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal intermediate key: %w", err)
 	}
 	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: pemTypeCertificate, Bytes: der}))
 	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: pemTypePrivateKey, Bytes: keyDER}))

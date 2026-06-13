@@ -89,6 +89,27 @@ type Store struct {
 	PKIs map[string]PKI `yaml:"pkis,omitempty"`
 }
 
+// RootKeyRecipient returns the age recipient a PKI's root key is encrypted to:
+// the offline rootRecipient for a cold two-tier root (CI never holds the
+// matching identity), the CI recipient for a root-only root (delivered to an
+// online issuer at deploy). This is the single encrypt-side custody rule; the
+// matching decrypt identity is selected per call site (offline operator for
+// intermediate minting, deploy for leaf minting in #108).
+func (s *Store) RootKeyRecipient(topology string) string {
+	if topology == TopologyRootOnly {
+		return s.Recipient
+	}
+	return s.RootRecipient
+}
+
+// IntermediateKeyRecipient returns the recipient intermediate keys are
+// encrypted to — always the CI recipient. Intermediates are minted offline by
+// the cold root but used by deploy to sign leaves, so CI must be able to
+// decrypt them (ADR-0024).
+func (s *Store) IntermediateKeyRecipient() string {
+	return s.Recipient
+}
+
 // Path returns the store file path for an environment under the resources dir.
 func Path(dir, env string) string {
 	return filepath.Join(dir, env, FileName)
