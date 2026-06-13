@@ -34,6 +34,19 @@ const (
 // ErrNotFound reports that the store file does not exist for the environment.
 var ErrNotFound = errors.New("pki store not found")
 
+// ValidTopology reports whether t is a recognized trust-tree shape. It is the
+// single point of truth for the valid set, shared by the CLI (which adds
+// empty-vs-unknown messaging) and Load (which rejects malformed stores up
+// front); later slices that branch on topology validate through it too.
+func ValidTopology(t string) bool {
+	switch t {
+	case TopologyTwoTier, TopologyRootOnly:
+		return true
+	default:
+		return false
+	}
+}
+
 // Material is one certificate and its private key. Cert is plaintext PEM (it is
 // public, committed verbatim so the whole hierarchy is auditable in git); Key
 // is an ASCII-armored age ciphertext, encrypted to whichever recipient owns the
@@ -99,6 +112,11 @@ func Load(path string) (*Store, error) {
 	}
 	if s.RootRecipient == "" || s.Recipient == "" {
 		return nil, fmt.Errorf("pki store %s is missing a recipient — the file is corrupt or was not created by `inforge pki init`", path)
+	}
+	for name, p := range s.PKIs {
+		if !ValidTopology(p.Topology) {
+			return nil, fmt.Errorf("pki store %s: PKI %q has unknown topology %q — the file is corrupt or was written by a newer inforge", path, name, p.Topology)
+		}
 	}
 	return &s, nil
 }

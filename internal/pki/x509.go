@@ -49,12 +49,12 @@ const (
 // per-signature nonce risk, fully supported by Go's crypto/x509 and by the
 // rustls/webpki consumers in the fully-controlled mesh. Switching the entire
 // hierarchy to another algorithm is a change confined to this function.
-func newCAKey() (crypto.PublicKey, crypto.Signer, error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+func newCAKey() (crypto.Signer, error) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate ed25519 key: %w", err)
+		return nil, fmt.Errorf("generate ed25519 key: %w", err)
 	}
-	return pub, priv, nil
+	return priv, nil
 }
 
 // GenerateRoot mints a self-signed root CA and returns its certificate as
@@ -64,7 +64,7 @@ func newCAKey() (crypto.PublicKey, crypto.Signer, error) {
 // unconstrained, since whether a leaf sits directly below it (root-only) or
 // below an intermediate (two-tier) is decided by later slices.
 func GenerateRoot(commonName string) (certPEM, keyPEM string, err error) {
-	pub, signer, err := newCAKey()
+	signer, err := newCAKey()
 	if err != nil {
 		return "", "", err
 	}
@@ -82,7 +82,7 @@ func GenerateRoot(commonName string) (certPEM, keyPEM string, err error) {
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, signer)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, signer.Public(), signer)
 	if err != nil {
 		return "", "", fmt.Errorf("create root certificate: %w", err)
 	}

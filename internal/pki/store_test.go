@@ -61,6 +61,21 @@ func TestLoadMissingRecipientIsCorrupt(t *testing.T) {
 	require.ErrorContains(t, err, "missing a recipient")
 }
 
+func TestLoadRejectsUnknownTopology(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pki.enc.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(
+		"rootRecipient: age1root\nrecipient: age1ci\npkis:\n  x:\n    topology: single-tier\n    root:\n      cert: C\n      key: K\n"), 0o644))
+	_, err := pki.Load(path)
+	require.ErrorContains(t, err, "unknown topology")
+}
+
+func TestValidTopology(t *testing.T) {
+	assert.True(t, pki.ValidTopology(pki.TopologyTwoTier))
+	assert.True(t, pki.ValidTopology(pki.TopologyRootOnly))
+	assert.False(t, pki.ValidTopology(""))
+	assert.False(t, pki.ValidTopology("single-tier"))
+}
+
 func TestNamesGetSet(t *testing.T) {
 	s := &pki.Store{RootRecipient: "age1root", Recipient: "age1ci"}
 	assert.Empty(t, s.Names())

@@ -128,6 +128,7 @@ func newPkiAddCmd(dir *string) *cobra.Command {
 // per-scope intermediates are minted later (#106). A root-only root is
 // encrypted to the CI recipient for delivery to an online issuer at deploy.
 func runPkiAdd(dir, env, name, topology, scope string) error {
+	scope = strings.TrimSpace(scope) // whitespace is never an intended part of a scope
 	switch topology {
 	case pki.TopologyTwoTier:
 		if scope != "" {
