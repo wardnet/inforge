@@ -23,7 +23,8 @@ go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 cmd/inforge/                                       # the inforge CLI (user-facing)
 cmd/inforge-bootstrap/                             # runtime secret bootstrapper (service ExecStart)
 internal/bootstrapper/                             # bootstrapper core (descriptor, fetch, decrypt, exec)
-internal/pki/                                      # PKI store (pki.enc.yaml read/write), x509 helpers, ScopeGlobal const
+internal/pki/                                      # PKI store (pki.enc.yaml read/write), x509 helpers, leaf minting, ScopeGlobal const
+internal/meshcert/                                 # deploy/renew orchestration: decrypt intermediate, mint leaf, compute trust set
 internal/validate/                                 # inforge validate — structural checks incl. credential-free PKI pass
 providers/neon/cmd/pulumi-resource-neon/           # Pulumi provider plugin — Neon
 providers/infisical/cmd/pulumi-resource-infisical/ # Pulumi provider plugin — Infisical
@@ -66,6 +67,11 @@ naming.GlobalResource(env, "key", "user")               // wardnet-prd-key-user
 in derived names (DNS records, display names). It is NOT a cloud resource name and is NOT written in
 resource specs — foreign references use the resource `name` directly (e.g. `service.host: bridge`).
 
+## Rules
+
+This repo has prescriptive rules in `.agents/rules/`. **Read every file in that directory before making changes here, and follow each rule strictly.**
+Each file contains one rule. New rules go in that directory — one file per rule, kebab-case filename matching the rule's intent.
+
 ## Mesh PKI
 
 Every service manifest requires a `pki:` field naming the **two-tier** (mesh) PKI in `pki.enc.yaml`
@@ -80,8 +86,31 @@ to a PKI with topology `two-tier` and an intermediate for every scope the servic
 no decryption keys needed). A missing intermediate fails validation with a command hint:
 `inforge pki intermediate <env> <pki-name> <scope>`.
 
-An environment may host several meshes; a service names the one it joins. The mesh trust model (per-scope
-bundles + acceptor-side authz) and leaf delivery are implemented in slices #108/#109 — not here.
+An environment may host several meshes; a service names the one it joins.
+
+### Leaf minting (slice #108)
+
+Deploy-time and renewal leaf minting is live. Key packages:
+
+- **`internal/pki`** — `GenerateLeaf` mints a non-CA Ed25519 leaf (90-day TTL, clamped to parent) with a
+  SPIFFE URI SAN; `SPIFFEID` builds `spiffe://<trustDomain>/<env>/<scope>/<service>`; `Store.TrustBundle`
+  concatenates plaintext intermediate certs for a set of scopes.
+- **`internal/meshcert`** — orchestration layer; `IntermediateSigner` decrypts the scope intermediate
+  with the CI identity (`INFORGE_SECRETS_KEY`); `MintLeaf` / `MintServiceLeaf` sign a leaf from it;
+  `TrustSet` computes the peer-verification scope set (global service → all regions + global; regional
+  service → own region + global). Shared delivery constants: `MtlsDir`, `EnvLeafCertPath`,
+  `EnvLeafKeyPath`, `EnvTrustBundlePath`, `CertFiles`, `DescriptorFiles`.
+- **`providers/infisical.CertWriter`** — imperative (non-Pulumi) write path for `inforge pki renew`;
+  authenticates once, caches workspace IDs; uses `workspaceName` / `servicePath` helpers shared with
+  the Pulumi deploy path so renewed certs land at the same provider address deploy provisioned.
+- **`internal/bootstrapper.Descriptor`** — `SupportedVersion` is now **3**; the `Files` map
+  (`env-var → provider secret key`) carries mesh material paths. A descriptor with `files:` but no
+  `provider.kind` is rejected.
+
+`inforge pki renew <env>` is the CLI entry point: it mints one leaf per (service, scope) and writes
+leaf cert + key + per-scope trust bundle to the secrets provider. It never runs the Pulumi program.
+Schedule it separately from `inforge deploy` (e.g. cron). On-host projection of the material (tmpfs +
+env-var injection) is slice #109.
 
 ## Conventions
 
