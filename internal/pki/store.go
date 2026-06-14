@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -173,6 +174,29 @@ func (s *Store) Set(name string, p PKI) {
 		s.PKIs = map[string]PKI{}
 	}
 	s.PKIs[name] = p
+}
+
+// TrustBundle returns the concatenated intermediate certificate PEMs for the
+// given scopes of a two-tier PKI — the trust anchors a mesh member verifies
+// peers against (per-scope bundle, not the root; ADR-0024 amendment). Certs are
+// plaintext in the store, so this needs no decryption. It errors if the PKI is
+// absent or any scope has no intermediate (the validator guarantees presence at
+// `inforge validate` time, but renew double-checks).
+func (s *Store) TrustBundle(pkiName string, scopes []string) (string, error) {
+	p, ok := s.Get(pkiName)
+	if !ok {
+		return "", fmt.Errorf("pki %q not found", pkiName)
+	}
+	var b strings.Builder
+	for _, scope := range scopes {
+		m, ok := p.Intermediates[scope]
+		if !ok {
+			return "", fmt.Errorf("pki %q has no intermediate for scope %q", pkiName, scope)
+		}
+		b.WriteString(strings.TrimRight(m.Cert, "\n"))
+		b.WriteString("\n")
+	}
+	return b.String(), nil
 }
 
 // Names returns the sorted PKI names in the store.

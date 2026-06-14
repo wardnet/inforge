@@ -17,6 +17,7 @@ import (
 	"github.com/wardnet/inforge/internal/bootstrapper"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
+	"github.com/wardnet/inforge/internal/meshcert"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/registry"
@@ -564,6 +565,15 @@ func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle,
 			SecretPath:  bundle.SecretPath,
 		}
 		d.Env = bundle.Env
+		// A mesh member's leaf/key/CA-bundle are written to the provider by
+		// `inforge pki renew`; advertise them in files: so the bootstrapper
+		// projects them at boot (#109). files: are only meaningful with a provider
+		// to fetch them from, so this is gated on the bundle alongside provider/env
+		// — a mesh service with no provider yet (secret-less, pending #109's
+		// per-service identity) emits no files: rather than an unsatisfiable one.
+		if svc.Pki != "" {
+			d.Files = meshcert.DescriptorFiles()
+		}
 	}
 	b, err := yaml.Marshal(d)
 	if err != nil {

@@ -64,6 +64,7 @@ const sidebars: SidebarsConfig = {
         'cli/deploy',
         'cli/releases',
         'cli/secret',
+        'cli/pki',
         'cli/service',
         'cli/matrix',
         'cli/plugins',

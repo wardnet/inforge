@@ -27,10 +27,10 @@ import (
 // (the producer) stamps this same constant into every descriptor it writes, so
 // producer and consumer can never disagree on the schema version. Because parsing
 // is strict (KnownFields), any field addition is a breaking change for an older
-// reader, so it bumps this major: v2 added the Deployment block, so a v1
-// bootstrapper meeting a v2 descriptor fails cleanly on the version rather than on
-// an unknown field.
-const SupportedVersion = 2
+// reader, so it bumps this major: v2 added the Deployment block and v3 added the
+// Files map, so an older bootstrapper meeting a newer descriptor fails cleanly on
+// the version rather than on an unknown field.
+const SupportedVersion = 3
 
 // Descriptor is the versioned, secret-free on-host contract inforge writes to
 // /etc/wardnet/services/<svc>/descriptor.yaml (0644 root). It names the service,
@@ -38,12 +38,18 @@ const SupportedVersion = 2
 // env-var -> vault-key mapping (keys are relative to provider secret_path, with
 // an infra/ or custom/ prefix encoding origin). It carries no secret values.
 type Descriptor struct {
-	Version    int               `yaml:"version"`
-	Service    string            `yaml:"service"`
-	Exec       string            `yaml:"exec"`
-	User       string            `yaml:"user"`
-	Provider   Provider          `yaml:"provider"`
-	Env        map[string]string `yaml:"env"`
+	Version  int               `yaml:"version"`
+	Service  string            `yaml:"service"`
+	Exec     string            `yaml:"exec"`
+	User     string            `yaml:"user"`
+	Provider Provider          `yaml:"provider"`
+	Env      map[string]string `yaml:"env"`
+	// Files maps an env-var name → a provider secret key (relative to the
+	// provider secret_path). For a mesh service, inforge writes the leaf/key/CA
+	// bundle to the provider and lists them here; the bootstrapper fetches each,
+	// writes the PEM to a tmpfs file, and sets the env var to that path (#109).
+	// Empty for services with no mesh PKI material.
+	Files      map[string]string `yaml:"files,omitempty"`
 	Deployment Deployment        `yaml:"deployment"`
 }
 
@@ -99,6 +105,11 @@ func ParseDescriptor(b []byte) (Descriptor, error) {
 	// keys against — so an env without a provider is a producer bug, rejected here.
 	if d.Provider.Kind == "" && len(d.Env) > 0 {
 		return Descriptor{}, fmt.Errorf("descriptor: env is set but provider.kind is empty (a secret-less service must have no env entries)")
+	}
+	// files: are provider secret keys too — like env, they are meaningless with no
+	// provider to fetch them from, so the same producer-bug guard applies.
+	if d.Provider.Kind == "" && len(d.Files) > 0 {
+		return Descriptor{}, fmt.Errorf("descriptor: files is set but provider.kind is empty (mesh material requires a provider to fetch it)")
 	}
 	return d, nil
 }

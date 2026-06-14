@@ -165,7 +165,7 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 		return nil, fmt.Errorf("ensure infisical workspace for service %q: %w", svc.Name, err)
 	}
 
-	secretPath := "/" + svc.Name
+	secretPath := servicePath(svc.Name)
 	infraPath := secretPath + "/infra"
 
 	// Pre-compute the Infisical key for each env var. For vault: sources the key
@@ -248,7 +248,7 @@ func (a *InfisicalSecretsAdapter) ensureWorkspace(
 		return ws, nil
 	}
 
-	wsName := naming.Resource(env, a.slug, "container", container)
+	wsName := a.workspaceName(container, env)
 	wsRes, err := newInfisicalWorkspaceResource(ctx, wsName, wsName, a.clientId, a.clientSecret, a.siteUrl)
 	if err != nil {
 		return pulumi.StringOutput{}, fmt.Errorf("create infisical workspace %q: %w", wsName, err)
@@ -266,6 +266,19 @@ func envToSlug(env string) string {
 	}
 	return env
 }
+
+// workspaceName is the deterministic Infisical project name for a (container,
+// env) pair. The Pulumi deploy path (ensureWorkspace) and the imperative renew
+// path (CertWriter) MUST address the same workspace, so both derive it here —
+// the addressing is defined once, not duplicated.
+func (a *InfisicalSecretsAdapter) workspaceName(container, env string) string {
+	return naming.Resource(env, a.slug, "container", container)
+}
+
+// servicePath is the per-service secret root ("/<service>") both the deploy path
+// (infra secrets under /<svc>/infra) and the renew path (mesh material under
+// /<svc>/mtls) write beneath.
+func servicePath(service string) string { return "/" + service }
 
 // resolveRef resolves a secrets source string to a Pulumi StringOutput.
 //
