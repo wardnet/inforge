@@ -78,6 +78,17 @@ func TestGenerateIntermediate(t *testing.T) {
 	assert.Equal(t, cert.PublicKey, signer.Public())
 }
 
+func TestRootIdentityFromEnv(t *testing.T) {
+	t.Setenv(pki.RootIdentityEnvVar, "  ")
+	_, err := pki.RootIdentityFromEnv()
+	require.ErrorContains(t, err, pki.RootIdentityEnvVar)
+
+	t.Setenv(pki.RootIdentityEnvVar, "  AGE-SECRET-KEY-XYZ  ")
+	id, err := pki.RootIdentityFromEnv()
+	require.NoError(t, err)
+	assert.Equal(t, "AGE-SECRET-KEY-XYZ", id, "value must be trimmed")
+}
+
 func TestGenerateRootUniqueSerials(t *testing.T) {
 	c1, _, err := pki.GenerateRoot("a")
 	require.NoError(t, err)

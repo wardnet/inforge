@@ -231,9 +231,9 @@ func runPkiIntermediate(dir, env, name, scope string) error {
 		return fmt.Errorf("PKI %q already has an intermediate for scope %q (rotation is a separate command)", name, scope)
 	}
 
-	rootIdentity := strings.TrimSpace(os.Getenv(pki.RootIdentityEnvVar))
-	if rootIdentity == "" {
-		return fmt.Errorf("%s is unset — set it to the offline root identity (AGE-SECRET-KEY-…) printed by `inforge pki init`", pki.RootIdentityEnvVar)
+	rootIdentity, err := pki.RootIdentityFromEnv()
+	if err != nil {
+		return err
 	}
 	rootKeyPEM, err := secretstore.Decrypt(p.Root.Key, rootIdentity)
 	if err != nil {

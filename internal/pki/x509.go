@@ -22,6 +22,8 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -42,6 +44,19 @@ const intermediateValidity = 5 * 365 * 24 * time.Hour
 // distinct from secretstore.IdentityEnvVar (INFORGE_SECRETS_KEY): the cold root
 // key must never be reachable by the CI master.
 const RootIdentityEnvVar = "INFORGE_PKI_ROOT_KEY"
+
+// RootIdentityFromEnv reads the offline root identity from RootIdentityEnvVar,
+// with an actionable error when it is unset. It mirrors
+// secretstore.IdentityFromEnv but is deliberately separate: this identity
+// unseals cold two-tier roots to mint intermediates and must never be the CI
+// master (INFORGE_SECRETS_KEY).
+func RootIdentityFromEnv() (string, error) {
+	id := strings.TrimSpace(os.Getenv(RootIdentityEnvVar))
+	if id == "" {
+		return "", fmt.Errorf("%s is unset — set it to the offline root identity (AGE-SECRET-KEY-…) printed by `inforge pki init`", RootIdentityEnvVar)
+	}
+	return id, nil
+}
 
 const (
 	pemTypeCertificate = "CERTIFICATE"
@@ -91,13 +106,7 @@ func GenerateRoot(commonName string) (certPEM, keyPEM string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("create root certificate: %w", err)
 	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(signer)
-	if err != nil {
-		return "", "", fmt.Errorf("marshal root key: %w", err)
-	}
-	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: pemTypeCertificate, Bytes: der}))
-	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: pemTypePrivateKey, Bytes: keyDER}))
-	return certPEM, keyPEM, nil
+	return encodeCertAndKey(der, signer)
 }
 
 // GenerateIntermediate mints an intermediate CA signed by parent (the root
@@ -136,9 +145,17 @@ func GenerateIntermediate(parent *x509.Certificate, parentKey crypto.Signer, com
 	if err != nil {
 		return "", "", fmt.Errorf("create intermediate certificate: %w", err)
 	}
+	return encodeCertAndKey(der, signer)
+}
+
+// encodeCertAndKey renders a signed DER certificate and its signer's private
+// key as the CERTIFICATE / PKCS#8 PRIVATE KEY PEM pair the store commits. Both
+// GenerateRoot and GenerateIntermediate end here, so the key marshaling and PEM
+// block types stay defined in one place.
+func encodeCertAndKey(der []byte, signer crypto.Signer) (certPEM, keyPEM string, err error) {
 	keyDER, err := x509.MarshalPKCS8PrivateKey(signer)
 	if err != nil {
-		return "", "", fmt.Errorf("marshal intermediate key: %w", err)
+		return "", "", fmt.Errorf("marshal CA key: %w", err)
 	}
 	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: pemTypeCertificate, Bytes: der}))
 	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: pemTypePrivateKey, Bytes: keyDER}))
