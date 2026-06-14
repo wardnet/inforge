@@ -23,6 +23,8 @@ go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 cmd/inforge/                                       # the inforge CLI (user-facing)
 cmd/inforge-bootstrap/                             # runtime secret bootstrapper (service ExecStart)
 internal/bootstrapper/                             # bootstrapper core (descriptor, fetch, decrypt, exec)
+internal/pki/                                      # PKI store (pki.enc.yaml read/write), x509 helpers, ScopeGlobal const
+internal/validate/                                 # inforge validate — structural checks incl. credential-free PKI pass
 providers/neon/cmd/pulumi-resource-neon/           # Pulumi provider plugin — Neon
 providers/infisical/cmd/pulumi-resource-infisical/ # Pulumi provider plugin — Infisical
 .goreleaser.yml                                    # build/release config (v2 schema)
@@ -63,6 +65,23 @@ naming.GlobalResource(env, "key", "user")               // wardnet-prd-key-user
 `naming.SpecKey(name, instance)` produces `bridge-01` etc. and is used as an internal map key and
 in derived names (DNS records, display names). It is NOT a cloud resource name and is NOT written in
 resource specs — foreign references use the resource `name` directly (e.g. `service.host: bridge`).
+
+## Mesh PKI
+
+Every service manifest requires a `pki:` field naming the **two-tier** (mesh) PKI in `pki.enc.yaml`
+the service joins as a leaf member. The name is a FK into the `pki.enc.yaml` store — it must resolve
+to a PKI with topology `two-tier` and an intermediate for every scope the service deploys under:
+
+- **Global services** (`global/service/…`) → must have an intermediate for scope `"global"`.
+- **Regional services** (`regional/service/…`) → must have an intermediate for every region defined
+  in `regions.yaml` (the regional set deploys to all regions simultaneously).
+
+`inforge validate` enforces these rules credential-free (reads only the store's plaintext structure —
+no decryption keys needed). A missing intermediate fails validation with a command hint:
+`inforge pki intermediate <env> <pki-name> <scope>`.
+
+An environment may host several meshes; a service names the one it joins. The mesh trust model (per-scope
+bundles + acceptor-side authz) and leaf delivery are implemented in slices #108/#109 — not here.
 
 ## Conventions
 
