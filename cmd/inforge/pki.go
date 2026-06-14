@@ -27,6 +27,7 @@ func newPkiCmd(dir *string) *cobra.Command {
 	cmd.AddCommand(
 		newPkiInitCmd(dir),
 		newPkiAddCmd(dir),
+		newPkiIntermediateCmd(dir),
 		newPkiLsCmd(dir),
 	)
 	return cmd
@@ -161,11 +162,7 @@ func runPkiAdd(dir, env, name, topology, scope string) error {
 		return err
 	}
 
-	keyRecipient := store.RootRecipient
-	if topology == pki.TopologyRootOnly {
-		keyRecipient = store.Recipient
-	}
-	ciphertext, err := secretstore.Encrypt([]byte(keyPEM), keyRecipient)
+	ciphertext, err := secretstore.Encrypt([]byte(keyPEM), store.RootKeyRecipient(topology))
 	if err != nil {
 		return err
 	}
@@ -186,6 +183,93 @@ func runPkiAdd(dir, env, name, topology, scope string) error {
 		fmt.Printf("  2. mint a per-scope intermediate for each active scope (global + each region), e.g.:\n       inforge pki intermediate %s %s global\n", env, name)
 		fmt.Printf("     intermediate minting needs the offline root identity in %s\n", pki.RootIdentityEnvVar)
 	}
+	return nil
+}
+
+func newPkiIntermediateCmd(dir *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "intermediate <env> <name> <scope>",
+		Short:         "Mint a per-scope intermediate CA for a two-tier PKI, signed offline by its cold root",
+		Args:          cobra.ExactArgs(3),
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runPkiIntermediate(*dir, args[0], args[1], args[2])
+		},
+	}
+	return cmd
+}
+
+// runPkiIntermediate is the operator-run, offline step that mints a per-scope
+// intermediate for a two-tier PKI. It reads the cold root identity from
+// INFORGE_PKI_ROOT_KEY (never CI's INFORGE_SECRETS_KEY), decrypts the root key,
+// signs the intermediate, and re-encrypts the intermediate key to the CI
+// recipient so deploy can mint leaves from it (#108). Scope is recorded as-is
+// (trimmed); semantic scope/region validation runs at `inforge validate` (#107).
+func runPkiIntermediate(dir, env, name, scope string) error {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return fmt.Errorf("scope is required (e.g. global, or a region)")
+	}
+
+	path := pki.Path(dir, env)
+	store, err := pki.Load(path)
+	if err != nil {
+		if errors.Is(err, pki.ErrNotFound) {
+			return fmt.Errorf("%w — run `inforge pki init %s` first", err, env)
+		}
+		return err
+	}
+	p, ok := store.Get(name)
+	if !ok {
+		return fmt.Errorf("PKI %q not found in %s", name, path)
+	}
+	if p.Topology != pki.TopologyTwoTier {
+		return fmt.Errorf("PKI %q is %s; only two-tier PKIs have intermediates", name, p.Topology)
+	}
+	if _, exists := p.Intermediates[scope]; exists {
+		return fmt.Errorf("PKI %q already has an intermediate for scope %q (rotation is a separate command)", name, scope)
+	}
+
+	rootIdentity, err := pki.RootIdentityFromEnv()
+	if err != nil {
+		return err
+	}
+	rootKeyPEM, err := secretstore.Decrypt(p.Root.Key, rootIdentity)
+	if err != nil {
+		return fmt.Errorf("decrypt root key for PKI %q (is %s the right offline root identity?): %w", name, pki.RootIdentityEnvVar, err)
+	}
+	rootCert, err := pki.ParseCertificate(p.Root.Cert)
+	if err != nil {
+		return err
+	}
+	rootSigner, err := pki.ParsePrivateKey(string(rootKeyPEM))
+	if err != nil {
+		return err
+	}
+
+	certPEM, keyPEM, err := pki.GenerateIntermediate(rootCert, rootSigner, fmt.Sprintf("%s %s intermediate", name, scope))
+	if err != nil {
+		return err
+	}
+	ciphertext, err := secretstore.Encrypt([]byte(keyPEM), store.IntermediateKeyRecipient())
+	if err != nil {
+		return err
+	}
+
+	if p.Intermediates == nil {
+		p.Intermediates = map[string]pki.Material{}
+	}
+	p.Intermediates[scope] = pki.Material{Cert: certPEM, Key: ciphertext}
+	store.Set(name, p)
+	if err := store.Save(path); err != nil {
+		return err
+	}
+
+	fmt.Printf("minted intermediate for PKI %q scope %q in %s\n", name, scope, path)
+	fmt.Println("\nnext steps:")
+	fmt.Println("  1. commit the store file")
+	fmt.Println("  2. deploy mints short-TTL leaves from this intermediate (#108)")
 	return nil
 }
 

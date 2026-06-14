@@ -166,3 +166,103 @@ func TestRunPkiLs(t *testing.T) {
 	assert.Contains(t, out, "root-only")
 	assert.Contains(t, out, "scope global")
 }
+
+// twoTierFixture inits a store with explicit recipients (so the test holds both
+// the offline root identity and the CI identity) and adds a two-tier PKI.
+func twoTierFixture(t *testing.T) (dir, rootIdentity, ciIdentity string) {
+	t.Helper()
+	dir = t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
+	rootIdentity, rootRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	ciIdentity, ciRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	require.NoError(t, runPkiInit(dir, "prd", ciRecipient, rootRecipient))
+	require.NoError(t, runPkiAdd(dir, "prd", "wardnet-mesh", pki.TopologyTwoTier, ""))
+	return dir, rootIdentity, ciIdentity
+}
+
+func TestRunPkiIntermediateMintsCIHeldChain(t *testing.T) {
+	dir, rootIdentity, ciIdentity := twoTierFixture(t)
+	t.Setenv(pki.RootIdentityEnvVar, rootIdentity)
+
+	require.NoError(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "global"))
+
+	store, err := pki.Load(pki.Path(dir, "prd"))
+	require.NoError(t, err)
+	p, ok := store.Get("wardnet-mesh")
+	require.True(t, ok)
+	mat, ok := p.Intermediates["global"]
+	require.True(t, ok, "intermediate must be recorded under its scope")
+
+	// The intermediate is a path-len-0 CA that chains to the committed root.
+	interCert, err := pki.ParseCertificate(mat.Cert)
+	require.NoError(t, err)
+	assert.True(t, interCert.IsCA)
+	assert.True(t, interCert.MaxPathLenZero)
+	rootCert, err := pki.ParseCertificate(p.Root.Cert)
+	require.NoError(t, err)
+	require.NoError(t, interCert.CheckSignatureFrom(rootCert))
+
+	// Custody: the intermediate KEY is CI-held — decrypts with the CI identity...
+	plain, err := secretstore.Decrypt(mat.Key, ciIdentity)
+	require.NoError(t, err)
+	_, err = pki.ParsePrivateKey(string(plain))
+	require.NoError(t, err)
+	// ...and NOT with the offline root identity (only the root key is cold).
+	_, err = secretstore.Decrypt(mat.Key, rootIdentity)
+	require.Error(t, err)
+}
+
+func TestRunPkiIntermediateRequiresRootKeyEnv(t *testing.T) {
+	dir, _, _ := twoTierFixture(t)
+	t.Setenv(pki.RootIdentityEnvVar, "")
+	err := runPkiIntermediate(dir, "prd", "wardnet-mesh", "global")
+	require.ErrorContains(t, err, pki.RootIdentityEnvVar)
+}
+
+func TestRunPkiIntermediateWrongRootKey(t *testing.T) {
+	dir, _, _ := twoTierFixture(t)
+	wrongIdentity, _, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	t.Setenv(pki.RootIdentityEnvVar, wrongIdentity)
+	err = runPkiIntermediate(dir, "prd", "wardnet-mesh", "global")
+	require.ErrorContains(t, err, "decrypt root key")
+}
+
+func TestRunPkiIntermediateRejectsRootOnly(t *testing.T) {
+	dir, rootIdentity, _ := twoTierFixture(t)
+	require.NoError(t, runPkiAdd(dir, "prd", "wardnet-daemon", pki.TopologyRootOnly, ""))
+	t.Setenv(pki.RootIdentityEnvVar, rootIdentity)
+	err := runPkiIntermediate(dir, "prd", "wardnet-daemon", "global")
+	require.ErrorContains(t, err, "only two-tier")
+}
+
+func TestRunPkiIntermediateValidation(t *testing.T) {
+	dir, rootIdentity, _ := twoTierFixture(t)
+	t.Setenv(pki.RootIdentityEnvVar, rootIdentity)
+
+	require.ErrorContains(t, runPkiIntermediate(dir, "prd", "nope", "global"), "not found")
+	require.ErrorContains(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "  "), "scope is required")
+
+	require.NoError(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "global"))
+	require.ErrorContains(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "global"), "already has an intermediate")
+}
+
+func TestRunPkiIntermediateBeforeInit(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
+	t.Setenv(pki.RootIdentityEnvVar, "irrelevant")
+	err := runPkiIntermediate(dir, "prd", "wardnet-mesh", "global")
+	require.ErrorContains(t, err, "inforge pki init")
+}
+
+func TestRunPkiLsShowsIntermediate(t *testing.T) {
+	dir, rootIdentity, _ := twoTierFixture(t)
+	t.Setenv(pki.RootIdentityEnvVar, rootIdentity)
+	require.NoError(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "global"))
+
+	out, err := captureStdout(t, func() error { return runPkiLs(dir, "prd") })
+	require.NoError(t, err)
+	assert.Contains(t, out, "intermediates: global")
+}
