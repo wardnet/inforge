@@ -4,6 +4,7 @@ container: bridge
 host: bridge
 type: raw
 user: web
+pki: wardnet-mesh
 ingress:
   - type: tls-termination
     listen: 443

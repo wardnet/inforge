@@ -4,3 +4,4 @@ container: core
 host: bridge
 type: raw
 user: api
+pki: wardnet-mesh

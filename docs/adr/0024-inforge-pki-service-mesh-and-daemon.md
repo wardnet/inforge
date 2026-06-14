@@ -163,3 +163,56 @@ scope alongside the abstract regions, and an intermediate exists per active scop
 - Short-TTL leaves make renewal cadence and host clock skew operationally relevant; the
   bootstrapper re-projects on every start, and leaf TTL must comfortably exceed the deploy/reboot
   interval.
+
+## Amendment — 2026-06-14 (#107)
+
+Implementing the service-side slice surfaced two corrections to the decisions above.
+
+### Mesh trust is per-scope bundles + an acceptor-side authz check, not the root anchor
+
+The original "deliver the mesh **root** cert as the trust anchor" makes every leaf in the mesh
+mutually trusted — an any-to-any mesh. The intended policy is a **regional boundary**:
+
+| initiator → acceptor | allowed |
+|---|---|
+| region R → region R (intra-region) | ✅ |
+| region R → global | ✅ |
+| global → global | ✅ |
+| global → region R | ❌ |
+| region R → region R′ (cross-region) | ❌ |
+
+This is enforced in two layers, both at deploy/runtime (**#108/#109**), not by the root anchor:
+
+- **Per-scope trust *bundles* (blocks cross-region).** A service is delivered the CA bundle of the
+  scopes it may talk to — a regional service trusts `{its region, global}`, a global service trusts
+  `{all regions, global}` — **not** the root. A peer whose leaf is signed by an out-of-bundle
+  intermediate (e.g. another region) fails verification. This replaces `MTLS_MESH_ROOT_CERT_PATH`
+  with a per-scope bundle path.
+- **Acceptor-side authz on peer scope (blocks `global→region`).** Trust bundles are symmetric, so
+  they cannot express direction; and because globals may call globals, an EKU client/server split is
+  too coarse. Direction is therefore enforced by the **acceptor** checking the peer leaf's scope
+  against an allow-policy (a regional service rejects an initiator whose scope is `global`).
+
+The boundary applies **only to the mesh PKI** a service is a member of. #108/#109 own the bundle
+delivery, leaf SAN/scope encoding, and the acceptor check.
+
+### `issues:`/`verifies:` are removed; custom PKI exposure becomes a general resource grant
+
+The two daemon fields over-fit one consumer (the bridge). Exposing a PKI to a service *with a
+permission* — `verify` (CA cert delivered, trust-only) or `issue` (signing key delivered, online
+signer) — is an instance of a capability inforge does not yet have: **granting a service a
+permission on a resource, materialized as a credential/secret on that service** (the same shape as
+"a service creating a user on a database"). It should ride that general model, not bespoke fields.
+
+Therefore the service DSL of **#107 is mesh-only**: a single required `pki:` field naming the
+two-tier mesh PKI the service is a leaf member of (an env may host several meshes, so the service
+names which it joins). The `issues:`/`verifies:` fields and their env/path table rows are dropped,
+and the "single global issuer" rule with them. Custom/daemon PKI exposure is tracked separately as
+the resource-permission-grant work (#117) and supersedes the "concrete three-field service DSL" /
+"generic asset schema" decision above for the daemon case.
+
+`inforge validate` (#107) enforces the mesh rules credential-free against the store's plaintext
+structure: `pki:` must name an existing **two-tier** PKI whose intermediate exists for **every scope
+the service is deployed under** (a global service → `global`; a regional service → every region,
+since the regional set deploys to all of them). A missing intermediate fails validation — deploy
+cannot mint that leaf without it.

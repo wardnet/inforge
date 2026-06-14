@@ -7,3 +7,4 @@ container: shared
 host: edge
 type: raw
 user: g
+pki: wardnet-mesh
