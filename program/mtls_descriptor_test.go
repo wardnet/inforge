@@ -13,13 +13,27 @@ import (
 
 func TestRenderDescriptorMeshFiles(t *testing.T) {
 	svc := types.ServiceSpec{Name: "bridge", Container: "bridge", Host: "bridge", Type: "raw", User: "bridge", Pki: "wardnet-mesh"}
-	out, err := renderDescriptor(svc, nil, "", "prd", "us-east-1", "use1", "wardnet.network")
+	// A mesh service with a provider (a bundle) advertises its leaf/key/bundle.
+	bundle := &types.ServiceSecretsBundle{ProviderKind: "infisical", URL: "https://x", Environment: "prod", SecretPath: "/bridge"}
+	out, err := renderDescriptor(svc, bundle, "ws-1", "prd", "us-east-1", "use1", "wardnet.network")
 	require.NoError(t, err)
 
 	d, err := bootstrapper.ParseDescriptor([]byte(out))
 	require.NoError(t, err)
 	assert.Equal(t, meshcert.DescriptorFiles(), d.Files,
-		"a mesh service advertises its leaf/key/bundle in files:")
+		"a mesh service with a provider advertises its leaf/key/bundle in files:")
+}
+
+func TestRenderDescriptorMeshNoProviderNoFiles(t *testing.T) {
+	// A mesh service with no provider yet (secret-less; provider/identity lands
+	// in #109) emits no files: — never an unsatisfiable descriptor.
+	svc := types.ServiceSpec{Name: "bridge", Container: "bridge", Host: "bridge", Type: "raw", User: "bridge", Pki: "wardnet-mesh"}
+	out, err := renderDescriptor(svc, nil, "", "prd", "us-east-1", "use1", "wardnet.network")
+	require.NoError(t, err)
+
+	d, err := bootstrapper.ParseDescriptor([]byte(out))
+	require.NoError(t, err)
+	assert.Empty(t, d.Files, "no provider → no files:")
 }
 
 func TestRenderDescriptorNoMeshNoFiles(t *testing.T) {

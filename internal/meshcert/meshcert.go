@@ -10,6 +10,8 @@
 package meshcert
 
 import (
+	"crypto"
+	"crypto/x509"
 	"fmt"
 	"sort"
 
@@ -58,32 +60,50 @@ func DescriptorFiles() map[string]string {
 // spiffe://<trustDomain>/<env>/<ownScope>/<service>. Returns the leaf cert and
 // key as PEM.
 func MintServiceLeaf(store *pki.Store, pkiName, ownScope, ciIdentity, trustDomain, env, service string) (leafPEM, keyPEM string, err error) {
+	interCert, interKey, err := IntermediateSigner(store, pkiName, ownScope, ciIdentity)
+	if err != nil {
+		return "", "", err
+	}
+	return MintLeaf(interCert, interKey, trustDomain, env, ownScope, service)
+}
+
+// IntermediateSigner decrypts and parses a two-tier PKI's scope intermediate
+// (cert + key) with ciIdentity (the CI age identity — the decrypt-side of the
+// custody rule; intermediate keys are encrypted to the CI recipient, never the
+// cold root). Callers minting several leaves from the same scope cache the
+// returned pair per (pkiName, scope) to decrypt once.
+func IntermediateSigner(store *pki.Store, pkiName, scope, ciIdentity string) (*x509.Certificate, crypto.Signer, error) {
 	p, ok := store.Get(pkiName)
 	if !ok {
-		return "", "", fmt.Errorf("pki %q not found", pkiName)
+		return nil, nil, fmt.Errorf("pki %q not found", pkiName)
 	}
 	if p.Topology != pki.TopologyTwoTier {
-		return "", "", fmt.Errorf("pki %q is %s; mesh leaves require a two-tier PKI", pkiName, p.Topology)
+		return nil, nil, fmt.Errorf("pki %q is %s; mesh leaves require a two-tier PKI", pkiName, p.Topology)
 	}
-	inter, ok := p.Intermediates[ownScope]
+	inter, ok := p.Intermediates[scope]
 	if !ok {
-		return "", "", fmt.Errorf("pki %q has no intermediate for scope %q — run `inforge pki intermediate <env> %s %s`", pkiName, ownScope, pkiName, ownScope)
+		return nil, nil, fmt.Errorf("pki %q has no intermediate for scope %q — run `inforge pki intermediate <env> %s %s`", pkiName, scope, pkiName, scope)
 	}
-
 	keyPlain, err := secretstore.Decrypt(inter.Key, ciIdentity)
 	if err != nil {
-		return "", "", fmt.Errorf("decrypt intermediate key for pki %q scope %q: %w", pkiName, ownScope, err)
+		return nil, nil, fmt.Errorf("decrypt intermediate key for pki %q scope %q: %w", pkiName, scope, err)
 	}
 	interCert, err := pki.ParseCertificate(inter.Cert)
 	if err != nil {
-		return "", "", err
+		return nil, nil, err
 	}
 	interKey, err := pki.ParsePrivateKey(string(keyPlain))
 	if err != nil {
-		return "", "", err
+		return nil, nil, err
 	}
+	return interCert, interKey, nil
+}
 
-	return pki.GenerateLeaf(interCert, interKey, pki.SPIFFEID(trustDomain, env, ownScope, service), service)
+// MintLeaf mints a leaf for service from an already-decrypted scope intermediate
+// (see IntermediateSigner), carrying the spiffe://<trustDomain>/<env>/<scope>/
+// <service> identity.
+func MintLeaf(interCert *x509.Certificate, interKey crypto.Signer, trustDomain, env, scope, service string) (leafPEM, keyPEM string, err error) {
+	return pki.GenerateLeaf(interCert, interKey, pki.SPIFFEID(trustDomain, env, scope, service), service)
 }
 
 // TrustSet returns the scopes a service in ownScope verifies peers against

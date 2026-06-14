@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"os"
@@ -380,63 +382,113 @@ func runPkiRenew(ctx context.Context, dir, env string) error {
 		return err
 	}
 
-	count := 0
-	// Global services: scope "global", region-less slug, creds from the global block.
-	for _, svc := range globalRes.Service {
-		if svc.Pki == "" {
-			continue
-		}
-		if global == nil {
-			return fmt.Errorf("global service %q declares pki but the env has no global providers block", svc.Name)
-		}
-		cID, cSecret, site, org := infisicalCreds(global.Providers)
-		adapter := infisical.New(cID, cSecret, site, org, "")
-		if err := renewServiceScope(ctx, adapter, store, ciIdentity, vars.BaseDomain, env, svc, pki.ScopeGlobal, allRegions); err != nil {
-			return err
-		}
-		count++
+	// Decrypt each (pki, scope) intermediate at most once per run — many services
+	// in a scope mint from the same one.
+	type interKey struct{ pkiName, scope string }
+	type interVal struct {
+		cert *x509.Certificate
+		key  crypto.Signer
 	}
-	// Regional services: one leaf per region, scope = region, per-region slug + creds.
-	for _, region := range allRegions {
-		ar := regionTable[region]
-		cID, cSecret, site, org := infisicalCreds(ar.Providers)
-		for _, svc := range regionalRes.Service {
+	interCache := map[interKey]interVal{}
+	intermediate := func(pkiName, scope string) (*x509.Certificate, crypto.Signer, error) {
+		k := interKey{pkiName, scope}
+		if v, ok := interCache[k]; ok {
+			return v.cert, v.key, nil
+		}
+		cert, key, err := meshcert.IntermediateSigner(store, pkiName, scope, ciIdentity)
+		if err != nil {
+			return nil, nil, err
+		}
+		interCache[k] = interVal{cert, key}
+		return cert, key, nil
+	}
+
+	count := 0
+	// renewSet mints + writes a leaf for each pki-bearing service in one scope,
+	// reusing one authenticated provider writer.
+	renewSet := func(writer *infisical.CertWriter, services []types.ServiceSpec, scope string) error {
+		for _, svc := range services {
 			if svc.Pki == "" {
 				continue
 			}
-			adapter := infisical.New(cID, cSecret, site, org, ar.Slug)
-			if err := renewServiceScope(ctx, adapter, store, ciIdentity, vars.BaseDomain, env, svc, region, allRegions); err != nil {
-				return err
+			interCert, interKey, err := intermediate(svc.Pki, scope)
+			if err != nil {
+				return fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
+			}
+			leafPEM, keyPEM, err := meshcert.MintLeaf(interCert, interKey, vars.BaseDomain, env, scope, svc.Name)
+			if err != nil {
+				return fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
+			}
+			bundle, err := store.TrustBundle(svc.Pki, meshcert.TrustSet(scope, allRegions))
+			if err != nil {
+				return fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
+			}
+			files := meshcert.CertFiles(leafPEM, keyPEM, bundle)
+			if err := writer.Write(ctx, svc.Container, svc.Name, meshcert.MtlsDir, files); err != nil {
+				return fmt.Errorf("service %q scope %q: write certs: %w", svc.Name, scope, err)
 			}
 			count++
+		}
+		return nil
+	}
+
+	// Global services: scope "global", region-less slug, creds from the global block.
+	if anyServiceHasPki(globalRes.Service) {
+		if global == nil {
+			return fmt.Errorf("a global service declares pki but the env has no global providers block")
+		}
+		cID, cSecret, site, org, err := requireInfisicalCreds(global.Providers, "global")
+		if err != nil {
+			return err
+		}
+		writer, err := infisical.NewCertWriter(ctx, env, "", cID, cSecret, site, org)
+		if err != nil {
+			return err
+		}
+		if err := renewSet(writer, globalRes.Service, pki.ScopeGlobal); err != nil {
+			return err
+		}
+	}
+	// Regional services: one leaf per region, scope = region, per-region slug + creds.
+	if anyServiceHasPki(regionalRes.Service) {
+		for _, region := range allRegions {
+			ar := regionTable[region]
+			cID, cSecret, site, org, err := requireInfisicalCreds(ar.Providers, region)
+			if err != nil {
+				return err
+			}
+			writer, err := infisical.NewCertWriter(ctx, env, ar.Slug, cID, cSecret, site, org)
+			if err != nil {
+				return err
+			}
+			if err := renewSet(writer, regionalRes.Service, region); err != nil {
+				return err
+			}
 		}
 	}
 	fmt.Printf("renewed %d mesh leaf certificate(s) in %s\n", count, env)
 	return nil
 }
 
-// renewServiceScope mints svc's leaf for one scope, assembles its per-scope trust
-// bundle, and writes leaf/key/bundle to the provider under "/<svc>/mtls".
-func renewServiceScope(ctx context.Context, adapter *infisical.InfisicalSecretsAdapter, store *pki.Store, ciIdentity, baseDomain, env string, svc types.ServiceSpec, scope string, allRegions []string) error {
-	leafPEM, keyPEM, err := meshcert.MintServiceLeaf(store, svc.Pki, scope, ciIdentity, baseDomain, env, svc.Name)
-	if err != nil {
-		return fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
+func anyServiceHasPki(services []types.ServiceSpec) bool {
+	for _, s := range services {
+		if s.Pki != "" {
+			return true
+		}
 	}
-	bundle, err := store.TrustBundle(svc.Pki, meshcert.TrustSet(scope, allRegions))
-	if err != nil {
-		return fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
-	}
-	files := meshcert.CertFiles(leafPEM, keyPEM, bundle)
-	if err := adapter.WriteServiceCerts(ctx, svc.Container, svc.Name, env, meshcert.MtlsDir, files); err != nil {
-		return fmt.Errorf("service %q scope %q: write certs: %w", svc.Name, scope, err)
-	}
-	return nil
+	return false
 }
 
-// infisicalCreds extracts the Infisical admin universal-auth credentials from a
-// providers block (regions.yaml global or per-region).
-func infisicalCreds(providers map[string]map[string]any) (clientID, clientSecret, siteURL, orgID string) {
+// requireInfisicalCreds extracts the Infisical admin universal-auth credentials
+// from a providers block (regions.yaml global or per-region), erroring when the
+// block is missing clientId/clientSecret so the misconfigured scope is named up
+// front rather than surfacing as a generic auth failure deep in the write.
+func requireInfisicalCreds(providers map[string]map[string]any, scope string) (clientID, clientSecret, siteURL, orgID string, err error) {
 	cfg := providers["infisical"]
 	get := func(k string) string { s, _ := cfg[k].(string); return s }
-	return get("clientId"), get("clientSecret"), get("siteUrl"), get("organizationId")
+	clientID, clientSecret, siteURL, orgID = get("clientId"), get("clientSecret"), get("siteUrl"), get("organizationId")
+	if clientID == "" || clientSecret == "" {
+		return "", "", "", "", fmt.Errorf("scope %q has no infisical clientId/clientSecret in its regions.yaml providers block", scope)
+	}
+	return clientID, clientSecret, siteURL, orgID, nil
 }

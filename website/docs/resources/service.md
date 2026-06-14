@@ -26,6 +26,7 @@ container: bridge        # required
 host: bridge             # required — name of the Compute resource that hosts this service
 type: raw                # required — delivery type
 user: wardnet            # required — no-login system user the service runs as
+pki: wardnet-mesh        # required — name of the two-tier (mesh) PKI this service is a member of
 ingress:                  # optional — typed inbound routes realized on the host's nginx
   - type: tls-termination #   required — tls-termination | forward
     listen: 443           #   required — public port the host accepts traffic on
@@ -57,6 +58,7 @@ LOG_LEVEL: info                                 # a literal (non-secret config) 
 | `host` | string | Yes | **Name** of the Compute resource that hosts this service (e.g. `bridge`). The host must have `instance_count: 1`; a multi-instance host is a validation error. |
 | `type` | string | Yes | Delivery type. Currently only `raw` (SSH-push) is supported. `container` is reserved. |
 | `user` | string | Yes | No-login system user the service runs as. inforge emits `User=<name>` in the systemd unit and creates the account via SSH on first deploy; the bootstrapper drops privilege to it before exec. |
+| `pki` | string | Yes | Name of the **two-tier (mesh) PKI** in `pki.enc.yaml` this service is a leaf member of. `inforge validate` checks it names an existing two-tier PKI with an intermediate for every scope the service deploys under (a global service → `global`; a regional service → every region). See [`inforge pki`](/cli/pki). |
 | `ingress` | array | No | Typed inbound routes (`tls-termination` / `forward`) fronted by nginx. Each entry binds a public `listen` port; the service binds `127.0.0.1:<target>` behind nginx. See [Ingress](#ingress) below. |
 
 **`environment.yaml` sidecar:**

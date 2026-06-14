@@ -10,12 +10,40 @@ import (
 // AdoptOrCreateWorkspace returns the ID of an Infisical project matching name,
 // creating it if it does not already exist.
 func (c *Client) AdoptOrCreateWorkspace(ctx context.Context, name string) (string, error) {
-	data, status, err := c.do(ctx, http.MethodGet, "/api/v1/projects", nil)
+	id, found, err := c.findWorkspace(ctx, name)
 	if err != nil {
 		return "", err
 	}
+	if found {
+		return id, nil
+	}
+	return c.createWorkspace(ctx, name)
+}
+
+// WorkspaceID returns the ID of the project matching name, erroring if none
+// exists. Unlike AdoptOrCreateWorkspace it never creates — callers that must not
+// own workspace lifecycle (e.g. `inforge pki renew`, which only writes into a
+// workspace deploy already provisioned) use this so a missing workspace surfaces
+// as "deploy first" rather than being silently created without an identity.
+func (c *Client) WorkspaceID(ctx context.Context, name string) (string, error) {
+	id, found, err := c.findWorkspace(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("infisical: no workspace named %q — run `inforge deploy` for this environment first", name)
+	}
+	return id, nil
+}
+
+// findWorkspace looks up a project ID by name, reporting presence.
+func (c *Client) findWorkspace(ctx context.Context, name string) (id string, found bool, err error) {
+	data, status, err := c.do(ctx, http.MethodGet, "/api/v1/projects", nil)
+	if err != nil {
+		return "", false, err
+	}
 	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("infisical: list projects failed (HTTP %d): %s", status, data)
+		return "", false, fmt.Errorf("infisical: list projects failed (HTTP %d): %s", status, data)
 	}
 	var list struct {
 		Projects []struct {
@@ -24,14 +52,14 @@ func (c *Client) AdoptOrCreateWorkspace(ctx context.Context, name string) (strin
 		} `json:"projects"`
 	}
 	if err := json.Unmarshal(data, &list); err != nil {
-		return "", fmt.Errorf("infisical: parse projects list: %w", err)
+		return "", false, fmt.Errorf("infisical: parse projects list: %w", err)
 	}
 	for _, p := range list.Projects {
 		if p.Name == name {
-			return p.Id, nil
+			return p.Id, true, nil
 		}
 	}
-	return c.createWorkspace(ctx, name)
+	return "", false, nil
 }
 
 func (c *Client) createWorkspace(ctx context.Context, name string) (string, error) {

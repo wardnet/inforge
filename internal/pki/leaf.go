@@ -14,8 +14,10 @@ import (
 // spiffe://<trustDomain>/<env>/<scope>/<service>. trustDomain is the env's base
 // domain; scope is ScopeGlobal or an abstract region name. The acceptor reads
 // the scope path segment to enforce the regional boundary (ADR-0024 amendment).
-func SPIFFEID(trustDomain, env, scope, service string) string {
-	return (&url.URL{Scheme: "spiffe", Host: trustDomain, Path: "/" + env + "/" + scope + "/" + service}).String()
+// It returns a *url.URL so GenerateLeaf consumes it directly (no string
+// round-trip); call .String() for the canonical form.
+func SPIFFEID(trustDomain, env, scope, service string) *url.URL {
+	return &url.URL{Scheme: "spiffe", Host: trustDomain, Path: "/" + env + "/" + scope + "/" + service}
 }
 
 // GenerateLeaf mints a short-TTL mTLS leaf signed by parent (a scope's
@@ -25,11 +27,7 @@ func SPIFFEID(trustDomain, env, scope, service string) string {
 // can authorize on the encoded scope. It never outlives the parent (NotAfter is
 // clamped). Returns the leaf as CERTIFICATE PEM and its key as PKCS#8 PRIVATE KEY
 // PEM (the caller writes the key to the secrets provider).
-func GenerateLeaf(parent *x509.Certificate, parentKey crypto.Signer, spiffeID, commonName string) (certPEM, keyPEM string, err error) {
-	uri, err := url.Parse(spiffeID)
-	if err != nil {
-		return "", "", fmt.Errorf("parse spiffe id %q: %w", spiffeID, err)
-	}
+func GenerateLeaf(parent *x509.Certificate, parentKey crypto.Signer, spiffeID *url.URL, commonName string) (certPEM, keyPEM string, err error) {
 	signer, err := newCAKey()
 	if err != nil {
 		return "", "", err
@@ -52,7 +50,7 @@ func GenerateLeaf(parent *x509.Certificate, parentKey crypto.Signer, spiffeID, c
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  false,
-		URIs:                  []*url.URL{uri},
+		URIs:                  []*url.URL{spiffeID},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, signer.Public(), parentKey)
 	if err != nil {

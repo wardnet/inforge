@@ -14,9 +14,9 @@ import (
 
 func TestSPIFFEID(t *testing.T) {
 	assert.Equal(t, "spiffe://wardnet.network/prd/us-east-1/bridge",
-		pki.SPIFFEID("wardnet.network", "prd", "us-east-1", "bridge"))
+		pki.SPIFFEID("wardnet.network", "prd", "us-east-1", "bridge").String())
 	assert.Equal(t, "spiffe://wardnet.network/prd/global/tenant",
-		pki.SPIFFEID("wardnet.network", "prd", pki.ScopeGlobal, "tenant"))
+		pki.SPIFFEID("wardnet.network", "prd", pki.ScopeGlobal, "tenant").String())
 }
 
 // meshChain mints a root + intermediate for leaf tests.
@@ -51,7 +51,7 @@ func TestGenerateLeaf(t *testing.T) {
 	assert.Contains(t, leaf.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
 	assert.Contains(t, leaf.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
 	require.Len(t, leaf.URIs, 1)
-	assert.Equal(t, spiffe, leaf.URIs[0].String(), "scope is carried in the SPIFFE URI SAN")
+	assert.Equal(t, spiffe.String(), leaf.URIs[0].String(), "scope is carried in the SPIFFE URI SAN")
 
 	// Never outlives the intermediate; ~90d window.
 	assert.False(t, leaf.NotAfter.After(interCert.NotAfter))
