@@ -19,6 +19,14 @@ func TestValidateResourcesOK(t *testing.T) {
 	assert.NoError(t, err, "the ok environment should validate cleanly")
 }
 
+func TestValidateResourcesPkiMissingIntermediate(t *testing.T) {
+	// The mesh PKI has only the global intermediate; the regional services need a
+	// us-east-1 intermediate, so validation fails (the "silent miss" guard).
+	err := ValidateResources("pki-missing-intermediate", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "a regional service whose scope has no mesh intermediate should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
 func TestValidateResourcesBad(t *testing.T) {
 	err := ValidateResources("bad", testdataDir, types.ProviderDefaults{})
 	require.Error(t, err, "the bad environment should fail validation")

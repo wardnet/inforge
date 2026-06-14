@@ -4,3 +4,4 @@ container: bridge
 host: ghost
 type: raw
 user: api
+pki: wardnet-mesh

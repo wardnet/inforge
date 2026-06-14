@@ -31,6 +31,11 @@ const (
 	TopologyRootOnly = "root-only"
 )
 
+// ScopeGlobal is the scope of a global service (and its mandatory global
+// intermediate), alongside the abstract region scopes (ADR-0024). A two-tier
+// PKI keys its Intermediates map by ScopeGlobal and by abstract region name.
+const ScopeGlobal = "global"
+
 // ErrNotFound reports that the store file does not exist for the environment.
 var ErrNotFound = errors.New("pki store not found")
 

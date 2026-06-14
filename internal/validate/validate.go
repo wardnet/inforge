@@ -20,6 +20,7 @@ import (
 	"github.com/wardnet/inforge/internal/bootstrapper"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/sizes"
@@ -233,6 +234,14 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 		r.fail(secretstore.Path(dir, env), err.Error())
 		encStore = nil
 	}
+	// The PKI store is optional and read credential-free (only its plaintext
+	// structure — names, topology, which scopes have intermediates), exactly like
+	// the secret store above.
+	pkiStore, err := pki.Load(pki.Path(dir, env))
+	if err != nil && !errors.Is(err, pki.ErrNotFound) {
+		r.fail(pki.Path(dir, env), err.Error())
+		pkiStore = nil
+	}
 	globalBase := filepath.Join(base, "global")
 	checkVariables(r, vars, filepath.Join(base, "variables.yaml"))
 	checkRegionsFile(r, regionTable, global, filepath.Join(base, "regions.yaml"))
@@ -255,6 +264,10 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	if err := validateResourceSet(r, schemaSet, regionalBase, nil, sizeTable, buildGlobalRefs(globalRes), encStore, defaults); err != nil {
 		return err
 	}
+
+	// Mesh PKI references: a global service's leaf comes from the global
+	// intermediate; a regional service's leaf, from each region's intermediate.
+	checkPKI(r, globalBase, regionalBase, regionTable, pkiStore)
 
 	// Per-region provider availability: the same set deploys into every region, so
 	// each resource's provider must be declared in that region's providers block.
@@ -731,6 +744,70 @@ func checkProviderAvailability(r *reporter, base string, table regions.Table, de
 // provider is present in the regions.yaml global providers block. The global
 // slice is region-less, so it is checked once against the single global block
 // (mirroring the per-region check in checkProviderAvailability).
+// checkPKI validates each service's mesh `pki:` reference against the committed
+// PKI store, credential-free (only the store's plaintext structure is read). A
+// global service's leaf is minted from the PKI's global intermediate; a regional
+// service's, from each region's intermediate (the regional set deploys to every
+// region). Deploy (#108) cannot mint a leaf without that intermediate, so a
+// missing one fails here — the "silent miss" guard.
+func checkPKI(r *reporter, globalBase, regionalBase string, regionTable regions.Table, store *pki.Store) {
+	regionScopes := make([]string, 0, len(regionTable))
+	for name := range regionTable {
+		regionScopes = append(regionScopes, name)
+	}
+	sort.Strings(regionScopes)
+
+	checkServicePKI(r, globalBase, []string{pki.ScopeGlobal}, store)
+	checkServicePKI(r, regionalBase, regionScopes, store)
+}
+
+// checkServicePKI applies the mesh-membership rules to every service under base,
+// requiring an intermediate for each of the given scopes.
+func checkServicePKI(r *reporter, base string, scopes []string, store *pki.Store) {
+	services, _, err := readFolders[types.ServiceSpec](filepath.Join(base, "service"))
+	if err != nil {
+		r.fail(filepath.Join(base, "service"), err.Error())
+		return
+	}
+	for i := range services {
+		f := services[i]
+		if f.parseErr != nil {
+			continue // already reported by validateResourceSet
+		}
+		s := f.spec
+		loader.NormalizeService(&s)
+		if errs := servicePKIErrors(s, scopes, store); len(errs) > 0 {
+			r.report(f.path, errs, nil)
+		}
+	}
+}
+
+// servicePKIErrors applies the mesh-membership rules to one service for the
+// given scopes and returns any validation errors. A missing required `pki:` is
+// left to the JSON schema pass, so an empty value yields no error here.
+func servicePKIErrors(s types.ServiceSpec, scopes []string, store *pki.Store) []string {
+	if s.Pki == "" {
+		return nil
+	}
+	if store == nil {
+		return []string{fmt.Sprintf("pki %q references the PKI store, but %s does not exist — run `inforge pki init <env>`", s.Pki, pki.FileName)}
+	}
+	p, ok := store.Get(s.Pki)
+	if !ok {
+		return []string{fmt.Sprintf("pki: unknown PKI %q — known PKIs: %s", s.Pki, strings.Join(store.Names(), ", "))}
+	}
+	if p.Topology != pki.TopologyTwoTier {
+		return []string{fmt.Sprintf("pki: %q is a %s PKI; the mesh membership field must name a %s (mesh) PKI", s.Pki, p.Topology, pki.TopologyTwoTier)}
+	}
+	var errs []string
+	for _, scope := range scopes {
+		if _, ok := p.Intermediates[scope]; !ok {
+			errs = append(errs, fmt.Sprintf("pki %q has no intermediate for scope %q — run `inforge pki intermediate <env> %s %s`", s.Pki, scope, s.Pki, scope))
+		}
+	}
+	return errs
+}
+
 func checkGlobalProviderAvailability(r *reporter, globalBase string, global *regions.Global, defaults types.ProviderDefaults) error {
 	refs, err := collectProviderRefs(globalBase, defaults)
 	if err != nil {

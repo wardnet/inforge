@@ -3,6 +3,7 @@ container: bridge
 host: bridge
 type: raw
 user: api
+pki: wardnet-mesh
 ingress:
   # tls-termination and a forward on one service: nginx terminates ACME TLS on
   # 443 and reverse-proxies to 8080, and stream-forwards 853 to a local backend.
