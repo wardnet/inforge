@@ -37,6 +37,12 @@ const rootValidity = 10 * 365 * 24 * time.Hour
 // parent) and above the short-TTL leaves that deploy mints from it (#108).
 const intermediateValidity = 5 * 365 * 24 * time.Hour
 
+// leafValidity is how long a minted mesh leaf is valid. Leaves are re-minted by
+// `inforge pki renew` (non-disruptively — a running service keeps its in-memory
+// cert until the host re-projects, #109), so the TTL only needs to comfortably
+// exceed the renew/reboot interval; 90 days gives a wide safety margin.
+const leafValidity = 90 * 24 * time.Hour
+
 // RootIdentityEnvVar names the environment variable that carries the offline
 // operator identity (AGE-SECRET-KEY-…) matching a two-tier PKI's rootRecipient.
 // `inforge pki init` prints that identity once; slice #106 reads it from here

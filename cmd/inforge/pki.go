@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,15 +11,21 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/wardnet/inforge/internal/loader"
+	"github.com/wardnet/inforge/internal/meshcert"
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/secretstore"
+	"github.com/wardnet/inforge/internal/types"
+	"github.com/wardnet/inforge/providers/infisical"
 )
 
 // newPkiCmd manages the env's committed encrypted PKI store
 // (resources/<env>/pki.enc.yaml, ADR-0024), the structural twin of the secret
-// store. Every subcommand writes git state only: certificate material reaches
-// the provider exclusively via `inforge deploy` on merge (later slices), so the
-// CLI deliberately has no provider write path.
+// store. The store subcommands (init/add/intermediate/ls) write git state only;
+// `renew` is the one provider-writing subcommand — it mints fresh mesh leaves
+// from the committed intermediates and writes them to the secrets provider,
+// deliberately decoupled from `inforge deploy` so cert renewal never pushes
+// un-shipped infra changes.
 func newPkiCmd(dir *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pki",
@@ -28,6 +35,7 @@ func newPkiCmd(dir *string) *cobra.Command {
 		newPkiInitCmd(dir),
 		newPkiAddCmd(dir),
 		newPkiIntermediateCmd(dir),
+		newPkiRenewCmd(dir),
 		newPkiLsCmd(dir),
 	)
 	return cmd
@@ -315,4 +323,120 @@ func runPkiLs(dir, env string) error {
 		fmt.Printf("%s\t%s\troot; intermediates: %s\n", name, p.Topology, tiers)
 	}
 	return nil
+}
+
+func newPkiRenewCmd(dir *string) *cobra.Command {
+	return &cobra.Command{
+		Use:           "renew <env>",
+		Short:         "Mint fresh mesh leaf certificates for every service and write them to the secrets provider",
+		Args:          cobra.ExactArgs(1),
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPkiRenew(cmd.Context(), *dir, args[0])
+		},
+	}
+}
+
+// runPkiRenew mints a fresh short-TTL leaf for every service's mesh `pki:` from
+// the committed per-scope intermediate (decrypting the intermediate key with the
+// CI identity, INFORGE_SECRETS_KEY) and writes the leaf + key + per-scope trust
+// bundle to the secrets provider. It never runs the infra program, so it is safe
+// to schedule (cron calling the CLI) without pushing un-shipped infra changes.
+// A global service gets one leaf (scope "global"); a regional service gets one
+// per region (the regional set deploys to every region).
+func runPkiRenew(ctx context.Context, dir, env string) error {
+	store, err := pki.Load(pki.Path(dir, env))
+	if err != nil {
+		if errors.Is(err, pki.ErrNotFound) {
+			return fmt.Errorf("%w — run `inforge pki init %s` first", err, env)
+		}
+		return err
+	}
+	ciIdentity, err := secretstore.IdentityFromEnv()
+	if err != nil {
+		return err
+	}
+	vars, err := loader.LoadVariables(env, dir)
+	if err != nil {
+		return err
+	}
+	regionTable, global, err := loader.LoadRegionTable(env, dir)
+	if err != nil {
+		return err
+	}
+	allRegions := make([]string, 0, len(regionTable))
+	for r := range regionTable {
+		allRegions = append(allRegions, r)
+	}
+	sort.Strings(allRegions)
+
+	globalRes, err := loader.LoadGlobalResources(env, dir)
+	if err != nil {
+		return err
+	}
+	regionalRes, err := loader.LoadResources(env, dir)
+	if err != nil {
+		return err
+	}
+
+	count := 0
+	// Global services: scope "global", region-less slug, creds from the global block.
+	for _, svc := range globalRes.Service {
+		if svc.Pki == "" {
+			continue
+		}
+		if global == nil {
+			return fmt.Errorf("global service %q declares pki but the env has no global providers block", svc.Name)
+		}
+		cID, cSecret, site, org := infisicalCreds(global.Providers)
+		adapter := infisical.New(cID, cSecret, site, org, "")
+		if err := renewServiceScope(ctx, adapter, store, ciIdentity, vars.BaseDomain, env, svc, pki.ScopeGlobal, allRegions); err != nil {
+			return err
+		}
+		count++
+	}
+	// Regional services: one leaf per region, scope = region, per-region slug + creds.
+	for _, region := range allRegions {
+		ar := regionTable[region]
+		cID, cSecret, site, org := infisicalCreds(ar.Providers)
+		for _, svc := range regionalRes.Service {
+			if svc.Pki == "" {
+				continue
+			}
+			adapter := infisical.New(cID, cSecret, site, org, ar.Slug)
+			if err := renewServiceScope(ctx, adapter, store, ciIdentity, vars.BaseDomain, env, svc, region, allRegions); err != nil {
+				return err
+			}
+			count++
+		}
+	}
+	fmt.Printf("renewed %d mesh leaf certificate(s) in %s\n", count, env)
+	return nil
+}
+
+// renewServiceScope mints svc's leaf for one scope, assembles its per-scope trust
+// bundle, and writes leaf/key/bundle to the provider under "/<svc>/mtls".
+func renewServiceScope(ctx context.Context, adapter *infisical.InfisicalSecretsAdapter, store *pki.Store, ciIdentity, baseDomain, env string, svc types.ServiceSpec, scope string, allRegions []string) error {
+	leafPEM, keyPEM, err := meshcert.MintServiceLeaf(store, svc.Pki, scope, ciIdentity, baseDomain, env, svc.Name)
+	if err != nil {
+		return fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
+	}
+	bundle, err := store.TrustBundle(svc.Pki, meshcert.TrustSet(scope, allRegions))
+	if err != nil {
+		return fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
+	}
+	files := meshcert.CertFiles(leafPEM, keyPEM, bundle)
+	if err := adapter.WriteServiceCerts(ctx, svc.Container, svc.Name, env, meshcert.MtlsDir, files); err != nil {
+		return fmt.Errorf("service %q scope %q: write certs: %w", svc.Name, scope, err)
+	}
+	return nil
+}
+
+// infisicalCreds extracts the Infisical admin universal-auth credentials from a
+// providers block (regions.yaml global or per-region).
+func infisicalCreds(providers map[string]map[string]any) (clientID, clientSecret, siteURL, orgID string) {
+	cfg := providers["infisical"]
+	get := func(k string) string { s, _ := cfg[k].(string); return s }
+	return get("clientId"), get("clientSecret"), get("siteUrl"), get("organizationId")
 }

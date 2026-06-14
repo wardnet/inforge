@@ -76,6 +76,27 @@ func TestValidTopology(t *testing.T) {
 	assert.False(t, pki.ValidTopology("single-tier"))
 }
 
+func TestTrustBundle(t *testing.T) {
+	s := &pki.Store{RootRecipient: "age1root", Recipient: "age1ci"}
+	s.Set("wardnet-mesh", pki.PKI{
+		Topology: pki.TopologyTwoTier,
+		Intermediates: map[string]pki.Material{
+			"global":    {Cert: "GLOBAL-CERT", Key: "x"},
+			"us-east-1": {Cert: "USE1-CERT", Key: "x"},
+		},
+	})
+
+	bundle, err := s.TrustBundle("wardnet-mesh", []string{"global", "us-east-1"})
+	require.NoError(t, err)
+	assert.Equal(t, "GLOBAL-CERT\nUSE1-CERT\n", bundle)
+
+	_, err = s.TrustBundle("wardnet-mesh", []string{"eu-central-1"})
+	require.ErrorContains(t, err, `no intermediate for scope "eu-central-1"`)
+
+	_, err = s.TrustBundle("absent", []string{"global"})
+	require.ErrorContains(t, err, "not found")
+}
+
 func TestNamesGetSet(t *testing.T) {
 	s := &pki.Store{RootRecipient: "age1root", Recipient: "age1ci"}
 	assert.Empty(t, s.Names())

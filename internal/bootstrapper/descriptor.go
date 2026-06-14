@@ -44,6 +44,12 @@ type Descriptor struct {
 	User       string            `yaml:"user"`
 	Provider   Provider          `yaml:"provider"`
 	Env        map[string]string `yaml:"env"`
+	// Files maps an env-var name → a provider secret key (relative to the
+	// provider secret_path). For a mesh service, inforge writes the leaf/key/CA
+	// bundle to the provider and lists them here; the bootstrapper fetches each,
+	// writes the PEM to a tmpfs file, and sets the env var to that path (#109).
+	// Empty for services with no mesh PKI material.
+	Files      map[string]string `yaml:"files,omitempty"`
 	Deployment Deployment        `yaml:"deployment"`
 }
 
