@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wardnet/inforge/internal/hostpaths"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/types"
@@ -21,9 +22,11 @@ func Folder(name string) string {
 	return "/srv/wardnet/" + name
 }
 
-// UnitName returns the systemd unit name inforge manages for a service.
+// UnitName returns the systemd unit name inforge manages for a service. The
+// scheme lives in internal/hostpaths so inforge-bootstrap (which reloads the
+// unit at renewal) shares one definition.
 func UnitName(name string) string {
-	return "wardnet-" + name + ".service"
+	return hostpaths.UnitName(name)
 }
 
 // UnitPath returns the absolute on-host path of a service's systemd unit file.
@@ -77,8 +80,8 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=%s
-RuntimeDirectory=wardnet/%s
-RuntimeDirectoryMode=0755
+RuntimeDirectory=%s
+RuntimeDirectoryMode=0700
 ExecStart=%s %s
 %sRestart=on-failure
 RestartSec=5
@@ -99,14 +102,14 @@ func Unit(spec types.ServiceSpec) string {
 	if spec.Reload != "" {
 		reloadLine = "ExecReload=" + spec.Reload + "\n"
 	}
-	return fmt.Sprintf(unitTemplate, spec.Name, Folder(spec.Name), spec.Name, BootstrapBin, DescriptorDir(spec.Name), reloadLine)
+	return fmt.Sprintf(unitTemplate, spec.Name, Folder(spec.Name), hostpaths.RuntimeSubdir(spec.Name), BootstrapBin, DescriptorDir(spec.Name), reloadLine)
 }
 
 // RuntimeDir is the tmpfs directory the bootstrapper projects a service's mesh
-// PEMs into. It matches the unit's RuntimeDirectory=wardnet/<name> and
-// internal/bootstrapper.runtimeDir.
+// PEMs into. It matches the unit's RuntimeDirectory= (RuntimeSubdir) and is
+// shared with inforge-bootstrap via internal/hostpaths.
 func RuntimeDir(name string) string {
-	return "/run/wardnet/" + name
+	return hostpaths.RuntimeDir(name)
 }
 
 // RenewUnitName / RenewTimerName name the per-service renewal oneshot + timer

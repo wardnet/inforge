@@ -45,7 +45,7 @@ func rootCmd() *cobra.Command {
 		newPluginsCmd(),
 		newPreviewCmd(&cfg),
 		newDeployCmd(&cfg),
-		newReleasesCmd(&cfg),
+		newReleasesCmd(&cfg, &dir),
 		newSecretCmd(&dir),
 		newPkiCmd(&dir),
 		newServiceCmd(&cfg),

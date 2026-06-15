@@ -94,6 +94,16 @@ on its own within the timer interval (well inside the 90-day TTL), with no CLI�
 At boot, the bootstrapper projects the leaf the same way before starting the service. Leaf private keys
 live only in tmpfs (RAM) for the life of a boot — never written to persistent disk.
 
+### The leaf is minted at release time, not just on the timer
+
+A service only starts running on its **first `inforge releases deploy`** (deploy provisions the unit;
+the release ships the code the unit runs). Because the boot path projects whatever the provider holds,
+that first start would otherwise crash-loop until the daily renew timer first fired. To close the gap,
+`inforge releases deploy` mints the released service's leaf **before** it restarts the unit — so the
+restart always lands a fresh leaf. It runs from the infra repo, so it holds the same `INFORGE_SECRETS_KEY`
+as `inforge deploy` and signs from the scope intermediate, reusing the same minting core as `inforge pki
+renew` (scoped to just the released service). Non-mesh services (no `pki:`) skip this step.
+
 ## The store file
 
 ```yaml title="resources/prd/pki.enc.yaml"

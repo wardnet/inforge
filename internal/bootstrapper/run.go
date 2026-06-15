@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+
+	"github.com/wardnet/inforge/internal/hostpaths"
 )
 
 // Descriptor and credential filenames within a service's on-host directory.
@@ -56,7 +58,7 @@ func runBoot(dir string) error {
 	// Project mesh PEMs (descriptor files:) into the tmpfs RuntimeDirectory, mode
 	// 0400 owned by the service user — done while still root, before the privilege
 	// drop. The *_PATH vars are not in desc.Env, so they are appended after buildEnv.
-	pathEnv, _, err := projectFiles(desc.Files, secrets, runtimeDir(desc.Service), user.uid, user.gid)
+	pathEnv, _, err := projectFiles(desc.Files, secrets, hostpaths.RuntimeDir(desc.Service), user.uid, user.gid)
 	if err != nil {
 		return err
 	}
@@ -91,7 +93,7 @@ func runProject(dir string) error {
 	if err != nil {
 		return err
 	}
-	_, changed, err := projectFiles(desc.Files, secrets, runtimeDir(desc.Service), user.uid, user.gid)
+	_, changed, err := projectFiles(desc.Files, secrets, hostpaths.RuntimeDir(desc.Service), user.uid, user.gid)
 	if err != nil {
 		return err
 	}
@@ -121,14 +123,14 @@ func fetchSecrets(ctx context.Context, dir string, desc Descriptor) (map[string]
 
 // unitActive reports whether the service unit is currently running.
 func unitActive(service string) bool {
-	return systemctl("is-active", "--quiet", unitName(service)) == nil
+	return systemctl("is-active", "--quiet", hostpaths.UnitName(service)) == nil
 }
 
 // reloadUnit applies a renewed leaf to a running service. reload-or-restart
 // reloads when the unit defines ExecReload (the service declared `reload:`),
 // otherwise restarts — so renewal is no-downtime when the service supports it.
 func reloadUnit(service string) error {
-	return systemctl("reload-or-restart", unitName(service))
+	return systemctl("reload-or-restart", hostpaths.UnitName(service))
 }
 
 // newFetcher selects the SecretsFetcher implementation for the provider kind.

@@ -56,6 +56,38 @@ func TestProjectFilesMissingSecret(t *testing.T) {
 	require.ErrorContains(t, err, "not found")
 }
 
+// TestProjectFilesDirMode: the runtime dir holding the leaf key must be 0700 so
+// only its owner (and root) can list it — matching RuntimeDirectoryMode in the
+// unit.
+func TestProjectFilesDirMode(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "run")
+	_, _, err := projectFiles(
+		map[string]string{"MTLS_LEAF_CERT_PATH": "mtls/leaf.crt"},
+		map[string]string{"mtls/leaf.crt": "CERT"}, dir, os.Getuid(), os.Getgid())
+	require.NoError(t, err)
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+}
+
+// TestProjectFilesAtomicSet: when one file in a multi-file set fails, none of
+// the set is committed — the service must never start with a leaf cert but a
+// stale (or absent) matching key.
+func TestProjectFilesAtomicSet(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"MTLS_LEAF_CERT_PATH": "mtls/leaf.crt",
+		"MTLS_LEAF_KEY_PATH":  "mtls/leaf.key",
+	}
+	// leaf.key is missing from the provider — the whole set must roll back.
+	_, _, err := projectFiles(files, map[string]string{"mtls/leaf.crt": "CERT"},
+		dir, os.Getuid(), os.Getgid())
+	require.Error(t, err)
+
+	_, statErr := os.Stat(filepath.Join(dir, "mtls/leaf.crt"))
+	assert.True(t, os.IsNotExist(statErr), "no file is committed when any file in the set fails")
+}
+
 func TestProjectFilesEmpty(t *testing.T) {
 	pathEnv, changed, err := projectFiles(nil, nil, t.TempDir(), os.Getuid(), os.Getgid())
 	require.NoError(t, err)

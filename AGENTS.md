@@ -113,12 +113,27 @@ Schedule it separately from `inforge deploy` (e.g. cron).
 
 ### Host projection (slice #109)
 
+- **`internal/hostpaths`** is the dependency-free (stdlib-only) source of truth for the on-host names
+  both `inforge` and `inforge-bootstrap` must agree on byte-for-byte: `RuntimeSubdir`/`RuntimeDir`
+  (the tmpfs PEM dir) and `UnitName`. It exists so the minimal static bootstrap binary can import it
+  without pulling in the deploy-side packages (`internal/service` → `naming`/`types` → the Pulumi SDK).
 - **`internal/bootstrapper.projectFiles`** is the single projection path, used by both the ExecStart
   boot path (`runBoot`) and the renewal timer (`runProject`): for each descriptor `files:` entry it
-  fetches the provider key, atomically writes the PEM into the service's tmpfs `RuntimeDir`
-  (`/run/wardnet/<svc>`, from the unit's `RuntimeDirectory=`), mode `0400` owned by the service user
-  (chown'd **while still root**, before the privilege drop), and sets the `*_PATH` env var. It reports
-  `changed` so the renewal path reloads only on a real rotation.
+  fetches the provider key, writes the PEM into the service's tmpfs `RuntimeDir`
+  (`/run/wardnet/<svc>`, dir mode `0700`, from the unit's `RuntimeDirectory=`), mode `0400` owned by
+  the service user (chown'd **while still root**, before the privilege drop), and sets the `*_PATH`
+  env var. Projection is an **atomic set**: every changed file is staged to a temp then renamed only
+  after all stage cleanly, so a service never starts with a fresh leaf cert but a stale/absent key.
+  It reports `changed` so the renewal path reloads only on a real rotation.
+- **A mesh service's leaf is minted at release time, not only on the timer.** A service first runs on
+  its first `inforge releases deploy`; since the boot path projects whatever the provider holds, that
+  first start (and every update) would crash-loop until the daily timer fired. So `inforge releases
+  deploy` mints the released service's leaf **before** the `systemctl restart`, reusing the shared
+  `renewMeshCerts` core scoped to that one service. It runs from the infra repo, so it holds the same
+  `INFORGE_SECRETS_KEY` as `inforge deploy`. Non-mesh services skip it.
+- **The `MTLS_*_PATH` env names are reserved.** `inforge validate` rejects a service `environment:`
+  key colliding with a `meshcert.DescriptorFiles()` name (projection would overwrite it), and rejects
+  a multi-line `reload:` (it becomes one `ExecReload=` line).
 - **Renewal is pull-based, per service.** A `wardnet-<svc>-renew.timer` runs `inforge-bootstrap project
   <dir>` daily; on a changed leaf it runs `systemctl reload-or-restart` — **reload** when the service
   declares `reload:` (emitted as `ExecReload=`, no downtime), else **restart**. `inforge pki renew` only

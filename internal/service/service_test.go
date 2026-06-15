@@ -39,6 +39,8 @@ func TestUnitRuntimeDirectoryAndReload(t *testing.T) {
 	// it); ExecReload only when the service declares reload:.
 	withReload := Unit(types.ServiceSpec{Name: "api", User: "api", Reload: "/bin/kill -HUP $MAINPID"})
 	assert.Contains(t, withReload, "RuntimeDirectory=wardnet/api")
+	// 0700 so the dir holding the leaf key is owner-only (the leaf key is 0400).
+	assert.Contains(t, withReload, "RuntimeDirectoryMode=0700")
 	assert.Contains(t, withReload, "ExecReload=/bin/kill -HUP $MAINPID")
 
 	noReload := Unit(types.ServiceSpec{Name: "api", User: "api"})
