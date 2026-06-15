@@ -335,6 +335,15 @@ func loadResourceSet(base string) (types.Resources, error) {
 	}
 	res.Service = svcSpecs
 
+	pkiSpecs, _, err := loadTypeFromFolders[types.PKIResourceSpec](filepath.Join(base, "pki"))
+	if err != nil {
+		return types.Resources{}, err
+	}
+	for i := range pkiSpecs {
+		NormalizePKIResource(&pkiSpecs[i])
+	}
+	res.PKI = pkiSpecs
+
 	return res, nil
 }
 
@@ -374,4 +383,11 @@ func NormalizeService(s *types.ServiceSpec) {
 	}
 	s.Pki = strings.TrimSpace(s.Pki)
 	s.Reload = strings.TrimSpace(s.Reload)
+}
+
+// NormalizePKIResource trims the PKI resource's topology so a stray space does
+// not defeat the root-only check. There is no default topology — a PKI resource
+// must declare it explicitly (validated against the schema and semantically).
+func NormalizePKIResource(p *types.PKIResourceSpec) {
+	p.Topology = strings.TrimSpace(p.Topology)
 }

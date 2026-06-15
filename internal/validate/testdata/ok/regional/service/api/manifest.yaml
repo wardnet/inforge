@@ -15,3 +15,14 @@ ingress:
   - type: forward
     listen: 853
     target: 5353
+grants:
+  # A read-write DB user composed into one connection URL (value fields).
+  - resource: database/bridge
+    permission: rw
+    outputs:
+      TENANT_DB_URL: "{USER}:{PASSWORD}@{HOST}:{PORT}/{DBNAME}"
+  # A verify (ro) grant on a root-only PKI resource: the CA cert path (file field).
+  - resource: pki/daemon
+    permission: ro
+    outputs:
+      DAEMON_CA_CERT_PATH: "{CERT}"

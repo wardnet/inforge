@@ -18,6 +18,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	"github.com/wardnet/inforge/internal/bootstrapper"
+	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/meshcert"
 	"github.com/wardnet/inforge/internal/naming"
@@ -123,13 +124,14 @@ func readFolders[T any](dir string) ([]fileOf[T], []string, error) {
 type globalRefs struct {
 	databaseNames map[string]bool   // bare global database name -> true
 	computeKind   map[string]string // accepted global compute FK form -> kind
+	pkiTopology   map[string]string // bare global PKI resource name -> topology
 }
 
 // buildGlobalRefs derives the cross-referenceable outputs from the loaded
 // global resource set (already default-normalised by the loader). Single-instance
 // computes are additionally keyed by their bare name, mirroring CanonicalComputeKeys.
 func buildGlobalRefs(global types.Resources) *globalRefs {
-	g := &globalRefs{databaseNames: map[string]bool{}, computeKind: map[string]string{}}
+	g := &globalRefs{databaseNames: map[string]bool{}, computeKind: map[string]string{}, pkiTopology: map[string]string{}}
 	for _, d := range global.Database {
 		g.databaseNames[d.Name] = true
 	}
@@ -140,6 +142,9 @@ func buildGlobalRefs(global types.Resources) *globalRefs {
 		if c.InstanceCount == 1 {
 			g.computeKind[c.Name] = c.Kind
 		}
+	}
+	for _, p := range global.PKI {
+		g.pkiTopology[p.Name] = p.Topology
 	}
 	return g
 }
@@ -162,6 +167,12 @@ type regionContext struct {
 	computeDeployer  map[string]bool              // canonical specKey -> declares a deploy_user
 	computeNames     map[string]bool              // bare compute names; service.host must be one of these
 	databaseNames    map[string]bool
+	// pkiResources maps a PKI resource name (a grant target, "<name>" or the
+	// "global/<name>" form for the global slice's resources) to its topology. A
+	// grant on a pki/<name> target resolves against this map; a regional service
+	// reaches its own region's PKI resources or a global/<name> one (the
+	// cross-region boundary, mirrored from databaseNames).
+	pkiResources map[string]string
 	// portUsersByHost maps a canonical host specKey to, per listen port, the names
 	// of the services with an ingress entry on that port. It enforces that a
 	// forward port is single-service-exclusive (and, since forward is the only
@@ -305,6 +316,10 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	if err != nil {
 		return err
 	}
+	pkiFiles, _, err := readFolders[types.PKIResourceSpec](filepath.Join(base, "pki"))
+	if err != nil {
+		return err
+	}
 
 	// Apply defaults so semantic checks see normalised specs.
 	for i := range networkFiles {
@@ -315,6 +330,11 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	}
 	for i := range databaseFiles {
 		loader.NormalizeDatabase(&databaseFiles[i].spec)
+	}
+	for i := range pkiFiles {
+		if pkiFiles[i].parseErr == nil {
+			loader.NormalizePKIResource(&pkiFiles[i].spec)
+		}
 	}
 	for i := range serviceFiles {
 		if serviceFiles[i].parseErr != nil {
@@ -354,6 +374,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		portUsersByHost:      map[string]map[int][]string{},
 		targetUsersByHost:    map[string]map[int][]string{},
 		tlsTermIngressByHost: map[string]bool{},
+		pkiResources:         map[string]string{},
 		encStore:             encStore,
 		providerDefaults:     defaults,
 	}
@@ -382,6 +403,11 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	ctx.computeCanonical = naming.CanonicalComputeKeys(computeSpecs)
 	for _, f := range databaseFiles {
 		ctx.databaseNames[f.spec.Name] = true
+	}
+	for _, f := range pkiFiles {
+		if f.parseErr == nil {
+			ctx.pkiResources[f.spec.Name] = f.spec.Topology
+		}
 	}
 	// Aggregate per-host ingress so checkService can enforce the cross-service
 	// rules: which services use each listen port (forward ports are
@@ -417,6 +443,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		for key, kind := range global.computeKind {
 			ctx.computeKind["global/"+key] = kind
 		}
+		for name, topology := range global.pkiTopology {
+			ctx.pkiResources["global/"+name] = topology
+		}
 	}
 
 	validateType(r, schemaSet["network"], networkFiles, func(s types.NetworkSpec) ([]string, []string) {
@@ -430,6 +459,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	})
 	validateType(r, schemaSet["service"], serviceFiles, func(s types.ServiceSpec) ([]string, []string) {
 		return checkService(s, ctx)
+	})
+	validateType(r, schemaSet["pkiresource"], pkiFiles, func(s types.PKIResourceSpec) ([]string, []string) {
+		return checkPKIResource(s)
 	})
 	return nil
 }
@@ -456,7 +488,7 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 
 // compileSchemas compiles every embedded JSON Schema, keyed by resource type.
 func compileSchemas() (map[string]*jsonschema.Schema, error) {
-	names := []string{"network", "compute", "database", "service", "environment"}
+	names := []string{"network", "compute", "database", "service", "environment", "pkiresource"}
 	c := jsonschema.NewCompiler()
 	for _, n := range names {
 		b, err := schemas.FS.ReadFile(n + ".json")
@@ -1075,7 +1107,142 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 			}
 		}
 	}
+	errs = append(errs, checkGrants(s, ctx)...)
 	return errs, warns
+}
+
+// checkPKIResource validates a PKI resource manifest's own shape (credential-free):
+// a PKI resource is the root-only standalone CA grants target, so a non-root-only
+// topology is rejected — the two-tier mesh PKI lives in pki.enc.yaml and is
+// consumed via the service pki: field, never as a grant target.
+func checkPKIResource(s types.PKIResourceSpec) (errs, warns []string) {
+	if s.Topology != pki.TopologyRootOnly {
+		errs = append(errs, fmt.Sprintf("topology: %q is invalid for a PKI resource; it must be %q (the two-tier mesh PKI lives in %s and is consumed via the service pki: field)", s.Topology, pki.TopologyRootOnly, pki.FileName))
+	}
+	return errs, warns
+}
+
+// checkGrants validates a service's grants: entries credential-free (ADR-0025):
+// the target resolves to a supported Grantable of the right shape, the permission
+// is ro/rw, every {FIELD} in an outputs template is published by the target for
+// that permission, a file field stands alone (it is a path, not a substring), and
+// each output env-var name avoids the reserved INFORGE_*/MTLS_* namespaces and
+// does not collide with the service's environment.yaml keys or another grant's
+// outputs. The cross-region boundary falls out of target resolution: the shared
+// regional set + the global/ prefix mean a regional service can only name its own
+// region's resources or a global/<name> one (mirroring ref:).
+func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
+	var errs []string
+	// grantEnvNames tracks each output name across all of the service's grants so a
+	// name defined by two grants is reported (the descriptor merges them into one
+	// env namespace alongside environment.yaml).
+	grantEnvNames := map[string]string{}
+	for gi := range s.Grants {
+		g := s.Grants[gi]
+		label := fmt.Sprintf("grants[%d]", gi)
+
+		typ, name, ok := strings.Cut(g.Resource, "/")
+		if !ok || typ == "" || name == "" {
+			errs = append(errs, fmt.Sprintf("%s.resource: %q must be \"<type>/<name>\" (e.g. database/main)", label, g.Resource))
+			continue
+		}
+		grantable, supported := grant.For(typ)
+		if !supported {
+			errs = append(errs, fmt.Sprintf("%s.resource: %q is not a grantable type (want database/* or pki/*)", label, g.Resource))
+			continue
+		}
+		perm := grant.Permission(g.Permission)
+		if !perm.Valid() {
+			errs = append(errs, fmt.Sprintf("%s.permission: %q is invalid; must be %q or %q", label, g.Permission, grant.PermissionRO, grant.PermissionRW))
+			continue
+		}
+
+		// Resolve the target: existence (which also enforces the cross-region
+		// boundary) plus the type-specific shape.
+		switch typ {
+		case "database":
+			if !ctx.databaseNames[name] {
+				errs = append(errs, fmt.Sprintf("%s.resource: database %q not found", label, name))
+			}
+		case "pki":
+			topology, found := ctx.pkiResources[name]
+			if !found {
+				errs = append(errs, fmt.Sprintf("%s.resource: pki resource %q not found", label, name))
+			} else if topology != pki.TopologyRootOnly {
+				errs = append(errs, fmt.Sprintf("%s.resource: pki resource %q has topology %q; a grant target must be %q", label, name, topology, pki.TopologyRootOnly))
+			}
+		}
+
+		// The fields the target publishes for this permission (credential-free).
+		values, files := grantable.FieldNames(perm)
+		published := map[string]bool{}
+		isFile := map[string]bool{}
+		for _, v := range values {
+			published[v] = true
+		}
+		for _, f := range files {
+			published[f] = true
+			isFile[f] = true
+		}
+
+		outNames := make([]string, 0, len(g.Outputs))
+		for k := range g.Outputs {
+			outNames = append(outNames, k)
+		}
+		sort.Strings(outNames)
+		for _, envName := range outNames {
+			tmpl := g.Outputs[envName]
+			if strings.HasPrefix(envName, bootstrapper.ReservedEnvPrefix) {
+				errs = append(errs, fmt.Sprintf("%s.outputs.%s: env var name uses the reserved %s* namespace owned by inforge", label, envName, bootstrapper.ReservedEnvPrefix))
+			}
+			if _, reserved := meshcert.DescriptorFiles()[envName]; reserved {
+				errs = append(errs, fmt.Sprintf("%s.outputs.%s: env var name is reserved by inforge for mesh certificate paths", label, envName))
+			}
+			if _, clash := s.Environment[envName]; clash {
+				errs = append(errs, fmt.Sprintf("%s.outputs.%s: env var collides with a key in the service's environment.yaml", label, envName))
+			}
+			if prev, clash := grantEnvNames[envName]; clash {
+				errs = append(errs, fmt.Sprintf("%s.outputs.%s: env var is also produced by the grant on %q", label, envName, prev))
+			} else {
+				grantEnvNames[envName] = g.Resource
+			}
+
+			t, perr := grant.ParseTemplate(tmpl)
+			if perr != nil {
+				errs = append(errs, fmt.Sprintf("%s.outputs.%s: %s", label, envName, perr.Error()))
+				continue
+			}
+			fields := t.Fields()
+			hasFile := false
+			for _, f := range fields {
+				if !published[f] {
+					errs = append(errs, fmt.Sprintf("%s.outputs.%s: field {%s} is not published by %s for permission %q (published: %s)", label, envName, f, g.Resource, perm, publishedFields(values, files)))
+					continue
+				}
+				if isFile[f] {
+					hasFile = true
+				}
+			}
+			// A file field is an on-host path, not a substring: its template must be
+			// exactly that one placeholder, with no other tokens and no literal text.
+			if hasFile && (len(fields) != 1 || t.HasLiteral()) {
+				errs = append(errs, fmt.Sprintf("%s.outputs.%s: a file field must stand alone (it is a path, not a substring); template %q mixes it with other tokens", label, envName, tmpl))
+			}
+		}
+	}
+	return errs
+}
+
+// publishedFields renders the value and file fields a grant target publishes, for
+// an error message. Files are suffixed so a reader sees which fields are paths.
+func publishedFields(values, files []string) string {
+	parts := make([]string, 0, len(values)+len(files))
+	parts = append(parts, values...)
+	for _, f := range files {
+		parts = append(parts, f+" (file)")
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
 }
 
 // otherUsers returns the port users that are not self, sorted and de-duplicated,

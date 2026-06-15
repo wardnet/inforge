@@ -161,6 +161,41 @@ Key internal seams introduced in slice #110:
   so the host can fetch its leaf. The skip is `len(svc.Environment)==0 && svc.Pki==""` in both
   `program.provisionServiceSecrets` and `infisical.ProvisionService`.
 
+## Grants (#117, ADR-0025)
+
+A **grant** is a service's declared, permissioned access to a **Grantable** resource, materialized as
+the env vars it composes over the fields the resource publishes. It is authored as a `grants:` list on
+the service manifest (topological, beside `pki:`/`ingress:` — **not** in `environment.yaml`), each entry
+naming a target `<type>/<name>`, a permission (`ro`|`rw`), and an `outputs:` map of env-var → template
+over `{FIELD}` placeholders. A grant *creates/issues* a credential (DB user, minted cert), distinct from
+a `ref:` (which only reads an existing output) and from mesh `pki:` membership (intrinsic identity).
+
+Landing in dependency order: **slice A (this code) = grant core + schema + credential-free validation**;
+slice B = the Database Grantable (pgx, per-service user, removes `connectionUrl`); slice C = the PKI
+resource Grantable (sidecar + `inforge pki generate` + file projection). The `Grant(...)` methods are
+stubs until then.
+
+- **`internal/grant`** is the abstraction. `Grantable.FieldNames(perm) (values, files)` is
+  **credential- and instance-independent** (keyed by resource *type* + permission) — the validator calls
+  it on a zero-value Grantable from `grant.For(type)`, so grant validation is real without building the
+  providers. `Database` publishes value fields `{USER,PASSWORD,HOST,PORT,DBNAME}` (same for ro/rw); a
+  `PKIResource` publishes file fields `{CERT}` for verify (ro) and `{CERT,KEY}` for issue (rw).
+  `ParseTemplate`/`Template.{Fields,HasLiteral,Interpolate}` are the shared `{FIELD}` machinery.
+- **A value field** composes a string secret (the ADR-0010 env-secret path); **a file field** resolves
+  to a projected PEM's on-host path (the descriptor `files:` path, slice #109). The two never mix in one
+  template — a file field must stand alone. So the bootstrapper needs no new mechanism.
+- **The PKI resource is its own declarative type** (`types.PKIResourceSpec`, `schemas/pkiresource.json`,
+  `regional|global/pki/<name>/manifest.yaml`): **root-only**, scope derived from its folder. It is
+  distinct from the mesh-auth `pki.enc.yaml` store (two-tier, `pki:` membership). The two never cross — a
+  grant targets only a root-only PKI resource; `pki:` names only a two-tier mesh PKI. Slice A defines and
+  validates the shape; the `pki.enc.yaml` sidecar + generate command are slice C.
+- **`validate.checkGrants`** is the credential-free pass: target resolves to a supported Grantable of the
+  right shape (`database/*`, `pki/*` root-only); permission ∈ {ro,rw}; every `{FIELD}` is published for
+  that permission; a file field stands alone; output env names avoid the reserved
+  `INFORGE_*`/`meshcert.DescriptorFiles()` names and don't collide with `environment.yaml` keys or each
+  other across the service's grants. The cross-region boundary falls out of target resolution (shared
+  regional set + `global/` prefix), exactly like `ref:`.
+
 ## Conventions
 
 - **Provider binary names are load-bearing.** Pulumi locates plugins by the exact filename
