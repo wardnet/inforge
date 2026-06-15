@@ -146,6 +146,26 @@ const (
 	IngressTypeForward        = "forward"
 )
 
+// GrantSpec is one entry in a service's grants: list — a declared, permissioned
+// access to a Grantable resource (a Database or a PKI resource), materialized as
+// the env vars in Outputs (ADR-0025). It is topological — it wires the service to
+// a named resource — so it lives on the manifest beside pki:/ingress:, not in the
+// environment.yaml Source DSL (which only reads existing outputs). Distinct from
+// mesh pki: membership (intrinsic identity, not a granted permission).
+type GrantSpec struct {
+	// Resource is the granted resource as "<type>/<name>", e.g. "database/main"
+	// or "pki/daemon" (type ∈ database | pki). A global target uses a "global/"
+	// name prefix (e.g. "database/global/main").
+	Resource string `yaml:"resource"`
+	// Permission is "ro" or "rw"; each Grantable maps it to its domain (DB
+	// read-only/read-write user; PKI verify/issue).
+	Permission string `yaml:"permission"`
+	// Outputs maps an env-var name to a template over {FIELD} placeholders scoped
+	// to this grant. A value-field template composes a string secret; a file-field
+	// placeholder resolves to the projected PEM's on-host path.
+	Outputs map[string]string `yaml:"outputs"`
+}
+
 // ServiceSpec is one service resource — a workload hosted on a compute.
 type ServiceSpec struct {
 	Name        string            `yaml:"name"`
@@ -156,7 +176,25 @@ type ServiceSpec struct {
 	Pki         string            `yaml:"pki"`               // FK -> two-tier (mesh) PKI name in pki.enc.yaml this service is a leaf member of (required)
 	Reload      string            `yaml:"reload,omitempty"`  // optional ExecReload command to apply a renewed mesh leaf without downtime (e.g. "/bin/kill -HUP $MAINPID"); absent -> renewal restarts the unit
 	Ingress     []IngressSpec     `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx
+	Grants      []GrantSpec       `yaml:"grants,omitempty"`  // permissioned access to Grantable resources (database/pki), materialized as env vars (ADR-0025)
 	Environment map[string]string `yaml:"-"`                 // env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); loaded from the service's sibling environment.yaml, not the manifest; the secrets provider is derived from the region, not the service
+}
+
+// PKIResourceSpec is one PKI resource — a root-only Certificate Authority that
+// services obtain cert material from via a Grant (ADR-0025). It is distinct from
+// the mesh-auth PKI store (the env-root pki.enc.yaml, two-tier, consumed via the
+// service pki: membership field): a Grant may target only a PKI resource, and
+// pki: membership may name only a mesh PKI. Like every resource it carries a scope
+// from its folder — regional/pki/<name> is instantiated per region (one
+// independent root each); global/pki/<name> is region-less. The age-encrypted
+// pki.enc.yaml sidecar (root key + cert) and the generate command land with the
+// PKI resource Grant behavior (slice C of #117); this slice defines and validates
+// the declarative shape only.
+type PKIResourceSpec struct {
+	Name      string `yaml:"name"`
+	Container string `yaml:"container"`
+	Topology  string `yaml:"topology"`           // "root-only" — the only valid topology for a PKI resource
+	Validity  string `yaml:"validity,omitempty"` // optional CA validity (e.g. "10y"); enforced when generation lands (slice C)
 }
 
 // IngressRoute is one typed inbound routing entry the host ingress proxy (nginx)
@@ -324,6 +362,7 @@ type Resources struct {
 	Compute  []ComputeSpec
 	Database []DatabaseSpec
 	Service  []ServiceSpec
+	PKI      []PKIResourceSpec
 }
 
 // ProviderDefaults are project-level provider fallbacks. When a resource spec omits

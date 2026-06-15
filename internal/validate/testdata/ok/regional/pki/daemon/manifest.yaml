@@ -1,0 +1,4 @@
+name: daemon
+container: bridge
+topology: root-only
+validity: 10y

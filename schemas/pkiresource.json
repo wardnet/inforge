@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pkiresource.json",
+  "title": "PKI resource",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "container", "topology"],
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+    "container": { "type": "string", "minLength": 1 },
+    "topology": {
+      "type": "string",
+      "minLength": 1,
+      "description": "must be \"root-only\" — a PKI resource is the daemon's standalone CA; the two-tier mesh PKI lives in pki.enc.yaml and is consumed via the service pki: field, never via a grant."
+    },
+    "validity": {
+      "type": "string",
+      "minLength": 1,
+      "description": "optional CA validity (e.g. \"10y\"); enforced when the generate command lands (slice C of #117)."
+    }
+  }
+}
