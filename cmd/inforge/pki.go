@@ -37,6 +37,8 @@ func newPkiCmd(dir *string) *cobra.Command {
 		newPkiInitCmd(dir),
 		newPkiAddCmd(dir),
 		newPkiIntermediateCmd(dir),
+		newPkiRotateCmd(dir),
+		newPkiRecoverIntermediateCmd(dir),
 		newPkiRenewCmd(dir),
 		newPkiLsCmd(dir),
 	)
@@ -280,6 +282,305 @@ func runPkiIntermediate(dir, env, name, scope string) error {
 	fmt.Println("\nnext steps:")
 	fmt.Println("  1. commit the store file")
 	fmt.Println("  2. deploy mints short-TTL leaves from this intermediate (#108)")
+	return nil
+}
+
+func newPkiRotateCmd(dir *string) *cobra.Command {
+	var leaf, root, finalize bool
+	var intermediate string
+	cmd := &cobra.Command{
+		Use:   "rotate <env> <name>",
+		Short: "Rotate a tier of a two-tier PKI: --leaf, --intermediate <scope>, or --root",
+		Long: "Rotate one tier of a two-tier PKI. Exactly one of --leaf, --intermediate, or --root.\n\n" +
+			"  --leaf                 short-TTL leaves rotate by redeploy; this prints how (see `inforge pki renew`).\n" +
+			"  --intermediate <scope> re-mint one scope's intermediate from the cold root (offline; needs " + pki.RootIdentityEnvVar + ").\n" +
+			"                         Invisible to other regions — the mesh's regional boundary keeps each region's\n" +
+			"                         intermediate out of every other region's trust bundle.\n" +
+			"  --root                 dual-root overlap: mint a new cold root, retain the old one, and re-sign every\n" +
+			"                         intermediate from the new root (keys preserved, so live leaves keep verifying).\n" +
+			"                         Both roots verify during the overlap; run again with --finalize to drop the old root.",
+		Args:          cobra.ExactArgs(2),
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			modes := 0
+			for _, on := range []bool{leaf, intermediate != "", root} {
+				if on {
+					modes++
+				}
+			}
+			if modes != 1 {
+				return fmt.Errorf("choose exactly one of --leaf, --intermediate <scope>, or --root")
+			}
+			if finalize && !root {
+				return fmt.Errorf("--finalize is only valid with --root")
+			}
+			switch {
+			case leaf:
+				return runPkiRotateLeaf(args[0], args[1])
+			case intermediate != "":
+				return runPkiRotateIntermediate(*dir, args[0], args[1], intermediate)
+			default:
+				return runPkiRotateRoot(*dir, args[0], args[1], finalize)
+			}
+		},
+	}
+	cmd.Flags().BoolVar(&leaf, "leaf", false, "explain how short-TTL leaves rotate (via `inforge pki renew`)")
+	cmd.Flags().StringVar(&intermediate, "intermediate", "", "re-mint the named scope's intermediate from the cold root")
+	cmd.Flags().BoolVar(&root, "root", false, "rotate the cold root with a dual-root overlap")
+	cmd.Flags().BoolVar(&finalize, "finalize", false, "with --root: drop the retained old root, ending the overlap")
+	return cmd
+}
+
+// runPkiRotateLeaf documents leaf rotation. Mesh leaves are short-TTL and expiry
+// is the only revocation mechanism (ADR-0024), so there is nothing to mint here:
+// a fresh leaf is produced by `inforge pki renew` (all services) or by `inforge
+// releases deploy` (the released service), and each host re-projects it on its
+// renewal timer. Rotating a single PKI's leaves is just running renew.
+func runPkiRotateLeaf(env, name string) error {
+	fmt.Printf("Leaf certificates for PKI %q rotate by re-minting, not by an in-place command.\n\n", name)
+	fmt.Println("Mesh leaves are short-TTL (90 days); expiry IS revocation — there is no CRL/OCSP.")
+	fmt.Println("To roll every service's leaf now:")
+	fmt.Printf("    export %s=\"AGE-SECRET-KEY-…\"   # the CI master identity\n", secretstore.IdentityEnvVar)
+	fmt.Printf("    inforge pki renew %s\n\n", env)
+	fmt.Println("Each host re-projects the new leaf on its `wardnet-<svc>-renew.timer` (daily); to apply")
+	fmt.Println("immediately, run `systemctl start wardnet-<svc>-renew.service` on the host. A newly")
+	fmt.Println("released service also gets a fresh leaf from `inforge releases deploy` before it restarts.")
+	return nil
+}
+
+// runPkiRotateIntermediate re-mints one scope's intermediate from the cold root.
+// It is a planned, graceful rotation: a fresh intermediate key replaces the old,
+// signed offline by the cold root. Because the mesh's regional boundary keeps a
+// region's intermediate out of every other region's trust bundle, this is
+// invisible outside the rotated scope; within the scope, a `inforge pki renew`
+// re-mints the leaves (and bundle) from the new intermediate.
+func runPkiRotateIntermediate(dir, env, name, scope string) error {
+	if err := reissueIntermediate(dir, env, name, scope); err != nil {
+		return err
+	}
+	fmt.Printf("rotated intermediate for PKI %q scope %q (fresh key, signed by the cold root)\n", name, scope)
+	fmt.Println("\nnext steps:")
+	fmt.Println("  1. commit the store file")
+	fmt.Printf("  2. re-mint leaves from the new intermediate within the leaf TTL: inforge pki renew %s\n", env)
+	fmt.Println("     other regions are unaffected — the regional boundary isolates this scope")
+	return nil
+}
+
+func newPkiRecoverIntermediateCmd(dir *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "recover-intermediate <env> <name> <scope>",
+		Short:         "Compromise recovery: re-mint one scope's intermediate from the cold root and force re-projection",
+		Args:          cobra.ExactArgs(3),
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runPkiRecoverIntermediate(*dir, args[0], args[1], args[2])
+		},
+	}
+	return cmd
+}
+
+// runPkiRecoverIntermediate handles a *compromised* intermediate key. The crypto
+// is the same fresh-key re-mint as a planned rotation, but the operational
+// posture is not: the old key is burned, so there is no overlap — every leaf it
+// signed must be replaced and re-projected to hosts immediately, rather than
+// drifting in on the daily timer. The guidance reflects that urgency. Re-minting
+// is offline (cold root); the follow-up renew is the online CI step.
+func runPkiRecoverIntermediate(dir, env, name, scope string) error {
+	if err := reissueIntermediate(dir, env, name, scope); err != nil {
+		return err
+	}
+	fmt.Printf("re-minted intermediate for PKI %q scope %q after compromise (fresh key, signed by the cold root)\n", name, scope)
+	fmt.Println("\nthe old intermediate key is now BURNED — every leaf it signed is untrusted. Act now:")
+	fmt.Println("  1. commit the store file")
+	fmt.Printf("  2. re-mint leaves from the new intermediate IMMEDIATELY (CI identity): inforge pki renew %s\n", env)
+	fmt.Println("  3. force every host in this scope to re-project NOW — do not wait for the daily timer:")
+	fmt.Println("       systemctl start wardnet-<svc>-renew.service   # on each host running an affected service")
+	fmt.Println("  4. confirm no service still presents a leaf signed by the old key")
+	return nil
+}
+
+// reissueIntermediate re-mints an *existing* scope intermediate of a two-tier PKI
+// with a fresh key, signed offline by the cold root, and re-encrypts the new key
+// to the CI recipient. It mirrors runPkiIntermediate's custody flow but replaces
+// in place (the scope must already have an intermediate — minting a brand-new
+// scope is `inforge pki intermediate`). Shared by the planned rotate path and the
+// compromise-recovery path, which differ only in their next-step messaging.
+func reissueIntermediate(dir, env, name, scope string) error {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return fmt.Errorf("scope is required (e.g. global, or a region)")
+	}
+
+	path := pki.Path(dir, env)
+	store, err := pki.Load(path)
+	if err != nil {
+		if errors.Is(err, pki.ErrNotFound) {
+			return fmt.Errorf("%w — run `inforge pki init %s` first", err, env)
+		}
+		return err
+	}
+	p, ok := store.Get(name)
+	if !ok {
+		return fmt.Errorf("PKI %q not found in %s", name, path)
+	}
+	if p.Topology != pki.TopologyTwoTier {
+		return fmt.Errorf("PKI %q is %s; only two-tier PKIs have intermediates", name, p.Topology)
+	}
+	if _, exists := p.Intermediates[scope]; !exists {
+		return fmt.Errorf("PKI %q has no intermediate for scope %q to rotate — mint one with `inforge pki intermediate %s %s %s`", name, scope, env, name, scope)
+	}
+
+	rootIdentity, err := pki.RootIdentityFromEnv()
+	if err != nil {
+		return err
+	}
+	rootKeyPEM, err := secretstore.Decrypt(p.Root.Key, rootIdentity)
+	if err != nil {
+		return fmt.Errorf("decrypt root key for PKI %q (is %s the right offline root identity?): %w", name, pki.RootIdentityEnvVar, err)
+	}
+	rootCert, err := pki.ParseCertificate(p.Root.Cert)
+	if err != nil {
+		return err
+	}
+	rootSigner, err := pki.ParsePrivateKey(string(rootKeyPEM))
+	if err != nil {
+		return err
+	}
+
+	certPEM, keyPEM, err := pki.GenerateIntermediate(rootCert, rootSigner, fmt.Sprintf("%s %s intermediate", name, scope))
+	if err != nil {
+		return err
+	}
+	ciphertext, err := secretstore.Encrypt([]byte(keyPEM), store.IntermediateKeyRecipient())
+	if err != nil {
+		return err
+	}
+
+	p.Intermediates[scope] = pki.Material{Cert: certPEM, Key: ciphertext}
+	store.Set(name, p)
+	return store.Save(path)
+}
+
+// runPkiRotateRoot performs a dual-root rotation of a two-tier PKI's cold root.
+//
+// Without --finalize it BEGINS the overlap: it verifies the caller holds the
+// current cold root (decrypts it with INFORGE_PKI_ROOT_KEY — only the root
+// custodian may rotate the root), mints a fresh cold root, retains the old root
+// in PreviousRoots, and re-signs every intermediate from the new root while
+// PRESERVING each intermediate's key. Key preservation is what makes the overlap
+// graceful: live leaves keep verifying (the mesh anchors on the intermediate's
+// public key), and a root-anchoring consumer that trusts both roots accepts a
+// chain to either. The old intermediate certs are retained in
+// PreviousIntermediates so a chain to the old root still validates during the
+// window.
+//
+// With --finalize it ENDS the overlap: once every root-anchoring consumer trusts
+// the new root, it drops the retained old root and old intermediate certs.
+func runPkiRotateRoot(dir, env, name string, finalize bool) error {
+	path := pki.Path(dir, env)
+	store, err := pki.Load(path)
+	if err != nil {
+		if errors.Is(err, pki.ErrNotFound) {
+			return fmt.Errorf("%w — run `inforge pki init %s` first", err, env)
+		}
+		return err
+	}
+	p, ok := store.Get(name)
+	if !ok {
+		return fmt.Errorf("PKI %q not found in %s", name, path)
+	}
+	if p.Topology != pki.TopologyTwoTier {
+		return fmt.Errorf("PKI %q is %s; --root rotation applies to two-tier (mesh) PKIs", name, p.Topology)
+	}
+
+	if finalize {
+		if len(p.PreviousRoots) == 0 {
+			return fmt.Errorf("PKI %q is not in a root overlap — nothing to finalize", name)
+		}
+		p.PreviousRoots = nil
+		p.PreviousIntermediates = nil
+		store.Set(name, p)
+		if err := store.Save(path); err != nil {
+			return err
+		}
+		fmt.Printf("finalized root rotation for PKI %q — old root dropped; only the new root remains\n", name)
+		fmt.Println("\ncommit the store file. Verify no consumer still anchors solely on the old root before deploying.")
+		return nil
+	}
+
+	if len(p.PreviousRoots) > 0 {
+		return fmt.Errorf("PKI %q is already in a root overlap — finalize it (`inforge pki rotate %s %s --root --finalize`) before starting another", name, env, name)
+	}
+
+	// Custody gate: only the holder of the current cold root may rotate it.
+	rootIdentity, err := pki.RootIdentityFromEnv()
+	if err != nil {
+		return err
+	}
+	if _, err := secretstore.Decrypt(p.Root.Key, rootIdentity); err != nil {
+		return fmt.Errorf("decrypt current root key for PKI %q (is %s the offline root identity?): %w", name, pki.RootIdentityEnvVar, err)
+	}
+
+	// Mint the new cold root, encrypted to the same offline recipient.
+	newCertPEM, newKeyPEM, err := pki.GenerateRoot(name + " root")
+	if err != nil {
+		return err
+	}
+	newRootCiphertext, err := secretstore.Encrypt([]byte(newKeyPEM), store.RootKeyRecipient(pki.TopologyTwoTier))
+	if err != nil {
+		return err
+	}
+	newRootCert, err := pki.ParseCertificate(newCertPEM)
+	if err != nil {
+		return err
+	}
+	newRootSigner, err := pki.ParsePrivateKey(newKeyPEM)
+	if err != nil {
+		return err
+	}
+
+	// Re-sign every intermediate from the new root, preserving each key. Sorted
+	// for a deterministic diff.
+	scopes := make([]string, 0, len(p.Intermediates))
+	for s := range p.Intermediates {
+		scopes = append(scopes, s)
+	}
+	sort.Strings(scopes)
+	if p.PreviousIntermediates == nil && len(scopes) > 0 {
+		p.PreviousIntermediates = map[string][]string{}
+	}
+	for _, scope := range scopes {
+		inter := p.Intermediates[scope]
+		existing, err := pki.ParseCertificate(inter.Cert)
+		if err != nil {
+			return fmt.Errorf("scope %q: %w", scope, err)
+		}
+		reSignedPEM, err := pki.ReSignIntermediate(newRootCert, newRootSigner, existing)
+		if err != nil {
+			return fmt.Errorf("scope %q: %w", scope, err)
+		}
+		p.PreviousIntermediates[scope] = append(p.PreviousIntermediates[scope], inter.Cert)
+		inter.Cert = reSignedPEM // key (inter.Key) deliberately unchanged
+		p.Intermediates[scope] = inter
+	}
+
+	// Retain the old root, then swap in the new one.
+	p.PreviousRoots = append(p.PreviousRoots, p.Root)
+	p.Root = pki.Material{Cert: newCertPEM, Key: newRootCiphertext}
+	store.Set(name, p)
+	if err := store.Save(path); err != nil {
+		return err
+	}
+
+	fmt.Printf("rotated the root of PKI %q — dual-root overlap is now active\n", name)
+	fmt.Printf("  re-signed %d intermediate(s) from the new root (keys preserved; live leaves still verify)\n", len(scopes))
+	fmt.Println("\nduring the overlap, BOTH roots verify. Next steps:")
+	fmt.Println("  1. commit the store file")
+	fmt.Println("  2. distribute the NEW root cert to every root-anchoring consumer (e.g. the daemon fleet) so")
+	fmt.Println("     it trusts {old, new}. Mesh services need no change — they anchor on intermediate keys.")
+	fmt.Printf("  3. once every consumer trusts the new root, end the overlap: inforge pki rotate %s %s --root --finalize\n", env, name)
 	return nil
 }
 

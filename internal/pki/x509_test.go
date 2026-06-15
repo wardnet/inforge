@@ -78,6 +78,65 @@ func TestGenerateIntermediate(t *testing.T) {
 	assert.Equal(t, cert.PublicKey, signer.Public())
 }
 
+// verifyLeaf reports whether leaf chains to root through inter.
+func verifyLeaf(leaf, inter, root *x509.Certificate) error {
+	roots := x509.NewCertPool()
+	roots.AddCert(root)
+	inters := x509.NewCertPool()
+	inters.AddCert(inter)
+	_, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inters, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
+	return err
+}
+
+func TestReSignIntermediate(t *testing.T) {
+	// Original tree: old root -> intermediate (key K) -> leaf.
+	oldRootCertPEM, oldRootKeyPEM, err := pki.GenerateRoot("wardnet-mesh root")
+	require.NoError(t, err)
+	oldRoot, err := pki.ParseCertificate(oldRootCertPEM)
+	require.NoError(t, err)
+	oldRootKey, err := pki.ParsePrivateKey(oldRootKeyPEM)
+	require.NoError(t, err)
+	oldInterPEM, interKeyPEM, err := pki.GenerateIntermediate(oldRoot, oldRootKey, "wardnet-mesh global intermediate")
+	require.NoError(t, err)
+	oldInter, err := pki.ParseCertificate(oldInterPEM)
+	require.NoError(t, err)
+	interKey, err := pki.ParsePrivateKey(interKeyPEM)
+	require.NoError(t, err)
+	leafPEM, _, err := pki.GenerateLeaf(oldInter, interKey, pki.SPIFFEID("wardnet.network", "prd", "global", "tenant"), "tenant")
+	require.NoError(t, err)
+	leaf, err := pki.ParseCertificate(leafPEM)
+	require.NoError(t, err)
+
+	// Rotate the root and re-sign the intermediate over its existing public key.
+	newRootCertPEM, newRootKeyPEM, err := pki.GenerateRoot("wardnet-mesh root")
+	require.NoError(t, err)
+	newRoot, err := pki.ParseCertificate(newRootCertPEM)
+	require.NoError(t, err)
+	newRootKey, err := pki.ParsePrivateKey(newRootKeyPEM)
+	require.NoError(t, err)
+	newInterPEM, err := pki.ReSignIntermediate(newRoot, newRootKey, oldInter)
+	require.NoError(t, err)
+	newInter, err := pki.ParseCertificate(newInterPEM)
+	require.NoError(t, err)
+
+	// The intermediate key is PRESERVED: same subject, same public key, new issuer.
+	assert.Equal(t, oldInter.Subject.String(), newInter.Subject.String())
+	assert.Equal(t, oldInter.PublicKey, newInter.PublicKey, "re-sign must preserve the intermediate key")
+	assert.True(t, newInter.MaxPathLenZero)
+	require.NoError(t, newInter.CheckSignatureFrom(newRoot), "re-signed intermediate chains to the new root")
+	require.Error(t, newInter.CheckSignatureFrom(oldRoot), "and not to the old root")
+
+	// Dual-root overlap: the SAME live leaf verifies under BOTH roots —
+	// via the old intermediate cert to the old root, and via the re-signed
+	// intermediate cert to the new root.
+	require.NoError(t, verifyLeaf(leaf, oldInter, oldRoot), "old chain still valid during overlap")
+	require.NoError(t, verifyLeaf(leaf, newInter, newRoot), "new chain valid during overlap")
+
+	// Cross pairings do not verify (wrong root for the presented intermediate).
+	require.Error(t, verifyLeaf(leaf, newInter, oldRoot))
+	require.Error(t, verifyLeaf(leaf, oldInter, newRoot))
+}
+
 func TestRootIdentityFromEnv(t *testing.T) {
 	t.Setenv(pki.RootIdentityEnvVar, "  ")
 	_, err := pki.RootIdentityFromEnv()

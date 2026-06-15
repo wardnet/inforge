@@ -72,6 +72,18 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
+      label: 'Runbooks',
+      items: [
+        'runbooks/pki',
+        'runbooks/pki-add-region',
+        'runbooks/pki-rotate-leaf',
+        'runbooks/pki-rotate-intermediate',
+        'runbooks/pki-rotate-root',
+        'runbooks/pki-recover-intermediate',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Configuration',
       items: [
         'configuration/inforge-yaml',

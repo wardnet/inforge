@@ -154,6 +154,44 @@ func GenerateIntermediate(parent *x509.Certificate, parentKey crypto.Signer, com
 	return encodeCertAndKey(der, signer)
 }
 
+// ReSignIntermediate re-issues an intermediate CA certificate over an existing
+// intermediate's public key and subject, signed by newParent (a new root) using
+// newParentKey. It is the heart of a dual-root rotation (`inforge pki rotate
+// --root`): the intermediate's private key is deliberately *preserved* — only
+// the issuer changes — so every leaf the intermediate already signed keeps
+// verifying, and the mesh (which anchors on the intermediate's public key) is
+// undisturbed while the new root propagates. Returns only the new certificate as
+// CERTIFICATE PEM; the caller leaves the intermediate's stored (encrypted) key
+// untouched. The new cert is capped at path length zero and never outlives the
+// new parent, exactly as a freshly-minted intermediate.
+func ReSignIntermediate(newParent *x509.Certificate, newParentKey crypto.Signer, existing *x509.Certificate) (certPEM string, err error) {
+	serial, err := randomSerial()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	notAfter := now.Add(intermediateValidity)
+	if notAfter.After(newParent.NotAfter) {
+		notAfter = newParent.NotAfter
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               existing.Subject,
+		NotBefore:             now.Add(-time.Minute), // tolerate minor clock skew at verifiers
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true, // signs leaves only — no further sub-CAs
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, newParent, existing.PublicKey, newParentKey)
+	if err != nil {
+		return "", fmt.Errorf("re-sign intermediate certificate: %w", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: pemTypeCertificate, Bytes: der})), nil
+}
+
 // encodeCertAndKey renders a signed DER certificate and its signer's private
 // key as the CERTIFICATE / PKCS#8 PRIVATE KEY PEM pair the store commits. Both
 // GenerateRoot and GenerateIntermediate end here, so the key marshaling and PEM

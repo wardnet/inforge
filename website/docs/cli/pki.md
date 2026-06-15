@@ -24,8 +24,15 @@ intermediate and root-only issuer keys, which deploy and `inforge pki renew` use
 | `inforge pki init <env>` | Create the env's store. Reuses the secret store's CI recipient; generates the offline root recipient and prints its identity **once**. |
 | `inforge pki add <env> <name> --topology two-tier\|root-only` | Generate a PKI root and record it. A two-tier root is **cold** (encrypted to the offline recipient); a root-only root is delivered to an online issuer (encrypted to CI). |
 | `inforge pki intermediate <env> <name> <scope>` | **Offline, operator-run.** Mint a per-scope intermediate CA for a two-tier PKI, signed by its cold root. Needs the offline root identity in `INFORGE_PKI_ROOT_KEY`. |
+| `inforge pki rotate <env> <name> --leaf\|--intermediate <scope>\|--root` | Rotate a tier. `--leaf` documents leaf renewal; `--intermediate` re-mints one scope's intermediate from the cold root (**offline**); `--root` runs a dual-root overlap (`--finalize` ends it). |
+| `inforge pki recover-intermediate <env> <name> <scope>` | **Offline.** Compromise recovery for one intermediate: fresh-key re-mint + forced, immediate host re-projection. |
 | `inforge pki renew <env>` | Mint fresh mesh **leaf** certificates for every service and write them to the secrets provider. Decoupled from `inforge deploy`. |
 | `inforge pki ls <env>` | List the PKIs in the store with their topology and the tiers present. |
+
+:::tip Operator runbooks
+Step-by-step procedures for adding a region and for rotating or recovering each tier live in the
+[PKI runbooks](/runbooks/pki).
+:::
 
 ## Topologies
 
@@ -104,6 +111,22 @@ restart always lands a fresh leaf. It runs from the infra repo, so it holds the 
 as `inforge deploy` and signs from the scope intermediate, reusing the same minting core as `inforge pki
 renew` (scoped to just the released service). Non-mesh services (no `pki:`) skip this step.
 
+## Rotation and recovery
+
+Each tier rotates on its own cadence and with its own custody:
+
+- **Leaves** are short-TTL — re-minting (`inforge pki renew`) *is* rotation; expiry is revocation.
+  See [rotate a leaf](/runbooks/pki-rotate-leaf).
+- **Intermediates** rotate from the cold root (offline). A planned roll
+  (`inforge pki rotate <env> <name> --intermediate <scope>`) is invisible to other regions thanks to
+  the regional boundary; a suspected key leak uses `inforge pki recover-intermediate` for an
+  immediate, no-overlap replacement. See [rotate an intermediate](/runbooks/pki-rotate-intermediate)
+  and [recover a compromised intermediate](/runbooks/pki-recover-intermediate).
+- **The root** rotates with a **dual-root overlap** (`inforge pki rotate <env> <name> --root`, then
+  `--root --finalize`): both roots verify during the window while root-anchoring consumers (e.g. the
+  daemon fleet, cross-repo) come to trust the new root. Mesh services are undisturbed — re-signing
+  preserves intermediate keys. See [rotate the root](/runbooks/pki-rotate-root).
+
 ## The store file
 
 ```yaml title="resources/prd/pki.enc.yaml"
@@ -125,6 +148,13 @@ pkis:
       us-east-1:
         cert: |
         key: |
+    # During a `--root` overlap only, the store also carries the retired tier:
+    # previousRoots:                 # old root cert+key, dropped on --finalize
+    #   - cert: |
+    #     key: |
+    # previousIntermediates:         # old intermediate certs (per scope), public
+    #   global:
+    #     - |
 ```
 
 Because every certificate is committed in the clear, `inforge validate` checks a service's `pki:`
