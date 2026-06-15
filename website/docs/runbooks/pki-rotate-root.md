@@ -51,10 +51,13 @@ old root.
 5. **Finalize the overlap (offline)** once *every* consumer trusts the new root:
 
    ```bash
+   export INFORGE_PKI_ROOT_KEY="AGE-SECRET-KEY-…"   # the offline root identity
    inforge pki rotate <env> <mesh-name> --root --finalize
    ```
 
-   This drops the retained old root and old intermediate certs. Commit the result.
+   Finalize is **custody-gated** like the begin step — it proves you hold the (new) cold root before
+   retiring the old one, so CI or a stale checkout can't drop the old root prematurely. It drops the
+   retained old root and old intermediate certs. Commit the result.
 
 ## Verify
 
@@ -66,7 +69,11 @@ old root.
 ## Notes
 
 - Re-running `--root` while an overlap is active is refused — finalize first.
-- The rotation **preserves intermediate keys**. If you also need to roll an intermediate key, do that
-  separately ([rotate an intermediate](/runbooks/pki-rotate-intermediate)).
+- **Intermediate rotation/recovery is blocked during an overlap.** Rolling an intermediate key
+  mid-overlap would orphan the old-key leaves the overlap protects, so
+  [rotate an intermediate](/runbooks/pki-rotate-intermediate) and
+  [recover a compromised intermediate](/runbooks/pki-recover-intermediate) refuse to run until you
+  `--finalize`. The rotation itself **preserves intermediate keys**, so the mesh needs no intermediate
+  change.
 - The old root key is retained (cold) until finalize, so the rotation can be reasoned about — but it
   signs nothing new once the overlap begins.

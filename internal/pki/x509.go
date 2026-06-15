@@ -127,18 +127,38 @@ func GenerateIntermediate(parent *x509.Certificate, parentKey crypto.Signer, com
 	if err != nil {
 		return "", "", err
 	}
-	serial, err := randomSerial()
+	tmpl, err := intermediateTemplate(parent, pkix.Name{CommonName: commonName})
 	if err != nil {
 		return "", "", err
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, signer.Public(), parentKey)
+	if err != nil {
+		return "", "", fmt.Errorf("create intermediate certificate: %w", err)
+	}
+	return encodeCertAndKey(der, signer)
+}
+
+// intermediateTemplate builds the x509 template shared by GenerateIntermediate
+// and ReSignIntermediate so the intermediate CA's shape — path-length-zero CA,
+// cert/CRL signing usage, the validity window clamped to the parent, and the
+// clock-skew margin — is defined in exactly one place. Drift between a freshly
+// minted and a re-signed intermediate (e.g. a tightened constraint applied to
+// only one path) would silently change chains across a root rotation, so both
+// callers go through here; they differ only in the subject and the public key
+// they hand to CreateCertificate.
+func intermediateTemplate(parent *x509.Certificate, subject pkix.Name) (*x509.Certificate, error) {
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, err
 	}
 	now := time.Now()
 	notAfter := now.Add(intermediateValidity)
 	if notAfter.After(parent.NotAfter) {
 		notAfter = parent.NotAfter
 	}
-	tmpl := &x509.Certificate{
+	return &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: commonName},
+		Subject:               subject,
 		NotBefore:             now.Add(-time.Minute), // tolerate minor clock skew at verifiers
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -146,12 +166,7 @@ func GenerateIntermediate(parent *x509.Certificate, parentKey crypto.Signer, com
 		IsCA:                  true,
 		MaxPathLen:            0,
 		MaxPathLenZero:        true, // signs leaves only — no further sub-CAs
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, signer.Public(), parentKey)
-	if err != nil {
-		return "", "", fmt.Errorf("create intermediate certificate: %w", err)
-	}
-	return encodeCertAndKey(der, signer)
+	}, nil
 }
 
 // ReSignIntermediate re-issues an intermediate CA certificate over an existing
@@ -165,25 +180,9 @@ func GenerateIntermediate(parent *x509.Certificate, parentKey crypto.Signer, com
 // untouched. The new cert is capped at path length zero and never outlives the
 // new parent, exactly as a freshly-minted intermediate.
 func ReSignIntermediate(newParent *x509.Certificate, newParentKey crypto.Signer, existing *x509.Certificate) (certPEM string, err error) {
-	serial, err := randomSerial()
+	tmpl, err := intermediateTemplate(newParent, existing.Subject)
 	if err != nil {
 		return "", err
-	}
-	now := time.Now()
-	notAfter := now.Add(intermediateValidity)
-	if notAfter.After(newParent.NotAfter) {
-		notAfter = newParent.NotAfter
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               existing.Subject,
-		NotBefore:             now.Add(-time.Minute), // tolerate minor clock skew at verifiers
-		NotAfter:              notAfter,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		MaxPathLen:            0,
-		MaxPathLenZero:        true, // signs leaves only — no further sub-CAs
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, newParent, existing.PublicKey, newParentKey)
 	if err != nil {

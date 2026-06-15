@@ -57,3 +57,6 @@ does.
   zero-mixed-window guarantee, treat it like a [root overlap](/runbooks/pki-rotate-root) and stage the
   bundle, but for a planned roll the short window is normally acceptable.
 - The **root is untouched** — verifiers that anchor on the root are unaffected.
+- This command is **refused during a [root overlap](/runbooks/pki-rotate-root)** (`previousRoots`
+  present) — rolling the intermediate key would orphan the old-key leaves the overlap protects.
+  Finalize the root rotation first.

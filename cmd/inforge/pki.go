@@ -240,39 +240,17 @@ func runPkiIntermediate(dir, env, name, scope string) error {
 		return fmt.Errorf("PKI %q is %s; only two-tier PKIs have intermediates", name, p.Topology)
 	}
 	if _, exists := p.Intermediates[scope]; exists {
-		return fmt.Errorf("PKI %q already has an intermediate for scope %q (rotation is a separate command)", name, scope)
+		return fmt.Errorf("PKI %q already has an intermediate for scope %q — rotate it with `inforge pki rotate %s %s --intermediate %s`", name, scope, env, name, scope)
 	}
 
-	rootIdentity, err := pki.RootIdentityFromEnv()
+	mat, err := mintScopeIntermediate(store, p, name, scope)
 	if err != nil {
 		return err
 	}
-	rootKeyPEM, err := secretstore.Decrypt(p.Root.Key, rootIdentity)
-	if err != nil {
-		return fmt.Errorf("decrypt root key for PKI %q (is %s the right offline root identity?): %w", name, pki.RootIdentityEnvVar, err)
-	}
-	rootCert, err := pki.ParseCertificate(p.Root.Cert)
-	if err != nil {
-		return err
-	}
-	rootSigner, err := pki.ParsePrivateKey(string(rootKeyPEM))
-	if err != nil {
-		return err
-	}
-
-	certPEM, keyPEM, err := pki.GenerateIntermediate(rootCert, rootSigner, fmt.Sprintf("%s %s intermediate", name, scope))
-	if err != nil {
-		return err
-	}
-	ciphertext, err := secretstore.Encrypt([]byte(keyPEM), store.IntermediateKeyRecipient())
-	if err != nil {
-		return err
-	}
-
 	if p.Intermediates == nil {
 		p.Intermediates = map[string]pki.Material{}
 	}
-	p.Intermediates[scope] = pki.Material{Cert: certPEM, Key: ciphertext}
+	p.Intermediates[scope] = mat
 	store.Set(name, p)
 	if err := store.Save(path); err != nil {
 		return err
@@ -431,36 +409,56 @@ func reissueIntermediate(dir, env, name, scope string) error {
 	if _, exists := p.Intermediates[scope]; !exists {
 		return fmt.Errorf("PKI %q has no intermediate for scope %q to rotate — mint one with `inforge pki intermediate %s %s %s`", name, scope, env, name, scope)
 	}
+	// An intermediate rotation rolls the intermediate KEY, which would orphan the
+	// old-key leaves the dual-root overlap promises keep verifying. Refuse it mid
+	// overlap; the operator finalizes the root rotation first.
+	if len(p.PreviousRoots) > 0 {
+		return fmt.Errorf("PKI %q is in a root overlap — finalize it (`inforge pki rotate %s %s --root --finalize`) before rotating an intermediate", name, env, name)
+	}
 
-	rootIdentity, err := pki.RootIdentityFromEnv()
+	mat, err := mintScopeIntermediate(store, p, name, scope)
 	if err != nil {
 		return err
+	}
+	p.Intermediates[scope] = mat
+	store.Set(name, p)
+	return store.Save(path)
+}
+
+// mintScopeIntermediate signs a fresh intermediate (new key) for scope from the
+// cold root and re-encrypts its key to the CI recipient. It is the single
+// custody seam — decrypt the root with the offline INFORGE_PKI_ROOT_KEY, sign,
+// re-encrypt to CI — shared by the first-mint path (runPkiIntermediate) and the
+// re-mint paths (rotate/recover). Keeping the offline-identity decrypt, the CN
+// convention, and the CI recipient in one place means a change to any of them
+// cannot drift between minting and rotating. The caller owns the create-vs-
+// overwrite guard and the store write.
+func mintScopeIntermediate(store *pki.Store, p pki.PKI, name, scope string) (pki.Material, error) {
+	rootIdentity, err := pki.RootIdentityFromEnv()
+	if err != nil {
+		return pki.Material{}, err
 	}
 	rootKeyPEM, err := secretstore.Decrypt(p.Root.Key, rootIdentity)
 	if err != nil {
-		return fmt.Errorf("decrypt root key for PKI %q (is %s the right offline root identity?): %w", name, pki.RootIdentityEnvVar, err)
+		return pki.Material{}, fmt.Errorf("decrypt root key for PKI %q (is %s the right offline root identity?): %w", name, pki.RootIdentityEnvVar, err)
 	}
 	rootCert, err := pki.ParseCertificate(p.Root.Cert)
 	if err != nil {
-		return err
+		return pki.Material{}, err
 	}
 	rootSigner, err := pki.ParsePrivateKey(string(rootKeyPEM))
 	if err != nil {
-		return err
+		return pki.Material{}, err
 	}
-
 	certPEM, keyPEM, err := pki.GenerateIntermediate(rootCert, rootSigner, fmt.Sprintf("%s %s intermediate", name, scope))
 	if err != nil {
-		return err
+		return pki.Material{}, err
 	}
 	ciphertext, err := secretstore.Encrypt([]byte(keyPEM), store.IntermediateKeyRecipient())
 	if err != nil {
-		return err
+		return pki.Material{}, err
 	}
-
-	p.Intermediates[scope] = pki.Material{Cert: certPEM, Key: ciphertext}
-	store.Set(name, p)
-	return store.Save(path)
+	return pki.Material{Cert: certPEM, Key: ciphertext}, nil
 }
 
 // runPkiRotateRoot performs a dual-root rotation of a two-tier PKI's cold root.
@@ -498,6 +496,16 @@ func runPkiRotateRoot(dir, env, name string, finalize bool) error {
 	if finalize {
 		if len(p.PreviousRoots) == 0 {
 			return fmt.Errorf("PKI %q is not in a root overlap — nothing to finalize", name)
+		}
+		// Dropping the old root is a root-custody decision, just like starting
+		// the overlap — gate it on the offline identity so CI (or a stale repo
+		// checkout) cannot retire the old root before consumers have migrated.
+		rootIdentity, err := pki.RootIdentityFromEnv()
+		if err != nil {
+			return err
+		}
+		if _, err := secretstore.Decrypt(p.Root.Key, rootIdentity); err != nil {
+			return fmt.Errorf("decrypt current root key for PKI %q (is %s the offline root identity?): %w", name, pki.RootIdentityEnvVar, err)
 		}
 		p.PreviousRoots = nil
 		p.PreviousIntermediates = nil

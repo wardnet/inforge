@@ -56,6 +56,9 @@ global (i.e. all of them), so treat a global-scope compromise as the widest inci
 
 - This command is the same crypto as `inforge pki rotate --intermediate`; it exists separately to make
   the incident posture explicit (no overlap, immediate renew + forced re-projection) and auditable.
+- It is **refused during a [root overlap](/runbooks/pki-rotate-root)** — finalize the root rotation
+  first. (A compromise during a root overlap is a coordinate-with-the-root-custodian situation, not a
+  routine recovery.)
 - The **root is not compromised** by an intermediate leak — do not rotate the root for this. If the
   *root* key is believed leaked, follow [rotate the root](/runbooks/pki-rotate-root) and shorten the
   overlap to the minimum your consumers can tolerate.

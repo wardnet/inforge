@@ -181,6 +181,33 @@ func TestRunPkiRotateRootCustodyAndFinalize(t *testing.T) {
 	require.ErrorContains(t, runPkiRotateRoot(dir2, "prd", "wardnet-mesh", true), "nothing to finalize")
 }
 
+func TestRunPkiRotateIntermediateRejectedDuringRootOverlap(t *testing.T) {
+	dir, rootIdentity, _ := mintedIntermediate(t)
+	t.Setenv(pki.RootIdentityEnvVar, rootIdentity)
+	require.NoError(t, runPkiRotateRoot(dir, "prd", "wardnet-mesh", false))
+
+	// Rotating or recovering an intermediate mid-overlap would orphan the
+	// old-key leaves the overlap protects — both are refused until --finalize.
+	require.ErrorContains(t, runPkiRotateIntermediate(dir, "prd", "wardnet-mesh", "global"), "root overlap")
+	require.ErrorContains(t, runPkiRecoverIntermediate(dir, "prd", "wardnet-mesh", "global"), "root overlap")
+
+	// After finalizing, intermediate rotation is allowed again.
+	require.NoError(t, runPkiRotateRoot(dir, "prd", "wardnet-mesh", true))
+	require.NoError(t, runPkiRotateIntermediate(dir, "prd", "wardnet-mesh", "global"))
+}
+
+func TestRunPkiRotateRootFinalizeRequiresRootIdentity(t *testing.T) {
+	dir, rootIdentity, _ := mintedIntermediate(t)
+	t.Setenv(pki.RootIdentityEnvVar, rootIdentity)
+	require.NoError(t, runPkiRotateRoot(dir, "prd", "wardnet-mesh", false))
+
+	// Finalize is custody-gated too: the wrong offline identity is rejected.
+	wrong, _, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	t.Setenv(pki.RootIdentityEnvVar, wrong)
+	require.ErrorContains(t, runPkiRotateRoot(dir, "prd", "wardnet-mesh", true), "decrypt current root key")
+}
+
 func TestRunPkiRotateRootRejectsRootOnly(t *testing.T) {
 	dir, rootIdentity, _ := mintedIntermediate(t)
 	require.NoError(t, runPkiAdd(dir, "prd", "wardnet-daemon", pki.TopologyRootOnly, ""))
