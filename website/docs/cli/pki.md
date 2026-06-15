@@ -78,9 +78,21 @@ it is safe to run while your working tree has un-shipped infra changes. Every ru
 already exist — run `inforge deploy` for the environment first; renew adopts it, never creates it.
 :::
 
-Renewal is **non-disruptive**: a running service keeps its in-memory certificate until the host
-re-projects the new leaf (the per-host projection lands in a later slice), so renewing does not restart
-or interrupt services.
+## How a renewed leaf reaches a running service
+
+Each mesh service gets a **per-service systemd timer** (`wardnet-<svc>-renew.timer`) installed at deploy.
+It runs `inforge-bootstrap project` daily, which re-fetches the current leaf from the provider into the
+service's tmpfs `RuntimeDirectory` and, **only if the leaf changed**, applies it:
+
+- If the service declares a [`reload:`](/resources/service) command, the timer **reloads** the unit
+  (`systemctl reload`) — **no downtime**.
+- Otherwise it **restarts** the unit (a brief interruption) — the only universally-safe way to pick up
+  a new certificate.
+
+So renewal is hands-off: `inforge pki renew` writes the new leaf to the provider, and each host converges
+on its own within the timer interval (well inside the 90-day TTL), with no CLI→host connection required.
+At boot, the bootstrapper projects the leaf the same way before starting the service. Leaf private keys
+live only in tmpfs (RAM) for the life of a boot — never written to persistent disk.
 
 ## The store file
 

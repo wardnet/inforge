@@ -109,8 +109,25 @@ Deploy-time and renewal leaf minting is live. Key packages:
 
 `inforge pki renew <env>` is the CLI entry point: it mints one leaf per (service, scope) and writes
 leaf cert + key + per-scope trust bundle to the secrets provider. It never runs the Pulumi program.
-Schedule it separately from `inforge deploy` (e.g. cron). On-host projection of the material (tmpfs +
-env-var injection) is slice #109.
+Schedule it separately from `inforge deploy` (e.g. cron).
+
+### Host projection (slice #109)
+
+- **`internal/bootstrapper.projectFiles`** is the single projection path, used by both the ExecStart
+  boot path (`runBoot`) and the renewal timer (`runProject`): for each descriptor `files:` entry it
+  fetches the provider key, atomically writes the PEM into the service's tmpfs `RuntimeDir`
+  (`/run/wardnet/<svc>`, from the unit's `RuntimeDirectory=`), mode `0400` owned by the service user
+  (chown'd **while still root**, before the privilege drop), and sets the `*_PATH` env var. It reports
+  `changed` so the renewal path reloads only on a real rotation.
+- **Renewal is pull-based, per service.** A `wardnet-<svc>-renew.timer` runs `inforge-bootstrap project
+  <dir>` daily; on a changed leaf it runs `systemctl reload-or-restart` — **reload** when the service
+  declares `reload:` (emitted as `ExecReload=`, no downtime), else **restart**. `inforge pki renew` only
+  writes the provider; hosts converge on their own. The renewal oneshot must NOT declare its own
+  `RuntimeDirectory=` (systemd would delete the running service's dir when the oneshot stops).
+- **A mesh service is provisioned even with no `environment.yaml`.** Deploy gives any `pki:` service a
+  workspace + per-service identity (read scope on `/<svc>`, covering `/<svc>/mtls`) + `credential.age`,
+  so the host can fetch its leaf. The skip is `len(svc.Environment)==0 && svc.Pki==""` in both
+  `program.provisionServiceSecrets` and `infisical.ProvisionService`.
 
 ## Conventions
 

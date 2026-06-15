@@ -77,8 +77,10 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=%s
+RuntimeDirectory=wardnet/%s
+RuntimeDirectoryMode=0755
 ExecStart=%s %s
-Restart=on-failure
+%sRestart=on-failure
 RestartSec=5
 
 [Install]
@@ -88,8 +90,65 @@ WantedBy=multi-user.target
 // Unit renders the systemd unit file for a service. The unit's ExecStart is the
 // inforge-bootstrap binary pointed at the service's descriptor directory; the
 // unit runs as root (no User=) because the bootstrapper drops privilege itself.
+// RuntimeDirectory= gives the bootstrapper a tmpfs dir (RuntimeDir) to project
+// mesh PEMs into, created and cleaned with the unit. ExecReload= is emitted when
+// the service declares reload:, so the renewal timer can apply a renewed leaf
+// without a restart.
 func Unit(spec types.ServiceSpec) string {
-	return fmt.Sprintf(unitTemplate, spec.Name, Folder(spec.Name), BootstrapBin, DescriptorDir(spec.Name))
+	reloadLine := ""
+	if spec.Reload != "" {
+		reloadLine = "ExecReload=" + spec.Reload + "\n"
+	}
+	return fmt.Sprintf(unitTemplate, spec.Name, Folder(spec.Name), spec.Name, BootstrapBin, DescriptorDir(spec.Name), reloadLine)
+}
+
+// RuntimeDir is the tmpfs directory the bootstrapper projects a service's mesh
+// PEMs into. It matches the unit's RuntimeDirectory=wardnet/<name> and
+// internal/bootstrapper.runtimeDir.
+func RuntimeDir(name string) string {
+	return "/run/wardnet/" + name
+}
+
+// RenewUnitName / RenewTimerName name the per-service renewal oneshot + timer
+// that re-project the current mesh leaf and reload the unit on change.
+func RenewUnitName(name string) string  { return "wardnet-" + name + "-renew.service" }
+func RenewTimerName(name string) string { return "wardnet-" + name + "-renew.timer" }
+
+// RenewUnitPath / RenewTimerPath are the on-host paths of those units.
+func RenewUnitPath(name string) string  { return "/etc/systemd/system/" + RenewUnitName(name) }
+func RenewTimerPath(name string) string { return "/etc/systemd/system/" + RenewTimerName(name) }
+
+const renewServiceTemplate = `[Unit]
+Description=wardnet %s mesh certificate renewal
+
+[Service]
+Type=oneshot
+ExecStart=%s project %s
+`
+
+// RenewService renders the oneshot that runs `inforge-bootstrap project` for a
+// service: re-fetch the current leaf, re-project it into the RuntimeDir, and
+// reload-or-restart the unit if it changed.
+func RenewService(spec types.ServiceSpec) string {
+	return fmt.Sprintf(renewServiceTemplate, spec.Name, BootstrapBin, DescriptorDir(spec.Name))
+}
+
+const renewTimerTemplate = `[Unit]
+Description=wardnet %s mesh certificate renewal timer
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`
+
+// RenewTimer renders the timer that fires the renewal oneshot daily (with a
+// randomized delay), well inside the 90-day leaf TTL.
+func RenewTimer(spec types.ServiceSpec) string {
+	return fmt.Sprintf(renewTimerTemplate, spec.Name)
 }
 
 // DeployTarget is one service's deployment coordinates: where to push the

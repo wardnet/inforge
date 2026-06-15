@@ -373,4 +373,5 @@ func NormalizeService(s *types.ServiceSpec) {
 		s.Type = "raw"
 	}
 	s.Pki = strings.TrimSpace(s.Pki)
+	s.Reload = strings.TrimSpace(s.Reload)
 }
