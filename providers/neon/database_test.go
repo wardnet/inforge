@@ -53,6 +53,12 @@ func (m *dbMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Pr
 	case neonDatabaseType:
 		outputs["branchId"] = resource.NewStringProperty("br-test-id")
 		outputs["connectionUrl"] = resource.NewStringProperty("postgresql://role:pass@host/db")
+	case neonRoleType:
+		outputs["user"] = resource.NewStringProperty("svc-role")
+		outputs["password"] = resource.NewStringProperty("svc-pass")
+		outputs["host"] = resource.NewStringProperty("host")
+		outputs["port"] = resource.NewStringProperty("5432")
+		outputs["dbName"] = resource.NewStringProperty("appdb")
 	}
 	return args.Name + "-id", outputs, nil
 }
@@ -143,6 +149,12 @@ func (m *namingCapture) NewResource(args pulumi.MockResourceArgs) (string, resou
 	case neonDatabaseType:
 		outputs["branchId"] = resource.NewStringProperty("br-test-id")
 		outputs["connectionUrl"] = resource.NewStringProperty("postgresql://role:pass@host/db")
+	case neonRoleType:
+		outputs["user"] = resource.NewStringProperty("svc-role")
+		outputs["password"] = resource.NewStringProperty("svc-pass")
+		outputs["host"] = resource.NewStringProperty("host")
+		outputs["port"] = resource.NewStringProperty("5432")
+		outputs["dbName"] = resource.NewStringProperty("appdb")
 	}
 	return args.Name + "-id", outputs, nil
 }
@@ -238,7 +250,15 @@ func TestCreateSmoke(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		assert.NotZero(t, out.ConnectionURL, "ConnectionURL should be non-zero output")
+		assert.NotNil(t, out.RoleProvisioner, "Create should return a role provisioner (no credential output — ADR-0025)")
+
+		// The provisioner mints a NeonRole and returns its connection value fields.
+		fields, err := out.RoleProvisioner.ProvisionRole(ctx, "wardnet-prod-use1-dbrole-api-bridge", "rw")
+		if err != nil {
+			return err
+		}
+		assert.NotZero(t, fields.User, "ProvisionRole returns the role's USER field")
+		assert.NotZero(t, fields.Password, "ProvisionRole returns the role's PASSWORD field")
 		return nil
 	}, pulumi.WithMocks("project", "stack", &dbMocks{}))
 	require.NoError(t, err)

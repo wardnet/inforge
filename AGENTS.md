@@ -170,10 +170,20 @@ naming a target `<type>/<name>`, a permission (`ro`|`rw`), and an `outputs:` map
 over `{FIELD}` placeholders. A grant *creates/issues* a credential (DB user, minted cert), distinct from
 a `ref:` (which only reads an existing output) and from mesh `pki:` membership (intrinsic identity).
 
-Landing in dependency order: **slice A (this code) = grant core + schema + credential-free validation**;
-slice B = the Database Grantable (pgx, per-service user, removes `connectionUrl`); slice C = the PKI
-resource Grantable (sidecar + `inforge pki generate` + file projection). The `Grant(...)` methods are
-stubs until then.
+Landing in dependency order: slice A = grant core + schema + credential-free validation (#123);
+**slice B (this code) = the Database Grantable** — `Database.Grant` mints a scoped per-service Postgres
+role via the `neon:resources:NeonRole` plugin resource (Neon role API + pgx `GRANT`s as the DB owner,
+CGO-free), and the credential-bearing `DatabaseOutputs.ConnectionURL` is **removed** (`ref:database/*`
+is now rejected — DB credentials flow only through grants). slice C = the PKI resource Grantable
+(sidecar + `inforge pki generate` + file projection); `PKIResource.Grant` stays a stub.
+
+- **`ro`** = read-only (CONNECT/USAGE/SELECT); **`rw`** = read/write **plus** `CREATE ON SCHEMA public`
+  (the service owns its own migrations). The role-provisioning capability rides on
+  `types.DatabaseOutputs.RoleProvisioner` threaded through `AllOutputs` (so a regional service granting a
+  `database/global/<name>` resolves the same way `ref:` does); the per-service role is named for the
+  **consuming** service instance (`naming.Resource(env, consumerSlug, "dbrole", svc-db)`). The deploy
+  wiring is `program.resolveDatabaseGrants` → `infisical.ProvisionService(…, grantSecrets)`, merging
+  grant value secrets into the same `/<svc>/infra` batch. Bootstrapper untouched.
 
 - **`internal/grant`** is the abstraction. `Grantable.FieldNames(perm) (values, files)` is
   **credential- and instance-independent** (keyed by resource *type* + permission) — the validator calls

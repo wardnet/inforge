@@ -15,6 +15,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 	"github.com/wardnet/inforge/internal/agehost"
 	"github.com/wardnet/inforge/internal/bootstrapper"
+	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/meshcert"
@@ -178,7 +179,7 @@ func Run(ctx *pulumi.Context) error {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
-		bundles, err := provisionServiceSecrets(ctx, reg, res, all, env, region)
+		bundles, err := provisionServiceSecrets(ctx, reg, res, all, env, region, slug)
 		if err != nil {
 			return err
 		}
@@ -397,24 +398,28 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 // service whose container has no infisical secrets yields no bundle (and gets a
 // unit + a static secret-less descriptor, but no credential — see
 // deliverServiceDescriptor).
-func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, all types.AllOutputs, env, region string) (map[string]*types.ServiceSecretsBundle, error) {
+func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, all types.AllOutputs, env, region, slug string) (map[string]*types.ServiceSecretsBundle, error) {
 	bundles := map[string]*types.ServiceSecretsBundle{}
 	provName := reg.SecretsProviderName()
 	for _, svc := range res.Service {
-		// A service needs provisioning when it has infra secrets OR is a mesh
-		// member (pki:): a mesh-only service still needs a workspace + identity so
-		// the host can fetch its leaf (#109).
-		if len(svc.Environment) == 0 && svc.Pki == "" {
+		// A service needs provisioning when it has infra secrets, database grants, OR
+		// is a mesh member (pki:): a mesh-only service still needs a workspace +
+		// identity so the host can fetch its leaf (#109).
+		if len(svc.Environment) == 0 && svc.Pki == "" && len(svc.Grants) == 0 {
 			continue
 		}
 		if provName == "" {
-			return nil, fmt.Errorf("service %q needs a secrets provider (it has secrets or a mesh pki) but region %q has none configured", svc.Name, region)
+			return nil, fmt.Errorf("service %q needs a secrets provider (it has secrets, grants, or a mesh pki) but region %q has none configured", svc.Name, region)
+		}
+		grantSecrets, err := resolveDatabaseGrants(ctx, svc, all, env, region, slug)
+		if err != nil {
+			return nil, fmt.Errorf("service %q: resolve grants: %w", svc.Name, err)
 		}
 		prov, err := reg.ServiceSecretsProvisioner(provName)
 		if err != nil {
 			return nil, err
 		}
-		bundle, err := prov.ProvisionService(ctx, svc, env, region, all)
+		bundle, err := prov.ProvisionService(ctx, svc, env, region, all, grantSecrets)
 		if err != nil {
 			return nil, fmt.Errorf("service %q: provision secrets: %w", svc.Name, err)
 		}
@@ -423,6 +428,83 @@ func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry,
 		}
 	}
 	return bundles, nil
+}
+
+// resolveDatabaseGrants materializes a service's database/* grants into env-var →
+// value-secret outputs (ADR-0025): for each such grant it mints a consumer-scoped
+// per-service role on the target database (resolved through AllOutputs the same way
+// ref: is, including the global/ redirect) and interpolates each outputs: template
+// over the role's connection fields. pki/* grants are not wired here (slice C).
+func resolveDatabaseGrants(ctx *pulumi.Context, svc types.ServiceSpec, all types.AllOutputs, env, region, slug string) (map[string]pulumi.StringOutput, error) {
+	if len(svc.Grants) == 0 {
+		return nil, nil
+	}
+	out := map[string]pulumi.StringOutput{}
+	for _, g := range svc.Grants {
+		typ, name, ok := strings.Cut(g.Resource, "/")
+		if !ok || typ != "database" {
+			continue // pki/* grants are materialized in slice C; unknowns caught by validate.
+		}
+		// Resolve the target the same way resolveRef does: a global/ prefix redirects
+		// to the global slot regardless of the consuming service's region.
+		refRegion, dbName := region, name
+		if rest, isGlobal := strings.CutPrefix(name, "global/"); isGlobal {
+			refRegion, dbName = "global", rest
+		}
+		regionMap, ok := all.Database[refRegion]
+		if !ok {
+			return nil, fmt.Errorf("grant %q: no database outputs for region %q", g.Resource, refRegion)
+		}
+		db, ok := regionMap[dbName]
+		if !ok {
+			return nil, fmt.Errorf("grant %q: database %q not found in region %q", g.Resource, dbName, refRegion)
+		}
+		if db.RoleProvisioner == nil {
+			return nil, fmt.Errorf("grant %q: database %q has no role provisioner", g.Resource, dbName)
+		}
+		// Consumer-scoped role identity: the consuming service's env+slug, so two
+		// regions granting the same (global) database never collide on a role.
+		roleName := naming.Resource(env, slug, "dbrole", svc.Name+"-"+dbName)
+		gdb := grant.Database{RoleProvisioner: db.RoleProvisioner, RoleName: roleName}
+		fields, err := gdb.Grant(ctx, svc.Name, grant.Permission(g.Permission), env, region)
+		if err != nil {
+			return nil, fmt.Errorf("grant %q: %w", g.Resource, err)
+		}
+		for envName, tmpl := range g.Outputs {
+			secret, err := interpolateGrantOutput(tmpl, fields.Values)
+			if err != nil {
+				return nil, fmt.Errorf("grant %q output %q: %w", g.Resource, envName, err)
+			}
+			out[envName] = secret
+		}
+	}
+	return out, nil
+}
+
+// interpolateGrantOutput resolves a grant outputs: template over the grant's value
+// fields, returning the composed secret as a StringOutput. Validation (slice A) has
+// already checked the template parses and references only published fields.
+func interpolateGrantOutput(tmpl string, values map[string]pulumi.StringOutput) (pulumi.StringOutput, error) {
+	t, err := grant.ParseTemplate(tmpl)
+	if err != nil {
+		return pulumi.StringOutput{}, err
+	}
+	names := make([]string, 0, len(values))
+	for n := range values {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	outs := make([]any, len(names))
+	for i, n := range names {
+		outs[i] = values[n]
+	}
+	return pulumi.All(outs...).ApplyT(func(args []any) (string, error) {
+		resolved := make(map[string]string, len(names))
+		for i, n := range names {
+			resolved[n] = args[i].(string)
+		}
+		return t.Interpolate(resolved)
+	}).(pulumi.StringOutput), nil
 }
 
 // deliverServiceSecrets writes a service's bootstrapper inputs onto its host: the

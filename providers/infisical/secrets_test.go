@@ -65,7 +65,7 @@ func TestProvisionServiceScopesPaths(t *testing.T) {
 			Environment: map[string]string{"DATABASE_URL": "env:DATABASE_URL"},
 		}
 		var err error
-		bundle, err = adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
+		bundle, err = adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{}, nil)
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
@@ -89,7 +89,7 @@ func TestProvisionServicePassesOrganizationId(t *testing.T) {
 			Name: "ghost", Container: "ghost", User: "ghost",
 			Environment: map[string]string{"DATABASE_URL": "env:DATABASE_URL"},
 		}
-		_, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
+		_, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{}, nil)
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
@@ -103,7 +103,7 @@ func TestProvisionServiceNoSecretsReturnsNil(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
 		svc := types.ServiceSpec{Name: "ghost", Container: "ghost"}
-		bundle, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
+		bundle, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{}, nil)
 		require.NoError(t, err)
 		assert.Nil(t, bundle)
 		return nil
@@ -121,7 +121,7 @@ func TestProvisionServicePkiOnly(t *testing.T) {
 		adapter := New("cid", "csec", "", "", "use1")
 		svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost", Pki: "wardnet-mesh"}
 		var err error
-		bundle, err = adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
+		bundle, err = adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{}, nil)
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
@@ -155,7 +155,7 @@ func TestWorkspaceNamePassedToAPIMatchesNamingConvention(t *testing.T) {
 		adapter := New("cid", "csec", "", "", "use1")
 		svc := bridgeServiceWithSecret()
 		// env="prd", region="us-east-1" — workspace name must use env, not region.
-		_, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
+		_, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{}, nil)
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
@@ -175,7 +175,7 @@ func TestSecretsBatchNameMatchesNamingConvention(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		adapter := New("cid", "csec", "", "", "use1")
 		svc := bridgeServiceWithSecret()
-		_, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
+		_, err := adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{}, nil)
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
@@ -218,19 +218,14 @@ func awaitString(t *testing.T, o pulumi.StringOutput) string {
 	}
 }
 
-// TestResolveRefGlobalDatabase verifies a global/ prefix redirects a database ref
-// to the region-less global slot, regardless of the consuming service's region.
-func TestResolveRefGlobalDatabase(t *testing.T) {
+// TestResolveRefDatabaseRejected verifies a database ref is rejected: a database
+// exposes no referenceable outputs (ADR-0025); DB credentials flow only through a
+// grant. The global/ redirect for grant targets is exercised in the program tests.
+func TestResolveRefDatabaseRejected(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		all := types.AllOutputs{
-			Database: map[string]map[string]types.DatabaseOutputs{
-				"us-east-1": {"shared": {ConnectionURL: pulumi.String("regional-url").ToStringOutput()}},
-				"global":    {"shared": {ConnectionURL: pulumi.String("global-url").ToStringOutput()}},
-			},
-		}
-		out, err := resolveRef("ref:database/global/shared.connectionUrl", "container", "us-east-1", all)
-		require.NoError(t, err)
-		assert.Equal(t, "global-url", awaitString(t, out), "global/ must resolve against the global slot, not the service's region")
+		_, err := resolveRef("ref:database/global/shared.connectionUrl", "container", "us-east-1", types.AllOutputs{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "use a grants: entry")
 		return nil
 	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
 	require.NoError(t, err)
@@ -290,23 +285,6 @@ func TestResolveRefGlobalCompute(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestResolveRefGlobalMissing verifies a global ref to an absent name fails
-// against the global slot (not the service's region).
-func TestResolveRefGlobalMissing(t *testing.T) {
-	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		all := types.AllOutputs{
-			Database: map[string]map[string]types.DatabaseOutputs{
-				"global": {},
-			},
-		}
-		_, err := resolveRef("ref:database/global/missing.connectionUrl", "container", "us-east-1", all)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `no database "missing" in region "global"`)
-		return nil
-	}, pulumi.WithMocks("project", "stack", &infisicalMocks{}))
-	require.NoError(t, err)
-}
-
 // TestResolveRefVault verifies a vault: source serves the value the program
 // pre-decrypted into all.Encrypted, addressed by (container, vaultKey).
 func TestResolveRefVault(t *testing.T) {
@@ -346,7 +324,7 @@ func TestProvisionServiceVaultSource(t *testing.T) {
 			Encrypted: map[string]map[string]string{"ghost": {"API_KEY": "plain-value"}},
 		}
 		var err error
-		bundle, err = adapter.ProvisionService(ctx, svc, "prd", "us-east-1", all)
+		bundle, err = adapter.ProvisionService(ctx, svc, "prd", "us-east-1", all, nil)
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)

@@ -154,13 +154,13 @@ func New(clientId, clientSecret, siteUrl, organizationId, slug string) *Infisica
 // path and identity (the container's secrets are broadcast to every consuming
 // service), so a leaked credential exposes only that one service's path.
 func (a *InfisicalSecretsAdapter) ProvisionService(
-	ctx *pulumi.Context, svc types.ServiceSpec, env, region string, all types.AllOutputs,
+	ctx *pulumi.Context, svc types.ServiceSpec, env, region string, all types.AllOutputs, grantSecrets map[string]pulumi.StringOutput,
 ) (*types.ServiceSecretsBundle, error) {
-	// A service is provisioned when it has infra secrets OR is a mesh member: a
-	// `pki:`-only service still needs a workspace + identity so the host can fetch
-	// the mesh leaf `inforge pki renew` writes under /<svc>/mtls (the identity's
-	// read scope on /<svc> covers it).
-	if len(svc.Environment) == 0 && svc.Pki == "" {
+	// A service is provisioned when it has infra secrets, grant secrets, OR is a
+	// mesh member: a `pki:`-only service still needs a workspace + identity so the
+	// host can fetch the mesh leaf `inforge pki renew` writes under /<svc>/mtls (the
+	// identity's read scope on /<svc> covers it).
+	if len(svc.Environment) == 0 && len(grantSecrets) == 0 && svc.Pki == "" {
 		return nil, nil
 	}
 
@@ -174,26 +174,37 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 	// Infra secrets are written only when the service declares them; a mesh-only
 	// service skips the batch write but still gets an identity below.
 	envMap := map[string]string{}
-	if len(svc.Environment) > 0 {
+	if len(svc.Environment) > 0 || len(grantSecrets) > 0 {
 		infraPath := secretPath + "/infra"
-		// Pre-compute the Infisical key for each env var. For vault: sources the key
-		// stored in Infisical is the VaultKey (decoupled from the env var name); for
-		// all other sources the env var name doubles as the Infisical key.
-		keys := sortedStringKeys(svc.Environment)
-		infisicalKeys := make([]string, len(keys))
-		ifaces := make([]any, len(keys))
-		for i, key := range keys {
+		// One infra batch carries both the environment.yaml-derived secrets and the
+		// grant value secrets (ADR-0025). For each entry, infisicalKeys[i] is the key
+		// stored in Infisical and ifaces[i] is its resolved StringOutput value.
+		// Pre-compute the Infisical key for each env var: for vault: sources it is the
+		// VaultKey (decoupled from the env var name); otherwise the env var name
+		// doubles as the Infisical key. Grant value secrets are already resolved and
+		// use the env var name as the key.
+		envKeys := sortedStringKeys(svc.Environment)
+		grantKeys := sortedStringKeys(grantSecrets)
+		infisicalKeys := make([]string, 0, len(envKeys)+len(grantKeys))
+		ifaces := make([]any, 0, len(envKeys)+len(grantKeys))
+		for _, key := range envKeys {
 			src, _ := validate.ParseSource(svc.Environment[key])
+			ik := key
 			if src.Kind == validate.SourceVault {
-				infisicalKeys[i] = src.VaultKey
-			} else {
-				infisicalKeys[i] = key
+				ik = src.VaultKey
 			}
 			resolved, err := resolveRef(svc.Environment[key], svc.Container, region, all)
 			if err != nil {
 				return nil, fmt.Errorf("resolve ref for service %q secret %q: %w", svc.Name, key, err)
 			}
-			ifaces[i] = resolved
+			infisicalKeys = append(infisicalKeys, ik)
+			ifaces = append(ifaces, resolved)
+			envMap[key] = "infra/" + ik
+		}
+		for _, key := range grantKeys {
+			infisicalKeys = append(infisicalKeys, key)
+			ifaces = append(ifaces, grantSecrets[key])
+			envMap[key] = "infra/" + key
 		}
 		secretsJson := pulumi.All(ifaces...).ApplyT(func(args []any) (string, error) {
 			m := make(map[string]string, len(infisicalKeys))
@@ -214,10 +225,6 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 			secretsJson,
 		); err != nil {
 			return nil, fmt.Errorf("write infra secrets for service %q: %w", svc.Name, err)
-		}
-
-		for i, key := range keys {
-			envMap[key] = "infra/" + infisicalKeys[i]
 		}
 	}
 
@@ -291,9 +298,8 @@ func servicePath(service string) string { return "/" + service }
 // resolveRef resolves a secrets source string to a Pulumi StringOutput.
 //
 // Supported forms:
-//   - ref:database/<name>.<output>        — looks up database output (connectionUrl)
+//   - ref:database/<name>.<output>        — REJECTED: a database exposes no output (use a grant)
 //   - ref:compute/<name>.<output>         — looks up compute output (publicIp)
-//   - ref:database/global/<name>.<output> — looks up a GLOBAL database output
 //   - ref:compute/global/<name>.<output>  — looks up a GLOBAL compute output
 //   - ${NAME}                             — reads environment variable NAME
 //   - static:<value> / value:<value>      — returns the literal value verbatim
@@ -353,27 +359,14 @@ func resolveRef(source, container, region string, all types.AllOutputs) (pulumi.
 		}
 		switch src.RefType {
 		case "database":
-			regionMap, ok := all.Database[region]
-			if !ok {
-				return pulumi.StringOutput{}, fmt.Errorf(
-					"resolveRef %q: no database outputs for region %q (available: %v)",
-					source, region, sortedKeys(all.Database),
-				)
-			}
-			db, ok := regionMap[name]
-			if !ok {
-				return pulumi.StringOutput{}, fmt.Errorf(
-					"resolveRef %q: no database %q in region %q (available: %v)",
-					source, name, region, sortedStringKeys(regionMap),
-				)
-			}
-			if src.RefOutput != "connectionUrl" {
-				return pulumi.StringOutput{}, fmt.Errorf(
-					"resolveRef %q: unknown database output field %q (available: connectionUrl)",
-					source, src.RefOutput,
-				)
-			}
-			return db.ConnectionURL, nil
+			// A database exposes no referenceable outputs (ADR-0025): the
+			// credential-bearing connectionUrl was removed so the admin credential is
+			// never handed to consumers. DB credentials flow only through a grant.
+			// inforge validate rejects this earlier; this guards the deploy path.
+			return pulumi.StringOutput{}, fmt.Errorf(
+				"resolveRef %q: a database exposes no referenceable outputs; use a grants: entry for DB credentials (ADR-0025)",
+				source,
+			)
 
 		case "compute":
 			regionMap, ok := all.Compute[region]

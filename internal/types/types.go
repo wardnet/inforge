@@ -230,9 +230,35 @@ type ComputeOutputs struct {
 	PublicIP pulumi.StringOutput
 }
 
-// DatabaseOutputs are the values a DatabaseProvider returns after creating a database.
+// DatabaseOutputs are the values a DatabaseProvider returns after creating a
+// database. A database exposes NO credential-bearing ref output (ADR-0025): DB
+// credentials flow only through a grant, which mints a scoped per-service role via
+// RoleProvisioner. ref:database/* is rejected. RoleProvisioner is bound to this one
+// database; it is threaded through AllOutputs so a grant resolves its target the
+// same way ref: does, including the cross-region global/ redirect.
 type DatabaseOutputs struct {
-	ConnectionURL pulumi.StringOutput
+	RoleProvisioner DBRoleProvisioner
+}
+
+// DBRoleProvisioner mints a scoped per-service database role and applies its ro/rw
+// privileges, returning the role's connection value fields. It is set on a
+// DatabaseOutputs by the database provider's Create, bound to that one database.
+// The program supplies the consumer-scoped roleName, so a regional service granting
+// a global database gets its own role named for the consumer's region — two regions
+// never collide. permission is "ro"|"rw" as a plain string so this interface need
+// not import internal/grant.
+type DBRoleProvisioner interface {
+	ProvisionRole(ctx *pulumi.Context, roleName, permission string) (DBRoleFields, error)
+}
+
+// DBRoleFields are the connection value fields a database grant publishes (the
+// USER/PASSWORD/HOST/PORT/DBNAME a service composes into its outputs templates).
+type DBRoleFields struct {
+	User     pulumi.StringOutput
+	Password pulumi.StringOutput
+	Host     pulumi.StringOutput
+	Port     pulumi.StringOutput
+	DBName   pulumi.StringOutput
 }
 
 // AllOutputs collects per-region outputs so the secrets backend can resolve
@@ -323,7 +349,10 @@ type ServiceSecretsBundle struct {
 // program needs to write the descriptor + host-key-encrypted credential. It
 // returns a nil bundle (no error) when the service has no secrets to deliver.
 type ServiceSecretsProvisioner interface {
-	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, env, region string, all AllOutputs) (*ServiceSecretsBundle, error)
+	// grantSecrets are env-var → value-field secret outputs already resolved by the
+	// program from the service's database grants (ADR-0025); the provisioner writes
+	// them into the same infra batch alongside the environment.yaml-derived secrets.
+	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, env, region string, all AllOutputs, grantSecrets map[string]pulumi.StringOutput) (*ServiceSecretsBundle, error)
 }
 
 // ManifestContribution is a set of non-secret fields a contributor adds to a

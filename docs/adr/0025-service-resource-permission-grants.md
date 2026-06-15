@@ -219,6 +219,24 @@ interpolates each grant's `outputs:` over the returned `Fields`, emitting value 
   (e.g. a future Kafka resource: `ro`/`rw` → an ACL'd principal, fields `{BROKERS, USERNAME,
   PASSWORD}`) implements `Grantable` without touching the DSL, the validator, or the bootstrapper.
 
+### Implementation notes (slice B)
+
+- **GRANT semantics:** `ro` = `CONNECT` + `USAGE` + `SELECT` on schema `public` (+ matching `ALTER
+  DEFAULT PRIVILEGES`). `rw` = `ro` + `INSERT/UPDATE/DELETE` + sequence `USAGE/SELECT/UPDATE` **and**
+  `CREATE ON SCHEMA public` — a `rw` service owns its own migrations (DDL), not just data. Statements
+  are run as the database owner over a pgx connection inside the `neon:resources:NeonRole` plugin
+  resource; identifiers are quoted via `pgx.Identifier.Sanitize()`.
+- **`ref:database/*` is now rejected** (validate + the deploy-time `resolveRef`) with a "use a grants:
+  entry" hint — a database has no referenceable output today. Regional access to a **global** database
+  uses the same `global/` redirect grants and `ref:` share, and the per-service role is named for the
+  **consuming** service instance (`wardnet-<env>-<consumerSlug>-dbrole-<svc>-<db>`) so two regions
+  granting one global database never collide.
+- **Threading:** the role-provisioning capability rides on `DatabaseOutputs.RoleProvisioner` through
+  `AllOutputs` (not adapter-instance memory), because the global registry is not shared with the
+  regional service loop.
+
 ## Status
 
-Accepted (planning). Docs-only; gates the code slices of #117.
+Accepted. Slice A (grant core + schema + validation) shipped in #123; **slice B (Database Grantable,
+this change) implements `Database.Grant` and removes `connectionUrl`**. Slice C (PKI resource Grantable)
+remains a stub.

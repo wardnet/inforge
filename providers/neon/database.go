@@ -20,6 +20,7 @@ import (
 const (
 	neonProjectType  = "neon:resources:NeonProject"
 	neonDatabaseType = "neon:resources:NeonDatabase"
+	neonRoleType     = "neon:resources:NeonRole"
 )
 
 // neonProjectResource is the output state returned by the Pulumi engine after
@@ -73,6 +74,68 @@ func newNeonDatabaseResource(
 	return res, nil
 }
 
+// neonRoleResource is the output state returned by the Pulumi engine after a
+// NeonRole is created: the scoped per-service role's connection value fields.
+type neonRoleResource struct {
+	pulumi.CustomResourceState
+	User     pulumi.StringOutput `pulumi:"user"`
+	Password pulumi.StringOutput `pulumi:"password"`
+	Host     pulumi.StringOutput `pulumi:"host"`
+	Port     pulumi.StringOutput `pulumi:"port"`
+	DBName   pulumi.StringOutput `pulumi:"dbName"`
+}
+
+func newNeonRoleResource(
+	ctx *pulumi.Context, name string,
+	projectId, branchId pulumi.StringInput, database, roleName, permission string,
+	ownerConnectionURI pulumi.StringInput, apiKey string,
+	opts ...pulumi.ResourceOption,
+) (*neonRoleResource, error) {
+	res := &neonRoleResource{}
+	args := pulumi.Map{
+		"projectId":          projectId,
+		"branchId":           branchId,
+		"database":           pulumi.String(database),
+		"roleName":           pulumi.String(roleName),
+		"permission":         pulumi.String(permission),
+		"ownerConnectionUri": ownerConnectionURI,
+		"apiKey":             pulumi.String(apiKey),
+	}
+	if err := ctx.RegisterResource(neonRoleType, name, args, res, opts...); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// neonRoleProvisioner is the types.DBRoleProvisioner bound to one NeonDatabase. It
+// captures only that database's coordinates (project, branch, name, owner
+// connection), so it mints a role identically whether the consuming service is
+// regional or reaches it through the global slot — the consumer-scoped roleName is
+// supplied by the caller (ADR-0025).
+type neonRoleProvisioner struct {
+	projectId pulumi.StringOutput
+	branchId  pulumi.StringOutput
+	database  string
+	ownerURI  pulumi.StringOutput
+	apiKey    string
+}
+
+func (p *neonRoleProvisioner) ProvisionRole(
+	ctx *pulumi.Context, roleName, permission string,
+) (types.DBRoleFields, error) {
+	res, err := newNeonRoleResource(ctx, roleName, p.projectId, p.branchId, p.database, roleName, permission, p.ownerURI, p.apiKey)
+	if err != nil {
+		return types.DBRoleFields{}, fmt.Errorf("create neon role %q: %w", roleName, err)
+	}
+	return types.DBRoleFields{
+		User:     res.User,
+		Password: res.Password,
+		Host:     res.Host,
+		Port:     res.Port,
+		DBName:   res.DBName,
+	}, nil
+}
+
 // NeonDatabaseAdapter implements types.DatabaseProvider using the custom
 // pulumi-resource-neon provider binary. One NeonProject is created per
 // (container, Neon region) key; concurrent calls with the same key are
@@ -104,7 +167,8 @@ func New(apiKey, project, slug, region string) *NeonDatabaseAdapter {
 }
 
 // Create provisions a NeonProject (deduped per container+region) and a
-// NeonDatabase within it, then returns the connection URL as a secret output.
+// NeonDatabase within it, then returns a per-database role provisioner (no
+// credential-bearing output — ADR-0025).
 func (n *NeonDatabaseAdapter) Create(
 	ctx *pulumi.Context, spec types.DatabaseSpec, env, abstractRegion string,
 ) (types.DatabaseOutputs, error) {
@@ -129,7 +193,20 @@ func (n *NeonDatabaseAdapter) Create(
 		return types.DatabaseOutputs{}, fmt.Errorf("create neon database %q: %w", dbName, err)
 	}
 
-	return types.DatabaseOutputs{ConnectionURL: dbRes.ConnectionUrl}, nil
+	// A database exposes no credential-bearing ref output (ADR-0025). Instead it
+	// hands back a provisioner bound to this database; a service grant uses it to
+	// mint a scoped per-service role. The owner connection (with the owner password)
+	// stays inside the provisioner and is delivered only to the NeonRole resource —
+	// never as a public output.
+	return types.DatabaseOutputs{
+		RoleProvisioner: &neonRoleProvisioner{
+			projectId: proj.ProjectId,
+			branchId:  dbRes.BranchId,
+			database:  spec.Database,
+			ownerURI:  dbRes.ConnectionUrl,
+			apiKey:    n.apiKey,
+		},
+	}, nil
 }
 
 // ensureContainer returns the NeonProject resource for the (container, neonRegion)

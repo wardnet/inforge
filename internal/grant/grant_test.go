@@ -3,9 +3,30 @@ package grant
 import (
 	"testing"
 
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/wardnet/inforge/internal/types"
 )
+
+// fakeRoleProvisioner records the inputs and returns fixed value fields.
+type fakeRoleProvisioner struct {
+	gotRole string
+	gotPerm string
+}
+
+func (f *fakeRoleProvisioner) ProvisionRole(_ *pulumi.Context, roleName, permission string) (types.DBRoleFields, error) {
+	f.gotRole = roleName
+	f.gotPerm = permission
+	return types.DBRoleFields{
+		User:     pulumi.String("u").ToStringOutput(),
+		Password: pulumi.String("p").ToStringOutput(),
+		Host:     pulumi.String("h").ToStringOutput(),
+		Port:     pulumi.String("5432").ToStringOutput(),
+		DBName:   pulumi.String("db").ToStringOutput(),
+	}, nil
+}
 
 func TestPermissionValid(t *testing.T) {
 	assert.True(t, PermissionRO.Valid())
@@ -47,12 +68,29 @@ func TestPKIResourceFieldNames(t *testing.T) {
 	assert.Equal(t, []string{"CERT", "KEY"}, rwFiles, "issue (rw) adds the signing key")
 }
 
-func TestGrantStubsNotImplemented(t *testing.T) {
+func TestDatabaseGrantRequiresProvisioner(t *testing.T) {
+	// The zero value (validation path) has no provisioner — Grant must refuse.
 	_, err := Database{}.Grant(nil, "api", PermissionRW, "prd", "us-east-1")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "slice B")
+	assert.Contains(t, err.Error(), "RoleProvisioner")
+}
 
-	_, err = PKIResource{}.Grant(nil, "daemon", PermissionRW, "prd", "global")
+func TestDatabaseGrantMapsFields(t *testing.T) {
+	fp := &fakeRoleProvisioner{}
+	db := Database{RoleProvisioner: fp, RoleName: "wardnet-prd-use1-dbrole-api-main"}
+	f, err := db.Grant(nil, "api", PermissionRW, "prd", "us-east-1")
+	require.NoError(t, err)
+	assert.Equal(t, "wardnet-prd-use1-dbrole-api-main", fp.gotRole, "consumer-scoped role name is threaded through")
+	assert.Equal(t, "rw", fp.gotPerm)
+	for _, k := range []string{"USER", "PASSWORD", "HOST", "PORT", "DBNAME"} {
+		_, ok := f.Values[k]
+		assert.True(t, ok, "value field %s published", k)
+	}
+	assert.Empty(t, f.Files, "a database grant publishes no file fields")
+}
+
+func TestPKIResourceGrantStub(t *testing.T) {
+	_, err := PKIResource{}.Grant(nil, "daemon", PermissionRW, "prd", "global")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "slice C")
 }

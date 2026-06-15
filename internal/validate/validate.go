@@ -1087,12 +1087,10 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 		}
 		switch parsed.RefType {
 		case "database":
-			if parsed.RefOutput != "connectionUrl" {
-				errs = append(errs, fmt.Sprintf("environment.%s: unknown database output %q (want connectionUrl)", k, parsed.RefOutput))
-			}
-			if !ctx.databaseNames[parsed.RefName] {
-				errs = append(errs, fmt.Sprintf("environment.%s: database %q not found", k, parsed.RefName))
-			}
+			// A database exposes no referenceable outputs (ADR-0025): the
+			// credential-bearing connectionUrl was removed so the admin credential is
+			// never handed to a consumer. DB credentials flow only through a grant.
+			errs = append(errs, fmt.Sprintf("environment.%s: a database exposes no referenceable outputs; use a grants: entry for DB credentials (ADR-0025)", k))
 		case "compute":
 			if parsed.RefOutput != "publicIp" {
 				errs = append(errs, fmt.Sprintf("environment.%s: unknown compute output %q (want publicIp)", k, parsed.RefOutput))

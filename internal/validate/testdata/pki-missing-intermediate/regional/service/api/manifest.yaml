@@ -15,3 +15,8 @@ ingress:
   - type: forward
     listen: 853
     target: 5353
+grants:
+  - resource: database/bridge
+    permission: rw
+    outputs:
+      DATABASE_URL: "postgresql://{USER}:{PASSWORD}@{HOST}:{PORT}/{DBNAME}"
