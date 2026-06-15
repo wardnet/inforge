@@ -78,6 +78,8 @@ func TestCheckGrantsErrors(t *testing.T) {
 			{Resource: "pki/daemon", Permission: "ro", Outputs: map[string]string{"SHARED": "{CERT}"}},
 		}, "also produced by the grant"},
 		{"template parse error", nil, []types.GrantSpec{{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"X": "{USER"}}}, "unbalanced"},
+		{"literal-only template (dropped braces)", nil, []types.GrantSpec{{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"X": "static"}}}, "interpolates no field"},
+		{"whitespace-only template", nil, []types.GrantSpec{{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"X": " "}}}, "interpolates no field"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,6 +88,33 @@ func TestCheckGrantsErrors(t *testing.T) {
 			assert.True(t, containsSub(errs, tc.wantSub), "errors %v do not contain %q", errs, tc.wantSub)
 		})
 	}
+}
+
+// TestCheckGrantsUnresolvedTargetNoCascade: a grant whose target does not resolve
+// reports only the not-found error, not a misleading "field not published" cascade
+// from validating outputs against a zero-value Grantable.
+func TestCheckGrantsUnresolvedTargetNoCascade(t *testing.T) {
+	ctx := grantCtx()
+
+	errs := checkGrants(grantSvc(nil, types.GrantSpec{Resource: "database/nope", Permission: "ro", Outputs: map[string]string{"X": "{BOGUS}"}}), ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "database \"nope\" not found")
+	assert.False(t, containsSub(errs, "not published"), "must not cascade field-publication errors for an unresolved target")
+
+	// A non-root-only pki target is also "unresolved" for field checks.
+	errs = checkGrants(grantSvc(nil, types.GrantSpec{Resource: "pki/bad", Permission: "rw", Outputs: map[string]string{"X": "{BOGUS}"}}), ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "must be \"root-only\"")
+	assert.False(t, containsSub(errs, "not published"))
+}
+
+// TestGlobalHasResourcesCountsPKI: a global slice declaring only a PKI resource
+// must still count as non-empty, so the "global resources need a providers block"
+// guard fires (the PKI cert material is written to that block's secrets provider).
+func TestGlobalHasResourcesCountsPKI(t *testing.T) {
+	assert.False(t, globalHasResources(types.Resources{}))
+	assert.True(t, globalHasResources(types.Resources{PKI: []types.PKIResourceSpec{{Name: "rootca"}}}),
+		"a global slice with only a PKI resource must count as having resources")
 }
 
 func TestCheckPKIResource(t *testing.T) {

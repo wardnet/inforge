@@ -149,10 +149,14 @@ func buildGlobalRefs(global types.Resources) *globalRefs {
 	return g
 }
 
-// globalHasResources reports whether the global slice declares any resource.
+// globalHasResources reports whether the global slice declares any resource. PKI
+// resources are counted too: a global PKI resource's cert material is written to
+// the secrets provider (from the global providers block) at deploy, so a global
+// slice that declares one with no providers block must still fail the guard in
+// ValidateResources.
 func globalHasResources(g types.Resources) bool {
 	return len(g.Network)+len(g.Compute)+len(g.Database)+
-		len(g.Service) > 0
+		len(g.Service)+len(g.PKI) > 0
 }
 
 // regionContext holds the foreign-key targets and tables a region's semantic
@@ -1062,16 +1066,7 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	}
 	sort.Strings(envKeys)
 	for _, k := range envKeys {
-		if strings.HasPrefix(k, bootstrapper.ReservedEnvPrefix) {
-			errs = append(errs, fmt.Sprintf("environment.%s: env var name uses the reserved %s* namespace owned by inforge", k, bootstrapper.ReservedEnvPrefix))
-		}
-		// The mesh *_PATH vars are projected by inforge and injected into the env
-		// (descriptor files:); a service mapping a secret to one of these names
-		// would silently collide with the injected path. Reserve them, mirroring
-		// the INFORGE_* guard above.
-		if _, reserved := meshcert.DescriptorFiles()[k]; reserved {
-			errs = append(errs, fmt.Sprintf("environment.%s: env var name is reserved by inforge for mesh certificate paths", k))
-		}
+		errs = append(errs, reservedEnvNameErrs(k, "environment."+k)...)
 		parsed, err := ParseSource(s.Environment[k])
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("environment.%s: %s", k, err.Error()))
@@ -1122,15 +1117,34 @@ func checkPKIResource(s types.PKIResourceSpec) (errs, warns []string) {
 	return errs, warns
 }
 
+// reservedEnvNameErrs returns errors for an env-var name that collides with a
+// namespace inforge owns: the INFORGE_* prefix, or one of the mesh cert-path names
+// inforge projects and injects (meshcert.DescriptorFiles()) — a service mapping a
+// value onto either would silently collide with an inforge-injected value. Shared
+// by the environment.yaml check and the grant-outputs check so the reserved set is
+// enforced identically in both; label prefixes the message (e.g. "environment.FOO"
+// or "grants[0].outputs.FOO").
+func reservedEnvNameErrs(envName, label string) []string {
+	var errs []string
+	if strings.HasPrefix(envName, bootstrapper.ReservedEnvPrefix) {
+		errs = append(errs, fmt.Sprintf("%s: env var name uses the reserved %s* namespace owned by inforge", label, bootstrapper.ReservedEnvPrefix))
+	}
+	if _, reserved := meshcert.DescriptorFiles()[envName]; reserved {
+		errs = append(errs, fmt.Sprintf("%s: env var name is reserved by inforge for mesh certificate paths", label))
+	}
+	return errs
+}
+
 // checkGrants validates a service's grants: entries credential-free (ADR-0025):
 // the target resolves to a supported Grantable of the right shape, the permission
-// is ro/rw, every {FIELD} in an outputs template is published by the target for
-// that permission, a file field stands alone (it is a path, not a substring), and
-// each output env-var name avoids the reserved INFORGE_*/MTLS_* namespaces and
-// does not collide with the service's environment.yaml keys or another grant's
-// outputs. The cross-region boundary falls out of target resolution: the shared
-// regional set + the global/ prefix mean a regional service can only name its own
-// region's resources or a global/<name> one (mirroring ref:).
+// is ro/rw, every outputs template interpolates at least one {FIELD} that the
+// target publishes for that permission, a file field stands alone (it is a path,
+// not a substring), and each output env-var name avoids the reserved INFORGE_*
+// namespace and the mesh cert-path names (meshcert.DescriptorFiles()) and does not
+// collide with the service's environment.yaml keys or another grant's outputs. The
+// cross-region boundary falls out of target resolution: the shared regional set +
+// the global/ prefix mean a regional service can only name its own region's
+// resources or a global/<name> one (mirroring ref:).
 func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
 	var errs []string
 	// grantEnvNames tracks each output name across all of the service's grants so a
@@ -1158,19 +1172,33 @@ func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
 		}
 
 		// Resolve the target: existence (which also enforces the cross-region
-		// boundary) plus the type-specific shape.
+		// boundary) plus the type-specific shape. A target that does not resolve
+		// skips the field-publication checks below, so a wrong resource name yields
+		// one clear error instead of a misleading "field not published" cascade.
+		targetResolved := false
 		switch typ {
 		case "database":
-			if !ctx.databaseNames[name] {
+			if ctx.databaseNames[name] {
+				targetResolved = true
+			} else {
 				errs = append(errs, fmt.Sprintf("%s.resource: database %q not found", label, name))
 			}
 		case "pki":
 			topology, found := ctx.pkiResources[name]
-			if !found {
+			switch {
+			case !found:
 				errs = append(errs, fmt.Sprintf("%s.resource: pki resource %q not found", label, name))
-			} else if topology != pki.TopologyRootOnly {
+			case topology != pki.TopologyRootOnly:
 				errs = append(errs, fmt.Sprintf("%s.resource: pki resource %q has topology %q; a grant target must be %q", label, name, topology, pki.TopologyRootOnly))
+			default:
+				targetResolved = true
 			}
+		default:
+			// grant.For accepted this type but checkGrants has no resolver for it:
+			// a new Grantable was wired into grant.For without adding its target
+			// resolution here. Fail loudly rather than silently skip validation.
+			errs = append(errs, fmt.Sprintf("%s.resource: grantable type %q has no validation support — add a target resolver in checkGrants", label, typ))
+			continue
 		}
 
 		// The fields the target publishes for this permission (credential-free).
@@ -1192,12 +1220,7 @@ func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
 		sort.Strings(outNames)
 		for _, envName := range outNames {
 			tmpl := g.Outputs[envName]
-			if strings.HasPrefix(envName, bootstrapper.ReservedEnvPrefix) {
-				errs = append(errs, fmt.Sprintf("%s.outputs.%s: env var name uses the reserved %s* namespace owned by inforge", label, envName, bootstrapper.ReservedEnvPrefix))
-			}
-			if _, reserved := meshcert.DescriptorFiles()[envName]; reserved {
-				errs = append(errs, fmt.Sprintf("%s.outputs.%s: env var name is reserved by inforge for mesh certificate paths", label, envName))
-			}
+			errs = append(errs, reservedEnvNameErrs(envName, label+".outputs."+envName)...)
 			if _, clash := s.Environment[envName]; clash {
 				errs = append(errs, fmt.Sprintf("%s.outputs.%s: env var collides with a key in the service's environment.yaml", label, envName))
 			}
@@ -1213,6 +1236,19 @@ func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
 				continue
 			}
 			fields := t.Fields()
+			// A grant output materializes credential fields: a template that
+			// interpolates none is almost always a dropped-brace typo (a constant
+			// belongs in environment.yaml as a literal, not a grant output).
+			if len(fields) == 0 {
+				errs = append(errs, fmt.Sprintf("%s.outputs.%s: template %q interpolates no field; a grant output must reference at least one {FIELD}", label, envName, tmpl))
+				continue
+			}
+			// Field publication is relative to the target's published set, so only
+			// check it once the target resolved (an unresolved target already has its
+			// own error above).
+			if !targetResolved {
+				continue
+			}
 			hasFile := false
 			for _, f := range fields {
 				if !published[f] {
