@@ -145,6 +145,56 @@ resource's output), `vault:KEY` (a secret from the age-encrypted committed store
 `env:NAME` (an environment variable, resolved from the deploy process env via `os.Getenv`), or a bare
 literal string (anything else — a verbatim non-secret value, committed in plaintext).
 
+**Grant**:
+A service's declared, permissioned access to a **Grantable** resource, materialized as a
+credential/secret delivered to that service. Authored as an entry in the service manifest's `grants:`
+list — distinct from the `environment.yaml` Source DSL (which only *reads* existing outputs) and from
+mesh `pki:` membership (which is intrinsic identity, not a granted permission). Each entry names the
+target `<type>/<name>`, a **permission** (`ro` | `rw`), and an `outputs:` block.
+_Avoid_: conflating with `ref:` (a grant *creates/issues* a credential; a `ref:` only reads an
+existing output) or with mesh `pki:` membership.
+
+**Grantable**:
+A resource type that can be the target of a **Grant** — currently a **Database** or a **PKI
+resource**. Granting means something type-specific: for a Database, creating a scoped DB user; for a
+PKI resource, delivering cert material. Each Grantable maps the universal `ro`/`rw` permission to its
+own domain (DB: read-only vs read-write user; PKI: `verify` = CA cert only vs `issue` = signing key)
+and publishes a permission-dependent set of **fields**.
+
+**PKI resource**:
+A grantable, root-only Certificate Authority declared as a full resource folder
+(`…/pki/<name>/manifest.yaml` + a CLI-generated age-encrypted `pki.enc.yaml` sidecar holding the
+root key + cert). Like every resource it has a **scope**: a regional PKI resource
+(`regional/pki/<name>/`) is instantiated into every region; a global one (`global/pki/<name>/`) is
+region-less. Grants obey the same cross-region boundary as the rest of the model — a regional service
+may grant on its own region's PKI resource or a global one; **no cross-region access**. It is
+**distinct from the mesh-auth PKI** — the special, env-root `pki.enc.yaml` store consumed via `pki:`
+membership. The two never mix: a **Grant** may target only a PKI resource (root-only); the `pki:`
+membership field may name only a two-tier mesh PKI. A `verify` grant delivers the root cert
+(trust-only); an `issue` grant delivers the root signing key (online signer, e.g. a daemon that mints
+its own short-TTL leaves).
+_Avoid_: conflating the PKI resource with the mesh `pki.enc.yaml` store, or with `pki:` membership.
+
+**Field**:
+A named piece of credential material a Grantable produces for a granted permission — resource- and
+permission-dependent. Each field is either a **value** field (a string, e.g. DB `USER`, `PASSWORD`,
+`HOST`, `PORT`) or a **file** field (material delivered as an on-host PEM file, e.g. PKI `CERT`,
+`KEY`). Fields are the placeholder vocabulary a grant's `outputs:` templates over.
+
+**Output**:
+A service-chosen environment variable a grant materializes, declared per-grant as
+`outputs: { ENV_VAR: "<template>" }` where the template interpolates `{FIELD}` placeholders scoped to
+that grant. A value-field template composes a string secret (`"{USER}:{PASSWORD}@{HOST}:{PORT}"`); a
+file-field placeholder resolves to the projected PEM's on-host **path** (`DAEMON_CA_CERT_PATH:
+"{CERT}"`). The resource publishes raw fields; the service decides its env surface — so the same
+credential can be one composed URL or several discrete vars.
+
+**Database credential access**:
+A service obtains database credentials **only** through a **Grant** (a scoped per-service user) —
+never by referencing a connection string via the Source DSL. A Database exposes no credential-bearing
+output; `ref:database/<name>.…` may reference only non-credential outputs. This keeps the database's
+owner/admin credential off every consuming service.
+
 ### Providers
 
 **Provider**:
