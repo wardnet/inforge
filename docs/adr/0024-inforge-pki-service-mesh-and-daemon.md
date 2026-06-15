@@ -164,6 +164,28 @@ scope alongside the abstract regions, and an intermediate exists per active scop
   bootstrapper re-projects on every start, and leaf TTL must comfortably exceed the deploy/reboot
   interval.
 
+## Lifecycle operations (#110)
+
+Slice #110 closes the lifecycle with rotation/recovery tooling and operator runbooks. The CLI gains
+`inforge pki rotate <env> <name>` (`--leaf` documents leaf renewal; `--intermediate <scope>` re-mints
+one scope's intermediate from the cold root; `--root` runs a dual-root overlap, `--root --finalize`
+ends it) and `inforge pki recover-intermediate <env> <name> <scope>` (compromise recovery). The
+operator runbooks — add a region, rotate a leaf, rotate an intermediate, rotate the root, recover a
+compromised intermediate — live under `website/docs/runbooks/` (see
+[the PKI runbooks index](https://github.com/wardnet/inforge/blob/main/website/docs/runbooks/pki.md)).
+
+Two facts ground every rotation, both per the #107 amendment below:
+
+- **Re-minting an intermediate is invisible to other regions** because the mesh's regional boundary
+  keeps a region's intermediate out of every other region's trust bundle — *not* because verifiers
+  anchor on the root (they anchor on per-scope intermediate bundles).
+- **Root rotation needs a dual-root overlap for root-anchoring consumers only.** A `--root` rotation
+  re-signs every intermediate from the new root while **preserving each intermediate key**, so live
+  leaves keep verifying and the mesh is undisturbed. The overlap (the store holds `previousRoots` +
+  `previousIntermediates` until `--finalize`) exists so consumers that anchor on the mesh *root* — the
+  daemon fleet, cross-repo (#610) — can come to trust `{old, new}` before the old root is retired.
+  Mesh-root rotation is therefore cross-repo coordination, not just an inforge command.
+
 ## Amendment — 2026-06-14 (#107)
 
 Implementing the service-side slice surfaced two corrections to the decisions above.

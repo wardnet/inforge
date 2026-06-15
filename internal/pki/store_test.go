@@ -97,6 +97,37 @@ func TestTrustBundle(t *testing.T) {
 	require.ErrorContains(t, err, "not found")
 }
 
+func TestRootCerts(t *testing.T) {
+	// Outside an overlap, RootCerts is just the active root.
+	p := pki.PKI{Topology: pki.TopologyTwoTier, Root: pki.Material{Cert: "NEW-ROOT"}}
+	assert.Equal(t, []string{"NEW-ROOT"}, p.RootCerts())
+
+	// Mid-overlap, it is the active root plus every retained previous root.
+	p.PreviousRoots = []pki.Material{{Cert: "OLD-ROOT"}}
+	assert.Equal(t, []string{"NEW-ROOT", "OLD-ROOT"}, p.RootCerts())
+}
+
+func TestOverlapFieldsRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pki.enc.yaml")
+	s := &pki.Store{RootRecipient: "age1root", Recipient: "age1ci"}
+	s.Set("wardnet-mesh", pki.PKI{
+		Topology:      pki.TopologyTwoTier,
+		Root:          pki.Material{Cert: "NEW-ROOT", Key: "NEW-CT"},
+		PreviousRoots: []pki.Material{{Cert: "OLD-ROOT", Key: "OLD-CT"}},
+		Intermediates: map[string]pki.Material{
+			"global": {Cert: "NEW-GLOBAL-INTER", Key: "GLOBAL-CT"},
+		},
+		PreviousIntermediates: map[string][]string{
+			"global": {"OLD-GLOBAL-INTER"},
+		},
+	})
+	require.NoError(t, s.Save(path))
+
+	got, err := pki.Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, s.PKIs, got.PKIs, "overlap fields must survive a save/load round-trip")
+}
+
 func TestNamesGetSet(t *testing.T) {
 	s := &pki.Store{RootRecipient: "age1root", Recipient: "age1ci"}
 	assert.Empty(t, s.Names())

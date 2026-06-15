@@ -72,9 +72,35 @@ type PKI struct {
 	// Root is the trust anchor: cert committed in the clear, key encrypted to
 	// rootRecipient (two-tier) or recipient (root-only).
 	Root Material `yaml:"root"`
+	// PreviousRoots holds superseded roots retained during a dual-root rotation
+	// overlap (`inforge pki rotate --root`). It is empty outside an overlap. A
+	// root-anchoring consumer must trust both the active Root and every entry
+	// here until the rotation is finalized (`--finalize` clears it); see
+	// RootCerts. Each entry keeps its (cold) key so the rotation can be reasoned
+	// about or reverted before finalize.
+	PreviousRoots []Material `yaml:"previousRoots,omitempty"`
 	// Intermediates maps scope ("global" or an abstract region) -> its
 	// intermediate CA. Empty until slice #106 mints them; only two-tier uses it.
 	Intermediates map[string]Material `yaml:"intermediates,omitempty"`
+	// PreviousIntermediates maps scope -> the intermediate certs issued by a
+	// superseded root, retained during a dual-root overlap so a chain to an old
+	// root still validates. The matching private key is unchanged across the
+	// rotation (it lives in Intermediates[scope].Key), so only the public cert is
+	// kept here. Cleared by `--finalize`. Certs only — public, no key.
+	PreviousIntermediates map[string][]string `yaml:"previousIntermediates,omitempty"`
+}
+
+// RootCerts returns the active root cert followed by any retained previous-root
+// certs (dual-root overlap). It is the trust-anchor set a root-anchoring
+// consumer must hold during a root rotation: outside an overlap it is just the
+// active root; mid-overlap it is both, so a chain to either root validates.
+func (p PKI) RootCerts() []string {
+	certs := make([]string, 0, 1+len(p.PreviousRoots))
+	certs = append(certs, p.Root.Cert)
+	for _, r := range p.PreviousRoots {
+		certs = append(certs, r.Cert)
+	}
+	return certs
 }
 
 // Store is the decoded form of an environment's committed PKI store. Its
