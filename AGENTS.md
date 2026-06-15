@@ -111,6 +111,23 @@ Deploy-time and renewal leaf minting is live. Key packages:
 leaf cert + key + per-scope trust bundle to the secrets provider. It never runs the Pulumi program.
 Schedule it separately from `inforge deploy` (e.g. cron).
 
+### Rotation and recovery (slice #110)
+
+`inforge pki rotate <env> <name>` rotates one tier of a two-tier PKI:
+
+- **`--leaf`** — no-op mint; prints guidance to run `inforge pki renew` (leaves are short-TTL; expiry is the only revocation mechanism).
+- **`--intermediate <scope>`** — re-mints one scope's intermediate with a fresh key, signed offline by the cold root (`INFORGE_PKI_ROOT_KEY`). Regional boundary keeps the rotated intermediate invisible outside the rotated scope. Refused if a root overlap is active (`PreviousRoots` is non-empty) — finalize the root rotation first.
+- **`--root`** — dual-root overlap: mint a new cold root, retain the old in `PKI.PreviousRoots`, re-sign every existing intermediate over its existing public key (`pki.ReSignIntermediate`). Old-key leaves keep verifying because the old root stays in the trust anchor set (`PKI.RootCerts()` = active root + previous roots). Run with `--finalize` to drop the retained root and end the overlap; both the begin step and the finalize step require the offline root identity.
+
+`inforge pki recover-intermediate <env> <name> <scope>` handles a compromised intermediate: same fresh-key re-mint as planned rotation, but the operational urgency differs — all leaves the old intermediate signed must be replaced immediately (run `inforge pki renew` right after; do not wait for the daily timer).
+
+Key internal seams introduced in slice #110:
+
+- **`pki.ReSignIntermediate`** — re-issues an intermediate cert over its *existing* public key signed by a new root. Key is preserved; serial and validity window are refreshed. Used exclusively by `--root` rotation.
+- **`intermediateTemplate`** (unexported) — shared x509 template builder used by both `GenerateIntermediate` (first-mint) and `ReSignIntermediate` (re-sign). Do not duplicate this template logic elsewhere.
+- **`mintScopeIntermediate`** (unexported, `cmd/inforge`) — single shared path for decrypt-root → sign-intermediate → encrypt-to-CI. Used by `runPkiIntermediate` (first-mint) and `reissueIntermediate` (re-mint). Do not bypass it with a hand-rolled equivalent.
+- **`PKI.PreviousRoots []Material`** — retained old roots during overlap (certs + cold keys). **`PKI.PreviousIntermediates map[string][]string`** — certs of old intermediates superseded during an overlap (audit trail; keys discarded). **`PKI.RootCerts() []string`** — returns active root cert + all previous-root certs; the full trust-anchor set mid-overlap.
+
 ### Host projection (slice #109)
 
 - **`internal/hostpaths`** is the dependency-free (stdlib-only) source of truth for the on-host names
