@@ -171,6 +171,33 @@ func TestCheckSecretsRejectsReservedEnvName(t *testing.T) {
 	assert.Contains(t, strings.Join(errs, "\n"), "reserved")
 }
 
+// TestCheckServiceRejectsReservedMeshEnvName: an env var name colliding with a
+// reserved mesh certificate path (MTLS_*_PATH) must fail — the host projection
+// would otherwise overwrite the user's value with the leaf path.
+func TestCheckServiceRejectsReservedMeshEnvName(t *testing.T) {
+	ctx := baseCtx()
+	ctx.available = nil
+	errs, _ := checkService(types.ServiceSpec{
+		Host: "bridge", Type: "raw", User: "svc", Container: "ghost",
+		Environment: map[string]string{"MTLS_LEAF_CERT_PATH": "env:SOME_SECRET"},
+	}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "reserved")
+}
+
+// TestCheckServiceRejectsMultilineReload: reload becomes a single ExecReload=
+// line in the unit, so a newline would inject extra directives.
+func TestCheckServiceRejectsMultilineReload(t *testing.T) {
+	ctx := baseCtx()
+	ctx.available = nil
+	errs, _ := checkService(types.ServiceSpec{
+		Host: "bridge", Type: "raw", User: "svc", Container: "ghost",
+		Reload: "nginx -s reload\nExecStart=/bin/evil",
+	}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "single line")
+}
+
 // TestBuildGlobalRefs derives referenceable database names and compute keys from
 // the global resource set, keying single-instance computes by both forms.
 func TestBuildGlobalRefs(t *testing.T) {

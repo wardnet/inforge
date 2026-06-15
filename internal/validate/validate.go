@@ -19,6 +19,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	"github.com/wardnet/inforge/internal/bootstrapper"
 	"github.com/wardnet/inforge/internal/loader"
+	"github.com/wardnet/inforge/internal/meshcert"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/regions"
@@ -915,6 +916,11 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 		errs = append(errs, fmt.Sprintf("host: %q references a global host — a service on a global host is defined in the global slice itself, not referenced from a region", s.Host))
 		return errs, warns
 	}
+	// reload: becomes a single ExecReload= line in the systemd unit; a newline
+	// would inject additional unit directives.
+	if strings.ContainsAny(s.Reload, "\n\r") {
+		errs = append(errs, "reload: must be a single line (no newlines)")
+	}
 	_, ok := ctx.computeNames[s.Host]
 	if !ok {
 		if ctx.computeCanonical[s.Host] != "" {
@@ -1026,6 +1032,13 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	for _, k := range envKeys {
 		if strings.HasPrefix(k, bootstrapper.ReservedEnvPrefix) {
 			errs = append(errs, fmt.Sprintf("environment.%s: env var name uses the reserved %s* namespace owned by inforge", k, bootstrapper.ReservedEnvPrefix))
+		}
+		// The mesh *_PATH vars are projected by inforge and injected into the env
+		// (descriptor files:); a service mapping a secret to one of these names
+		// would silently collide with the injected path. Reserve them, mirroring
+		// the INFORGE_* guard above.
+		if _, reserved := meshcert.DescriptorFiles()[k]; reserved {
+			errs = append(errs, fmt.Sprintf("environment.%s: env var name is reserved by inforge for mesh certificate paths", k))
 		}
 		parsed, err := ParseSource(s.Environment[k])
 		if err != nil {

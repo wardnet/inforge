@@ -111,6 +111,29 @@ func TestProvisionServiceNoSecretsReturnsNil(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestProvisionServicePkiOnly verifies a mesh-only service (pki: set, no infra
+// secrets) still gets a workspace + identity (scoped read on /<svc>, which covers
+// /<svc>/mtls) and a bundle with an empty Env, but writes no infra secret batch.
+func TestProvisionServicePkiOnly(t *testing.T) {
+	mocks := newNamingMocks()
+	var bundle *types.ServiceSecretsBundle
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		adapter := New("cid", "csec", "", "", "use1")
+		svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost", Pki: "wardnet-mesh"}
+		var err error
+		bundle, err = adapter.ProvisionService(ctx, svc, "prd", "us-east-1", types.AllOutputs{})
+		return err
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	require.NotNil(t, bundle, "a mesh-only service must get a bundle so the host can fetch its leaf")
+	assert.Equal(t, "/ghost", bundle.SecretPath)
+	assert.Empty(t, bundle.Env, "no infra secrets → empty env map")
+	assert.Equal(t, "/ghost", mocks.captured[infisicalIdentityType].inputs["secretPath"].StringValue())
+	_, wroteBatch := mocks.captured[infisicalSecretsBatchType]
+	assert.False(t, wroteBatch, "no infra secret batch is written for a mesh-only service")
+}
+
 // bridgeServiceWithSecret is a single-service fixture for the naming tests: a
 // service named "bridge" in container "bridge" with one infra secret declared
 // inline, so ProvisionService creates the workspace + batch + identity.

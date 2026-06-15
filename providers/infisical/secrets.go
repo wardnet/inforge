@@ -156,7 +156,11 @@ func New(clientId, clientSecret, siteUrl, organizationId, slug string) *Infisica
 func (a *InfisicalSecretsAdapter) ProvisionService(
 	ctx *pulumi.Context, svc types.ServiceSpec, env, region string, all types.AllOutputs,
 ) (*types.ServiceSecretsBundle, error) {
-	if len(svc.Environment) == 0 {
+	// A service is provisioned when it has infra secrets OR is a mesh member: a
+	// `pki:`-only service still needs a workspace + identity so the host can fetch
+	// the mesh leaf `inforge pki renew` writes under /<svc>/mtls (the identity's
+	// read scope on /<svc> covers it).
+	if len(svc.Environment) == 0 && svc.Pki == "" {
 		return nil, nil
 	}
 
@@ -166,46 +170,55 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 	}
 
 	secretPath := servicePath(svc.Name)
-	infraPath := secretPath + "/infra"
 
-	// Pre-compute the Infisical key for each env var. For vault: sources the key
-	// stored in Infisical is the VaultKey (decoupled from the env var name); for
-	// all other sources the env var name doubles as the Infisical key.
-	keys := sortedStringKeys(svc.Environment)
-	infisicalKeys := make([]string, len(keys))
-	ifaces := make([]any, len(keys))
-	for i, key := range keys {
-		src, _ := validate.ParseSource(svc.Environment[key])
-		if src.Kind == validate.SourceVault {
-			infisicalKeys[i] = src.VaultKey
-		} else {
-			infisicalKeys[i] = key
+	// Infra secrets are written only when the service declares them; a mesh-only
+	// service skips the batch write but still gets an identity below.
+	envMap := map[string]string{}
+	if len(svc.Environment) > 0 {
+		infraPath := secretPath + "/infra"
+		// Pre-compute the Infisical key for each env var. For vault: sources the key
+		// stored in Infisical is the VaultKey (decoupled from the env var name); for
+		// all other sources the env var name doubles as the Infisical key.
+		keys := sortedStringKeys(svc.Environment)
+		infisicalKeys := make([]string, len(keys))
+		ifaces := make([]any, len(keys))
+		for i, key := range keys {
+			src, _ := validate.ParseSource(svc.Environment[key])
+			if src.Kind == validate.SourceVault {
+				infisicalKeys[i] = src.VaultKey
+			} else {
+				infisicalKeys[i] = key
+			}
+			resolved, err := resolveRef(svc.Environment[key], svc.Container, region, all)
+			if err != nil {
+				return nil, fmt.Errorf("resolve ref for service %q secret %q: %w", svc.Name, key, err)
+			}
+			ifaces[i] = resolved
 		}
-		resolved, err := resolveRef(svc.Environment[key], svc.Container, region, all)
-		if err != nil {
-			return nil, fmt.Errorf("resolve ref for service %q secret %q: %w", svc.Name, key, err)
-		}
-		ifaces[i] = resolved
-	}
-	secretsJson := pulumi.All(ifaces...).ApplyT(func(args []any) (string, error) {
-		m := make(map[string]string, len(infisicalKeys))
-		for i, k := range infisicalKeys {
-			m[k] = args[i].(string)
-		}
-		b, err := json.Marshal(m)
-		if err != nil {
-			return "", fmt.Errorf("marshal secrets: %w", err)
-		}
-		return string(b), nil
-	}).(pulumi.StringOutput)
+		secretsJson := pulumi.All(ifaces...).ApplyT(func(args []any) (string, error) {
+			m := make(map[string]string, len(infisicalKeys))
+			for i, k := range infisicalKeys {
+				m[k] = args[i].(string)
+			}
+			b, err := json.Marshal(m)
+			if err != nil {
+				return "", fmt.Errorf("marshal secrets: %w", err)
+			}
+			return string(b), nil
+		}).(pulumi.StringOutput)
 
-	batchName := naming.Resource(env, a.slug, "secrets", svc.Name)
-	if _, err := newInfisicalSecretsBatchResource(
-		ctx, batchName,
-		workspaceId, envToSlug(env), a.clientId, a.clientSecret, a.siteUrl, infraPath,
-		secretsJson,
-	); err != nil {
-		return nil, fmt.Errorf("write infra secrets for service %q: %w", svc.Name, err)
+		batchName := naming.Resource(env, a.slug, "secrets", svc.Name)
+		if _, err := newInfisicalSecretsBatchResource(
+			ctx, batchName,
+			workspaceId, envToSlug(env), a.clientId, a.clientSecret, a.siteUrl, infraPath,
+			secretsJson,
+		); err != nil {
+			return nil, fmt.Errorf("write infra secrets for service %q: %w", svc.Name, err)
+		}
+
+		for i, key := range keys {
+			envMap[key] = "infra/" + infisicalKeys[i]
+		}
 	}
 
 	identityName := naming.Resource(env, a.slug, "identity", svc.Name)
@@ -215,11 +228,6 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("provision identity for service %q: %w", svc.Name, err)
-	}
-
-	envMap := make(map[string]string, len(keys))
-	for i, key := range keys {
-		envMap[key] = "infra/" + infisicalKeys[i]
 	}
 
 	return &types.ServiceSecretsBundle{

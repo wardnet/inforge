@@ -348,31 +348,6 @@ func newPkiRenewCmd(dir *string) *cobra.Command {
 // A global service gets one leaf (scope "global"); a regional service gets one
 // per region (the regional set deploys to every region).
 func runPkiRenew(ctx context.Context, dir, env string) error {
-	store, err := pki.Load(pki.Path(dir, env))
-	if err != nil {
-		if errors.Is(err, pki.ErrNotFound) {
-			return fmt.Errorf("%w — run `inforge pki init %s` first", err, env)
-		}
-		return err
-	}
-	ciIdentity, err := secretstore.IdentityFromEnv()
-	if err != nil {
-		return err
-	}
-	vars, err := loader.LoadVariables(env, dir)
-	if err != nil {
-		return err
-	}
-	regionTable, global, err := loader.LoadRegionTable(env, dir)
-	if err != nil {
-		return err
-	}
-	allRegions := make([]string, 0, len(regionTable))
-	for r := range regionTable {
-		allRegions = append(allRegions, r)
-	}
-	sort.Strings(allRegions)
-
 	globalRes, err := loader.LoadGlobalResources(env, dir)
 	if err != nil {
 		return err
@@ -381,6 +356,45 @@ func runPkiRenew(ctx context.Context, dir, env string) error {
 	if err != nil {
 		return err
 	}
+	count, err := renewMeshCerts(ctx, dir, env, globalRes.Service, regionalRes.Service)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("renewed %d mesh leaf certificate(s) in %s\n", count, env)
+	return nil
+}
+
+// renewMeshCerts mints + writes a fresh leaf (and per-scope trust bundle) for
+// every pki-bearing service in globalSvcs/regionalSvcs, across each service's
+// scopes. Shared by `inforge pki renew` (all services) and `inforge releases
+// deploy` (just the released service, so the first release — and every update —
+// restarts into a provider that already holds the service's leaf). Returns the
+// number of leaves written.
+func renewMeshCerts(ctx context.Context, dir, env string, globalSvcs, regionalSvcs []types.ServiceSpec) (int, error) {
+	store, err := pki.Load(pki.Path(dir, env))
+	if err != nil {
+		if errors.Is(err, pki.ErrNotFound) {
+			return 0, fmt.Errorf("%w — run `inforge pki init %s` first", err, env)
+		}
+		return 0, err
+	}
+	ciIdentity, err := secretstore.IdentityFromEnv()
+	if err != nil {
+		return 0, err
+	}
+	vars, err := loader.LoadVariables(env, dir)
+	if err != nil {
+		return 0, err
+	}
+	regionTable, global, err := loader.LoadRegionTable(env, dir)
+	if err != nil {
+		return 0, err
+	}
+	allRegions := make([]string, 0, len(regionTable))
+	for r := range regionTable {
+		allRegions = append(allRegions, r)
+	}
+	sort.Strings(allRegions)
 
 	// Decrypt each (pki, scope) intermediate at most once per run — many services
 	// in a scope mint from the same one.
@@ -433,41 +447,40 @@ func runPkiRenew(ctx context.Context, dir, env string) error {
 	}
 
 	// Global services: scope "global", region-less slug, creds from the global block.
-	if anyServiceHasPki(globalRes.Service) {
+	if anyServiceHasPki(globalSvcs) {
 		if global == nil {
-			return fmt.Errorf("a global service declares pki but the env has no global providers block")
+			return 0, fmt.Errorf("a global service declares pki but the env has no global providers block")
 		}
 		cID, cSecret, site, org, err := requireInfisicalCreds(global.Providers, "global")
 		if err != nil {
-			return err
+			return 0, err
 		}
 		writer, err := infisical.NewCertWriter(ctx, env, "", cID, cSecret, site, org)
 		if err != nil {
-			return err
+			return 0, err
 		}
-		if err := renewSet(writer, globalRes.Service, pki.ScopeGlobal); err != nil {
-			return err
+		if err := renewSet(writer, globalSvcs, pki.ScopeGlobal); err != nil {
+			return 0, err
 		}
 	}
 	// Regional services: one leaf per region, scope = region, per-region slug + creds.
-	if anyServiceHasPki(regionalRes.Service) {
+	if anyServiceHasPki(regionalSvcs) {
 		for _, region := range allRegions {
 			ar := regionTable[region]
 			cID, cSecret, site, org, err := requireInfisicalCreds(ar.Providers, region)
 			if err != nil {
-				return err
+				return 0, err
 			}
 			writer, err := infisical.NewCertWriter(ctx, env, ar.Slug, cID, cSecret, site, org)
 			if err != nil {
-				return err
+				return 0, err
 			}
-			if err := renewSet(writer, regionalRes.Service, region); err != nil {
-				return err
+			if err := renewSet(writer, regionalSvcs, region); err != nil {
+				return 0, err
 			}
 		}
 	}
-	fmt.Printf("renewed %d mesh leaf certificate(s) in %s\n", count, env)
-	return nil
+	return count, nil
 }
 
 func anyServiceHasPki(services []types.ServiceSpec) bool {

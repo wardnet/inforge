@@ -401,11 +401,14 @@ func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry,
 	bundles := map[string]*types.ServiceSecretsBundle{}
 	provName := reg.SecretsProviderName()
 	for _, svc := range res.Service {
-		if len(svc.Environment) == 0 {
+		// A service needs provisioning when it has infra secrets OR is a mesh
+		// member (pki:): a mesh-only service still needs a workspace + identity so
+		// the host can fetch its leaf (#109).
+		if len(svc.Environment) == 0 && svc.Pki == "" {
 			continue
 		}
 		if provName == "" {
-			return nil, fmt.Errorf("service %q has secrets but region %q has no secrets provider configured", svc.Name, region)
+			return nil, fmt.Errorf("service %q needs a secrets provider (it has secrets or a mesh pki) but region %q has none configured", svc.Name, region)
 		}
 		prov, err := reg.ServiceSecretsProvisioner(provName)
 		if err != nil {
@@ -602,9 +605,24 @@ func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string
 		// write); release extracts the payload into it as root.
 		fmt.Sprintf("sudo install -d -m 0755 %s", iremote.Quote(service.Folder(svc.Name))),
 		iremote.WriteFileScript(service.UnitPath(svc.Name), service.Unit(svc)),
+	)
+	// A mesh member gets a per-service renewal timer that re-projects its leaf and
+	// reload-or-restarts the unit when `inforge pki renew` rotates it.
+	if svc.Pki != "" {
+		steps = append(steps,
+			iremote.WriteFileScript(service.RenewUnitPath(svc.Name), service.RenewService(svc)),
+			iremote.WriteFileScript(service.RenewTimerPath(svc.Name), service.RenewTimer(svc)),
+		)
+	}
+	steps = append(steps,
 		"sudo systemctl daemon-reload",
 		fmt.Sprintf("sudo systemctl enable %s", iremote.Quote(service.UnitName(svc.Name))),
 	)
+	if svc.Pki != "" {
+		steps = append(steps,
+			fmt.Sprintf("sudo systemctl enable --now %s", iremote.Quote(service.RenewTimerName(svc.Name))),
+		)
+	}
 	return strings.Join(steps, "\n")
 }
 
@@ -651,7 +669,10 @@ func bootstrapDownloadStep(inforgeVersion string) string {
 func serviceDeprovisionScript(svc types.ServiceSpec) string {
 	return strings.Join([]string{
 		fmt.Sprintf("sudo systemctl disable --now %s 2>/dev/null || true", iremote.Quote(service.UnitName(svc.Name))),
-		fmt.Sprintf("sudo rm -f %s", iremote.Quote(service.UnitPath(svc.Name))),
+		// The renewal timer/oneshot exist only for mesh services; disable/remove
+		// them best-effort regardless (rm -f and `|| true` are no-ops when absent).
+		fmt.Sprintf("sudo systemctl disable --now %s 2>/dev/null || true", iremote.Quote(service.RenewTimerName(svc.Name))),
+		fmt.Sprintf("sudo rm -f %s %s %s", iremote.Quote(service.UnitPath(svc.Name)), iremote.Quote(service.RenewTimerPath(svc.Name)), iremote.Quote(service.RenewUnitPath(svc.Name))),
 		"sudo systemctl daemon-reload",
 	}, "\n")
 }

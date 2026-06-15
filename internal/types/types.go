@@ -148,12 +148,13 @@ const (
 
 // ServiceSpec is one service resource — a workload hosted on a compute.
 type ServiceSpec struct {
-	Name      string            `yaml:"name"`
-	Container string            `yaml:"container"`
-	Host      string            `yaml:"host"`              // FK -> bare compute name (e.g. "bridge", not "bridge-01"); kind must be vm
-	Type      string            `yaml:"type"`              // "raw" (built) | "container" (reserved)
-	User      string            `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
-	Pki       string            `yaml:"pki"`               // FK -> two-tier (mesh) PKI name in pki.enc.yaml this service is a leaf member of (required)
+	Name        string            `yaml:"name"`
+	Container   string            `yaml:"container"`
+	Host        string            `yaml:"host"`              // FK -> bare compute name (e.g. "bridge", not "bridge-01"); kind must be vm
+	Type        string            `yaml:"type"`              // "raw" (built) | "container" (reserved)
+	User        string            `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
+	Pki         string            `yaml:"pki"`               // FK -> two-tier (mesh) PKI name in pki.enc.yaml this service is a leaf member of (required)
+	Reload      string            `yaml:"reload,omitempty"`  // optional ExecReload command to apply a renewed mesh leaf without downtime (e.g. "/bin/kill -HUP $MAINPID"); absent -> renewal restarts the unit
 	Ingress     []IngressSpec     `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx
 	Environment map[string]string `yaml:"-"`                 // env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); loaded from the service's sibling environment.yaml, not the manifest; the secrets provider is derived from the region, not the service
 }

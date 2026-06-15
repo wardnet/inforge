@@ -34,6 +34,35 @@ func TestFolderAndUnitName(t *testing.T) {
 	assert.Equal(t, "wardnet-api.service", UnitName("api"))
 }
 
+func TestUnitRuntimeDirectoryAndReload(t *testing.T) {
+	// RuntimeDirectory is always present (the bootstrapper projects mesh PEMs into
+	// it); ExecReload only when the service declares reload:.
+	withReload := Unit(types.ServiceSpec{Name: "api", User: "api", Reload: "/bin/kill -HUP $MAINPID"})
+	assert.Contains(t, withReload, "RuntimeDirectory=wardnet/api")
+	// 0700 so the dir holding the leaf key is owner-only (the leaf key is 0400).
+	assert.Contains(t, withReload, "RuntimeDirectoryMode=0700")
+	assert.Contains(t, withReload, "ExecReload=/bin/kill -HUP $MAINPID")
+
+	noReload := Unit(types.ServiceSpec{Name: "api", User: "api"})
+	assert.Contains(t, noReload, "RuntimeDirectory=wardnet/api")
+	assert.NotContains(t, noReload, "ExecReload")
+}
+
+func TestRenewUnits(t *testing.T) {
+	svc := types.ServiceSpec{Name: "api"}
+	s := RenewService(svc)
+	assert.Contains(t, s, "Type=oneshot")
+	assert.Contains(t, s, "ExecStart="+BootstrapBin+" project "+DescriptorDir("api"))
+
+	tmr := RenewTimer(svc)
+	assert.Contains(t, tmr, "OnCalendar=daily")
+	assert.Contains(t, tmr, "WantedBy=timers.target")
+
+	assert.Equal(t, "wardnet-api-renew.service", RenewUnitName("api"))
+	assert.Equal(t, "wardnet-api-renew.timer", RenewTimerName("api"))
+	assert.Equal(t, "/run/wardnet/api", RuntimeDir("api"))
+}
+
 func TestDescriptorDirAndExecPath(t *testing.T) {
 	assert.Equal(t, "/etc/wardnet/services/api", DescriptorDir("api"))
 	assert.Equal(t, "/srv/wardnet/api/run", ExecPath("api"))

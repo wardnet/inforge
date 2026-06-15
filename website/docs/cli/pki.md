@@ -78,9 +78,31 @@ it is safe to run while your working tree has un-shipped infra changes. Every ru
 already exist — run `inforge deploy` for the environment first; renew adopts it, never creates it.
 :::
 
-Renewal is **non-disruptive**: a running service keeps its in-memory certificate until the host
-re-projects the new leaf (the per-host projection lands in a later slice), so renewing does not restart
-or interrupt services.
+## How a renewed leaf reaches a running service
+
+Each mesh service gets a **per-service systemd timer** (`wardnet-<svc>-renew.timer`) installed at deploy.
+It runs `inforge-bootstrap project` daily, which re-fetches the current leaf from the provider into the
+service's tmpfs `RuntimeDirectory` and, **only if the leaf changed**, applies it:
+
+- If the service declares a [`reload:`](/resources/service) command, the timer **reloads** the unit
+  (`systemctl reload`) — **no downtime**.
+- Otherwise it **restarts** the unit (a brief interruption) — the only universally-safe way to pick up
+  a new certificate.
+
+So renewal is hands-off: `inforge pki renew` writes the new leaf to the provider, and each host converges
+on its own within the timer interval (well inside the 90-day TTL), with no CLI→host connection required.
+At boot, the bootstrapper projects the leaf the same way before starting the service. Leaf private keys
+live only in tmpfs (RAM) for the life of a boot — never written to persistent disk.
+
+### The leaf is minted at release time, not just on the timer
+
+A service only starts running on its **first `inforge releases deploy`** (deploy provisions the unit;
+the release ships the code the unit runs). Because the boot path projects whatever the provider holds,
+that first start would otherwise crash-loop until the daily renew timer first fired. To close the gap,
+`inforge releases deploy` mints the released service's leaf **before** it restarts the unit — so the
+restart always lands a fresh leaf. It runs from the infra repo, so it holds the same `INFORGE_SECRETS_KEY`
+as `inforge deploy` and signs from the scope intermediate, reusing the same minting core as `inforge pki
+renew` (scoped to just the released service). Non-mesh services (no `pki:`) skip this step.
 
 ## The store file
 

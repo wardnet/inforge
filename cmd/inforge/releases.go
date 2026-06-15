@@ -14,22 +14,24 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/deployment"
+	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/release"
 	"github.com/wardnet/inforge/internal/service"
+	"github.com/wardnet/inforge/internal/types"
 )
 
 // newReleasesCmd is the `inforge releases` group: push builds + uploads an
 // artifact to the R2 release store and prunes; deploy ships a stored SHA to the
 // host(s) and records it in the per-env manifest; list reads that manifest. See
 // ADR-0016.
-func newReleasesCmd(configPath *string) *cobra.Command {
+func newReleasesCmd(configPath, dir *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "releases",
 		Short: "Manage service release artifacts (R2 store + per-env manifest)",
 	}
 	cmd.AddCommand(
 		newReleasesPushCmd(configPath),
-		newReleasesDeployCmd(configPath),
+		newReleasesDeployCmd(configPath, dir),
 		newReleasesListCmd(configPath),
 	)
 	return cmd
@@ -109,7 +111,7 @@ func runReleasesPush(ctx context.Context, configPath, env, svc, sha, deployDir s
 
 // --- releases deploy ----------------------------------------------------------
 
-func newReleasesDeployCmd(configPath *string) *cobra.Command {
+func newReleasesDeployCmd(configPath, dir *string) *cobra.Command {
 	var svc, sha, deployDir, stackConfig, sshKeyPath string
 	var dryRun bool
 	cmd := &cobra.Command{
@@ -119,7 +121,7 @@ func newReleasesDeployCmd(configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runReleasesDeploy(cmd.Context(), *configPath, args[0], svc, sha, deployDir, stackConfig, sshKeyPath, dryRun)
+			return runReleasesDeploy(cmd.Context(), *configPath, *dir, args[0], svc, sha, deployDir, stackConfig, sshKeyPath, dryRun)
 		},
 	}
 	cmd.Flags().StringVarP(&svc, "service", "s", "", "service name to deploy (required)")
@@ -132,7 +134,7 @@ func newReleasesDeployCmd(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func runReleasesDeploy(ctx context.Context, configPath, env, svc, sha, deployDir, stackConfigPath, sshKeyPath string, dryRun bool) error {
+func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, deployDir, stackConfigPath, sshKeyPath string, dryRun bool) error {
 	sha, err := resolveSHA(sha)
 	if err != nil {
 		return err
@@ -177,6 +179,16 @@ func runReleasesDeploy(ctx context.Context, configPath, env, svc, sha, deployDir
 	if dryRun {
 		fmt.Println("(dry-run: artifact present, skipping delivery)")
 		return nil
+	}
+
+	// A mesh service's leaf must already live in the provider before the unit
+	// restarts into it: the boot path projects whatever the provider holds, so
+	// the first release (and every update) re-mints here so the restart lands a
+	// fresh leaf rather than crash-looping until the daily renew timer fires.
+	// `inforge releases deploy` runs from the infra repo, so it holds the same
+	// INFORGE_SECRETS_KEY as `inforge deploy` and can sign from the intermediate.
+	if err := mintReleasedServiceLeaf(ctx, dir, env, svc); err != nil {
+		return err
 	}
 
 	sshKeyPath, err = resolveSSHKey(sshKeyPath)
@@ -448,6 +460,44 @@ func resolveDeployTargets(ctx context.Context, projCfg projectConfig, env, platf
 		return nil, fmt.Errorf("service %q not found in deployDescriptor for env %q — is it defined as a ServiceSpec in the infra resources?", svc, env)
 	}
 	return targets, nil
+}
+
+// mintReleasedServiceLeaf mints a fresh mesh leaf for the released service (when
+// it joins a mesh) and writes it to the secrets provider before delivery, so the
+// unit restarts into a provider that already holds the leaf the boot path will
+// project. A non-mesh service (no `pki:`) is a no-op. It reuses renewMeshCerts —
+// the same minting core as `inforge pki renew` — scoped to just this service.
+func mintReleasedServiceLeaf(ctx context.Context, dir, env, svc string) error {
+	globalRes, err := loader.LoadGlobalResources(env, dir)
+	if err != nil {
+		return err
+	}
+	regionalRes, err := loader.LoadResources(env, dir)
+	if err != nil {
+		return err
+	}
+	global := filterServicesByName(globalRes.Service, svc)
+	regional := filterServicesByName(regionalRes.Service, svc)
+	if !anyServiceHasPki(global) && !anyServiceHasPki(regional) {
+		return nil // not a mesh service — nothing to mint
+	}
+	count, err := renewMeshCerts(ctx, dir, env, global, regional)
+	if err != nil {
+		return fmt.Errorf("mint mesh leaf for %s: %w", svc, err)
+	}
+	fmt.Printf("minted %d mesh leaf certificate(s) for %s\n", count, svc)
+	return nil
+}
+
+// filterServicesByName returns the services whose Name matches svc (0 or 1).
+func filterServicesByName(services []types.ServiceSpec, svc string) []types.ServiceSpec {
+	var out []types.ServiceSpec
+	for _, s := range services {
+		if s.Name == svc {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // mustRequire marks flags required, panicking on the impossible misconfiguration
