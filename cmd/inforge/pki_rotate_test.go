@@ -190,10 +190,14 @@ func TestRunPkiRotateIntermediateRejectedDuringRootOverlap(t *testing.T) {
 	// old-key leaves the overlap protects — both are refused until --finalize.
 	require.ErrorContains(t, runPkiRotateIntermediate(dir, "prd", "wardnet-mesh", "global"), "root overlap")
 	require.ErrorContains(t, runPkiRecoverIntermediate(dir, "prd", "wardnet-mesh", "global"), "root overlap")
+	// Minting a brand-new scope mid-overlap is refused too — it would sign under
+	// the new root only, invisible to consumers still on the old root.
+	require.ErrorContains(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "us-east-1"), "root overlap")
 
-	// After finalizing, intermediate rotation is allowed again.
+	// After finalizing, intermediate mint/rotation is allowed again.
 	require.NoError(t, runPkiRotateRoot(dir, "prd", "wardnet-mesh", true))
 	require.NoError(t, runPkiRotateIntermediate(dir, "prd", "wardnet-mesh", "global"))
+	require.NoError(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "us-east-1"))
 }
 
 func TestRunPkiRotateRootFinalizeRequiresRootIdentity(t *testing.T) {

@@ -242,6 +242,13 @@ func runPkiIntermediate(dir, env, name, scope string) error {
 	if _, exists := p.Intermediates[scope]; exists {
 		return fmt.Errorf("PKI %q already has an intermediate for scope %q — rotate it with `inforge pki rotate %s %s --intermediate %s`", name, scope, env, name, scope)
 	}
+	// Mid root-overlap the cold root is the NEW root, so a first-mint here would
+	// sign the scope under the new root only — invisible to consumers still on
+	// the old root, with no PreviousIntermediates counterpart. Refuse it for the
+	// same reason re-mint is refused; the operator finalizes the rotation first.
+	if len(p.PreviousRoots) > 0 {
+		return fmt.Errorf("PKI %q is in a root overlap — finalize it (`inforge pki rotate %s %s --root --finalize`) before minting a new scope intermediate", name, env, name)
+	}
 
 	mat, err := mintScopeIntermediate(store, p, name, scope)
 	if err != nil {
@@ -461,6 +468,23 @@ func mintScopeIntermediate(store *pki.Store, p pki.PKI, name, scope string) (pki
 	return pki.Material{Cert: certPEM, Key: ciphertext}, nil
 }
 
+// requireRootCustody proves the caller holds the offline cold-root identity by
+// decrypting the PKI's current root key with it. It gates every root-custody
+// decision — both starting a dual-root overlap and finalizing it — so the same
+// check can't drift between the two paths: a weaker finalize gate would let CI
+// or a stale checkout retire the old root the begin step minted under a stricter
+// one.
+func requireRootCustody(p pki.PKI, name string) error {
+	rootIdentity, err := pki.RootIdentityFromEnv()
+	if err != nil {
+		return err
+	}
+	if _, err := secretstore.Decrypt(p.Root.Key, rootIdentity); err != nil {
+		return fmt.Errorf("decrypt current root key for PKI %q (is %s the offline root identity?): %w", name, pki.RootIdentityEnvVar, err)
+	}
+	return nil
+}
+
 // runPkiRotateRoot performs a dual-root rotation of a two-tier PKI's cold root.
 //
 // Without --finalize it BEGINS the overlap: it verifies the caller holds the
@@ -500,12 +524,8 @@ func runPkiRotateRoot(dir, env, name string, finalize bool) error {
 		// Dropping the old root is a root-custody decision, just like starting
 		// the overlap — gate it on the offline identity so CI (or a stale repo
 		// checkout) cannot retire the old root before consumers have migrated.
-		rootIdentity, err := pki.RootIdentityFromEnv()
-		if err != nil {
+		if err := requireRootCustody(p, name); err != nil {
 			return err
-		}
-		if _, err := secretstore.Decrypt(p.Root.Key, rootIdentity); err != nil {
-			return fmt.Errorf("decrypt current root key for PKI %q (is %s the offline root identity?): %w", name, pki.RootIdentityEnvVar, err)
 		}
 		p.PreviousRoots = nil
 		p.PreviousIntermediates = nil
@@ -523,12 +543,8 @@ func runPkiRotateRoot(dir, env, name string, finalize bool) error {
 	}
 
 	// Custody gate: only the holder of the current cold root may rotate it.
-	rootIdentity, err := pki.RootIdentityFromEnv()
-	if err != nil {
+	if err := requireRootCustody(p, name); err != nil {
 		return err
-	}
-	if _, err := secretstore.Decrypt(p.Root.Key, rootIdentity); err != nil {
-		return fmt.Errorf("decrypt current root key for PKI %q (is %s the offline root identity?): %w", name, pki.RootIdentityEnvVar, err)
 	}
 
 	// Mint the new cold root, encrypted to the same offline recipient.

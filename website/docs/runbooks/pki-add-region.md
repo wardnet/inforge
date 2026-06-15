@@ -45,3 +45,6 @@ regional service deploys to all regions, so each needs an intermediate).
   region→global and intra-region traffic is allowed.
 - To *remove* a region, drop it from `regions.yaml` and deploy; the now-orphaned intermediate can be
   left in the store (it signs nothing) or pruned in a follow-up commit.
+- Minting a region's intermediate is **refused during a [root overlap](/runbooks/pki-rotate-root)** —
+  it would chain only to the new root, invisible to consumers still on the old one. Finalize the root
+  rotation first, then add the region.
