@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -350,13 +349,6 @@ func resolveRef(source, container, region string, all types.AllOutputs) (pulumi.
 		return pulumi.ToSecret(pulumi.String(val)).(pulumi.StringOutput), nil
 
 	case validate.SourceRef:
-		// A global/ prefix redirects the lookup to the global slot, independent of
-		// the consuming service's region.
-		name := src.RefName
-		if rest, ok := strings.CutPrefix(src.RefName, "global/"); ok {
-			region = "global"
-			name = rest
-		}
 		switch src.RefType {
 		case "database":
 			// A database exposes no referenceable outputs (ADR-0025): the
@@ -369,18 +361,13 @@ func resolveRef(source, container, region string, all types.AllOutputs) (pulumi.
 			)
 
 		case "compute":
-			regionMap, ok := all.Compute[region]
-			if !ok {
+			// Shared global/ redirect (a global/ prefix resolves against the global
+			// slot, independent of the consuming service's region).
+			comp, refRegion, name, found := types.ResolveScoped(all.Compute, region, src.RefName)
+			if !found {
 				return pulumi.StringOutput{}, fmt.Errorf(
-					"resolveRef %q: no compute outputs for region %q (available: %v)",
-					source, region, sortedKeys(all.Compute),
-				)
-			}
-			comp, ok := regionMap[name]
-			if !ok {
-				return pulumi.StringOutput{}, fmt.Errorf(
-					"resolveRef %q: no compute instance %q in region %q (available: %v)",
-					source, name, region, sortedStringKeys(regionMap),
+					"resolveRef %q: no compute instance %q in region %q",
+					source, name, refRegion,
 				)
 			}
 			if src.RefOutput != "publicIp" {
@@ -403,14 +390,6 @@ func resolveRef(source, container, region string, all types.AllOutputs) (pulumi.
 	}
 }
 
-func sortedKeys[V any](m map[string]map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
 
 func sortedStringKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))

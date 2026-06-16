@@ -11,8 +11,11 @@ import (
 
 // dbValueFields are the value fields a Database Grant publishes. The connection
 // material is the same for both permissions — ro and rw differ in the Postgres
-// privileges granted to the per-service user, not in the fields delivered.
-var dbValueFields = []string{"USER", "PASSWORD", "HOST", "PORT", "DBNAME"}
+// privileges granted to the per-service user, not in the fields delivered. URL is
+// the role's full, already-encoded connection URI: compose a DSN with `{URL}`
+// rather than hand-assembling `{USER}:{PASSWORD}@...`, which would not URL-encode a
+// password containing reserved characters.
+var dbValueFields = []string{"USER", "PASSWORD", "HOST", "PORT", "DBNAME", "URL"}
 
 // Database is the Grantable for a managed database resource. A Grant mints a
 // scoped per-service DB role (applying the ro/rw Postgres GRANTs) via the bound
@@ -56,5 +59,6 @@ func (d Database) Grant(ctx *pulumi.Context, _ string, perm Permission, _, _ str
 		"HOST":     f.Host,
 		"PORT":     f.Port,
 		"DBNAME":   f.DBName,
+		"URL":      f.URL,
 	}}, nil
 }

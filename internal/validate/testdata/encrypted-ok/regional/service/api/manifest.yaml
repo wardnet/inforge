@@ -19,4 +19,4 @@ grants:
   - resource: database/bridge
     permission: rw
     outputs:
-      DATABASE_URL: "postgresql://{USER}:{PASSWORD}@{HOST}:{PORT}/{DBNAME}"
+      DATABASE_URL: "{URL}"

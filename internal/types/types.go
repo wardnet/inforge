@@ -9,6 +9,7 @@ package types
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"gopkg.in/yaml.v3"
@@ -251,14 +252,18 @@ type DBRoleProvisioner interface {
 	ProvisionRole(ctx *pulumi.Context, roleName, permission string) (DBRoleFields, error)
 }
 
-// DBRoleFields are the connection value fields a database grant publishes (the
-// USER/PASSWORD/HOST/PORT/DBNAME a service composes into its outputs templates).
+// DBRoleFields are the connection value fields a database grant publishes. The
+// discrete fields are the literal (decoded) values; URL is the role's full
+// connection URI exactly as the provider returns it (already URL-encoded), so a
+// grant template can compose a DSN with `{URL}` without re-encoding a password
+// that contains URL-reserved characters.
 type DBRoleFields struct {
 	User     pulumi.StringOutput
 	Password pulumi.StringOutput
 	Host     pulumi.StringOutput
 	Port     pulumi.StringOutput
 	DBName   pulumi.StringOutput
+	URL      pulumi.StringOutput
 }
 
 // AllOutputs collects per-region outputs so the secrets backend can resolve
@@ -271,6 +276,26 @@ type AllOutputs struct {
 	// (ADR-0017). Region-independent — the store is env-scoped. Nil when the
 	// environment declares no vault: sources.
 	Encrypted map[string]map[string]string
+}
+
+// ResolveScoped looks up name in a region-keyed output map (Compute/Database),
+// honoring the one allowed cross-region form: a "global/" name prefix redirects
+// the lookup to the region-less "global" slot, independent of the consuming
+// service's region. It returns the value, the resolved (region, bareName) for
+// error messages, and whether it was found. This is the single source of the
+// global/ redirect rule — both the Source DSL (ref:) and grant target resolution
+// MUST use it so they resolve a global resource identically (ADR-0025).
+func ResolveScoped[V any](m map[string]map[string]V, region, name string) (value V, resolvedRegion, bareName string, found bool) {
+	resolvedRegion, bareName = region, name
+	if rest, ok := strings.CutPrefix(name, "global/"); ok {
+		resolvedRegion, bareName = "global", rest
+	}
+	inner, ok := m[resolvedRegion]
+	if !ok {
+		return value, resolvedRegion, bareName, false
+	}
+	value, ok = inner[bareName]
+	return value, resolvedRegion, bareName, ok
 }
 
 // NetworkProvider creates a network for one spec in one region. Returns a map

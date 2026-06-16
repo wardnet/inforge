@@ -196,7 +196,8 @@ output at all: `ref:database/<name>.…` is rejected (there is no non-credential
 the `connectionUrl` was removed in slice B of #117). This keeps the database's owner/admin credential
 off every consuming service. The grant mints a per-service Postgres role (`ro` = read-only, `rw` =
 read/write **plus** `CREATE` on schema `public` so the service owns its own migrations) and publishes
-the `{USER,PASSWORD,HOST,PORT,DBNAME}` value fields.
+the `{USER,PASSWORD,HOST,PORT,DBNAME}` value fields plus `{URL}` (the role's full, already-URL-encoded
+connection URI — compose a DSN with `{URL}`, not a hand-assembled `{USER}:{PASSWORD}@…`).
 
 ### Providers
 

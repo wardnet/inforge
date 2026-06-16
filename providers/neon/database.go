@@ -83,6 +83,7 @@ type neonRoleResource struct {
 	Host     pulumi.StringOutput `pulumi:"host"`
 	Port     pulumi.StringOutput `pulumi:"port"`
 	DBName   pulumi.StringOutput `pulumi:"dbName"`
+	URL      pulumi.StringOutput `pulumi:"url"`
 }
 
 func newNeonRoleResource(
@@ -133,6 +134,7 @@ func (p *neonRoleProvisioner) ProvisionRole(
 		Host:     res.Host,
 		Port:     res.Port,
 		DBName:   res.DBName,
+		URL:      res.URL,
 	}, nil
 }
 

@@ -59,6 +59,7 @@ func (m *dbMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Pr
 		outputs["host"] = resource.NewStringProperty("host")
 		outputs["port"] = resource.NewStringProperty("5432")
 		outputs["dbName"] = resource.NewStringProperty("appdb")
+		outputs["url"] = resource.NewStringProperty("postgresql://svc-role:svc-pass@host:5432/appdb")
 	}
 	return args.Name + "-id", outputs, nil
 }
@@ -155,6 +156,7 @@ func (m *namingCapture) NewResource(args pulumi.MockResourceArgs) (string, resou
 		outputs["host"] = resource.NewStringProperty("host")
 		outputs["port"] = resource.NewStringProperty("5432")
 		outputs["dbName"] = resource.NewStringProperty("appdb")
+		outputs["url"] = resource.NewStringProperty("postgresql://svc-role:svc-pass@host:5432/appdb")
 	}
 	return args.Name + "-id", outputs, nil
 }

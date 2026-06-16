@@ -442,21 +442,16 @@ func resolveDatabaseGrants(ctx *pulumi.Context, svc types.ServiceSpec, all types
 	out := map[string]pulumi.StringOutput{}
 	for _, g := range svc.Grants {
 		typ, name, ok := strings.Cut(g.Resource, "/")
+		// Only value-field (database) grants are materialized here. File-field
+		// grants (pki/*, slice C) are projected via the descriptor files: path, not
+		// the secrets batch — their materialization is a separate seam, not this
+		// loop. Unknown types are already rejected by inforge validate.
 		if !ok || typ != "database" {
-			continue // pki/* grants are materialized in slice C; unknowns caught by validate.
+			continue
 		}
-		// Resolve the target the same way resolveRef does: a global/ prefix redirects
-		// to the global slot regardless of the consuming service's region.
-		refRegion, dbName := region, name
-		if rest, isGlobal := strings.CutPrefix(name, "global/"); isGlobal {
-			refRegion, dbName = "global", rest
-		}
-		regionMap, ok := all.Database[refRegion]
-		if !ok {
-			return nil, fmt.Errorf("grant %q: no database outputs for region %q", g.Resource, refRegion)
-		}
-		db, ok := regionMap[dbName]
-		if !ok {
+		// Resolve the target the same way ref: does (shared global/ redirect).
+		db, refRegion, dbName, found := types.ResolveScoped(all.Database, region, name)
+		if !found {
 			return nil, fmt.Errorf("grant %q: database %q not found in region %q", g.Resource, dbName, refRegion)
 		}
 		if db.RoleProvisioner == nil {
@@ -489,11 +484,20 @@ func interpolateGrantOutput(tmpl string, values map[string]pulumi.StringOutput) 
 	if err != nil {
 		return pulumi.StringOutput{}, err
 	}
-	names := make([]string, 0, len(values))
-	for n := range values {
-		names = append(names, n)
+	// Await only the fields this template references (deduped, stable order) —
+	// not the whole value set — so an unreferenced field never gates this output.
+	seen := map[string]bool{}
+	var names []string
+	for _, f := range t.Fields() {
+		if seen[f] {
+			continue
+		}
+		seen[f] = true
+		if _, ok := values[f]; !ok {
+			return pulumi.StringOutput{}, fmt.Errorf("field {%s} is not published by the grant", f)
+		}
+		names = append(names, f)
 	}
-	sort.Strings(names)
 	outs := make([]any, len(names))
 	for i, n := range names {
 		outs[i] = values[n]

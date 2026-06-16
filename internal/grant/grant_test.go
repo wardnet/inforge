@@ -25,6 +25,7 @@ func (f *fakeRoleProvisioner) ProvisionRole(_ *pulumi.Context, roleName, permiss
 		Host:     pulumi.String("h").ToStringOutput(),
 		Port:     pulumi.String("5432").ToStringOutput(),
 		DBName:   pulumi.String("db").ToStringOutput(),
+		URL:      pulumi.String("postgresql://u:p@h:5432/db").ToStringOutput(),
 	}, nil
 }
 
@@ -53,7 +54,7 @@ func TestDatabaseFieldNames(t *testing.T) {
 	// the DB user's privileges, not the delivered fields.
 	for _, perm := range []Permission{PermissionRO, PermissionRW} {
 		values, files := Database{}.FieldNames(perm)
-		assert.Equal(t, []string{"USER", "PASSWORD", "HOST", "PORT", "DBNAME"}, values, "perm %s", perm)
+		assert.Equal(t, []string{"USER", "PASSWORD", "HOST", "PORT", "DBNAME", "URL"}, values, "perm %s", perm)
 		assert.Empty(t, files, "perm %s", perm)
 	}
 }
@@ -82,7 +83,7 @@ func TestDatabaseGrantMapsFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "wardnet-prd-use1-dbrole-api-main", fp.gotRole, "consumer-scoped role name is threaded through")
 	assert.Equal(t, "rw", fp.gotPerm)
-	for _, k := range []string{"USER", "PASSWORD", "HOST", "PORT", "DBNAME"} {
+	for _, k := range []string{"USER", "PASSWORD", "HOST", "PORT", "DBNAME", "URL"} {
 		_, ok := f.Values[k]
 		assert.True(t, ok, "value field %s published", k)
 	}

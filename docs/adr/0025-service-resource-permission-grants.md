@@ -233,7 +233,19 @@ interpolates each grant's `outputs:` over the returned `Fields`, emitting value 
   granting one global database never collide.
 - **Threading:** the role-provisioning capability rides on `DatabaseOutputs.RoleProvisioner` through
   `AllOutputs` (not adapter-instance memory), because the global registry is not shared with the
-  regional service loop.
+  regional service loop. The `global/` redirect is the single shared `types.ResolveScoped` helper used
+  by both `ref:` resolution and grant target resolution, so they cannot drift.
+- **Published value fields:** `USER`, `PASSWORD`, `HOST`, `PORT`, `DBNAME` (literal/decoded values) plus
+  **`URL`** — the role's full, already-URL-encoded connection URI. Compose a DSN with `{URL}`, not a
+  hand-assembled `{USER}:{PASSWORD}@…`, which would not URL-encode a password containing reserved
+  characters. Only one grant per resource target is allowed (a duplicate target would collide on one
+  per-service role; `rw` already subsumes `ro`).
+- **Role lifecycle:** the `NeonRole` resource ignores drift in the (transient) owner connection URI and
+  API key, so a non-byte-stable Neon connection string never churns every consumer role. A `permission`
+  change is a replace (drop + re-mint, rotating the role password) — acceptable for a short-lived
+  per-service role, since `inforge releases deploy` restarts the unit and re-fetches. Delete is
+  best-effort on the SQL cleanup (REASSIGN/DROP OWNED) and always proceeds to the control-plane role
+  drop, so a suspended endpoint at destroy time does not wedge teardown.
 
 ## Status
 

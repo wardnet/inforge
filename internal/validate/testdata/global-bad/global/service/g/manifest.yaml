@@ -12,4 +12,4 @@ grants:
   - resource: database/regionaldb
     permission: ro
     outputs:
-      DATABASE_URL: "postgresql://{USER}:{PASSWORD}@{HOST}:{PORT}/{DBNAME}"
+      DATABASE_URL: "{URL}"

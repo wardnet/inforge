@@ -21,6 +21,7 @@ func (p *recordingProvisioner) ProvisionRole(_ *pulumi.Context, roleName, permis
 		Host:     pulumi.String("h").ToStringOutput(),
 		Port:     pulumi.String("5432").ToStringOutput(),
 		DBName:   pulumi.String("db").ToStringOutput(),
+		URL:      pulumi.String("postgresql://u:p@h:5432/db").ToStringOutput(),
 	}, nil
 }
 

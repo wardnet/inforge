@@ -1149,6 +1149,11 @@ func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
 	// name defined by two grants is reported (the descriptor merges them into one
 	// env namespace alongside environment.yaml).
 	grantEnvNames := map[string]string{}
+	// seenTargets rejects two grants on the same resource: each grant mints a
+	// resource (e.g. a per-service DB role named for the (service, target) pair), so
+	// a duplicate target would collide on one provider resource at deploy. One grant
+	// per target — rw already subsumes ro.
+	seenTargets := map[string]bool{}
 	for gi := range s.Grants {
 		g := s.Grants[gi]
 		label := fmt.Sprintf("grants[%d]", gi)
@@ -1158,6 +1163,11 @@ func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
 			errs = append(errs, fmt.Sprintf("%s.resource: %q must be \"<type>/<name>\" (e.g. database/main)", label, g.Resource))
 			continue
 		}
+		if seenTargets[g.Resource] {
+			errs = append(errs, fmt.Sprintf("%s.resource: %q is granted more than once; declare a single grant per resource", label, g.Resource))
+			continue
+		}
+		seenTargets[g.Resource] = true
 		grantable, supported := grant.For(typ)
 		if !supported {
 			errs = append(errs, fmt.Sprintf("%s.resource: %q is not a grantable type (want database/* or pki/*)", label, g.Resource))

@@ -20,7 +20,7 @@ grants:
   - resource: database/bridge
     permission: rw
     outputs:
-      TENANT_DB_URL: "{USER}:{PASSWORD}@{HOST}:{PORT}/{DBNAME}"
+      TENANT_DB_URL: "{URL}"
   # A verify (ro) grant on a root-only PKI resource: the CA cert path (file field).
   - resource: pki/daemon
     permission: ro

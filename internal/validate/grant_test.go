@@ -80,6 +80,10 @@ func TestCheckGrantsErrors(t *testing.T) {
 		{"template parse error", nil, []types.GrantSpec{{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"X": "{USER"}}}, "unbalanced"},
 		{"literal-only template (dropped braces)", nil, []types.GrantSpec{{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"X": "static"}}}, "interpolates no field"},
 		{"whitespace-only template", nil, []types.GrantSpec{{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"X": " "}}}, "interpolates no field"},
+		{"duplicate grant target", nil, []types.GrantSpec{
+			{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"RO_URL": "{URL}"}},
+			{Resource: "database/main", Permission: "rw", Outputs: map[string]string{"RW_URL": "{URL}"}},
+		}, "granted more than once"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

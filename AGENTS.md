@@ -188,7 +188,8 @@ is now rejected — DB credentials flow only through grants). slice C = the PKI 
 - **`internal/grant`** is the abstraction. `Grantable.FieldNames(perm) (values, files)` is
   **credential- and instance-independent** (keyed by resource *type* + permission) — the validator calls
   it on a zero-value Grantable from `grant.For(type)`, so grant validation is real without building the
-  providers. `Database` publishes value fields `{USER,PASSWORD,HOST,PORT,DBNAME}` (same for ro/rw); a
+  providers. `Database` publishes value fields `{USER,PASSWORD,HOST,PORT,DBNAME,URL}` (same for ro/rw;
+  `{URL}` is the already-encoded connection URI — prefer it for DSN composition); a
   `PKIResource` publishes file fields `{CERT}` for verify (ro) and `{CERT,KEY}` for issue (rw).
   `ParseTemplate`/`Template.{Fields,HasLiteral,Interpolate}` are the shared `{FIELD}` machinery.
 - **A value field** composes a string secret (the ADR-0010 env-secret path); **a file field** resolves
