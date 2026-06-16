@@ -33,9 +33,9 @@ const (
 type Source struct {
 	Kind SourceKind
 	// Ref fields (Kind == SourceRef).
-	RefType   string // "database" | "compute"
+	RefType   string // "database" | "compute" (database refs are rejected — credentials flow via grants)
 	RefName   string // resource name (compute uses an expanded specKey)
-	RefOutput string // output token, e.g. "connectionUrl" | "publicIp"
+	RefOutput string // output token, e.g. "publicIp" (compute); a database exposes none
 	// EnvName field (Kind == SourceEnv): the environment variable name.
 	EnvName string
 	// VaultKey field (Kind == SourceVault): key name in the encrypted store.

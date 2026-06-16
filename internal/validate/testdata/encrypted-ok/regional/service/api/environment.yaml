@@ -1,4 +1,3 @@
-DATABASE_URL: "ref:database/bridge.connectionUrl"
 SERVER_IP: "ref:compute/bridge-01.publicIp"
 CF_TOKEN: "env:CLOUDFLARE_API_TOKEN"
 API_TOKEN: "vault:API_TOKEN"

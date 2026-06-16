@@ -9,6 +9,7 @@ package types
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"gopkg.in/yaml.v3"
@@ -230,9 +231,39 @@ type ComputeOutputs struct {
 	PublicIP pulumi.StringOutput
 }
 
-// DatabaseOutputs are the values a DatabaseProvider returns after creating a database.
+// DatabaseOutputs are the values a DatabaseProvider returns after creating a
+// database. A database exposes NO credential-bearing ref output (ADR-0025): DB
+// credentials flow only through a grant, which mints a scoped per-service role via
+// RoleProvisioner. ref:database/* is rejected. RoleProvisioner is bound to this one
+// database; it is threaded through AllOutputs so a grant resolves its target the
+// same way ref: does, including the cross-region global/ redirect.
 type DatabaseOutputs struct {
-	ConnectionURL pulumi.StringOutput
+	RoleProvisioner DBRoleProvisioner
+}
+
+// DBRoleProvisioner mints a scoped per-service database role and applies its ro/rw
+// privileges, returning the role's connection value fields. It is set on a
+// DatabaseOutputs by the database provider's Create, bound to that one database.
+// The program supplies the consumer-scoped roleName, so a regional service granting
+// a global database gets its own role named for the consumer's region — two regions
+// never collide. permission is "ro"|"rw" as a plain string so this interface need
+// not import internal/grant.
+type DBRoleProvisioner interface {
+	ProvisionRole(ctx *pulumi.Context, roleName, permission string) (DBRoleFields, error)
+}
+
+// DBRoleFields are the connection value fields a database grant publishes. The
+// discrete fields are the literal (decoded) values; URL is the role's full
+// connection URI exactly as the provider returns it (already URL-encoded), so a
+// grant template can compose a DSN with `{URL}` without re-encoding a password
+// that contains URL-reserved characters.
+type DBRoleFields struct {
+	User     pulumi.StringOutput
+	Password pulumi.StringOutput
+	Host     pulumi.StringOutput
+	Port     pulumi.StringOutput
+	DBName   pulumi.StringOutput
+	URL      pulumi.StringOutput
 }
 
 // AllOutputs collects per-region outputs so the secrets backend can resolve
@@ -245,6 +276,26 @@ type AllOutputs struct {
 	// (ADR-0017). Region-independent — the store is env-scoped. Nil when the
 	// environment declares no vault: sources.
 	Encrypted map[string]map[string]string
+}
+
+// ResolveScoped looks up name in a region-keyed output map (Compute/Database),
+// honoring the one allowed cross-region form: a "global/" name prefix redirects
+// the lookup to the region-less "global" slot, independent of the consuming
+// service's region. It returns the value, the resolved (region, bareName) for
+// error messages, and whether it was found. This is the single source of the
+// global/ redirect rule — both the Source DSL (ref:) and grant target resolution
+// MUST use it so they resolve a global resource identically (ADR-0025).
+func ResolveScoped[V any](m map[string]map[string]V, region, name string) (value V, resolvedRegion, bareName string, found bool) {
+	resolvedRegion, bareName = region, name
+	if rest, ok := strings.CutPrefix(name, "global/"); ok {
+		resolvedRegion, bareName = "global", rest
+	}
+	inner, ok := m[resolvedRegion]
+	if !ok {
+		return value, resolvedRegion, bareName, false
+	}
+	value, ok = inner[bareName]
+	return value, resolvedRegion, bareName, ok
 }
 
 // NetworkProvider creates a network for one spec in one region. Returns a map
@@ -323,7 +374,10 @@ type ServiceSecretsBundle struct {
 // program needs to write the descriptor + host-key-encrypted credential. It
 // returns a nil bundle (no error) when the service has no secrets to deliver.
 type ServiceSecretsProvisioner interface {
-	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, env, region string, all AllOutputs) (*ServiceSecretsBundle, error)
+	// grantSecrets are env-var → value-field secret outputs already resolved by the
+	// program from the service's database grants (ADR-0025); the provisioner writes
+	// them into the same infra batch alongside the environment.yaml-derived secrets.
+	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, env, region string, all AllOutputs, grantSecrets map[string]pulumi.StringOutput) (*ServiceSecretsBundle, error)
 }
 
 // ManifestContribution is a set of non-secret fields a contributor adds to a

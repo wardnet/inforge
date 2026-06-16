@@ -133,10 +133,11 @@ func TestCheckServiceGlobalHostRejected(t *testing.T) {
 	assert.Contains(t, errs[0], "defined in the global slice itself")
 }
 
-// TestCheckSecretsGlobalDatabaseRef: a regional service secret may resolve a
-// global database when the regional context is seeded with the global/<name>
-// key (as validateResourceSet does from buildGlobalRefs).
-func TestCheckSecretsGlobalDatabaseRef(t *testing.T) {
+// TestCheckServiceDatabaseRefRejected: a ref:database/* is rejected — a database
+// exposes no referenceable outputs (ADR-0025); DB credentials flow only through a
+// grant. Regional access to a global database is exercised via grants (a
+// database/global/<name> grant) in grant_test.go.
+func TestCheckServiceDatabaseRefRejected(t *testing.T) {
 	ctx := baseCtx()
 	ctx.available = nil // provider availability is checked separately, per region
 	ctx.databaseNames = map[string]bool{"global/shared": true}
@@ -144,18 +145,8 @@ func TestCheckSecretsGlobalDatabaseRef(t *testing.T) {
 		Host: "bridge", Type: "raw", User: "svc", Container: "ghost",
 		Environment: map[string]string{"DB": "ref:database/global/shared.connectionUrl"},
 	}, ctx)
-	assert.Empty(t, errs, "a regional secret may reference a global database output")
-
-	// Without the global seed the same ref is not found.
-	ctx2 := baseCtx()
-	ctx2.available = nil
-	ctx2.databaseNames = map[string]bool{}
-	errs, _ = checkService(types.ServiceSpec{
-		Host: "bridge", Type: "raw", User: "svc", Container: "ghost",
-		Environment: map[string]string{"DB": "ref:database/global/shared.connectionUrl"},
-	}, ctx2)
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], `database "global/shared" not found`)
+	assert.Contains(t, errs[0], "use a grants: entry")
 }
 
 // TestCheckSecretsRejectsReservedEnvName: a secret key (which becomes the

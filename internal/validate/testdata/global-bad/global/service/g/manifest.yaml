@@ -1,10 +1,15 @@
-# A global service whose secret references a REGIONAL database (no global/
-# prefix), exercising the "global → global only" context restriction. The
-# regional database is not visible in the global validation context, so
-# validation fails with "database not found".
+# A global service that GRANTS on a REGIONAL database (no global/ prefix),
+# exercising the "global → global only" context restriction. The regional
+# database is not visible in the global validation context, so validation fails
+# with "database not found".
 name: g
 container: shared
 host: edge
 type: raw
 user: g
 pki: wardnet-mesh
+grants:
+  - resource: database/regionaldb
+    permission: ro
+    outputs:
+      DATABASE_URL: "{URL}"

@@ -191,9 +191,13 @@ credential can be one composed URL or several discrete vars.
 
 **Database credential access**:
 A service obtains database credentials **only** through a **Grant** (a scoped per-service user) —
-never by referencing a connection string via the Source DSL. A Database exposes no credential-bearing
-output; `ref:database/<name>.…` may reference only non-credential outputs. This keeps the database's
-owner/admin credential off every consuming service.
+never by referencing a connection string via the Source DSL. A Database exposes **no** referenceable
+output at all: `ref:database/<name>.…` is rejected (there is no non-credential database output today;
+the `connectionUrl` was removed in slice B of #117). This keeps the database's owner/admin credential
+off every consuming service. The grant mints a per-service Postgres role (`ro` = read-only, `rw` =
+read/write **plus** `CREATE` on schema `public` so the service owns its own migrations) and publishes
+the `{USER,PASSWORD,HOST,PORT,DBNAME}` value fields plus `{URL}` (the role's full, already-URL-encoded
+connection URI — compose a DSN with `{URL}`, not a hand-assembled `{USER}:{PASSWORD}@…`).
 
 ### Providers
 
@@ -315,10 +319,13 @@ The number of *unpinned* (historical, rollback) artifacts a service retains. Pru
 > **Expert:** Right, the region target. Its slug `use1` is what shows up in the display name and the
 > DNS subdomain. How `us-east-1` becomes a real Hetzner datacenter and server type — that's the region
 > realization under that region's `providers.hetzner` block in `regions.yaml`, not the target itself.
-> **Dev:** The secrets file has `source: ref:database/bridge.connectionUrl`. How does the service get
-> that secret?
-> **Expert:** inforge writes it to the secrets provider under the service's path and mints a per-service
-> identity, then drops a secret-free `descriptor.yaml` and a host-key-encrypted `credential.age` on the
-> host. At service start, `inforge-bootstrap` decrypts the credential, fetches the secret, and execs the
-> service with it in the environment. No secret value is ever baked into the manifest. Provision set all
-> that up — actually shipping the service binary is a separate deployment.
+> **Dev:** The service manifest has `grants: [{resource: database/bridge, permission: rw, outputs:
+> {DATABASE_URL: "..."}}]`. How does the service get that secret?
+> **Expert:** At deploy, inforge mints a scoped per-service Postgres role on `bridge` (not the owner
+> credential), composes the `DATABASE_URL` from the role's connection fields, and writes it to the
+> secrets provider under the service's path alongside a per-service identity — then drops a secret-free
+> `descriptor.yaml` and a host-key-encrypted `credential.age` on the host. At service start,
+> `inforge-bootstrap` decrypts the credential, fetches the secret, and execs the service with it in the
+> environment. No secret value is ever baked into the manifest, and there is no `ref:database` — a
+> database exposes no referenceable output. Provision set all that up — shipping the binary is a
+> separate deployment.

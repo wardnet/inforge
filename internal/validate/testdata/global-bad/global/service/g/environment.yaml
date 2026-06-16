@@ -1,1 +1,1 @@
-DATABASE_URL: "ref:database/regionaldb.connectionUrl"
+LOG_LEVEL: "info"
