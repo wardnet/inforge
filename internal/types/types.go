@@ -30,6 +30,31 @@ type NetworkSpec struct {
 	Subnets   []SubnetSpec `yaml:"subnets"`
 }
 
+// CdnSpec is one CDN resource — the edge platform front-end apps attach to (a
+// sibling of NetworkSpec: a thing other resources reference). Its provider is
+// NOT declared here: it comes from the scope's cdn authority in regions.yaml
+// (regions[].cdn / global.cdn), exactly as derived DNS records take their
+// provider from the dns authority. An AppSpec references a cdn by name within
+// the same scope.
+type CdnSpec struct {
+	Name      string `yaml:"name"`
+	Container string `yaml:"container"`
+}
+
+// AppSpec is one front-end (static SPA) resource — a bundle served from a CDN
+// under a domain. It is a sibling of ServiceSpec (a workload released onto a
+// target), NOT a service subtype: an app targets a cdn, a service targets a
+// host. Like a service it carries no provider field — it inherits the provider
+// of the cdn it references. The bundle itself is delivered at release time, not
+// declared here.
+type AppSpec struct {
+	Name      string `yaml:"name"`
+	Container string `yaml:"container"`
+	Cdn       string `yaml:"cdn"`       // FK -> cdn resource name (same scope)
+	Subdomain string `yaml:"subdomain"` // public subdomain; the FQDN is composed at realization from scope + base domain
+	Spa       bool   `yaml:"spa"`       // when true, any non-file path serves index.html (SPA deep-link fallback)
+}
+
 // Port is a firewall port or port range (e.g. "80", "8000-9000"). It unmarshals
 // from both YAML integers and strings so users can write `port: 80` without quotes.
 type Port string
@@ -417,6 +442,8 @@ type Resources struct {
 	Database []DatabaseSpec
 	Service  []ServiceSpec
 	PKI      []PKIResourceSpec
+	Cdn      []CdnSpec
+	App      []AppSpec
 }
 
 // ProviderDefaults are project-level provider fallbacks. When a resource spec omits

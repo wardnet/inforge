@@ -1,0 +1,5 @@
+name: dashboard
+container: ingress
+cdn: edge
+subdomain: my
+spa: true

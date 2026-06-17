@@ -105,6 +105,31 @@ func TestValidateResourcesEncryptedNoStore(t *testing.T) {
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
+// TestValidateResourcesCdnAppOK: a cdn + app at both regional and global scope,
+// each app resolving its cdn within its own scope, with cdn authorities declared
+// for both scopes, validates cleanly.
+func TestValidateResourcesCdnAppOK(t *testing.T) {
+	err := ValidateResources("cdn-app-ok", testdataDir, types.ProviderDefaults{})
+	assert.NoError(t, err, "regional and global cdn/app with declared authorities should validate cleanly")
+}
+
+// TestValidateResourcesAppBadCdn: an app whose cdn: foreign key names no cdn
+// resource in its scope fails validation (the same-scope FK rule).
+func TestValidateResourcesAppBadCdn(t *testing.T) {
+	err := ValidateResources("app-bad-cdn", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "an app referencing an unknown cdn should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
+// TestValidateResourcesCdnMissingAuthority: a scope that declares cdn/app
+// resources but no cdn authority in regions.yaml fails — the resources would
+// have no edge provider to be realized on.
+func TestValidateResourcesCdnMissingAuthority(t *testing.T) {
+	err := ValidateResources("cdn-missing-authority", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "cdn/app resources with no cdn authority should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
 // TestCheckComputeGlobalNetworkRejected: a compute attaching to a global network
 // is recognized but rejected (cross-region networking not supported yet).
 func TestCheckComputeGlobalNetworkRejected(t *testing.T) {
@@ -131,6 +156,35 @@ func TestCheckServiceGlobalHostRejected(t *testing.T) {
 	}, ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "defined in the global slice itself")
+}
+
+// TestCheckAppGlobalCdnRejected: an app referencing a global cdn is rejected —
+// like service.host, an app served from a global cdn is declared in the global
+// slice itself, not referenced from a region.
+func TestCheckAppGlobalCdnRejected(t *testing.T) {
+	ctx := baseCtx()
+	ctx.cdnNames = map[string]bool{"edge": true}
+	errs, _ := checkApp(types.AppSpec{Cdn: "global/edge", Subdomain: "my"}, ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "global slice itself")
+}
+
+// TestCheckAppUnknownCdnRejected: an app whose cdn: does not resolve to a cdn in
+// the same scope fails the foreign-key check.
+func TestCheckAppUnknownCdnRejected(t *testing.T) {
+	ctx := baseCtx()
+	ctx.cdnNames = map[string]bool{"edge": true}
+	errs, _ := checkApp(types.AppSpec{Cdn: "ghost", Subdomain: "my"}, ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "does not resolve to a cdn resource")
+}
+
+// TestCheckAppValid: an app whose cdn: resolves to a same-scope cdn passes.
+func TestCheckAppValid(t *testing.T) {
+	ctx := baseCtx()
+	ctx.cdnNames = map[string]bool{"edge": true}
+	errs, _ := checkApp(types.AppSpec{Cdn: "edge", Subdomain: "my", Spa: true}, ctx)
+	assert.Empty(t, errs)
 }
 
 // TestCheckServiceDatabaseRefRejected: a ref:database/* is rejected — a database

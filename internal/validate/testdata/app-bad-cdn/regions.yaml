@@ -1,0 +1,8 @@
+regions:
+  us-east-1:
+    slug: use1
+    cdn:
+      provider: cloudflare
+    providers:
+      cloudflare:
+        apiToken: test-token
