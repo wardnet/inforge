@@ -156,7 +156,7 @@ func buildGlobalRefs(global types.Resources) *globalRefs {
 // ValidateResources.
 func globalHasResources(g types.Resources) bool {
 	return len(g.Network)+len(g.Compute)+len(g.Database)+
-		len(g.Service)+len(g.PKI) > 0
+		len(g.Service)+len(g.PKI)+len(g.Cdn)+len(g.App) > 0
 }
 
 // regionContext holds the foreign-key targets and tables a region's semantic
@@ -171,6 +171,11 @@ type regionContext struct {
 	computeDeployer  map[string]bool              // canonical specKey -> declares a deploy_user
 	computeNames     map[string]bool              // bare compute names; service.host must be one of these
 	databaseNames    map[string]bool
+	// cdnNames holds the cdn resource names declared in this scope. An app's
+	// `cdn:` foreign key must resolve to one of them — same-scope only, exactly
+	// like a service's host must be a compute in the same set (a global/ prefix is
+	// rejected in checkApp).
+	cdnNames map[string]bool
 	// pkiResources maps a PKI resource name (a grant target, "<name>" or the
 	// "global/<name>" form for the global slice's resources) to its topology. A
 	// grant on a pki/<name> target resolves against this map; a regional service
@@ -324,6 +329,14 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	if err != nil {
 		return err
 	}
+	cdnFiles, _, err := readFolders[types.CdnSpec](filepath.Join(base, "cdn"))
+	if err != nil {
+		return err
+	}
+	appFiles, _, err := readFolders[types.AppSpec](filepath.Join(base, "app"))
+	if err != nil {
+		return err
+	}
 
 	// Apply defaults so semantic checks see normalised specs.
 	for i := range networkFiles {
@@ -338,6 +351,16 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for i := range pkiFiles {
 		if pkiFiles[i].parseErr == nil {
 			loader.NormalizePKIResource(&pkiFiles[i].spec)
+		}
+	}
+	for i := range cdnFiles {
+		if cdnFiles[i].parseErr == nil {
+			loader.NormalizeCdn(&cdnFiles[i].spec)
+		}
+	}
+	for i := range appFiles {
+		if appFiles[i].parseErr == nil {
+			loader.NormalizeApp(&appFiles[i].spec)
 		}
 	}
 	for i := range serviceFiles {
@@ -375,6 +398,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		computeDeployer:      map[string]bool{},
 		computeNames:         map[string]bool{},
 		databaseNames:        map[string]bool{},
+		cdnNames:             map[string]bool{},
 		portUsersByHost:      map[string]map[int][]string{},
 		targetUsersByHost:    map[string]map[int][]string{},
 		tlsTermIngressByHost: map[string]bool{},
@@ -411,6 +435,11 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for _, f := range pkiFiles {
 		if f.parseErr == nil {
 			ctx.pkiResources[f.spec.Name] = f.spec.Topology
+		}
+	}
+	for _, f := range cdnFiles {
+		if f.parseErr == nil {
+			ctx.cdnNames[f.spec.Name] = true
 		}
 	}
 	// Aggregate per-host ingress so checkService can enforce the cross-service
@@ -467,6 +496,15 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	validateType(r, schemaSet["pkiresource"], pkiFiles, func(s types.PKIResourceSpec) ([]string, []string) {
 		return checkPKIResource(s)
 	})
+	// A cdn carries no cross-resource reference (its provider is the scope's cdn
+	// authority, checked for availability separately), so the JSON schema is the
+	// whole story — no semantic pass.
+	validateType(r, schemaSet["cdn"], cdnFiles, func(types.CdnSpec) ([]string, []string) {
+		return nil, nil
+	})
+	validateType(r, schemaSet["app"], appFiles, func(s types.AppSpec) ([]string, []string) {
+		return checkApp(s, ctx)
+	})
 	return nil
 }
 
@@ -492,7 +530,7 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 
 // compileSchemas compiles every embedded JSON Schema, keyed by resource type.
 func compileSchemas() (map[string]*jsonschema.Schema, error) {
-	names := []string{"network", "compute", "database", "service", "environment", "pkiresource"}
+	names := []string{"network", "compute", "database", "service", "environment", "pkiresource", "cdn", "app"}
 	c := jsonschema.NewCompiler()
 	for _, n := range names {
 		b, err := schemas.FS.ReadFile(n + ".json")
@@ -616,6 +654,12 @@ func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, 
 				errs = append(errs, fmt.Sprintf("regions.%s.dns: zone required when a dns authority is declared", name))
 			}
 		}
+		// The CDN authority is optional, but when declared its provider is
+		// load-bearing: cdn/app resources in this region are realized on it and an
+		// app inherits it. An empty provider would silently have no edge to attach to.
+		if c := ar.Cdn; c != nil && strings.TrimSpace(c.Provider) == "" {
+			errs = append(errs, fmt.Sprintf("regions.%s.cdn: provider required when a cdn authority is declared", name))
+		}
 	}
 	if global != nil {
 		if len(global.Providers) == 0 {
@@ -625,6 +669,9 @@ func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, 
 			errs = append(errs, "global.placementRegion: required when a global block is present")
 		} else if _, err := table.Slug(global.PlacementRegion); err != nil {
 			errs = append(errs, fmt.Sprintf("global.placementRegion: %q is not a defined region", global.PlacementRegion))
+		}
+		if c := global.Cdn; c != nil && strings.TrimSpace(c.Provider) == "" {
+			errs = append(errs, "global.cdn: provider required when a cdn authority is declared")
 		}
 	}
 	r.report(path, errs, nil)
@@ -733,6 +780,42 @@ func servicesWithSecrets(base string) ([]string, error) {
 	return paths, nil
 }
 
+// collectParsedPaths returns the manifest path of every successfully parsed
+// resource of type T under base/sub (parse failures are skipped — they are
+// reported by the schema pass, not here).
+func collectParsedPaths[T any](base, sub string) ([]string, error) {
+	files, _, err := readFolders[T](filepath.Join(base, sub))
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, f := range files {
+		if f.parseErr == nil {
+			paths = append(paths, f.path)
+		}
+	}
+	return paths, nil
+}
+
+// cdnConsumerPaths returns the manifest path of every parsed cdn and app
+// resource under base. Both depend on the scope's cdn authority: a cdn is
+// realized on it, and an app inherits its provider through the cdn it
+// references. So when any exist, that authority must be declared and its
+// provider available in the scope — mirroring the secrets-provider requirement
+// (servicesWithSecrets). Neither carries a per-spec provider, so they are
+// invisible to collectProviderRefs and need this dedicated path.
+func cdnConsumerPaths(base string) ([]string, error) {
+	cdnPaths, err := collectParsedPaths[types.CdnSpec](base, "cdn")
+	if err != nil {
+		return nil, err
+	}
+	appPaths, err := collectParsedPaths[types.AppSpec](base, "app")
+	if err != nil {
+		return nil, err
+	}
+	return append(cdnPaths, appPaths...), nil
+}
+
 // checkProviderAvailability verifies, for every region in the table, that each
 // resource's declared provider is present in that region's providers block. The
 // shared set deploys into every region, so a provider missing from any region is
@@ -747,6 +830,10 @@ func checkProviderAvailability(r *reporter, base string, table regions.Table, de
 		return err
 	}
 	secretSvcPaths, err := servicesWithSecrets(base)
+	if err != nil {
+		return err
+	}
+	cdnPaths, err := cdnConsumerPaths(base)
 	if err != nil {
 		return err
 	}
@@ -767,6 +854,18 @@ func checkProviderAvailability(r *reporter, base string, table regions.Table, de
 		if len(secretSvcPaths) > 0 && !hasSecretsProvider(available) {
 			for _, path := range secretSvcPaths {
 				msgs = append(msgs, fmt.Sprintf("%s: declares secrets but this region's regions.yaml providers block has no secrets provider (one of: %s)", path, strings.Join(secretsProviderNames, ", ")))
+			}
+		}
+		if len(cdnPaths) > 0 {
+			switch auth := table[region].Cdn; {
+			case auth == nil || strings.TrimSpace(auth.Provider) == "":
+				for _, path := range cdnPaths {
+					msgs = append(msgs, fmt.Sprintf("%s: declares a cdn/app resource but this region's regions.yaml has no cdn authority (regions.%s.cdn.provider)", path, region))
+				}
+			case !available[auth.Provider]:
+				for _, path := range cdnPaths {
+					msgs = append(msgs, fmt.Sprintf("%s: cdn authority provider %q not defined in this region's regions.yaml providers block", path, auth.Provider))
+				}
 			}
 		}
 		if len(msgs) > 0 {
@@ -854,6 +953,10 @@ func checkGlobalProviderAvailability(r *reporter, globalBase string, global *reg
 	if err != nil {
 		return err
 	}
+	cdnPaths, err := cdnConsumerPaths(globalBase)
+	if err != nil {
+		return err
+	}
 	available := availableProviders(global.Providers)
 	var msgs []string
 	for _, ref := range refs {
@@ -864,6 +967,18 @@ func checkGlobalProviderAvailability(r *reporter, globalBase string, global *reg
 	if len(secretSvcPaths) > 0 && !hasSecretsProvider(available) {
 		for _, path := range secretSvcPaths {
 			msgs = append(msgs, fmt.Sprintf("%s: declares secrets but regions.yaml global providers block has no secrets provider (one of: %s)", path, strings.Join(secretsProviderNames, ", ")))
+		}
+	}
+	if len(cdnPaths) > 0 {
+		switch {
+		case global.Cdn == nil || strings.TrimSpace(global.Cdn.Provider) == "":
+			for _, path := range cdnPaths {
+				msgs = append(msgs, fmt.Sprintf("%s: declares a cdn/app resource but regions.yaml global block has no cdn authority (global.cdn.provider)", path))
+			}
+		case !available[global.Cdn.Provider]:
+			for _, path := range cdnPaths {
+				msgs = append(msgs, fmt.Sprintf("%s: cdn authority provider %q not defined in regions.yaml global providers block", path, global.Cdn.Provider))
+			}
 		}
 	}
 	if len(msgs) > 0 {
@@ -1111,6 +1226,23 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 func checkPKIResource(s types.PKIResourceSpec) (errs, warns []string) {
 	if s.Topology != pki.TopologyRootOnly {
 		errs = append(errs, fmt.Sprintf("topology: %q is invalid for a PKI resource; it must be %q (the two-tier mesh PKI lives in %s and is consumed via the service pki: field)", s.Topology, pki.TopologyRootOnly, pki.FileName))
+	}
+	return errs, warns
+}
+
+// checkApp validates an app (front-end) resource: its cdn: foreign key must
+// resolve to a cdn resource in the SAME scope. A global/ prefix is rejected
+// explicitly — an app served from a global cdn is declared in the global slice
+// itself, not referenced from a region (mirroring service.host, which is a
+// same-scope compute name and never a global/ reference). The app declares no
+// provider; it inherits the cdn's, whose availability is enforced per scope in
+// checkProviderAvailability / checkGlobalProviderAvailability.
+func checkApp(s types.AppSpec, ctx regionContext) (errs, warns []string) {
+	switch {
+	case strings.HasPrefix(s.Cdn, "global/"):
+		errs = append(errs, fmt.Sprintf("cdn: %q references a global cdn; an app served from a global cdn is declared in the global slice itself, not referenced from a region", s.Cdn))
+	case !ctx.cdnNames[s.Cdn]:
+		errs = append(errs, fmt.Sprintf("cdn: %q does not resolve to a cdn resource in this scope", s.Cdn))
 	}
 	return errs, warns
 }

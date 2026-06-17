@@ -207,6 +207,32 @@ is now rejected — DB credentials flow only through grants). slice C = the PKI 
   other across the service's grants. The cross-region boundary falls out of target resolution (shared
   regional set + `global/` prefix), exactly like `ref:`.
 
+## CDN and App (Slice 1, schema only)
+
+`cdn` and `app` are two new declarative resource types for front-end (React SPA) CDN deployment.
+They are schema scaffolding only in this slice — deploy-time realization (Cloudflare Workers Static
+Assets) and the release delivery adapter are later slices.
+
+- **`CdnSpec`** (`types.CdnSpec`, `schemas/cdn.json`, `regional|global/cdn/<name>/manifest.yaml`) —
+  the edge-platform resource: a sibling of network, not a workload. Its provider is **NOT** on the
+  spec — it comes from the scope's `cdn` authority in `regions.yaml` (`regions[region].cdn.provider`
+  or `global.cdn.provider`), exactly as derived DNS records take their provider from the dns
+  authority. When any cdn or app resources exist in a scope the validator enforces that the scope has
+  a cdn authority with a configured provider (mirroring the secrets-provider availability check).
+- **`AppSpec`** (`types.AppSpec`, `schemas/app.json`, `regional|global/app/<name>/manifest.yaml`) —
+  a static SPA workload: a sibling of service, **not** a service subtype. It references a `cdn` by
+  name in the **same scope** (`cdn:` FK). `spa: true` enables the SPA deep-link fallback (404 →
+  index.html). Like cdn, it carries no provider field — it inherits the cdn's provider, which inherits
+  from the scope's cdn authority.
+- **`regions.yaml` cdn authority** (`regions.CdnAuthority`) — optional block on a region and on the
+  global block, parallel to `dns:`. When declared, `provider:` is required (an empty provider is
+  rejected by `checkRegionsFile`).
+- **`internal/loader`** — `NormalizeCdn` and `NormalizeApp` trim free-text fields; loader reads
+  `cdn/` and `app/` sub-folders in both scopes alongside the existing resource folders.
+- **`internal/validate`** — `checkApp` enforces the same-scope cdn FK (see rule
+  `.agents/rules/app-cdn-fk-is-same-scope-only.md`); `cdnConsumerPaths` / `collectParsedPaths` are
+  the generic helper for the provider-availability check; `schemaSet` now includes `cdn` and `app`.
+
 ## Conventions
 
 - **Provider binary names are load-bearing.** Pulumi locates plugins by the exact filename

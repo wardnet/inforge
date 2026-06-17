@@ -1,0 +1,4 @@
+name: dashboard
+container: ingress
+cdn: ghost
+subdomain: my

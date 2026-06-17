@@ -344,6 +344,24 @@ func loadResourceSet(base string) (types.Resources, error) {
 	}
 	res.PKI = pkiSpecs
 
+	cdnSpecs, _, err := loadTypeFromFolders[types.CdnSpec](filepath.Join(base, "cdn"))
+	if err != nil {
+		return types.Resources{}, err
+	}
+	for i := range cdnSpecs {
+		NormalizeCdn(&cdnSpecs[i])
+	}
+	res.Cdn = cdnSpecs
+
+	appSpecs, _, err := loadTypeFromFolders[types.AppSpec](filepath.Join(base, "app"))
+	if err != nil {
+		return types.Resources{}, err
+	}
+	for i := range appSpecs {
+		NormalizeApp(&appSpecs[i])
+	}
+	res.App = appSpecs
+
 	return res, nil
 }
 
@@ -383,6 +401,24 @@ func NormalizeService(s *types.ServiceSpec) {
 	}
 	s.Pki = strings.TrimSpace(s.Pki)
 	s.Reload = strings.TrimSpace(s.Reload)
+}
+
+// NormalizeCdn trims the cdn spec's free-text fields. There is no default
+// provider to apply — the provider comes from the scope's cdn authority in
+// regions.yaml, not the spec.
+func NormalizeCdn(c *types.CdnSpec) {
+	c.Name = strings.TrimSpace(c.Name)
+	c.Container = strings.TrimSpace(c.Container)
+}
+
+// NormalizeApp trims the app spec's foreign-key and domain fields so a stray
+// space cannot defeat the cdn FK resolution or the subdomain composition. spa
+// defaults to false (no SPA fallback) when omitted.
+func NormalizeApp(a *types.AppSpec) {
+	a.Name = strings.TrimSpace(a.Name)
+	a.Container = strings.TrimSpace(a.Container)
+	a.Cdn = strings.TrimSpace(a.Cdn)
+	a.Subdomain = strings.TrimSpace(a.Subdomain)
 }
 
 // NormalizePKIResource trims the PKI resource's topology so a stray space does
