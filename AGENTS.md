@@ -238,6 +238,13 @@ fronts apps (and, from slice B, services). This slice is **schema scaffolding on
   rule `.agents/rules/app-ingress-fk-is-same-scope-only.md`) and unique app names/subdomains; `schemaSet`
   now includes `ingress` and `app`. There is **no** cdn authority or dedicated availability pass — an
   ingress inherits its compute host's provider, already covered by the compute provider-availability check.
+  **Name uniqueness is enforced generically:** `validateType` (the single validation pass used for
+  every resource type) rejects a duplicate `name:` within a scope for all types — network, compute,
+  database, service, pkiresource, ingress, app. When adding a new resource type, pass a name-extractor
+  func as the third argument to `validateType`; forgetting it would bypass the uniqueness check.
+  **`host:` FK resolution for compute-backed resources** (`service.host`, `ingress.host`) is
+  centralized in `resolveComputeHost(host, noun, ctx)` — see rule
+  `.agents/rules/use-resolve-compute-host-for-host-fk.md`.
 
 ## Conventions
 
