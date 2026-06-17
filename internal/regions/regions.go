@@ -16,19 +16,7 @@ import "fmt"
 type AbstractRegion struct {
 	Slug      string                    `yaml:"slug"`
 	Dns       *DnsAuthority             `yaml:"dns"`
-	Cdn       *CdnAuthority             `yaml:"cdn"`
 	Providers map[string]map[string]any `yaml:"providers"`
-}
-
-// CdnAuthority is the CDN authority for one scope (a region, or the global
-// block): the provider that owns the edge platform every cdn/app resource in
-// that scope is realized on. Like DnsAuthority it carries only the provider
-// selector — credentials and account config live in the matching providers
-// block (e.g. providers.cloudflare). An app inherits this provider transitively
-// through the cdn it references; neither the cdn nor the app spec declares a
-// provider of its own.
-type CdnAuthority struct {
-	Provider string `yaml:"provider"` // e.g. "cloudflare"
 }
 
 // DnsAuthority is the single DNS authority for one (env, region): the provider
@@ -52,7 +40,6 @@ type Table map[string]AbstractRegion
 // key for the global slice; it does not affect resource names.
 type Global struct {
 	PlacementRegion string                    `yaml:"placementRegion"`
-	Cdn             *CdnAuthority             `yaml:"cdn"`
 	Providers       map[string]map[string]any `yaml:"providers"`
 }
 

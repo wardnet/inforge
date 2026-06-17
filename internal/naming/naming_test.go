@@ -130,6 +130,18 @@ func TestServiceFQDN(t *testing.T) {
 	}
 }
 
+func TestAppFQDN(t *testing.T) {
+	// Regional: the slug segment is present, but NO env segment (unlike
+	// RecordFQDN/ServiceFQDN) — an app uses a per-env base domain.
+	if got, want := AppFQDN("my", "use1", "wardnet.network"), "my.use1.wardnet.network"; got != want {
+		t.Errorf("AppFQDN regional = %q, want %q", got, want)
+	}
+	// Global: an empty slug drops the region segment entirely.
+	if got, want := AppFQDN("marketing", "", "wardnet.network"), "marketing.wardnet.network"; got != want {
+		t.Errorf("AppFQDN global = %q, want %q", got, want)
+	}
+}
+
 func TestExpandVanity(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{"bare token is env+region scoped", "foo", "foo.prd.use1.wardnet.network"},

@@ -111,6 +111,20 @@ func ServiceFQDN(env, regionSlug, service, baseDomain string) string {
 	return RecordFQDN(env, regionSlug, service+".svc", baseDomain)
 }
 
+// AppFQDN returns an app's public fully-qualified domain — the clean dotted form
+// a front-end is served on, with NO env segment (each environment carries its own
+// base_domain): the global scope is "<subdomain>.<base>" (e.g.
+// "marketing.wardnet.network") and a regional scope is "<subdomain>.<slug>.<base>"
+// (e.g. "my.use1.wardnet.network"). An EMPTY regionSlug is the global scope. It is
+// deliberately flatter than ServiceFQDN/RecordFQDN (which carry an env and a type
+// segment): an app is a public-facing site, not an internal derived record.
+func AppFQDN(subdomain, regionSlug, baseDomain string) string {
+	if regionSlug == "" {
+		return fmt.Sprintf("%s.%s", subdomain, baseDomain)
+	}
+	return fmt.Sprintf("%s.%s.%s", subdomain, regionSlug, baseDomain)
+}
+
 // ExpandVanity resolves one vanity entry to a fully-qualified domain. A bare
 // token (no dot, no "{" placeholder) is env+region-scoped exactly like a service
 // record: "foo" -> "foo.<env>.<slug>.<base>". Anything containing a dot or a

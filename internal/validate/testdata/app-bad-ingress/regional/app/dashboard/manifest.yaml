@@ -1,0 +1,5 @@
+name: dashboard
+container: ingress
+ingress: ghost
+subdomain: my
+spa: true

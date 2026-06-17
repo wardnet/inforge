@@ -156,7 +156,7 @@ func buildGlobalRefs(global types.Resources) *globalRefs {
 // ValidateResources.
 func globalHasResources(g types.Resources) bool {
 	return len(g.Network)+len(g.Compute)+len(g.Database)+
-		len(g.Service)+len(g.PKI)+len(g.Cdn)+len(g.App) > 0
+		len(g.Service)+len(g.PKI)+len(g.Ingress)+len(g.App) > 0
 }
 
 // regionContext holds the foreign-key targets and tables a region's semantic
@@ -171,11 +171,19 @@ type regionContext struct {
 	computeDeployer  map[string]bool              // canonical specKey -> declares a deploy_user
 	computeNames     map[string]bool              // bare compute names; service.host must be one of these
 	databaseNames    map[string]bool
-	// cdnNames holds the cdn resource names declared in this scope. An app's
-	// `cdn:` foreign key must resolve to one of them — same-scope only, exactly
-	// like a service's host must be a compute in the same set (a global/ prefix is
-	// rejected in checkApp).
-	cdnNames map[string]bool
+	// ingressNames holds the ingress resource names declared in this scope. An
+	// app's `ingress:` foreign key must resolve to one of them — same-scope only,
+	// exactly like a service's host must be a compute in the same set (a global/
+	// prefix is rejected in checkApp).
+	ingressNames map[string]bool
+	// ingressNameCounts / appNameCounts / appSubdomainCounts count declarations per
+	// key in this scope so the per-spec checks can flag a collision (today a
+	// duplicate name silently overwrites a map entry). An ingress name and an app
+	// name must each be unique within the scope, and an app subdomain must be
+	// unique (each maps to a distinct public FQDN).
+	ingressNameCounts  map[string]int
+	appNameCounts      map[string]int
+	appSubdomainCounts map[string]int
 	// pkiResources maps a PKI resource name (a grant target, "<name>" or the
 	// "global/<name>" form for the global slice's resources) to its topology. A
 	// grant on a pki/<name> target resolves against this map; a regional service
@@ -329,7 +337,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	if err != nil {
 		return err
 	}
-	cdnFiles, _, err := readFolders[types.CdnSpec](filepath.Join(base, "cdn"))
+	ingressFiles, _, err := readFolders[types.IngressResourceSpec](filepath.Join(base, "ingress"))
 	if err != nil {
 		return err
 	}
@@ -353,9 +361,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			loader.NormalizePKIResource(&pkiFiles[i].spec)
 		}
 	}
-	for i := range cdnFiles {
-		if cdnFiles[i].parseErr == nil {
-			loader.NormalizeCdn(&cdnFiles[i].spec)
+	for i := range ingressFiles {
+		if ingressFiles[i].parseErr == nil {
+			loader.NormalizeIngress(&ingressFiles[i].spec)
 		}
 	}
 	for i := range appFiles {
@@ -398,7 +406,10 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		computeDeployer:      map[string]bool{},
 		computeNames:         map[string]bool{},
 		databaseNames:        map[string]bool{},
-		cdnNames:             map[string]bool{},
+		ingressNames:         map[string]bool{},
+		ingressNameCounts:    map[string]int{},
+		appNameCounts:        map[string]int{},
+		appSubdomainCounts:   map[string]int{},
 		portUsersByHost:      map[string]map[int][]string{},
 		targetUsersByHost:    map[string]map[int][]string{},
 		tlsTermIngressByHost: map[string]bool{},
@@ -437,9 +448,16 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			ctx.pkiResources[f.spec.Name] = f.spec.Topology
 		}
 	}
-	for _, f := range cdnFiles {
+	for _, f := range ingressFiles {
 		if f.parseErr == nil {
-			ctx.cdnNames[f.spec.Name] = true
+			ctx.ingressNames[f.spec.Name] = true
+			ctx.ingressNameCounts[f.spec.Name]++
+		}
+	}
+	for _, f := range appFiles {
+		if f.parseErr == nil {
+			ctx.appNameCounts[f.spec.Name]++
+			ctx.appSubdomainCounts[f.spec.Subdomain]++
 		}
 	}
 	// Aggregate per-host ingress so checkService can enforce the cross-service
@@ -496,11 +514,8 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	validateType(r, schemaSet["pkiresource"], pkiFiles, func(s types.PKIResourceSpec) ([]string, []string) {
 		return checkPKIResource(s)
 	})
-	// A cdn carries no cross-resource reference (its provider is the scope's cdn
-	// authority, checked for availability separately), so the JSON schema is the
-	// whole story — no semantic pass.
-	validateType(r, schemaSet["cdn"], cdnFiles, func(types.CdnSpec) ([]string, []string) {
-		return nil, nil
+	validateType(r, schemaSet["ingress"], ingressFiles, func(s types.IngressResourceSpec) ([]string, []string) {
+		return checkIngress(s, ctx)
 	})
 	validateType(r, schemaSet["app"], appFiles, func(s types.AppSpec) ([]string, []string) {
 		return checkApp(s, ctx)
@@ -530,7 +545,7 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 
 // compileSchemas compiles every embedded JSON Schema, keyed by resource type.
 func compileSchemas() (map[string]*jsonschema.Schema, error) {
-	names := []string{"network", "compute", "database", "service", "environment", "pkiresource", "cdn", "app"}
+	names := []string{"network", "compute", "database", "service", "environment", "pkiresource", "ingress", "app"}
 	c := jsonschema.NewCompiler()
 	for _, n := range names {
 		b, err := schemas.FS.ReadFile(n + ".json")
@@ -654,12 +669,6 @@ func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, 
 				errs = append(errs, fmt.Sprintf("regions.%s.dns: zone required when a dns authority is declared", name))
 			}
 		}
-		// The CDN authority is optional, but when declared its provider is
-		// load-bearing: cdn/app resources in this region are realized on it and an
-		// app inherits it. An empty provider would silently have no edge to attach to.
-		if c := ar.Cdn; c != nil && strings.TrimSpace(c.Provider) == "" {
-			errs = append(errs, fmt.Sprintf("regions.%s.cdn: provider required when a cdn authority is declared", name))
-		}
 	}
 	if global != nil {
 		if len(global.Providers) == 0 {
@@ -669,9 +678,6 @@ func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, 
 			errs = append(errs, "global.placementRegion: required when a global block is present")
 		} else if _, err := table.Slug(global.PlacementRegion); err != nil {
 			errs = append(errs, fmt.Sprintf("global.placementRegion: %q is not a defined region", global.PlacementRegion))
-		}
-		if c := global.Cdn; c != nil && strings.TrimSpace(c.Provider) == "" {
-			errs = append(errs, "global.cdn: provider required when a cdn authority is declared")
 		}
 	}
 	r.report(path, errs, nil)
@@ -780,42 +786,6 @@ func servicesWithSecrets(base string) ([]string, error) {
 	return paths, nil
 }
 
-// collectParsedPaths returns the manifest path of every successfully parsed
-// resource of type T under base/sub (parse failures are skipped — they are
-// reported by the schema pass, not here).
-func collectParsedPaths[T any](base, sub string) ([]string, error) {
-	files, _, err := readFolders[T](filepath.Join(base, sub))
-	if err != nil {
-		return nil, err
-	}
-	var paths []string
-	for _, f := range files {
-		if f.parseErr == nil {
-			paths = append(paths, f.path)
-		}
-	}
-	return paths, nil
-}
-
-// cdnConsumerPaths returns the manifest path of every parsed cdn and app
-// resource under base. Both depend on the scope's cdn authority: a cdn is
-// realized on it, and an app inherits its provider through the cdn it
-// references. So when any exist, that authority must be declared and its
-// provider available in the scope — mirroring the secrets-provider requirement
-// (servicesWithSecrets). Neither carries a per-spec provider, so they are
-// invisible to collectProviderRefs and need this dedicated path.
-func cdnConsumerPaths(base string) ([]string, error) {
-	cdnPaths, err := collectParsedPaths[types.CdnSpec](base, "cdn")
-	if err != nil {
-		return nil, err
-	}
-	appPaths, err := collectParsedPaths[types.AppSpec](base, "app")
-	if err != nil {
-		return nil, err
-	}
-	return append(cdnPaths, appPaths...), nil
-}
-
 // checkProviderAvailability verifies, for every region in the table, that each
 // resource's declared provider is present in that region's providers block. The
 // shared set deploys into every region, so a provider missing from any region is
@@ -830,10 +800,6 @@ func checkProviderAvailability(r *reporter, base string, table regions.Table, de
 		return err
 	}
 	secretSvcPaths, err := servicesWithSecrets(base)
-	if err != nil {
-		return err
-	}
-	cdnPaths, err := cdnConsumerPaths(base)
 	if err != nil {
 		return err
 	}
@@ -854,18 +820,6 @@ func checkProviderAvailability(r *reporter, base string, table regions.Table, de
 		if len(secretSvcPaths) > 0 && !hasSecretsProvider(available) {
 			for _, path := range secretSvcPaths {
 				msgs = append(msgs, fmt.Sprintf("%s: declares secrets but this region's regions.yaml providers block has no secrets provider (one of: %s)", path, strings.Join(secretsProviderNames, ", ")))
-			}
-		}
-		if len(cdnPaths) > 0 {
-			switch auth := table[region].Cdn; {
-			case auth == nil || strings.TrimSpace(auth.Provider) == "":
-				for _, path := range cdnPaths {
-					msgs = append(msgs, fmt.Sprintf("%s: declares a cdn/app resource but this region's regions.yaml has no cdn authority (regions.%s.cdn.provider)", path, region))
-				}
-			case !available[auth.Provider]:
-				for _, path := range cdnPaths {
-					msgs = append(msgs, fmt.Sprintf("%s: cdn authority provider %q not defined in this region's regions.yaml providers block", path, auth.Provider))
-				}
 			}
 		}
 		if len(msgs) > 0 {
@@ -953,10 +907,6 @@ func checkGlobalProviderAvailability(r *reporter, globalBase string, global *reg
 	if err != nil {
 		return err
 	}
-	cdnPaths, err := cdnConsumerPaths(globalBase)
-	if err != nil {
-		return err
-	}
 	available := availableProviders(global.Providers)
 	var msgs []string
 	for _, ref := range refs {
@@ -967,18 +917,6 @@ func checkGlobalProviderAvailability(r *reporter, globalBase string, global *reg
 	if len(secretSvcPaths) > 0 && !hasSecretsProvider(available) {
 		for _, path := range secretSvcPaths {
 			msgs = append(msgs, fmt.Sprintf("%s: declares secrets but regions.yaml global providers block has no secrets provider (one of: %s)", path, strings.Join(secretsProviderNames, ", ")))
-		}
-	}
-	if len(cdnPaths) > 0 {
-		switch {
-		case global.Cdn == nil || strings.TrimSpace(global.Cdn.Provider) == "":
-			for _, path := range cdnPaths {
-				msgs = append(msgs, fmt.Sprintf("%s: declares a cdn/app resource but regions.yaml global block has no cdn authority (global.cdn.provider)", path))
-			}
-		case !available[global.Cdn.Provider]:
-			for _, path := range cdnPaths {
-				msgs = append(msgs, fmt.Sprintf("%s: cdn authority provider %q not defined in regions.yaml global providers block", path, global.Cdn.Provider))
-			}
 		}
 	}
 	if len(msgs) > 0 {
@@ -1230,19 +1168,59 @@ func checkPKIResource(s types.PKIResourceSpec) (errs, warns []string) {
 	return errs, warns
 }
 
-// checkApp validates an app (front-end) resource: its cdn: foreign key must
-// resolve to a cdn resource in the SAME scope. A global/ prefix is rejected
-// explicitly — an app served from a global cdn is declared in the global slice
-// itself, not referenced from a region (mirroring service.host, which is a
-// same-scope compute name and never a global/ reference). The app declares no
-// provider; it inherits the cdn's, whose availability is enforced per scope in
-// checkProviderAvailability / checkGlobalProviderAvailability.
-func checkApp(s types.AppSpec, ctx regionContext) (errs, warns []string) {
+// checkIngress validates an ingress resource: its host: foreign key must resolve
+// to a single-instance vm compute in the SAME scope. A global/ prefix is rejected
+// explicitly — an ingress on a global host is declared in the global slice
+// itself, not referenced from a region (mirroring service.host). The ingress
+// carries no provider; it inherits its host's. Its name must be unique among the
+// scope's ingress resources.
+func checkIngress(s types.IngressResourceSpec, ctx regionContext) (errs, warns []string) {
+	if ctx.ingressNameCounts[s.Name] > 1 {
+		errs = append(errs, fmt.Sprintf("name: %q is declared by more than one ingress in this scope; ingress names must be unique", s.Name))
+	}
 	switch {
-	case strings.HasPrefix(s.Cdn, "global/"):
-		errs = append(errs, fmt.Sprintf("cdn: %q references a global cdn; an app served from a global cdn is declared in the global slice itself, not referenced from a region", s.Cdn))
-	case !ctx.cdnNames[s.Cdn]:
-		errs = append(errs, fmt.Sprintf("cdn: %q does not resolve to a cdn resource in this scope", s.Cdn))
+	case strings.HasPrefix(s.Host, "global/"):
+		errs = append(errs, fmt.Sprintf("host: %q references a global compute; an ingress on a global host is declared in the global slice itself, not referenced from a region", s.Host))
+	case !ctx.computeNames[s.Host]:
+		if ctx.computeCanonical[s.Host] != "" {
+			errs = append(errs, fmt.Sprintf("host: %q is an expanded specKey; use the bare compute name instead", s.Host))
+		} else {
+			errs = append(errs, fmt.Sprintf("host: %q does not resolve to a compute in this scope", s.Host))
+		}
+	default:
+		canonical := ctx.computeCanonical[s.Host]
+		if canonical == "" {
+			canonical = naming.SpecKey(s.Host, 1)
+		}
+		if kind := ctx.computeKind[canonical]; kind != "vm" {
+			errs = append(errs, fmt.Sprintf("host: %q has kind %q; an ingress requires a vm host", s.Host, kind))
+		}
+		if ctx.computeInstances[canonical] > 1 {
+			errs = append(errs, fmt.Sprintf("host: %q is a multi-instance compute; an ingress host must be single-instance (the ingress addresses one host)", s.Host))
+		}
+	}
+	return errs, warns
+}
+
+// checkApp validates an app (front-end) resource: its ingress: foreign key must
+// resolve to an ingress resource in the SAME scope. A global/ prefix is rejected
+// explicitly — an app served from a global ingress is declared in the global
+// slice itself, not referenced from a region (mirroring service.host, which is a
+// same-scope compute name and never a global/ reference). The app declares no
+// provider; it inherits the ingress's (its compute host's). Its name and its
+// subdomain must each be unique within the scope.
+func checkApp(s types.AppSpec, ctx regionContext) (errs, warns []string) {
+	if ctx.appNameCounts[s.Name] > 1 {
+		errs = append(errs, fmt.Sprintf("name: %q is declared by more than one app in this scope; app names must be unique", s.Name))
+	}
+	if s.Subdomain != "" && ctx.appSubdomainCounts[s.Subdomain] > 1 {
+		errs = append(errs, fmt.Sprintf("subdomain: %q is used by more than one app in this scope; each app must map to a distinct public FQDN", s.Subdomain))
+	}
+	switch {
+	case strings.HasPrefix(s.Ingress, "global/"):
+		errs = append(errs, fmt.Sprintf("ingress: %q references a global ingress; an app served from a global ingress is declared in the global slice itself, not referenced from a region", s.Ingress))
+	case !ctx.ingressNames[s.Ingress]:
+		errs = append(errs, fmt.Sprintf("ingress: %q does not resolve to an ingress resource in this scope", s.Ingress))
 	}
 	return errs, warns
 }

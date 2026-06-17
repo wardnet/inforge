@@ -1,0 +1,5 @@
+name: marketing
+container: ingress
+ingress: web
+subdomain: www
+spa: true

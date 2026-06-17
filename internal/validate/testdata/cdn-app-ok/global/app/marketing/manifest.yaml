@@ -1,5 +1,0 @@
-name: marketing
-container: ingress
-cdn: edge
-subdomain: www
-spa: true

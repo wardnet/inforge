@@ -105,28 +105,43 @@ func TestValidateResourcesEncryptedNoStore(t *testing.T) {
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
-// TestValidateResourcesCdnAppOK: a cdn + app at both regional and global scope,
-// each app resolving its cdn within its own scope, with cdn authorities declared
-// for both scopes, validates cleanly.
-func TestValidateResourcesCdnAppOK(t *testing.T) {
-	err := ValidateResources("cdn-app-ok", testdataDir, types.ProviderDefaults{})
-	assert.NoError(t, err, "regional and global cdn/app with declared authorities should validate cleanly")
+// TestValidateResourcesIngressAppOK: an ingress + app at both regional and global
+// scope, each ingress fronting a same-scope compute host and each app resolving
+// its ingress within its own scope, validates cleanly.
+func TestValidateResourcesIngressAppOK(t *testing.T) {
+	err := ValidateResources("ingress-app-ok", testdataDir, types.ProviderDefaults{})
+	assert.NoError(t, err, "regional and global ingress/app referencing same-scope hosts should validate cleanly")
 }
 
-// TestValidateResourcesAppBadCdn: an app whose cdn: foreign key names no cdn
-// resource in its scope fails validation (the same-scope FK rule).
-func TestValidateResourcesAppBadCdn(t *testing.T) {
-	err := ValidateResources("app-bad-cdn", testdataDir, types.ProviderDefaults{})
-	require.Error(t, err, "an app referencing an unknown cdn should fail validation")
+// TestValidateResourcesAppBadIngress: an app whose ingress: foreign key names no
+// ingress resource in its scope fails validation (the same-scope FK rule).
+func TestValidateResourcesAppBadIngress(t *testing.T) {
+	err := ValidateResources("app-bad-ingress", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "an app referencing an unknown ingress should fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
-// TestValidateResourcesCdnMissingAuthority: a scope that declares cdn/app
-// resources but no cdn authority in regions.yaml fails — the resources would
-// have no edge provider to be realized on.
-func TestValidateResourcesCdnMissingAuthority(t *testing.T) {
-	err := ValidateResources("cdn-missing-authority", testdataDir, types.ProviderDefaults{})
-	require.Error(t, err, "cdn/app resources with no cdn authority should fail validation")
+// TestValidateResourcesIngressBadHost: an ingress whose host: foreign key names no
+// compute in its scope fails validation (the same-scope host FK rule).
+func TestValidateResourcesIngressBadHost(t *testing.T) {
+	err := ValidateResources("ingress-bad-host", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "an ingress referencing an unknown compute host should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
+// TestValidateResourcesAppDuplicateSubdomain: two apps in one scope sharing a
+// subdomain fail — each app must map to a distinct public FQDN.
+func TestValidateResourcesAppDuplicateSubdomain(t *testing.T) {
+	err := ValidateResources("app-duplicate-subdomain", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "two apps sharing a subdomain in one scope should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
+// TestValidateResourcesAppDuplicateName: two apps in one scope sharing a name fail —
+// app names must be unique within a scope (today a duplicate silently overwrites).
+func TestValidateResourcesAppDuplicateName(t *testing.T) {
+	err := ValidateResources("app-duplicate-name", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "two apps sharing a name in one scope should fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
@@ -158,33 +173,91 @@ func TestCheckServiceGlobalHostRejected(t *testing.T) {
 	assert.Contains(t, errs[0], "defined in the global slice itself")
 }
 
-// TestCheckAppGlobalCdnRejected: an app referencing a global cdn is rejected —
-// like service.host, an app served from a global cdn is declared in the global
-// slice itself, not referenced from a region.
-func TestCheckAppGlobalCdnRejected(t *testing.T) {
+// ingressCtx returns a baseCtx seeded with one ingress "web" (fronting the bridge
+// host) so app FK checks resolve, with the per-key collision counts populated.
+func ingressCtx() regionContext {
 	ctx := baseCtx()
-	ctx.cdnNames = map[string]bool{"edge": true}
-	errs, _ := checkApp(types.AppSpec{Cdn: "global/edge", Subdomain: "my"}, ctx)
+	ctx.ingressNames = map[string]bool{"web": true}
+	ctx.ingressNameCounts = map[string]int{"web": 1}
+	ctx.appNameCounts = map[string]int{}
+	ctx.appSubdomainCounts = map[string]int{}
+	return ctx
+}
+
+// TestCheckIngressValid: an ingress whose host: resolves to a same-scope
+// single-instance vm compute passes.
+func TestCheckIngressValid(t *testing.T) {
+	errs, _ := checkIngress(types.IngressResourceSpec{Name: "web", Host: "bridge"}, ingressCtx())
+	assert.Empty(t, errs)
+}
+
+// TestCheckIngressGlobalHostRejected: an ingress referencing a global compute is
+// rejected — like service.host, it is declared in the global slice itself.
+func TestCheckIngressGlobalHostRejected(t *testing.T) {
+	errs, _ := checkIngress(types.IngressResourceSpec{Name: "web", Host: "global/edge"}, ingressCtx())
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "global slice itself")
 }
 
-// TestCheckAppUnknownCdnRejected: an app whose cdn: does not resolve to a cdn in
-// the same scope fails the foreign-key check.
-func TestCheckAppUnknownCdnRejected(t *testing.T) {
-	ctx := baseCtx()
-	ctx.cdnNames = map[string]bool{"edge": true}
-	errs, _ := checkApp(types.AppSpec{Cdn: "ghost", Subdomain: "my"}, ctx)
+// TestCheckIngressUnknownHostRejected: an ingress whose host: does not resolve to
+// a compute in the same scope fails the foreign-key check.
+func TestCheckIngressUnknownHostRejected(t *testing.T) {
+	errs, _ := checkIngress(types.IngressResourceSpec{Name: "web", Host: "ghost"}, ingressCtx())
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "does not resolve to a cdn resource")
+	assert.Contains(t, errs[0], "does not resolve to a compute")
 }
 
-// TestCheckAppValid: an app whose cdn: resolves to a same-scope cdn passes.
+// TestCheckIngressDuplicateName: an ingress name declared more than once in the
+// scope is rejected.
+func TestCheckIngressDuplicateName(t *testing.T) {
+	ctx := ingressCtx()
+	ctx.ingressNameCounts["web"] = 2
+	errs, _ := checkIngress(types.IngressResourceSpec{Name: "web", Host: "bridge"}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, errs[0], "ingress names must be unique")
+}
+
+// TestCheckAppGlobalIngressRejected: an app referencing a global ingress is
+// rejected — like service.host, an app served from a global ingress is declared
+// in the global slice itself, not referenced from a region.
+func TestCheckAppGlobalIngressRejected(t *testing.T) {
+	errs, _ := checkApp(types.AppSpec{Name: "dash", Ingress: "global/web", Subdomain: "my"}, ingressCtx())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "global slice itself")
+}
+
+// TestCheckAppUnknownIngressRejected: an app whose ingress: does not resolve to an
+// ingress in the same scope fails the foreign-key check.
+func TestCheckAppUnknownIngressRejected(t *testing.T) {
+	errs, _ := checkApp(types.AppSpec{Name: "dash", Ingress: "ghost", Subdomain: "my"}, ingressCtx())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "does not resolve to an ingress resource")
+}
+
+// TestCheckAppValid: an app whose ingress: resolves to a same-scope ingress passes.
 func TestCheckAppValid(t *testing.T) {
-	ctx := baseCtx()
-	ctx.cdnNames = map[string]bool{"edge": true}
-	errs, _ := checkApp(types.AppSpec{Cdn: "edge", Subdomain: "my", Spa: true}, ctx)
+	errs, _ := checkApp(types.AppSpec{Name: "dash", Ingress: "web", Subdomain: "my", Spa: true}, ingressCtx())
 	assert.Empty(t, errs)
+}
+
+// TestCheckAppDuplicateName: an app name declared more than once in the scope is
+// rejected.
+func TestCheckAppDuplicateName(t *testing.T) {
+	ctx := ingressCtx()
+	ctx.appNameCounts["dash"] = 2
+	errs, _ := checkApp(types.AppSpec{Name: "dash", Ingress: "web", Subdomain: "my"}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, errs[0], "app names must be unique")
+}
+
+// TestCheckAppDuplicateSubdomain: two apps sharing a subdomain in one scope are
+// rejected (each app must map to a distinct public FQDN).
+func TestCheckAppDuplicateSubdomain(t *testing.T) {
+	ctx := ingressCtx()
+	ctx.appSubdomainCounts["my"] = 2
+	errs, _ := checkApp(types.AppSpec{Name: "dash", Ingress: "web", Subdomain: "my"}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, errs[0], "distinct public FQDN")
 }
 
 // TestCheckServiceDatabaseRefRejected: a ref:database/* is rejected — a database

@@ -30,27 +30,37 @@ type NetworkSpec struct {
 	Subnets   []SubnetSpec `yaml:"subnets"`
 }
 
-// CdnSpec is one CDN resource — the edge platform front-end apps attach to (a
-// sibling of NetworkSpec: a thing other resources reference). Its provider is
-// NOT declared here: it comes from the scope's cdn authority in regions.yaml
-// (regions[].cdn / global.cdn), exactly as derived DNS records take their
-// provider from the dns authority. An AppSpec references a cdn by name within
-// the same scope.
-type CdnSpec struct {
+// IngressResourceSpec is one ingress resource — the shared, self-hosted proxy
+// tier (nginx) that fronts apps under a domain (and, from slice B, services
+// too). It is a sibling of NetworkSpec (a thing other resources reference), NOT
+// a workload: it references a compute Host (an FK to a compute name in the same
+// scope, exactly like service.host) and reuses that host's provisioning,
+// firewall, cloud-init and SSH machinery. It carries no provider field — it
+// inherits its host's. The nginx/routing config it serves is NOT declared here:
+// it is derived at deploy from the apps and services that reference this ingress.
+//
+// NOTE (slice A naming): the unqualified name IngressSpec is currently taken by
+// the inline per-service routing-entry struct embedded in ServiceSpec. Slice B
+// renames that route struct to RouteSpec and renames this resource to
+// IngressSpec; until then this carries the IngressResourceSpec name (mirroring
+// PKIResourceSpec) so the schema rework stays behavior-free and ServiceSpec is
+// untouched.
+type IngressResourceSpec struct {
 	Name      string `yaml:"name"`
 	Container string `yaml:"container"`
+	Host      string `yaml:"host"` // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
 }
 
-// AppSpec is one front-end (static SPA) resource — a bundle served from a CDN
-// under a domain. It is a sibling of ServiceSpec (a workload released onto a
-// target), NOT a service subtype: an app targets a cdn, a service targets a
-// host. Like a service it carries no provider field — it inherits the provider
-// of the cdn it references. The bundle itself is delivered at release time, not
-// declared here.
+// AppSpec is one front-end (static SPA) resource — a bundle served from an
+// ingress under a domain. It is a sibling of ServiceSpec (a workload released
+// onto a target), NOT a service subtype: an app targets an ingress, a service
+// targets a host. Like a service it carries no provider field — it inherits the
+// provider of the ingress (whose provider is its compute host's). The bundle
+// itself is delivered at release time, not declared here.
 type AppSpec struct {
 	Name      string `yaml:"name"`
 	Container string `yaml:"container"`
-	Cdn       string `yaml:"cdn"`       // FK -> cdn resource name (same scope)
+	Ingress   string `yaml:"ingress"`   // FK -> ingress resource name (same scope)
 	Subdomain string `yaml:"subdomain"` // public subdomain; the FQDN is composed at realization from scope + base domain
 	Spa       bool   `yaml:"spa"`       // when true, any non-file path serves index.html (SPA deep-link fallback)
 }
@@ -442,7 +452,7 @@ type Resources struct {
 	Database []DatabaseSpec
 	Service  []ServiceSpec
 	PKI      []PKIResourceSpec
-	Cdn      []CdnSpec
+	Ingress  []IngressResourceSpec
 	App      []AppSpec
 }
 
