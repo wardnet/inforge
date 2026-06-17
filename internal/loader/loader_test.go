@@ -91,6 +91,32 @@ func TestLoadGlobalResources(t *testing.T) {
 	assert.Empty(t, regional.Database, "global/ must not leak into the regional set")
 }
 
+// TestLoadIngressAndApp reads the ingress and app resource folders at both
+// scopes: a regional ingress fronting a same-scope host plus its app, and the
+// global equivalents. It confirms the new ingress/ folder is loaded and the app
+// carries the ingress foreign key (not the retired cdn field).
+func TestLoadIngressAndApp(t *testing.T) {
+	regional, err := LoadResources("ingress-app-ok", testdataDir)
+	require.NoError(t, err)
+	require.Len(t, regional.Ingress, 1, "the regional slice declares one ingress")
+	assert.Equal(t, "web", regional.Ingress[0].Name)
+	assert.Equal(t, "bridge", regional.Ingress[0].Host, "ingress carries its compute host FK")
+	require.Len(t, regional.App, 1, "the regional slice declares one app")
+	assert.Equal(t, "dashboard", regional.App[0].Name)
+	assert.Equal(t, "web", regional.App[0].Ingress, "app carries its ingress FK")
+	assert.Equal(t, "my", regional.App[0].Subdomain)
+	assert.True(t, regional.App[0].Spa)
+
+	global, err := LoadGlobalResources("ingress-app-ok", testdataDir)
+	require.NoError(t, err)
+	require.Len(t, global.Ingress, 1, "the global slice declares one ingress")
+	assert.Equal(t, "edge", global.Ingress[0].Host, "global ingress fronts the global host")
+	require.Len(t, global.App, 1, "the global slice declares one app")
+	assert.Equal(t, "marketing", global.App[0].Name)
+	assert.Equal(t, "web", global.App[0].Ingress)
+	assert.Equal(t, "www", global.App[0].Subdomain)
+}
+
 // TestLoadGlobalResourcesMissing confirms an environment with no global/ slice
 // yields an empty set (the global slice is optional), with no error.
 func TestLoadGlobalResourcesMissing(t *testing.T) {

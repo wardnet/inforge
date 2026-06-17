@@ -1,0 +1,10 @@
+regions:
+  us-east-1:
+    slug: use1
+    providers:
+      hetzner:
+        apiToken: test-token
+        location: ash
+        network_zone: us-east
+        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+        images: {ubuntu-24.04: ubuntu-24.04}

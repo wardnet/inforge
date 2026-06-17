@@ -344,14 +344,14 @@ func loadResourceSet(base string) (types.Resources, error) {
 	}
 	res.PKI = pkiSpecs
 
-	cdnSpecs, _, err := loadTypeFromFolders[types.CdnSpec](filepath.Join(base, "cdn"))
+	ingressSpecs, _, err := loadTypeFromFolders[types.IngressResourceSpec](filepath.Join(base, "ingress"))
 	if err != nil {
 		return types.Resources{}, err
 	}
-	for i := range cdnSpecs {
-		NormalizeCdn(&cdnSpecs[i])
+	for i := range ingressSpecs {
+		NormalizeIngress(&ingressSpecs[i])
 	}
-	res.Cdn = cdnSpecs
+	res.Ingress = ingressSpecs
 
 	appSpecs, _, err := loadTypeFromFolders[types.AppSpec](filepath.Join(base, "app"))
 	if err != nil {
@@ -403,21 +403,23 @@ func NormalizeService(s *types.ServiceSpec) {
 	s.Reload = strings.TrimSpace(s.Reload)
 }
 
-// NormalizeCdn trims the cdn spec's free-text fields. There is no default
-// provider to apply — the provider comes from the scope's cdn authority in
-// regions.yaml, not the spec.
-func NormalizeCdn(c *types.CdnSpec) {
-	c.Name = strings.TrimSpace(c.Name)
-	c.Container = strings.TrimSpace(c.Container)
+// NormalizeIngress trims the ingress spec's free-text fields and its host
+// foreign key so a stray space cannot defeat the host FK resolution. There is no
+// default provider to apply — the provider comes from the compute host the
+// ingress references, not the spec.
+func NormalizeIngress(i *types.IngressResourceSpec) {
+	i.Name = strings.TrimSpace(i.Name)
+	i.Container = strings.TrimSpace(i.Container)
+	i.Host = strings.TrimSpace(i.Host)
 }
 
 // NormalizeApp trims the app spec's foreign-key and domain fields so a stray
-// space cannot defeat the cdn FK resolution or the subdomain composition. spa
-// defaults to false (no SPA fallback) when omitted.
+// space cannot defeat the ingress FK resolution or the subdomain composition.
+// spa defaults to false (no SPA fallback) when omitted.
 func NormalizeApp(a *types.AppSpec) {
 	a.Name = strings.TrimSpace(a.Name)
 	a.Container = strings.TrimSpace(a.Container)
-	a.Cdn = strings.TrimSpace(a.Cdn)
+	a.Ingress = strings.TrimSpace(a.Ingress)
 	a.Subdomain = strings.TrimSpace(a.Subdomain)
 }
 

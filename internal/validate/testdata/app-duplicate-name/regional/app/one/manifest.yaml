@@ -1,0 +1,5 @@
+name: dashboard
+container: ingress
+ingress: web
+subdomain: app-one
+spa: true
