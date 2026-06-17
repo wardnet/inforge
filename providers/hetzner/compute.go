@@ -69,7 +69,7 @@ func (h *HetznerCompute) Create(
 	spec types.ComputeSpec,
 	network types.NetworkOutputs,
 	env, abstractRegion, domain, manifest string,
-	ingressPorts []int,
+	fwPorts types.FirewallPorts,
 ) (types.ComputeOutputs, error) {
 	if spec.Provider != "hetzner" {
 		return types.ComputeOutputs{}, fmt.Errorf("hetzner provider received spec with provider=%q", spec.Provider)
@@ -90,7 +90,7 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, fmt.Errorf("hetzner has no image for %q in region %q — add it to providers.hetzner.regions.%s.images", spec.Image, abstractRegion, abstractRegion)
 	}
 
-	fw, err := h.ensureFirewall(ctx, spec, env, ingressPorts)
+	fw, err := h.ensureFirewall(ctx, spec, env, fwPorts)
 	if err != nil {
 		return types.ComputeOutputs{}, fmt.Errorf("ensure firewall: %w", err)
 	}
@@ -153,17 +153,25 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, fmt.Errorf("create server %s: %w", serverName, err)
 	}
 
-	return types.ComputeOutputs{PublicIP: server.Ipv4Address}, nil
+	// The private IP is read back from the server's network attachment (we pin a
+	// single SubnetId, so index 0 is that attachment). Hetzner assigns it when we
+	// omit an explicit Ip; .Elem() unwraps the *string output to "" in preview.
+	privateIP := server.Networks.Index(pulumi.Int(0)).Ip().Elem()
+
+	return types.ComputeOutputs{PublicIP: server.Ipv4Address, PrivateIP: privateIP}, nil
 }
 
 // ensureFirewall returns the hcloud.Firewall for the spec name, creating it if it
 // does not yet exist. The inbound rule set is derived, not hand-maintained: SSH
-// (22) is always permitted, the host's derived ingressPorts (the union of its
-// services' ingress listen ports, plus :80 when it terminates TLS) are opened as
-// TCP, and any explicit spec.Firewall.Inbound rules are added on top. Duplicate
-// (proto, port) pairs are collapsed so the rendered firewall is stable. It is safe
-// to call concurrently.
-func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeSpec, env string, ingressPorts []int) (*hcloud.Firewall, error) {
+// (22) is always permitted from anywhere, the host's derived public ports (an
+// ingress host's route listen ports, plus :80 when it terminates TLS) are opened
+// to the internet, the derived private ports (a backend's route target ports) are
+// opened only to the private network CIDR (reachable from a co-tenant ingress
+// over the private network, never the internet), and any explicit
+// spec.Firewall.Inbound rules are added on top as public. Duplicate (proto, port,
+// source) tuples are collapsed so the rendered firewall is stable. It is safe to
+// call concurrently.
+func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeSpec, env string, fwPorts types.FirewallPorts) (*hcloud.Firewall, error) {
 	fwName := naming.Resource(env, h.slug, "fw", spec.Name)
 
 	h.mu.Lock()
@@ -173,40 +181,61 @@ func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeS
 		return fw, nil
 	}
 
-	// SSH first (management access is never locked out), then the derived ingress
-	// ports, then any explicitly declared inbound rules — de-duplicated by
-	// (proto, port) so a port that is both derived and declared appears once.
-	inbound := make([]types.FirewallRule, 0, 1+len(ingressPorts))
+	// publicSources is the internet; privateSources scopes a backend's target port
+	// to the host's private network CIDR (validation guarantees an ingress fronting
+	// it shares that network).
+	publicSources := pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")}
+	var privateSources pulumi.StringArray
+	if fwPorts.PrivateSourceCIDR != "" {
+		privateSources = pulumi.StringArray{pulumi.String(fwPorts.PrivateSourceCIDR)}
+	}
+
+	rules := make(hcloud.FirewallRuleArray, 0, len(fwPorts.Public)+len(fwPorts.Private)+4)
+	// De-duplicate by (proto, port, scope) so a port that is both derived and
+	// declared, or appears in two lists, is rendered once.
 	seen := map[string]bool{}
-	addRule := func(r types.FirewallRule) {
-		key := r.Proto + "/" + string(r.Port)
+	addTCP := func(port string, sources pulumi.StringArray, scope string) {
+		key := "tcp/" + port + "/" + scope
 		if seen[key] {
 			return
 		}
 		seen[key] = true
-		inbound = append(inbound, r)
+		rules = append(rules, &hcloud.FirewallRuleArgs{
+			Direction: pulumi.String("in"),
+			Protocol:  pulumi.String("tcp"),
+			Port:      pulumi.StringPtr(port),
+			SourceIps: sources,
+		})
 	}
-	addRule(types.FirewallRule{Proto: "tcp", Port: "22"})
-	for _, p := range ingressPorts {
-		addRule(types.FirewallRule{Proto: "tcp", Port: types.Port(strconv.Itoa(p))})
+	// SSH first (management access is never locked out).
+	addTCP("22", publicSources, "public")
+	for _, p := range fwPorts.Public {
+		addTCP(strconv.Itoa(p), publicSources, "public")
+	}
+	// Private rules only when a source CIDR is known; otherwise a backend port
+	// would silently open to the internet.
+	if privateSources != nil {
+		for _, p := range fwPorts.Private {
+			addTCP(strconv.Itoa(p), privateSources, "private")
+		}
 	}
 	if spec.Firewall != nil {
 		for _, r := range spec.Firewall.Inbound {
-			addRule(r)
+			key := r.Proto + "/" + string(r.Port) + "/public"
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			rule := &hcloud.FirewallRuleArgs{
+				Direction: pulumi.String("in"),
+				Protocol:  pulumi.String(r.Proto),
+				SourceIps: publicSources,
+			}
+			if r.Proto != "icmp" {
+				rule.Port = pulumi.StringPtr(string(r.Port))
+			}
+			rules = append(rules, rule)
 		}
-	}
-
-	rules := make(hcloud.FirewallRuleArray, 0, len(inbound)+3)
-	for _, r := range inbound {
-		rule := &hcloud.FirewallRuleArgs{
-			Direction: pulumi.String("in"),
-			Protocol:  pulumi.String(r.Proto),
-			SourceIps: pulumi.StringArray{pulumi.String("0.0.0.0/0"), pulumi.String("::/0")},
-		}
-		if r.Proto != "icmp" {
-			rule.Port = pulumi.StringPtr(string(r.Port))
-		}
-		rules = append(rules, rule)
 	}
 	// Outbound: always allow all TCP, UDP, ICMP.
 	rules = append(rules,

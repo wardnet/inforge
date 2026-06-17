@@ -118,6 +118,19 @@ func TestRenderTerminateOnly(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(got, "listen 80;"))
 }
 
+// TestRenderCrossHostBackend: a route whose Backend is a private IP (cross-host)
+// renders its proxy_pass to that address; an empty Backend defaults to loopback.
+func TestRenderCrossHostBackend(t *testing.T) {
+	got, err := Render([]types.IngressRoute{
+		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, FQDNs: []string{"api.svc"}, Backend: "10.0.1.5"},
+		{Service: "dns", Type: types.IngressTypeForward, Listen: 853, Target: 5353, Backend: "10.0.1.6"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, got, "proxy_pass http://10.0.1.5:8080;", "cross-host tls-termination proxies to the backend private IP")
+	assert.Contains(t, got, "proxy_pass 10.0.1.6:5353;", "cross-host forward proxies to the backend private IP")
+	assert.NotContains(t, got, "127.0.0.1", "no loopback when every route is cross-host")
+}
+
 // TestRenderUnknownTypeErrors guards the renderer against an unexpected route type.
 func TestRenderUnknownTypeErrors(t *testing.T) {
 	_, err := Render([]types.IngressRoute{{Service: "x", Type: "passthrough", Listen: 443}})

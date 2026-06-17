@@ -172,10 +172,13 @@ func TestTLSAndServiceShareOneGate(t *testing.T) {
 			Compute: []types.ComputeSpec{
 				{Name: "bridge", Provider: "hetzner", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
 			},
+			// The ingress resource is co-located on bridge, so its nginx realization
+			// and the service provisioning SSH the same host and share one gate.
+			Ingress: []types.IngressSpec{{Name: "web", Host: "bridge"}},
 			Service: []types.ServiceSpec{
-				// Ingress on the host drives nginx realization (no separate resource).
 				{Name: "ghost", Container: "ghost", Host: "bridge-01", Type: "raw", User: "ghost",
-					Ingress: []types.IngressSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}},
+					Ingress: "web",
+					Routes:  []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}},
 			},
 		}
 		computeOut := map[string]types.ComputeOutputs{

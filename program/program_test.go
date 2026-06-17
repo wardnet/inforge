@@ -26,23 +26,25 @@ func TestDeployUsersByHost(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestRoutesByHostDerivesEnvScopedFQDN(t *testing.T) {
+func TestIngressRoutesByHostDerivesEnvScopedFQDN(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "bridge"}},
 		Service: []types.ServiceSpec{
-			// Two tls-termination services on the same host, declared out of order,
-			// to exercise grouping + stable sorting. One service has no ingress.
-			{Name: "web", Host: "bridge-01", Ingress: []types.IngressSpec{{Type: types.IngressTypeTLSTermination, Listen: 8080, Target: 3000}}},
-			{Name: "api", Host: "bridge", Ingress: []types.IngressSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}},
+			// Two tls-termination services through the same ingress, declared out of
+			// order, to exercise grouping + stable sorting. One service has no routes.
+			{Name: "web", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 8080, Target: 3000}}},
+			{Name: "api", Host: "bridge", Ingress: "web", Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}},
 			{Name: "worker", Host: "bridge-01"},
 		},
 	}
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 
-	got, err := routesByHost(res, canonical, "prd", "use1", "wardnet.network")
+	got, crossHost, err := ingressRoutesByHost(res, canonical, "prd", "use1", "wardnet.network")
 	require.NoError(t, err)
+	assert.Empty(t, crossHost, "all routes are co-located, so no cross-host backends")
 
-	// `host: bridge` and `host: bridge-01` both land on the same canonical host.
+	// The ingress's host (bridge-01) is the realization key; both services land there.
 	require.Len(t, got, 1)
 	routes := got["bridge-01"]
 	require.Len(t, routes, 2)
@@ -54,6 +56,7 @@ func TestRoutesByHostDerivesEnvScopedFQDN(t *testing.T) {
 	assert.Equal(t, []string{"api.svc.prd.use1.wardnet.network"}, routes[0].FQDNs)
 	assert.Equal(t, 443, routes[0].Listen)
 	assert.Equal(t, 8080, routes[0].Target)
+	assert.Equal(t, "127.0.0.1", routes[0].Backend, "co-located backend is loopback")
 
 	assert.Equal(t, "web", routes[1].Service)
 	assert.Equal(t, []string{"web.svc.prd.use1.wardnet.network"}, routes[1].FQDNs)
@@ -64,15 +67,41 @@ func TestRoutesByHostDerivesEnvScopedFQDN(t *testing.T) {
 	assert.Equal(t, naming.ServiceFQDN("prd", "use1", "api", "wardnet.network"), routes[0].FQDNs[0])
 }
 
-// A single service carrying a tls-termination entry (with vanity) plus a forward
-// entry is the bridge shape: the tls-termination route carries every SNI (auto +
+// A cross-host route (service on a different host than its ingress) leaves Backend
+// empty and records the service → backend host in crossHost, so the caller can
+// supply the backend's private IP.
+func TestIngressRoutesByHostCrossHost(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{
+			{Name: "edge", InstanceCount: 1},
+			{Name: "back", InstanceCount: 1},
+		},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
+		Service: []types.ServiceSpec{
+			{Name: "api", Host: "back", Ingress: "web", Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}},
+		},
+	}
+	got, crossHost, err := ingressRoutesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	require.NoError(t, err)
+
+	// Realized on the ingress host (edge-01), proxying to the backend (back-01).
+	routes := got["edge-01"]
+	require.Len(t, routes, 1)
+	assert.Equal(t, "api", routes[0].Service)
+	assert.Equal(t, "", routes[0].Backend, "a cross-host route's backend is filled by the provider")
+	assert.Equal(t, "back-01", crossHost["edge-01"]["api"], "the backend host is recorded for IP wiring")
+}
+
+// A single service carrying a tls-termination route (with vanity) plus a forward
+// route is the bridge shape: the tls-termination route carries every SNI (auto +
 // vanity, sorted) as one server_name list; the forward route carries no SNI and a
 // target. Routes sort by listen port.
-func TestRoutesByHostTerminatePlusForward(t *testing.T) {
+func TestIngressRoutesByHostTerminatePlusForward(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "bridge"}},
 		Service: []types.ServiceSpec{
-			{Name: "bridge", Host: "bridge-01", Ingress: []types.IngressSpec{
+			{Name: "bridge", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{
 				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: []string{
 					"key-broker.{BASE_DOMAIN}",
 					"key-broker.inforge.wardnet.network",
@@ -81,7 +110,7 @@ func TestRoutesByHostTerminatePlusForward(t *testing.T) {
 			}},
 		},
 	}
-	got, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	got, _, err := ingressRoutesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
 	require.NoError(t, err)
 	routes := got["bridge-01"]
 	require.Len(t, routes, 2) // 1 tls-termination (multi-SNI) + 1 forward
@@ -103,17 +132,18 @@ func TestRoutesByHostTerminatePlusForward(t *testing.T) {
 	assert.Empty(t, fwd.FQDNs, "a forward route carries no SNI")
 }
 
-// Two services may share one listen port when both are tls-termination (nginx
-// demuxes by SNI); they render two routes on the same port.
-func TestRoutesByHostSharedTLSListen(t *testing.T) {
+// Two services may share one listen port through one ingress when both are
+// tls-termination (nginx demuxes by SNI); they render two routes on the same port.
+func TestIngressRoutesByHostSharedTLSListen(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "bridge"}},
 		Service: []types.ServiceSpec{
-			{Name: "a", Host: "bridge-01", Ingress: []types.IngressSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 3000}}},
-			{Name: "b", Host: "bridge-01", Ingress: []types.IngressSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 4000}}},
+			{Name: "a", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 3000}}},
+			{Name: "b", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 4000}}},
 		},
 	}
-	got, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	got, _, err := ingressRoutesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
 	require.NoError(t, err)
 	routes := got["bridge-01"]
 	require.Len(t, routes, 2)
@@ -124,15 +154,15 @@ func TestRoutesByHostSharedTLSListen(t *testing.T) {
 }
 
 // TestDerivedRecordsBridge asserts the bridge yields exactly the host record plus
-// the service's auto + vanity records, with the right zone-relative names and
-// resource-name components, all pointing at the host. The service's two ingress
-// entries (tls-termination + forward) both derive "<svc>.svc", which collapses to
-// one record.
+// the service's auto + vanity records, all pointing at the INGRESS host. The
+// service's two routes (tls-termination + forward) both derive "<svc>.svc", which
+// collapses to one record.
 func TestDerivedRecordsBridge(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", Container: "bridge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "bridge"}},
 		Service: []types.ServiceSpec{
-			{Name: "bridge", Container: "bridge", Host: "bridge-01", Ingress: []types.IngressSpec{
+			{Name: "bridge", Container: "bridge", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{
 				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: []string{
 					"key-broker.{BASE_DOMAIN}",
 					"key-broker.inforge.wardnet.network",
@@ -158,91 +188,146 @@ func TestDerivedRecordsBridge(t *testing.T) {
 	}, flat)
 }
 
-// Two tls-termination services on one host sharing the same vanity FQDN on the
-// same listen port collide on one SNI, which routesByHost must reject
-// (createDNSRecords' guard is a no-op without a DNS authority, so the route side
-// guards too).
-func TestRoutesByHostRejectsDuplicateSNI(t *testing.T) {
+// TestDerivedRecordsCrossHostIngress: a service's ingress FQDNs resolve to the
+// INGRESS host's public IP, not the backend's (ADR-0026). The host's own "<vm>"
+// records still point at their own compute.
+func TestDerivedRecordsCrossHostIngress(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{
+			{Name: "edge", Container: "edge", InstanceCount: 1},
+			{Name: "back", Container: "back", InstanceCount: 1},
+		},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
+		Service: []types.ServiceSpec{
+			{Name: "api", Container: "back", Host: "back", Ingress: "web", Routes: []types.RouteSpec{
+				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080},
+			}},
+		},
+	}
+	got := derivedRecords(res, "prd", "use1", "wardnet.network")
+	byRecord := map[string]string{}
+	for _, d := range got {
+		byRecord[d.rec.RecordName] = d.hostKey
+	}
+	assert.Equal(t, "edge-01", byRecord["edge.vm.prd.use1"])
+	assert.Equal(t, "back-01", byRecord["back.vm.prd.use1"])
+	// The service FQDN points at the ingress host (edge), not the backend (back).
+	assert.Equal(t, "edge-01", byRecord["api.svc.prd.use1"], "service FQDN resolves to the ingress host")
+}
+
+// Two tls-termination services through one ingress sharing the same vanity FQDN on
+// the same listen port collide on one SNI, which ingressRoutesByHost must reject.
+func TestIngressRoutesByHostRejectsDuplicateSNI(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "bridge"}},
 		Service: []types.ServiceSpec{
-			{Name: "a", Host: "bridge-01", Ingress: []types.IngressSpec{
+			{Name: "a", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{
 				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: []string{"dup.example.com"}}}},
-			{Name: "b", Host: "bridge-01", Ingress: []types.IngressSpec{
+			{Name: "b", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{
 				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 9090, Vanity: []string{"dup.example.com"}}}},
 		},
 	}
-	_, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	_, _, err := ingressRoutesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "dup.example.com")
 }
 
-// The same SNI on different listen ports is legitimate (nginx demuxes per port),
-// so routesByHost must NOT reject it.
-func TestRoutesByHostAllowsSameSNIDifferentListen(t *testing.T) {
+// The same SNI on different listen ports is legitimate (nginx demuxes per port).
+func TestIngressRoutesByHostAllowsSameSNIDifferentListen(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "bridge"}},
 		Service: []types.ServiceSpec{
-			{Name: "a", Host: "bridge-01", Ingress: []types.IngressSpec{
+			{Name: "a", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{
 				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: []string{"shared.example.com"}}}},
-			{Name: "b", Host: "bridge-01", Ingress: []types.IngressSpec{
+			{Name: "b", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{
 				{Type: types.IngressTypeTLSTermination, Listen: 8443, Target: 9090, Vanity: []string{"shared.example.com"}}}},
 		},
 	}
-	_, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	_, _, err := ingressRoutesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
 	require.NoError(t, err)
 }
 
-func TestRoutesByHostNoIngressNoRoutes(t *testing.T) {
+func TestIngressRoutesByHostNoRoutes(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
 		Service: []types.ServiceSpec{{Name: "worker", Host: "bridge-01"}},
 	}
-	got, err := routesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
+	got, _, err := ingressRoutesByHost(res, naming.CanonicalComputeKeys(res.Compute), "prd", "use1", "wardnet.network")
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
 
-// TestIngressPortsByHost locks the firewall derivation: the union of a host's
-// service ingress listen ports, plus :80 iff a tls-termination entry exists.
-func TestIngressPortsByHost(t *testing.T) {
+// TestFirewallPlanByHost locks the firewall derivation for the ingress tier: an
+// ingress host opens, publicly, its services' route listen ports plus :80 iff a
+// tls-termination route exists. A host with nothing contributes no entry.
+func TestFirewallPlanByHost(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{
 			{Name: "bridge", InstanceCount: 1},
 			{Name: "plain", InstanceCount: 1}, // no ingress -> absent from the map
 		},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "bridge"}},
 		Service: []types.ServiceSpec{
-			{Name: "api", Host: "bridge-01", Ingress: []types.IngressSpec{
+			{Name: "api", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{
 				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080},
 				{Type: types.IngressTypeForward, Listen: 853, Target: 5353},
 				{Type: types.IngressTypeForward, Listen: 9000, Target: 9001},
 			}},
-			{Name: "web", Host: "bridge", Ingress: []types.IngressSpec{
+			{Name: "web", Host: "bridge", Ingress: "web", Routes: []types.RouteSpec{
 				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 3000}, // dup 443
 			}},
 		},
 	}
 
-	got := ingressPortsByHost(res)
+	got := firewallPlanByHost(res)
 	// :80 added once (tls-termination present), 443 de-duplicated across services,
-	// 853 + 9000 (the forward listen ports), sorted.
-	assert.Equal(t, []int{80, 443, 853, 9000}, got["bridge-01"])
+	// 853 + 9000 (the forward listen ports), sorted. All co-located -> no private.
+	assert.Equal(t, []int{80, 443, 853, 9000}, got["bridge-01"].Public)
+	assert.Empty(t, got["bridge-01"].Private)
 	_, hasPlain := got["plain-01"]
-	assert.False(t, hasPlain, "a host with no ingress contributes no ports")
+	assert.False(t, hasPlain, "a host with no ingress and no backend ports contributes nothing")
 }
 
-// A forward-only host (no tls-termination entry) opens only its forward listen
-// ports — no :80, since ACME never runs there.
-func TestIngressPortsByHostForwardOnlyNoPort80(t *testing.T) {
+// A forward-only ingress host (no tls-termination route) opens only its forward
+// listen ports — no :80, since ACME never runs there.
+func TestFirewallPlanByHostForwardOnlyNoPort80(t *testing.T) {
 	res := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "bridge"}},
 		Service: []types.ServiceSpec{
-			{Name: "dns", Host: "bridge-01", Ingress: []types.IngressSpec{
+			{Name: "dns", Host: "bridge-01", Ingress: "web", Routes: []types.RouteSpec{
 				{Type: types.IngressTypeForward, Listen: 853, Target: 5353},
 			}},
 		},
 	}
-	assert.Equal(t, []int{853}, ingressPortsByHost(res)["bridge-01"])
+	assert.Equal(t, []int{853}, firewallPlanByHost(res)["bridge-01"].Public)
+}
+
+// TestFirewallPlanByHostCrossHost: a cross-host backend opens its route target
+// ports privately, scoped to its network CIDR; the ingress host opens the public
+// listen ports.
+func TestFirewallPlanByHostCrossHost(t *testing.T) {
+	res := types.Resources{
+		Network: []types.NetworkSpec{{Name: "net", CIDR: "10.0.0.0/16"}},
+		Compute: []types.ComputeSpec{
+			{Name: "edge", Network: "net", InstanceCount: 1},
+			{Name: "back", Network: "net", InstanceCount: 1},
+		},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
+		Service: []types.ServiceSpec{
+			{Name: "api", Host: "back", Ingress: "web", Routes: []types.RouteSpec{
+				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080},
+			}},
+		},
+	}
+	got := firewallPlanByHost(res)
+	assert.Equal(t, []int{80, 443}, got["edge-01"].Public, "ingress host opens public listen + ACME")
+	assert.Empty(t, got["edge-01"].Private)
+	assert.Equal(t, []int{8080}, got["back-01"].Private, "backend opens its target port privately")
+	assert.Equal(t, "10.0.0.0/16", got["back-01"].PrivateSourceCIDR)
+	assert.Empty(t, got["back-01"].Public, "backend opens no public ingress port")
 }
 
 // TestServiceProvisionScriptEnablesNeverStarts guards the headline constraint:

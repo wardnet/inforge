@@ -62,14 +62,14 @@ func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
 	assert.Equal(t, "api", api.Name)
 	assert.Equal(t, "raw", api.Type, "service type should default to raw")
 
-	// the api service declares a tls-termination and a forward ingress entry.
-	require.Len(t, api.Ingress, 2, "api service should declare two ingress entries")
-	assert.Equal(t, "tls-termination", api.Ingress[0].Type)
-	assert.Equal(t, 443, api.Ingress[0].Listen)
-	assert.Equal(t, 8080, api.Ingress[0].Target)
-	assert.Equal(t, "forward", api.Ingress[1].Type)
-	assert.Equal(t, 853, api.Ingress[1].Listen)
-	assert.Equal(t, 5353, api.Ingress[1].Target)
+	// the api service declares a tls-termination and a forward route.
+	require.Len(t, api.Routes, 2, "api service should declare two routes")
+	assert.Equal(t, "tls-termination", api.Routes[0].Type)
+	assert.Equal(t, 443, api.Routes[0].Listen)
+	assert.Equal(t, 8080, api.Routes[0].Target)
+	assert.Equal(t, "forward", api.Routes[1].Type)
+	assert.Equal(t, 853, api.Routes[1].Listen)
+	assert.Equal(t, 5353, api.Routes[1].Target)
 
 	// public network keeps its declared type; private keeps its parent.
 	require.Len(t, res.Network, 2)

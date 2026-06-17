@@ -58,11 +58,11 @@ func TestEnsureFirewallIdempotency(t *testing.T) {
 		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", nil)
 
 		bridgeSpec := types.ComputeSpec{Name: "bridge", Container: "vpc", Provider: "hetzner"}
-		fw1, err := h.ensureFirewall(ctx, bridgeSpec, "prod", nil)
+		fw1, err := h.ensureFirewall(ctx, bridgeSpec, "prod", types.FirewallPorts{})
 		if err != nil {
 			return err
 		}
-		fw2, err := h.ensureFirewall(ctx, bridgeSpec, "prod", nil)
+		fw2, err := h.ensureFirewall(ctx, bridgeSpec, "prod", types.FirewallPorts{})
 		if err != nil {
 			return err
 		}
@@ -71,7 +71,7 @@ func TestEnsureFirewallIdempotency(t *testing.T) {
 		}
 
 		dbSpec := types.ComputeSpec{Name: "db", Container: "vpc", Provider: "hetzner"}
-		fw3, err := h.ensureFirewall(ctx, dbSpec, "prod", nil)
+		fw3, err := h.ensureFirewall(ctx, dbSpec, "prod", types.FirewallPorts{})
 		if err != nil {
 			return err
 		}
@@ -82,6 +82,64 @@ func TestEnsureFirewallIdempotency(t *testing.T) {
 	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
 
 	require.NoError(t, err)
+}
+
+// fwCaptureMocks records the inbound rules of the first firewall it sees, so a
+// test can assert the public-vs-private source scoping ensureFirewall applies.
+type fwCaptureMocks struct {
+	rules []resource.PropertyValue
+}
+
+func (m *fwCaptureMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	return resource.PropertyMap{}, nil
+}
+
+func (m *fwCaptureMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
+	if args.TypeToken == "hcloud:index/firewall:Firewall" {
+		if r, ok := args.Inputs["rules"]; ok && r.IsArray() {
+			m.rules = r.ArrayValue()
+		}
+		return "42", resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}, nil
+	}
+	return args.Name + "-id", resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}, nil
+}
+
+// TestEnsureFirewallSourceScoping: public ports open to the internet, private
+// ports open only to the configured private CIDR, SSH is always public.
+func TestEnsureFirewallSourceScoping(t *testing.T) {
+	mocks := &fwCaptureMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", nil)
+		spec := types.ComputeSpec{Name: "back", Container: "vpc", Provider: "hetzner"}
+		_, err := h.ensureFirewall(ctx, spec, "prod", types.FirewallPorts{
+			Public:            []int{443},
+			Private:           []int{8080},
+			PrivateSourceCIDR: "10.0.0.0/16",
+		})
+		return err
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+
+	// Collect (port -> sourceIps) for every inbound rule.
+	srcByPort := map[string][]string{}
+	for _, r := range mocks.rules {
+		o := r.ObjectValue()
+		if o["direction"].StringValue() != "in" {
+			continue
+		}
+		port := ""
+		if p, ok := o["port"]; ok && p.IsString() {
+			port = p.StringValue()
+		}
+		var srcs []string
+		for _, s := range o["sourceIps"].ArrayValue() {
+			srcs = append(srcs, s.StringValue())
+		}
+		srcByPort[port] = srcs
+	}
+	assert.Contains(t, srcByPort["22"], "0.0.0.0/0", "SSH must stay public")
+	assert.Contains(t, srcByPort["443"], "0.0.0.0/0", "a public ingress port opens to the internet")
+	assert.Equal(t, []string{"10.0.0.0/16"}, srcByPort["8080"], "a private backend port opens only to the network CIDR")
 }
 
 func TestEnsureFirewallCustomRules(t *testing.T) {
@@ -99,7 +157,7 @@ func TestEnsureFirewallCustomRules(t *testing.T) {
 				},
 			},
 		}
-		fw, err := h.ensureFirewall(ctx, spec, "prod", nil)
+		fw, err := h.ensureFirewall(ctx, spec, "prod", types.FirewallPorts{})
 		if err != nil {
 			return err
 		}
@@ -137,7 +195,7 @@ func TestComputeCreateWithCustomFirewall(t *testing.T) {
 			},
 		}
 
-		out, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", nil)
+		out, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{})
 		if err != nil {
 			return err
 		}
@@ -205,7 +263,7 @@ func TestComputeCreateReturnsPublicIP(t *testing.T) {
 			InstanceCount: 1,
 		}
 
-		out, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", nil)
+		out, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{})
 		if err != nil {
 			return err
 		}
@@ -237,11 +295,11 @@ func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 
 		// Two consecutive Create calls for the same spec must succeed with
 		// different internal keys (bridge-01, bridge-02).
-		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", nil)
+		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{})
 		if err != nil {
 			return err
 		}
-		_, err = h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", nil)
+		_, err = h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{})
 		return err
 	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
 
@@ -298,7 +356,7 @@ func TestComputeCreateUsesRealization(t *testing.T) {
 			Name: "bridge", Container: "vpc", Provider: "hetzner",
 			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 1,
 		}
-		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", nil)
+		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{})
 		return err
 	}, pulumi.WithMocks("inforge", "test", mocks))
 	require.NoError(t, err)
@@ -317,7 +375,7 @@ func TestComputeCreateUnknownRegionReturnsError(t *testing.T) {
 			Name: "bridge", Container: "vpc", Provider: "hetzner",
 			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 1,
 		}
-		_, err := h.Create(ctx, spec, net, "prod", "eu-central-1", "bridge.euc1.example.com", "", nil)
+		_, err := h.Create(ctx, spec, net, "prod", "eu-central-1", "bridge.euc1.example.com", "", types.FirewallPorts{})
 		if err == nil {
 			t.Error("expected error for region with no realization, got nil")
 		} else {
@@ -340,7 +398,7 @@ func TestComputeCreateUnknownSizeReturnsError(t *testing.T) {
 			Name: "bridge", Container: "vpc", Provider: "hetzner",
 			Network: "vpc", Size: "XLARGE", Image: "ubuntu-24.04", InstanceCount: 1,
 		}
-		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", nil)
+		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{})
 		if err == nil {
 			t.Error("expected error for unknown size, got nil")
 		} else {
@@ -363,7 +421,7 @@ func TestComputeCreateUnknownImageReturnsError(t *testing.T) {
 			Name: "bridge", Container: "vpc", Provider: "hetzner",
 			Network: "vpc", Size: "SMALL", Image: "ubuntu-26.04", InstanceCount: 1,
 		}
-		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", nil)
+		_, err := h.Create(ctx, spec, net, "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{})
 		if err == nil {
 			t.Error("expected error for unknown image, got nil")
 		} else {

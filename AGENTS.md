@@ -207,24 +207,35 @@ is now rejected — DB credentials flow only through grants). slice C = the PKI 
   other across the service's grants. The cross-region boundary falls out of target resolution (shared
   regional set + `global/` prefix), exactly like `ref:`.
 
-## Ingress and App (Slice A, schema only — ADR-0026)
+## Ingress and App (ADR-0026)
 
 `ingress` and `app` are the two declarative resource types for front-end (React SPA) deployment. Apps
 are **origin-served by our own nginx** (Let's Encrypt, HTTP-01 — no CDN edge: free Cloudflare Universal
-SSL can't cover deep app hosts), and `ingress` is promoted to a **standalone, shared proxy tier** that
-fronts apps (and, from slice B, services). This slice is **schema scaffolding only and behavior-free** —
-`ServiceSpec` and all deploy-time realization are untouched; ingress realization (B), app static serving
-+ DNS (C), and app release delivery (D) are later slices. See ADR-0026 (which supersedes the
-"realization-driven, no host-level resource" parts of ADR-0015).
+SSL can't cover deep app hosts), and `ingress` is a **standalone, shared proxy tier** that fronts both
+services (slice B, live) and apps (slice C). See ADR-0026 (which supersedes the "realization-driven, no
+host-level resource" parts of ADR-0015). Slice landing: A = schema; **B (live) = ingress realization +
+service migration**; C = app static serving + DNS; D = app release delivery.
 
-- **`IngressResourceSpec`** (`schemas/ingress.json`, `regional|global/ingress/<name>/manifest.yaml`) —
+- **Slice B — the type rename.** The inline per-service route struct is now `types.RouteSpec` and the
+  ingress resource is `types.IngressSpec` (the slice-A `IngressResourceSpec` name is gone). `ServiceSpec`
+  carries `Ingress string` (FK → ingress resource, same scope) **and** `Routes []RouteSpec` (the typed
+  routes, formerly the `ingress:` array). YAML migration: a service's `ingress:` array became `routes:`,
+  and a new `ingress: <name>` FK names the ingress that fronts them.
+- **`IngressSpec`** (`schemas/ingress.json`, `regional|global/ingress/<name>/manifest.yaml`) —
   the shared proxy tier: a sibling of network, not a workload. It references a compute `host:` by name
   in the **same scope** (`host:` FK, exactly like `service.host`) and reuses that host's
   provisioning/firewall/SSH. Its provider is **NOT** on the spec — it inherits its host's. The
-  nginx/routing config is **not** declared; it is derived at deploy from the apps/services that
-  reference the ingress. *Naming:* the unqualified `IngressSpec` name is still the inline per-service
-  route struct embedded in `ServiceSpec`; slice B renames the route struct to `RouteSpec` and this
-  resource to `IngressSpec` (it temporarily carries `IngressResourceSpec`, mirroring `PKIResourceSpec`).
+  nginx/routing config is **not** declared; it is derived at deploy from the services (slice C: apps)
+  that reference the ingress.
+- **Slice B realization (`program.go` + `providers/hetzner`):** nginx moves OFF the service host onto
+  the **ingress host**. `ingressRoutesByHost` groups every referencing service's routes under the
+  ingress's host; `realizeIngress` installs nginx there and proxies to each backend over loopback
+  (co-located) or the backend's `ComputeOutputs.PrivateIP` (cross-host). `IngressRoute.Backend` is the
+  resolved upstream address; the provider renders the config inside an apply over the cross-host private
+  IPs. Service/ingress FQDNs (`<svc>.svc` + vanity) resolve to the **ingress host's** public IP.
+  Firewall (`firewallPlanByHost` → `types.FirewallPorts`): ingress hosts open public `listen` ports
+  (+`:80` for ACME); cross-host backends open `target` ports **only** to the network CIDR (see rule
+  `.agents/rules/cross-host-route-requires-same-network.md`). Every host keeps public `:22`.
 - **`AppSpec`** (`types.AppSpec`, `schemas/app.json`, `regional|global/app/<name>/manifest.yaml`) —
   a static SPA workload: a sibling of service, **not** a service subtype. It references an `ingress` by
   name in the **same scope** (`ingress:` FK). `spa: true` enables the SPA deep-link fallback (404 →

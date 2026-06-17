@@ -102,8 +102,19 @@ func httpBlock(terminate []types.IngressRoute) *crossplane.Directive {
 	return block("http", nil, children...)
 }
 
+// backendAddr returns the address nginx proxies a route to: the route's resolved
+// Backend (a private IP for a cross-host route, or "127.0.0.1" co-located). It
+// defaults an empty Backend to loopback so a co-located route the program left
+// implicit still renders to a valid upstream.
+func backendAddr(r types.IngressRoute) string {
+	if r.Backend == "" {
+		return "127.0.0.1"
+	}
+	return r.Backend
+}
+
 // terminateServer renders one tls-termination server: ACME-managed TLS for the
-// route's SNIs, reverse-proxying cleartext to the local target.
+// route's SNIs, reverse-proxying cleartext to the backend target.
 func terminateServer(r types.IngressRoute) *crossplane.Directive {
 	serverName := append([]string{}, r.FQDNs...)
 	return block("server", nil,
@@ -114,7 +125,7 @@ func terminateServer(r types.IngressRoute) *crossplane.Directive {
 		dir("ssl_certificate_key", "$acme_certificate_key"),
 		dir("ssl_certificate_cache", "max=2"),
 		block("location", []string{"/"},
-			dir("proxy_pass", fmt.Sprintf("http://127.0.0.1:%d", r.Target)),
+			dir("proxy_pass", fmt.Sprintf("http://%s:%d", backendAddr(r), r.Target)),
 			dir("proxy_set_header", "Host", "$host"),
 			dir("proxy_set_header", "X-Forwarded-For", "$proxy_add_x_forwarded_for"),
 			dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
@@ -130,7 +141,7 @@ func streamBlock(forward []types.IngressRoute) *crossplane.Directive {
 	for _, r := range forward {
 		children = append(children, block("server", nil,
 			dir("listen", strconv.Itoa(r.Listen)),
-			dir("proxy_pass", fmt.Sprintf("127.0.0.1:%d", r.Target)),
+			dir("proxy_pass", fmt.Sprintf("%s:%d", backendAddr(r), r.Target)),
 			dir("proxy_protocol", "on"),
 		))
 	}

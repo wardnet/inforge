@@ -30,22 +30,16 @@ type NetworkSpec struct {
 	Subnets   []SubnetSpec `yaml:"subnets"`
 }
 
-// IngressResourceSpec is one ingress resource — the shared, self-hosted proxy
-// tier (nginx) that fronts apps under a domain (and, from slice B, services
-// too). It is a sibling of NetworkSpec (a thing other resources reference), NOT
-// a workload: it references a compute Host (an FK to a compute name in the same
-// scope, exactly like service.host) and reuses that host's provisioning,
-// firewall, cloud-init and SSH machinery. It carries no provider field — it
-// inherits its host's. The nginx/routing config it serves is NOT declared here:
-// it is derived at deploy from the apps and services that reference this ingress.
-//
-// NOTE (slice A naming): the unqualified name IngressSpec is currently taken by
-// the inline per-service routing-entry struct embedded in ServiceSpec. Slice B
-// renames that route struct to RouteSpec and renames this resource to
-// IngressSpec; until then this carries the IngressResourceSpec name (mirroring
-// PKIResourceSpec) so the schema rework stays behavior-free and ServiceSpec is
-// untouched.
-type IngressResourceSpec struct {
+// IngressSpec is one ingress resource — the shared, self-hosted proxy tier
+// (nginx) that fronts apps under a domain and services (RouteSpec). It is a
+// sibling of NetworkSpec (a thing other resources reference), NOT a workload: it
+// references a compute Host (an FK to a compute name in the same scope, exactly
+// like service.host) and reuses that host's provisioning, firewall, cloud-init
+// and SSH machinery. It carries no provider field — it inherits its host's. The
+// nginx/routing config it serves is NOT declared here: it is derived at deploy
+// from the apps and services that reference this ingress (a service via its
+// Ingress FK, contributing its Routes; an app via its Ingress FK).
+type IngressSpec struct {
 	Name      string `yaml:"name"`
 	Container string `yaml:"container"`
 	Host      string `yaml:"host"` // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
@@ -147,36 +141,39 @@ type DeployUserSpec struct {
 	Name string `yaml:"name"`
 }
 
-// IngressSpec is one typed inbound routing entry a service exposes on its host.
-// Every ingress entry is fronted by nginx — there is no direct-bind path: a host
-// with any ingress runs nginx as its sole public entry point, and the service
-// binds 127.0.0.1:Target behind it. Each entry binds a public Listen port (which
-// must differ from Target, since nginx occupies that port on all interfaces),
-// served per Type:
+// RouteSpec is one typed inbound routing entry a service exposes through its
+// ingress (the standalone proxy tier the service's Ingress FK names — ADR-0026).
+// Every route is fronted by the ingress nginx — there is no direct-bind path: the
+// ingress is the sole public entry point, and the service binds Target behind it.
+// nginx reverse-proxies/forwards to the backend over loopback when the service is
+// co-located with the ingress host (127.0.0.1:Target) or over the private network
+// when they are different hosts (<private-ip>:Target). Each route binds a public
+// Listen port (which must differ from Target when co-located, since nginx occupies
+// that port on all interfaces of the shared host), served per Type:
 //
 //   - "tls-termination": nginx terminates ACME TLS for the service's SNIs (the
 //     auto-derived "<svc>.svc" FQDN plus any Vanity entries) and reverse-proxies
-//     cleartext to localhost:Target. Multiple services may share one Listen port
-//     (nginx demuxes by SNI/server_name).
-//   - "forward": nginx stream-forwards the raw L4 connection to 127.0.0.1:Target
+//     cleartext to the backend Target. Multiple services on one ingress may share
+//     one Listen port (nginx demuxes by SNI/server_name).
+//   - "forward": nginx stream-forwards the raw L4 connection to the backend Target
 //     with the PROXY protocol (so the backend learns the client address); the
 //     backend owns its own TLS. A forward Listen is single-service-exclusive.
 //
-// A truly raw public port (no proxy) is not ingress — declare it on the compute's
+// A truly raw public port (no proxy) is not a route — declare it on the compute's
 // firewall.inbound instead. The env-scoped FQDNs are derived at realization time
 // (see naming.ServiceFQDN / naming.ExpandVanity), not authored here.
-type IngressSpec struct {
+type RouteSpec struct {
 	Type   string `yaml:"type"`   // "tls-termination" | "forward"
-	Listen int    `yaml:"listen"` // public port nginx accepts traffic on (required; != Target)
-	Target int    `yaml:"target"` // loopback port the service listens on (required)
+	Listen int    `yaml:"listen"` // public port the ingress nginx accepts traffic on (required; != Target when co-located)
+	Target int    `yaml:"target"` // backend port the service listens on (required)
 	// Vanity adds extra public FQDNs (beyond the auto-derived "<svc>.svc" name) a
-	// tls-termination entry serves: a bare token is env+region-scoped, anything
+	// tls-termination route serves: a bare token is env+region-scoped, anything
 	// with a dot or a {BASE_DOMAIN}/{ENV}/{REGION_SLUG} placeholder is a literal
 	// FQDN. Valid only on tls-termination (forward has no SNI).
 	Vanity []string `yaml:"vanity,omitempty"`
 }
 
-// Ingress entry types.
+// Route (ingress) entry types.
 const (
 	IngressTypeTLSTermination = "tls-termination"
 	IngressTypeForward        = "forward"
@@ -211,7 +208,8 @@ type ServiceSpec struct {
 	User        string            `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
 	Pki         string            `yaml:"pki"`               // FK -> two-tier (mesh) PKI name in pki.enc.yaml this service is a leaf member of (required)
 	Reload      string            `yaml:"reload,omitempty"`  // optional ExecReload command to apply a renewed mesh leaf without downtime (e.g. "/bin/kill -HUP $MAINPID"); absent -> renewal restarts the unit
-	Ingress     []IngressSpec     `yaml:"ingress,omitempty"` // typed inbound routes (tls-termination / forward) realized on the host's nginx
+	Ingress     string            `yaml:"ingress,omitempty"` // FK -> ingress resource name (same scope) whose nginx fronts this service's Routes; required when Routes is non-empty
+	Routes      []RouteSpec       `yaml:"routes,omitempty"`  // typed inbound routes (tls-termination / forward) realized on the referenced ingress's nginx
 	Grants      []GrantSpec       `yaml:"grants,omitempty"`  // permissioned access to Grantable resources (database/pki), materialized as env vars (ADR-0025)
 	Environment map[string]string `yaml:"-"`                 // env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); loaded from the service's sibling environment.yaml, not the manifest; the secrets provider is derived from the region, not the service
 }
@@ -233,25 +231,32 @@ type PKIResourceSpec struct {
 	Validity  string `yaml:"validity,omitempty"` // optional CA validity (e.g. "10y"); enforced when generation lands (slice C)
 }
 
-// IngressRoute is one typed inbound routing entry the host ingress proxy (nginx)
-// realizes, derived from one ingress entry of one service. nginx is always the
-// sole public entry point on a host that has any ingress: services bind
-// 127.0.0.1:Target and nginx fronts them on the public Listen port. FQDNs are
-// fully resolved (env + region slug + base domain) before they reach the provider,
-// so the provider stays a pure renderer/installer and never re-derives names.
+// IngressRoute is one typed inbound routing entry the ingress proxy (nginx)
+// realizes, derived from one route of one service that references the ingress.
+// The ingress is the sole public entry point: nginx fronts the service on the
+// public Listen port and proxies to the backend at Backend:Target. FQDNs are
+// fully resolved (env + region slug + base domain) and Backend is a literal
+// address before they reach the provider, so the provider stays a pure
+// renderer/installer and never re-derives names or resolves IPs.
 //
 // Type selects how the Listen port is served:
 //   - "tls-termination": nginx terminates ACME TLS for FQDNs (server_name demux)
-//     and reverse-proxies cleartext to localhost:Target. Several routes may share
+//     and reverse-proxies cleartext to Backend:Target. Several routes may share
 //     one Listen port, distinguished by FQDNs.
 //   - "forward": nginx stream-forwards the raw L4 connection on Listen to
-//     127.0.0.1:Target with the PROXY protocol. FQDNs is empty (no SNI).
+//     Backend:Target with the PROXY protocol. FQDNs is empty (no SNI).
+//
+// Backend is the address nginx proxies to: "127.0.0.1" when the service is
+// co-located with the ingress host, or the backend host's private IP when they
+// are different hosts. The program leaves Backend empty for a cross-host route and
+// the provider fills it from the resolved backend private-IP output before Render.
 type IngressRoute struct {
 	Service string
 	Type    string   // IngressTypeTLSTermination | IngressTypeForward
 	FQDNs   []string // fully-qualified, env-scoped SNIs (tls-termination only; nil for forward)
-	Listen  int      // public port the host accepts traffic on
-	Target  int      // loopback port the service listens on
+	Listen  int      // public port the ingress accepts traffic on
+	Target  int      // backend port the service listens on
+	Backend string   // backend address nginx proxies to ("127.0.0.1" co-located; private IP cross-host)
 }
 
 // NetworkOutputs are the values a NetworkProvider returns after creating a
@@ -262,8 +267,24 @@ type NetworkOutputs struct {
 }
 
 // ComputeOutputs are the values a ComputeProvider returns after creating a host.
+// PrivateIP is the host's address on its attached private network — empty in
+// preview, and used by the ingress tier to proxy_pass to a backend that lives on
+// a different host within the same Hetzner Network (cross-host routing).
 type ComputeOutputs struct {
-	PublicIP pulumi.StringOutput
+	PublicIP  pulumi.StringOutput
+	PrivateIP pulumi.StringOutput
+}
+
+// FirewallPorts is the derived inbound port plan for one host, computed by the
+// program so the firewall stays a pure consumer. Public ports are opened to the
+// internet (0.0.0.0/0 + ::/0) — an ingress host's route Listen ports plus :80 for
+// ACME HTTP-01. Private ports are opened only to PrivateSourceCIDR (the host's
+// private network CIDR) — a backend's route Target ports, reachable solely from a
+// co-tenant ingress over the private network. Both lists are deduped and sorted.
+type FirewallPorts struct {
+	Public            []int
+	Private           []int
+	PrivateSourceCIDR string // private network CIDR scoping Private; "" when Private is empty
 }
 
 // DatabaseOutputs are the values a DatabaseProvider returns after creating a
@@ -341,14 +362,14 @@ type NetworkProvider interface {
 
 // ComputeProvider creates one compute instance, wiring in its network, the host
 // domain, the assembled (plain, secret-free) manifest, and the derived inbound
-// ingress ports. ingressPorts are the public Listen ports of every service ingress
-// entry on this host (deduped, sorted), already including :80 when the host has a
-// tls-termination entry (ACME HTTP-01) — the program derives them so the firewall
-// stays a pure consumer. Secret delivery is no longer a compute-creation concern:
-// secrets are fetched at runtime by inforge-bootstrap, so there is no bootstrap
-// document.
+// firewall port plan. fw carries this host's public ports (an ingress host's route
+// Listen ports plus :80 for ACME) and private ports (a backend's route Target
+// ports, scoped to the private network CIDR) — the program derives them so the
+// firewall stays a pure consumer. Secret delivery is no longer a compute-creation
+// concern: secrets are fetched at runtime by inforge-bootstrap, so there is no
+// bootstrap document.
 type ComputeProvider interface {
-	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest string, ingressPorts []int) (ComputeOutputs, error)
+	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest string, fw FirewallPorts) (ComputeOutputs, error)
 }
 
 // DnsProvider creates a derived DNS record pointing at a compute instance, on a
@@ -357,23 +378,28 @@ type DnsProvider interface {
 	CreateRecord(ctx *pulumi.Context, rec DnsRecord, target ComputeOutputs) error
 }
 
-// IngressProvider realizes a host's nginx ingress proxy. It is invoked once per
-// host that has any ingress, not per resource — there is no host-level ingress
-// resource; realization is driven by the host's ingress routes. hostKey is the
-// canonical compute specKey (used to name the Pulumi command resources); host
-// carries the target's public IP; deployUser is the sudo-capable account inforge
-// connects as over SSH (the host's deploy user); routes are the host's typed
-// inbound routing entries (tls-termination / forward), with FQDNs already
-// env-scoped by the caller. Realize installs nginx once per host, writes its
-// config, and reloads — and must be safe to re-run as services change.
+// IngressProvider realizes an ingress host's nginx proxy. It is invoked once per
+// ingress host — the compute an ingress resource references — with the merged
+// routes of every service (and app, slice C) pointing at that host. hostKey is the
+// canonical compute specKey of the ingress host (used to name the Pulumi command
+// resources); host carries its public IP; deployUser is the sudo-capable account
+// inforge connects as over SSH (the ingress host's deploy user); routes are the
+// typed inbound routing entries (tls-termination / forward), with FQDNs already
+// env-scoped by the caller and Backend filled for co-located routes.
 //
-// The provider is a pure installer over SSH, so it needs the host, the connection
-// identity, and the resolved routes — nothing more. env scopes the names of the
-// Pulumi resources it creates. dependsOn carries the host's cloud-init readiness
-// gate (and any other prerequisites): the provider must make its first per-host
-// SSH command depend on it so realization never races deploy_user creation.
+// backendIPs maps a service name to its backend host's private-IP output, present
+// only for cross-host routes (a route whose service runs on a host other than the
+// ingress host). The provider renders the config inside an apply over these
+// outputs, substituting each cross-host route's Backend with the resolved private
+// IP; co-located routes already carry "127.0.0.1". Realize installs nginx once per
+// host, writes its config, and reloads — and must be safe to re-run as routes change.
+//
+// env scopes the names of the Pulumi resources it creates. dependsOn carries the
+// host's cloud-init readiness gate (and any other prerequisites): the provider must
+// make its first per-host SSH command depend on it so realization never races
+// deploy_user creation.
 type IngressProvider interface {
-	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, env string, dependsOn []pulumi.Resource) error
+	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, backendIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
 }
 
 // DatabaseProvider creates a managed database.
@@ -452,7 +478,7 @@ type Resources struct {
 	Database []DatabaseSpec
 	Service  []ServiceSpec
 	PKI      []PKIResourceSpec
-	Ingress  []IngressResourceSpec
+	Ingress  []IngressSpec
 	App      []AppSpec
 }
 

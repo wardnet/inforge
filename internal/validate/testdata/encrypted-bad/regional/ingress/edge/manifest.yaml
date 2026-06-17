@@ -1,0 +1,4 @@
+# The standalone ingress tier (ADR-0026): nginx fronting the bridge services.
+name: edge
+container: bridge
+host: bridge
