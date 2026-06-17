@@ -1155,17 +1155,18 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 			if rt.Target < 1 || rt.Target > 65535 {
 				errs = append(errs, fmt.Sprintf("routes: target for listen %d is invalid; a backend port (1..65535) is required", rt.Listen))
 			}
-			// A co-located service shares its host with nginx, which binds *:listen on
-			// all interfaces (incl. loopback): listen and target must differ, and a
-			// target must not equal ANY public listen the ingress holds on that host.
-			// A cross-host backend has no nginx on it, so neither collision applies.
-			if coLocated {
-				if rt.Listen == rt.Target && rt.Listen != 0 {
-					errs = append(errs, fmt.Sprintf("routes: listen and target must differ (both %d) when the service is co-located with its ingress; nginx occupies the public port on all interfaces", rt.Listen))
-				}
-				if rt.Listen != rt.Target && len(ctx.portUsersByHost[ingHost][rt.Target]) > 0 {
-					errs = append(errs, fmt.Sprintf("routes: target %d collides with a public listen port on the ingress host (ingress %q); nginx occupies that port on all interfaces, so the co-located service cannot bind it", rt.Target, s.Ingress))
-				}
+			// The service binds rt.Target on its BACKEND host. If that host also runs
+			// nginx — because it is some ingress's host (its own co-located ingress, or
+			// the ingress fronting another co-located service) — nginx holds *:<listen>
+			// on all interfaces there, so the target must not equal any public listen
+			// port on the backend host. Keying on backendHost (not the ingress host)
+			// catches the cross-host case where the backend host independently hosts an
+			// ingress. When co-located and listen == target, the clearer "must differ"
+			// message subsumes the collision (same port), so report only that.
+			if coLocated && rt.Listen == rt.Target && rt.Listen != 0 {
+				errs = append(errs, fmt.Sprintf("routes: listen and target must differ (both %d) when the service is co-located with its ingress; nginx occupies the public port on all interfaces", rt.Listen))
+			} else if backendHost != "" && len(ctx.portUsersByHost[backendHost][rt.Target]) > 0 {
+				errs = append(errs, fmt.Sprintf("routes: target %d collides with a public listen port on the backend host %q; nginx runs there and occupies that port on all interfaces, so the service cannot bind it", rt.Target, s.Host))
 			}
 			// A backend port is bound by one process, so two services on the same
 			// backend host cannot share a target (a service may reuse its own).

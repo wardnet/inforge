@@ -559,6 +559,32 @@ func TestCheckServiceCrossHostSameNetwork(t *testing.T) {
 	assert.Empty(t, errs)
 }
 
+// TestCheckServiceCrossHostTargetCollidesWithBackendListen: a cross-host service
+// whose target port equals a public listen port held by nginx on its OWN backend
+// host (because another ingress is co-located there) is rejected — the backend
+// process could not bind that port. The collision check keys on the backend host,
+// not the ingress host.
+func TestCheckServiceCrossHostTargetCollidesWithBackendListen(t *testing.T) {
+	ctx := baseCtx()
+	// edge is the (different) ingress host; bridge is the backend host, which also
+	// runs nginx (holding :9000) for some co-located ingress.
+	ctx.computeNames["edge"] = true
+	ctx.computeKind["edge-01"] = "vm"
+	ctx.computeCanonical["edge"] = "edge-01"
+	ctx.computeCanonical["edge-01"] = "edge-01"
+	ctx.ingressNames = map[string]bool{"web": true}
+	ctx.ingressHost = map[string]string{"web": "edge-01"} // cross-host: ingress on edge, service on bridge
+	ctx.computeNetwork = map[string]string{"bridge-01": "net", "bridge": "net", "edge-01": "net", "edge": "net"}
+	ctx.portUsersByHost = map[string]map[int][]string{"bridge-01": {9000: {"other"}}}
+	ctx.targetUsersByHost = map[string]map[int][]string{}
+	ctx.tlsTermIngressByHost = map[string]bool{}
+
+	errs, _ := checkService(types.ServiceSpec{Name: "api", Host: "bridge", Type: "raw", User: "svc", Ingress: "web",
+		Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 9000}}}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "collides with a public listen port on the backend host")
+}
+
 func TestCheckServiceIngressRules(t *testing.T) {
 	base := func() regionContext {
 		c := ingressFKCtx()

@@ -879,6 +879,44 @@ func ingressFQDNs(svcName string, rt types.RouteSpec, env, slug, baseDomain stri
 	return fqdns
 }
 
+// ingressService is one service resolved to the hosts that matter for the ingress
+// tier: the canonical specKey of its ingress's host (ingHost), of its own backend
+// host (svcHost), and whether the two are the same (coLocated). It is produced once
+// by resolveIngressServices and consumed by every derivation below.
+type ingressService struct {
+	svc       types.ServiceSpec
+	ingHost   string
+	svcHost   string
+	coLocated bool
+}
+
+// resolveIngressServices derives, once, the (service, ingress host, backend host,
+// co-located) tuples for every service that exposes routes through a resolvable
+// ingress. The firewall plan, the realized nginx routes, and the derived DNS
+// records all consume it, so the three cannot drift on the skip guard, the FK
+// resolution, or the co-location test (which previously lived as three copies). A
+// service with no routes, no ingress, or an unresolvable ingress/host FK is
+// skipped — validation guarantees resolution, so the skip is purely defensive.
+func resolveIngressServices(res types.Resources, canonical map[string]string) []ingressService {
+	ingressHost := ingressHostsByName(res, canonical)
+	out := make([]ingressService, 0, len(res.Service))
+	for _, svc := range res.Service {
+		if svc.Ingress == "" || len(svc.Routes) == 0 {
+			continue
+		}
+		ingHost, ok := ingressHost[svc.Ingress]
+		if !ok {
+			continue
+		}
+		svcHost, ok := canonical[svc.Host]
+		if !ok {
+			continue
+		}
+		out = append(out, ingressService{svc: svc, ingHost: ingHost, svcHost: svcHost, coLocated: svcHost == ingHost})
+	}
+	return out
+}
+
 // firewallPlanByHost derives each host's inbound firewall port plan, keyed by
 // canonical compute specKey (ADR-0026 ingress tier). It is purely static (which
 // ingress fronts which service, co-located or not) so the firewall can be built
@@ -895,7 +933,6 @@ func ingressFQDNs(svcName string, rt types.RouteSpec, env, slug, baseDomain stri
 // permits it. Lists are sorted and de-duplicated so the rendered firewall is stable.
 func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
 	canonical := naming.CanonicalComputeKeys(res.Compute)
-	ingressHost := ingressHostsByName(res, canonical)
 	netCIDR := networkCIDRByCompute(res, canonical)
 
 	public := map[string]map[int]bool{}
@@ -912,26 +949,14 @@ func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
 		}
 		private[host][port] = true
 	}
-	for _, svc := range res.Service {
-		if svc.Ingress == "" || len(svc.Routes) == 0 {
-			continue
-		}
-		ingHost, ok := ingressHost[svc.Ingress]
-		if !ok {
-			continue // validation guarantees resolution; skip defensively
-		}
-		svcHost, ok := canonical[svc.Host]
-		if !ok {
-			continue
-		}
-		coLocated := svcHost == ingHost
-		for _, rt := range svc.Routes {
-			addPublic(ingHost, rt.Listen)
+	for _, is := range resolveIngressServices(res, canonical) {
+		for _, rt := range is.svc.Routes {
+			addPublic(is.ingHost, rt.Listen)
 			if rt.Type == types.IngressTypeTLSTermination {
-				addPublic(ingHost, 80) // ACME HTTP-01 on the ingress host
+				addPublic(is.ingHost, 80) // ACME HTTP-01 on the ingress host
 			}
-			if !coLocated {
-				addPrivate(svcHost, rt.Target) // backend target reachable over the private net
+			if !is.coLocated {
+				addPrivate(is.svcHost, rt.Target) // backend target reachable over the private net
 			}
 		}
 	}
@@ -1004,44 +1029,31 @@ func sortedInts(set map[int]bool) []int {
 // — the preview/deploy half of the rule validate also enforces, so the guarantee
 // holds even when `up` runs without a prior `validate`.
 func ingressRoutesByHost(res types.Resources, canonical map[string]string, env, slug, baseDomain string) (routesByHost map[string][]types.IngressRoute, crossHost map[string]map[string]string, err error) {
-	ingressHost := ingressHostsByName(res, canonical)
 	routesByHost = map[string][]types.IngressRoute{}
 	crossHost = map[string]map[string]string{}
-	for _, svc := range res.Service {
-		if svc.Ingress == "" || len(svc.Routes) == 0 {
-			continue
-		}
-		ingHost, ok := ingressHost[svc.Ingress]
-		if !ok {
-			continue // validation guarantees resolution; skip defensively
-		}
-		svcHost, ok := canonical[svc.Host]
-		if !ok {
-			continue
-		}
-		coLocated := svcHost == ingHost
-		for _, rt := range svc.Routes {
+	for _, is := range resolveIngressServices(res, canonical) {
+		for _, rt := range is.svc.Routes {
 			var fqdns []string
 			if rt.Type == types.IngressTypeTLSTermination {
-				fqdns = ingressFQDNs(svc.Name, rt, env, slug, baseDomain)
+				fqdns = ingressFQDNs(is.svc.Name, rt, env, slug, baseDomain)
 				sort.Strings(fqdns) // canonical server_name / cert SNI order
 			}
 			route := types.IngressRoute{
-				Service: svc.Name,
+				Service: is.svc.Name,
 				Type:    rt.Type,
 				FQDNs:   fqdns,
 				Listen:  rt.Listen,
 				Target:  rt.Target,
 			}
-			if coLocated {
+			if is.coLocated {
 				route.Backend = "127.0.0.1"
 			} else {
-				if crossHost[ingHost] == nil {
-					crossHost[ingHost] = map[string]string{}
+				if crossHost[is.ingHost] == nil {
+					crossHost[is.ingHost] = map[string]string{}
 				}
-				crossHost[ingHost][svc.Name] = svcHost
+				crossHost[is.ingHost][is.svc.Name] = is.svcHost
 			}
-			routesByHost[ingHost] = append(routesByHost[ingHost], route)
+			routesByHost[is.ingHost] = append(routesByHost[is.ingHost], route)
 		}
 	}
 	// Two services on one ingress can resolve to the same SNI on the same listen
@@ -1164,21 +1176,13 @@ func derivedRecords(res types.Resources, env, slug, baseDomain string) []derived
 		fqdn := naming.HostFQDN(env, slug, spec.Name, baseDomain)
 		dedupAdd(fqdn, spec.Container, naming.SpecKey(spec.Name, 1))
 	}
-	canonical := naming.CanonicalComputeKeys(res.Compute)
-	ingressHost := ingressHostsByName(res, canonical)
-	for _, svc := range res.Service {
-		if svc.Ingress == "" || len(svc.Routes) == 0 {
-			continue
-		}
-		// A service's ingress FQDNs resolve to its ingress host (where nginx
-		// terminates), not its backend host.
-		hostKey, ok := ingressHost[svc.Ingress]
-		if !ok {
-			continue // validation guarantees resolution; skip defensively
-		}
-		for _, rt := range svc.Routes {
-			for _, fqdn := range ingressFQDNs(svc.Name, rt, env, slug, baseDomain) {
-				dedupAdd(fqdn, svc.Container, hostKey)
+	// A service's ingress FQDNs resolve to its INGRESS host (where nginx terminates),
+	// not its backend host — so they share resolveIngressServices with the firewall
+	// and route derivations and cannot point at a different host than nginx runs on.
+	for _, is := range resolveIngressServices(res, naming.CanonicalComputeKeys(res.Compute)) {
+		for _, rt := range is.svc.Routes {
+			for _, fqdn := range ingressFQDNs(is.svc.Name, rt, env, slug, baseDomain) {
+				dedupAdd(fqdn, is.svc.Container, is.ingHost)
 			}
 		}
 	}
