@@ -174,15 +174,13 @@ type regionContext struct {
 	// ingressNames holds the ingress resource names declared in this scope. An
 	// app's `ingress:` foreign key must resolve to one of them — same-scope only,
 	// exactly like a service's host must be a compute in the same set (a global/
-	// prefix is rejected in checkApp).
+	// prefix is rejected in checkApp). Name *uniqueness* is enforced generically in
+	// validateType; this map only answers FK existence.
 	ingressNames map[string]bool
-	// ingressNameCounts / appNameCounts / appSubdomainCounts count declarations per
-	// key in this scope so the per-spec checks can flag a collision (today a
-	// duplicate name silently overwrites a map entry). An ingress name and an app
-	// name must each be unique within the scope, and an app subdomain must be
-	// unique (each maps to a distinct public FQDN).
-	ingressNameCounts  map[string]int
-	appNameCounts      map[string]int
+	// appSubdomainCounts counts app subdomain declarations per value in this scope so
+	// checkApp can flag a collision: two apps sharing a subdomain would resolve to
+	// the same public FQDN. (Bare-name uniqueness is handled generically in
+	// validateType; the subdomain is a distinct, app-specific field.)
 	appSubdomainCounts map[string]int
 	// pkiResources maps a PKI resource name (a grant target, "<name>" or the
 	// "global/<name>" form for the global slice's resources) to its topology. A
@@ -407,8 +405,6 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		computeNames:         map[string]bool{},
 		databaseNames:        map[string]bool{},
 		ingressNames:         map[string]bool{},
-		ingressNameCounts:    map[string]int{},
-		appNameCounts:        map[string]int{},
 		appSubdomainCounts:   map[string]int{},
 		portUsersByHost:      map[string]map[int][]string{},
 		targetUsersByHost:    map[string]map[int][]string{},
@@ -451,12 +447,10 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for _, f := range ingressFiles {
 		if f.parseErr == nil {
 			ctx.ingressNames[f.spec.Name] = true
-			ctx.ingressNameCounts[f.spec.Name]++
 		}
 	}
 	for _, f := range appFiles {
 		if f.parseErr == nil {
-			ctx.appNameCounts[f.spec.Name]++
 			ctx.appSubdomainCounts[f.spec.Subdomain]++
 		}
 	}
@@ -499,32 +493,44 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		}
 	}
 
-	validateType(r, schemaSet["network"], networkFiles, func(s types.NetworkSpec) ([]string, []string) {
+	validateType(r, schemaSet["network"], networkFiles, func(s types.NetworkSpec) string { return s.Name }, func(s types.NetworkSpec) ([]string, []string) {
 		return checkNetwork(s, ctx)
 	})
-	validateType(r, schemaSet["compute"], computeFiles, func(s types.ComputeSpec) ([]string, []string) {
+	validateType(r, schemaSet["compute"], computeFiles, func(s types.ComputeSpec) string { return s.Name }, func(s types.ComputeSpec) ([]string, []string) {
 		return checkCompute(s, ctx)
 	})
-	validateType(r, schemaSet["database"], databaseFiles, func(s types.DatabaseSpec) ([]string, []string) {
+	validateType(r, schemaSet["database"], databaseFiles, func(s types.DatabaseSpec) string { return s.Name }, func(s types.DatabaseSpec) ([]string, []string) {
 		return checkDatabase(s, ctx)
 	})
-	validateType(r, schemaSet["service"], serviceFiles, func(s types.ServiceSpec) ([]string, []string) {
+	validateType(r, schemaSet["service"], serviceFiles, func(s types.ServiceSpec) string { return s.Name }, func(s types.ServiceSpec) ([]string, []string) {
 		return checkService(s, ctx)
 	})
-	validateType(r, schemaSet["pkiresource"], pkiFiles, func(s types.PKIResourceSpec) ([]string, []string) {
+	validateType(r, schemaSet["pkiresource"], pkiFiles, func(s types.PKIResourceSpec) string { return s.Name }, func(s types.PKIResourceSpec) ([]string, []string) {
 		return checkPKIResource(s)
 	})
-	validateType(r, schemaSet["ingress"], ingressFiles, func(s types.IngressResourceSpec) ([]string, []string) {
+	validateType(r, schemaSet["ingress"], ingressFiles, func(s types.IngressResourceSpec) string { return s.Name }, func(s types.IngressResourceSpec) ([]string, []string) {
 		return checkIngress(s, ctx)
 	})
-	validateType(r, schemaSet["app"], appFiles, func(s types.AppSpec) ([]string, []string) {
+	validateType(r, schemaSet["app"], appFiles, func(s types.AppSpec) string { return s.Name }, func(s types.AppSpec) ([]string, []string) {
 		return checkApp(s, ctx)
 	})
 	return nil
 }
 
-// validateType runs schema + semantic validation over every file of one type.
-func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[T], semantic func(T) (errs, warns []string)) {
+// validateType runs schema + semantic validation over every file of one type. It
+// also enforces, in this one pass that already owns each file's OK/FAIL report,
+// that the resource `name:` is unique within the scope: a name keys the scope's
+// FK-resolution maps, so a duplicate would silently overwrite — realizing only one
+// of the colliding resources. (Reporting it here, rather than under a separate
+// label, keeps a single non-contradictory line per file.) The name extractor
+// pulls the comparable name out of each spec.
+func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[T], name func(T) string, semantic func(T) (errs, warns []string)) {
+	nameCounts := map[string]int{}
+	for _, f := range files {
+		if f.parseErr == nil {
+			nameCounts[name(f.spec)]++
+		}
+	}
 	for _, f := range files {
 		var errs, warns []string
 		if f.parseErr != nil {
@@ -534,7 +540,11 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 		if msgs := schemaErrors(schema, f.raw); len(msgs) > 0 {
 			errs = append(errs, msgs...)
 		} else {
-			// Only run semantic checks once the document is structurally valid.
+			// Only run the name-uniqueness and semantic checks once the document is
+			// structurally valid (a malformed file's name is moot — it already fails).
+			if nameCounts[name(f.spec)] > 1 {
+				errs = append(errs, fmt.Sprintf("name: %q is declared by more than one resource of this type in this scope; resource names must be unique within a scope", name(f.spec)))
+			}
 			e, w := semantic(f.spec)
 			errs = append(errs, e...)
 			warns = append(warns, w...)
@@ -997,6 +1007,42 @@ func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []strin
 	return errs, warns
 }
 
+// resolveComputeHost resolves a host: foreign key (a bare compute name) to its
+// canonical specKey and validates the host is a single-instance vm in this scope.
+// It is the single source of the same-scope host rule shared by service.host and
+// ingress.host: noun labels the referencing resource in error messages ("a
+// service" / "an ingress"). A global/ prefix is NOT handled here — callers reject
+// it first, with a resource-specific message and control flow — nor is the
+// deploy_user requirement (service-only). It returns the canonical specKey ("" when
+// the host does not resolve) plus any host errors.
+func resolveComputeHost(host, noun string, ctx regionContext) (canonical string, errs []string) {
+	if _, ok := ctx.computeNames[host]; !ok {
+		if ctx.computeCanonical[host] != "" {
+			errs = append(errs, fmt.Sprintf("host: %q is an expanded specKey; use the bare compute name instead", host))
+		} else {
+			errs = append(errs, fmt.Sprintf("host: %q does not resolve to a compute", host))
+		}
+		return "", errs
+	}
+	// host is a bare compute name. The canonical map has a bare-name entry only for
+	// single-instance computes; for multi-instance fall back to instance 1 so the
+	// specKey-keyed maps are always reachable.
+	canonical = ctx.computeCanonical[host]
+	if canonical == "" {
+		canonical = naming.SpecKey(host, 1)
+	}
+	if kind := ctx.computeKind[canonical]; kind != "vm" {
+		errs = append(errs, fmt.Sprintf("host: %q has kind %q; %s requires a vm host", host, kind, noun))
+	}
+	// The host DNS and the host's "<compute>.vm" record are derived from the bare
+	// compute name (no instance index), so they cannot address one instance of a
+	// multi-instance compute.
+	if ctx.computeInstances[canonical] > 1 {
+		errs = append(errs, fmt.Sprintf("host: %q is a multi-instance compute; %s host must be single-instance (the host DNS record cannot address one instance)", host, noun))
+	}
+	return canonical, errs
+}
+
 func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string) {
 	// A service on a global host (host: global/<name>) is rejected: a service that
 	// runs on a global host is defined in the global slice itself, not referenced
@@ -1010,34 +1056,11 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	if strings.ContainsAny(s.Reload, "\n\r") {
 		errs = append(errs, "reload: must be a single line (no newlines)")
 	}
-	_, ok := ctx.computeNames[s.Host]
-	if !ok {
-		if ctx.computeCanonical[s.Host] != "" {
-			errs = append(errs, fmt.Sprintf("host: %q is an expanded specKey; use the bare compute name instead", s.Host))
-		} else {
-			errs = append(errs, fmt.Sprintf("host: %q does not resolve to a compute", s.Host))
-		}
-	} else {
-		// s.Host is a bare compute name. The canonical map has a bare-name
-		// entry only for single-instance computes; for multi-instance fall
-		// back to instance 1 so the specKey-keyed maps are always reachable.
-		canonical := ctx.computeCanonical[s.Host]
-		if canonical == "" {
-			canonical = naming.SpecKey(s.Host, 1)
-		}
-		kind := ctx.computeKind[canonical]
-		if kind != "vm" {
-			errs = append(errs, fmt.Sprintf("host: %q has kind %q; services require a vm host", s.Host, kind))
-		}
-		// A service's host DNS and its host's "<compute>.vm" record are derived
-		// from the bare compute name (no instance index), so they cannot address
-		// one instance of a multi-instance compute.
-		if ctx.computeInstances[canonical] > 1 {
-			errs = append(errs, fmt.Sprintf("host: %q is a multi-instance compute; a service host must be single-instance (the host DNS record cannot address one instance)", s.Host))
-		}
-		if !ctx.computeDeployer[canonical] {
-			errs = append(errs, fmt.Sprintf("host: %q has no deploy_user; inforge provisions the service over SSH and requires one", s.Host))
-		}
+	canonical, hostErrs := resolveComputeHost(s.Host, "a service", ctx)
+	errs = append(errs, hostErrs...)
+	// deploy_user is service-only: inforge provisions the service over SSH.
+	if canonical != "" && !ctx.computeDeployer[canonical] {
+		errs = append(errs, fmt.Sprintf("host: %q has no deploy_user; inforge provisions the service over SSH and requires one", s.Host))
 	}
 	if s.Type == "container" {
 		warns = append(warns, "type: \"container\" is reserved and not implemented this phase")
@@ -1049,10 +1072,8 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 		errs = append(errs, "user: a service must declare the no-login user it runs as")
 	}
 	if len(s.Ingress) > 0 {
-		host := ctx.computeCanonical[s.Host]
-		if host == "" && ok {
-			host = naming.SpecKey(s.Host, 1)
-		}
+		// canonical is "" when the host did not resolve; the maps below tolerate that.
+		host := canonical
 		// nginx is always the host's sole public entry point when any ingress exists;
 		// the service binds 127.0.0.1:target behind it. No host-level resource is
 		// needed — realization is driven by ingress presence (provider from compute).
@@ -1175,30 +1196,15 @@ func checkPKIResource(s types.PKIResourceSpec) (errs, warns []string) {
 // carries no provider; it inherits its host's. Its name must be unique among the
 // scope's ingress resources.
 func checkIngress(s types.IngressResourceSpec, ctx regionContext) (errs, warns []string) {
-	if ctx.ingressNameCounts[s.Name] > 1 {
-		errs = append(errs, fmt.Sprintf("name: %q is declared by more than one ingress in this scope; ingress names must be unique", s.Name))
-	}
-	switch {
-	case strings.HasPrefix(s.Host, "global/"):
+	// An ingress on a global host (host: global/<name>) is rejected: it is declared
+	// in the global slice itself, not referenced from a region. Detected before host
+	// resolution so the message is specific (mirrors checkService).
+	if strings.HasPrefix(s.Host, "global/") {
 		errs = append(errs, fmt.Sprintf("host: %q references a global compute; an ingress on a global host is declared in the global slice itself, not referenced from a region", s.Host))
-	case !ctx.computeNames[s.Host]:
-		if ctx.computeCanonical[s.Host] != "" {
-			errs = append(errs, fmt.Sprintf("host: %q is an expanded specKey; use the bare compute name instead", s.Host))
-		} else {
-			errs = append(errs, fmt.Sprintf("host: %q does not resolve to a compute in this scope", s.Host))
-		}
-	default:
-		canonical := ctx.computeCanonical[s.Host]
-		if canonical == "" {
-			canonical = naming.SpecKey(s.Host, 1)
-		}
-		if kind := ctx.computeKind[canonical]; kind != "vm" {
-			errs = append(errs, fmt.Sprintf("host: %q has kind %q; an ingress requires a vm host", s.Host, kind))
-		}
-		if ctx.computeInstances[canonical] > 1 {
-			errs = append(errs, fmt.Sprintf("host: %q is a multi-instance compute; an ingress host must be single-instance (the ingress addresses one host)", s.Host))
-		}
+		return errs, warns
 	}
+	_, hostErrs := resolveComputeHost(s.Host, "an ingress", ctx)
+	errs = append(errs, hostErrs...)
 	return errs, warns
 }
 
@@ -1210,9 +1216,6 @@ func checkIngress(s types.IngressResourceSpec, ctx regionContext) (errs, warns [
 // provider; it inherits the ingress's (its compute host's). Its name and its
 // subdomain must each be unique within the scope.
 func checkApp(s types.AppSpec, ctx regionContext) (errs, warns []string) {
-	if ctx.appNameCounts[s.Name] > 1 {
-		errs = append(errs, fmt.Sprintf("name: %q is declared by more than one app in this scope; app names must be unique", s.Name))
-	}
 	if s.Subdomain != "" && ctx.appSubdomainCounts[s.Subdomain] > 1 {
 		errs = append(errs, fmt.Sprintf("subdomain: %q is used by more than one app in this scope; each app must map to a distinct public FQDN", s.Subdomain))
 	}

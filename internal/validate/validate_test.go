@@ -137,11 +137,29 @@ func TestValidateResourcesAppDuplicateSubdomain(t *testing.T) {
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
-// TestValidateResourcesAppDuplicateName: two apps in one scope sharing a name fail —
-// app names must be unique within a scope (today a duplicate silently overwrites).
+// TestValidateResourcesAppDuplicateName: two apps in one scope sharing a name fail.
+// Resource-name uniqueness is enforced generically in validateType (a duplicate
+// would silently overwrite the scope's FK-resolution map), so it applies to every
+// resource type — see the compute/ingress duplicate-name cases below.
 func TestValidateResourcesAppDuplicateName(t *testing.T) {
 	err := ValidateResources("app-duplicate-name", testdataDir, types.ProviderDefaults{})
 	require.Error(t, err, "two apps sharing a name in one scope should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
+// TestValidateResourcesComputeDuplicateName: two compute folders declaring the same
+// `name:` fail — name uniqueness is generic, not an app/ingress special case.
+func TestValidateResourcesComputeDuplicateName(t *testing.T) {
+	err := ValidateResources("compute-duplicate-name", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "two computes sharing a name in one scope should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
+// TestValidateResourcesIngressDuplicateName: two ingress folders declaring the same
+// `name:` fail (same generic uniqueness path).
+func TestValidateResourcesIngressDuplicateName(t *testing.T) {
+	err := ValidateResources("ingress-duplicate-name", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "two ingresses sharing a name in one scope should fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
@@ -174,12 +192,11 @@ func TestCheckServiceGlobalHostRejected(t *testing.T) {
 }
 
 // ingressCtx returns a baseCtx seeded with one ingress "web" (fronting the bridge
-// host) so app FK checks resolve, with the per-key collision counts populated.
+// host) so app FK checks resolve, plus an empty app-subdomain count map. (Bare-name
+// uniqueness is enforced generically in validateType, not in checkIngress/checkApp.)
 func ingressCtx() regionContext {
 	ctx := baseCtx()
 	ctx.ingressNames = map[string]bool{"web": true}
-	ctx.ingressNameCounts = map[string]int{"web": 1}
-	ctx.appNameCounts = map[string]int{}
 	ctx.appSubdomainCounts = map[string]int{}
 	return ctx
 }
@@ -207,16 +224,6 @@ func TestCheckIngressUnknownHostRejected(t *testing.T) {
 	assert.Contains(t, errs[0], "does not resolve to a compute")
 }
 
-// TestCheckIngressDuplicateName: an ingress name declared more than once in the
-// scope is rejected.
-func TestCheckIngressDuplicateName(t *testing.T) {
-	ctx := ingressCtx()
-	ctx.ingressNameCounts["web"] = 2
-	errs, _ := checkIngress(types.IngressResourceSpec{Name: "web", Host: "bridge"}, ctx)
-	require.NotEmpty(t, errs)
-	assert.Contains(t, errs[0], "ingress names must be unique")
-}
-
 // TestCheckAppGlobalIngressRejected: an app referencing a global ingress is
 // rejected — like service.host, an app served from a global ingress is declared
 // in the global slice itself, not referenced from a region.
@@ -238,16 +245,6 @@ func TestCheckAppUnknownIngressRejected(t *testing.T) {
 func TestCheckAppValid(t *testing.T) {
 	errs, _ := checkApp(types.AppSpec{Name: "dash", Ingress: "web", Subdomain: "my", Spa: true}, ingressCtx())
 	assert.Empty(t, errs)
-}
-
-// TestCheckAppDuplicateName: an app name declared more than once in the scope is
-// rejected.
-func TestCheckAppDuplicateName(t *testing.T) {
-	ctx := ingressCtx()
-	ctx.appNameCounts["dash"] = 2
-	errs, _ := checkApp(types.AppSpec{Name: "dash", Ingress: "web", Subdomain: "my"}, ctx)
-	require.NotEmpty(t, errs)
-	assert.Contains(t, errs[0], "app names must be unique")
 }
 
 // TestCheckAppDuplicateSubdomain: two apps sharing a subdomain in one scope are
