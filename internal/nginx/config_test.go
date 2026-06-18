@@ -16,8 +16,8 @@ import (
 func TestRenderGolden(t *testing.T) {
 	// Declared out of order to prove the renderer sorts deterministically.
 	routes := []types.IngressRoute{
-		{Service: "bridge", Type: types.IngressTypeForward, Listen: 853, Target: 5353},
-		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080,
+		{Service: "bridge", Type: types.IngressTypeForward, Listen: 853, Target: 5353, Backend: "127.0.0.1"},
+		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Backend: "127.0.0.1",
 			FQDNs: []string{"api.svc.prd.use1.wardnet.network", "key-broker.wardnet.network"}},
 	}
 
@@ -75,9 +75,9 @@ stream {
 // same bytes.
 func TestRenderDeterministic(t *testing.T) {
 	a := []types.IngressRoute{
-		{Service: "a", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 1000, FQDNs: []string{"a.svc"}},
-		{Service: "b", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 2000, FQDNs: []string{"b.svc"}},
-		{Service: "c", Type: types.IngressTypeForward, Listen: 853, Target: 3000},
+		{Service: "a", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 1000, FQDNs: []string{"a.svc"}, Backend: "127.0.0.1"},
+		{Service: "b", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 2000, FQDNs: []string{"b.svc"}, Backend: "127.0.0.1"},
+		{Service: "c", Type: types.IngressTypeForward, Listen: 853, Target: 3000, Backend: "127.0.0.1"},
 	}
 	b := []types.IngressRoute{a[2], a[1], a[0]}
 	ra, err := Render(a)
@@ -91,7 +91,7 @@ func TestRenderDeterministic(t *testing.T) {
 // no http/ACME block (nothing to terminate, so no :80 server).
 func TestRenderForwardOnly(t *testing.T) {
 	got, err := Render([]types.IngressRoute{
-		{Service: "bridge", Type: types.IngressTypeForward, Listen: 443, Target: 8080},
+		{Service: "bridge", Type: types.IngressTypeForward, Listen: 443, Target: 8080, Backend: "127.0.0.1"},
 	})
 	require.NoError(t, err)
 	assert.Contains(t, got, "stream {")
@@ -105,7 +105,7 @@ func TestRenderForwardOnly(t *testing.T) {
 // the ACME issuer and the :80 challenge/redirect server) and no stream block.
 func TestRenderTerminateOnly(t *testing.T) {
 	got, err := Render([]types.IngressRoute{
-		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, FQDNs: []string{"api.svc"}},
+		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, FQDNs: []string{"api.svc"}, Backend: "127.0.0.1"},
 	})
 	require.NoError(t, err)
 	assert.Contains(t, got, "http {")
@@ -118,9 +118,31 @@ func TestRenderTerminateOnly(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(got, "listen 80;"))
 }
 
+// TestRenderCrossHostBackend: a route whose Backend is a private IP (cross-host)
+// renders its proxy_pass to that address; an empty Backend defaults to loopback.
+func TestRenderCrossHostBackend(t *testing.T) {
+	got, err := Render([]types.IngressRoute{
+		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, FQDNs: []string{"api.svc"}, Backend: "10.0.1.5"},
+		{Service: "dns", Type: types.IngressTypeForward, Listen: 853, Target: 5353, Backend: "10.0.1.6"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, got, "proxy_pass http://10.0.1.5:8080;", "cross-host tls-termination proxies to the backend private IP")
+	assert.Contains(t, got, "proxy_pass 10.0.1.6:5353;", "cross-host forward proxies to the backend private IP")
+	assert.NotContains(t, got, "127.0.0.1", "no loopback when every route is cross-host")
+}
+
 // TestRenderUnknownTypeErrors guards the renderer against an unexpected route type.
 func TestRenderUnknownTypeErrors(t *testing.T) {
-	_, err := Render([]types.IngressRoute{{Service: "x", Type: "passthrough", Listen: 443}})
+	_, err := Render([]types.IngressRoute{{Service: "x", Type: "passthrough", Listen: 443, Backend: "127.0.0.1"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown type")
+}
+
+// TestRenderEmptyBackendErrors: a route with no resolved Backend fails loud rather
+// than silently proxying the service to localhost (the program/provider must fill
+// Backend — "127.0.0.1" co-located, the private IP cross-host).
+func TestRenderEmptyBackendErrors(t *testing.T) {
+	_, err := Render([]types.IngressRoute{{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, FQDNs: []string{"api.svc"}}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no backend address")
 }

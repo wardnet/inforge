@@ -1,11 +1,11 @@
-# a tls-termination ingress but no tls-termination resource targets the host -> FAIL.
 name: web
 container: bridge
 host: bridge
 type: raw
 user: web
 pki: wardnet-mesh
-ingress:
+ingress: edge
+routes:
   - type: tls-termination
     listen: 443
     target: 8080

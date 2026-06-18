@@ -4,7 +4,8 @@ host: bridge
 type: raw
 user: web
 pki: wardnet-mesh
-ingress:
+ingress: edge
+routes:
   # web shares listen 443 with api: two tls-termination services on one host are
   # demuxed by nginx server_name (SNI), so a shared port is legal here.
   - type: tls-termination

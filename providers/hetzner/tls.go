@@ -2,6 +2,7 @@ package hetzner
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -38,17 +39,21 @@ func NewTLS(deployPrivateKey, slug string) *HetznerTLS {
 	}
 }
 
-// Realize installs and configures nginx on the host. It runs the install script
-// once, writes the rendered nginx.conf, validates it, and reloads nginx. Every
-// step is idempotent and re-runnable: a route change rewrites the single config
-// and reloads without reinstalling. It is invoked once per host with ingress;
+// Realize installs and configures nginx on the ingress host. It runs the install
+// script once, writes the rendered nginx.conf, validates it, and reloads nginx.
+// Every step is idempotent and re-runnable: a route change rewrites the single
+// config and reloads without reinstalling. It is invoked once per ingress host;
 // hostKey (the canonical compute specKey) names the Pulumi command resources.
+// backendIPs maps a service to its backend host's private-IP output for cross-host
+// routes; the config is rendered inside an apply over them so the rendered upstream
+// addresses are the resolved private IPs.
 func (h *HetznerTLS) Realize(
 	ctx *pulumi.Context,
 	hostKey string,
 	host types.ComputeOutputs,
 	deployUser string,
 	routes []types.IngressRoute,
+	backendIPs map[string]pulumi.StringOutput,
 	env string,
 	dependsOn []pulumi.Resource,
 ) error {
@@ -66,7 +71,7 @@ func (h *HetznerTLS) Realize(
 		}
 	}
 
-	configContent, err := nginx.Render(routes)
+	writeScript, err := h.renderWriteScript(hostKey, routes, backendIPs)
 	if err != nil {
 		return fmt.Errorf("ingress %q: %w", hostKey, err)
 	}
@@ -86,13 +91,13 @@ func (h *HetznerTLS) Realize(
 
 	// 2. Write the rendered nginx.conf. Update in place on a content change so a
 	//    Triggers change rewrites rather than replacing (which would Create AND
-	//    Delete the file).
-	writeScript := iremote.WriteFileScript(nginx.ConfigPath, configContent)
+	//    Delete the file). writeScript embeds the full config, so it is also the
+	//    change trigger for this step and the reload below.
 	cfg, err := remote.NewCommand(ctx, base+"-config", &remote.CommandArgs{
 		Connection: conn,
-		Create:     pulumi.String(writeScript),
-		Update:     pulumi.String(writeScript),
-		Triggers:   pulumi.Array{pulumi.String(configContent)},
+		Create:     writeScript,
+		Update:     writeScript,
+		Triggers:   pulumi.Array{writeScript},
 	}, pulumi.DependsOn([]pulumi.Resource{install}))
 	if err != nil {
 		return fmt.Errorf("ingress %q: write nginx.conf: %w", hostKey, err)
@@ -106,10 +111,59 @@ func (h *HetznerTLS) Realize(
 		Connection: conn,
 		Create:     pulumi.String(reload),
 		Update:     pulumi.String(reload),
-		Triggers:   pulumi.Array{pulumi.String(configContent)},
+		Triggers:   pulumi.Array{writeScript},
 	}, pulumi.DependsOn([]pulumi.Resource{cfg})); err != nil {
 		return fmt.Errorf("ingress %q: reload nginx: %w", hostKey, err)
 	}
 
 	return nil
+}
+
+// renderWriteScript builds the shell that writes the rendered nginx.conf. When
+// every route is co-located (no cross-host backends), it renders synchronously and
+// returns a plain string. When some routes are cross-host, it renders inside an
+// apply over the backend private-IP outputs, substituting each cross-host route's
+// Backend with the resolved IP before Render — so the upstream addresses are the
+// real private IPs, resolved at deploy time. In preview a cross-host backend IP is
+// unknown, so the apply (and the command that consumes it) is skipped entirely.
+func (h *HetznerTLS) renderWriteScript(hostKey string, routes []types.IngressRoute, backendIPs map[string]pulumi.StringOutput) (pulumi.StringInput, error) {
+	if len(backendIPs) == 0 {
+		cfg, err := nginx.Render(routes)
+		if err != nil {
+			return nil, err
+		}
+		return pulumi.String(iremote.WriteFileScript(nginx.ConfigPath, cfg)), nil
+	}
+
+	svcNames := make([]string, 0, len(backendIPs))
+	for n := range backendIPs {
+		svcNames = append(svcNames, n)
+	}
+	sort.Strings(svcNames)
+	outs := make([]any, len(svcNames))
+	for i, n := range svcNames {
+		outs[i] = backendIPs[n]
+	}
+	return pulumi.All(outs...).ApplyT(func(args []any) (string, error) {
+		resolved := make(map[string]string, len(svcNames))
+		for i, n := range svcNames {
+			resolved[n], _ = args[i].(string)
+		}
+		rendered := make([]types.IngressRoute, len(routes))
+		for i, r := range routes {
+			if r.Backend == "" {
+				ip := resolved[r.Service]
+				if ip == "" {
+					return "", fmt.Errorf("ingress %q: cross-host route for service %q has no resolved backend private IP", hostKey, r.Service)
+				}
+				r.Backend = ip
+			}
+			rendered[i] = r
+		}
+		cfg, err := nginx.Render(rendered)
+		if err != nil {
+			return "", err
+		}
+		return iremote.WriteFileScript(nginx.ConfigPath, cfg), nil
+	}).(pulumi.StringOutput), nil
 }

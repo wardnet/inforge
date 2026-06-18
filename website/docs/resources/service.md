@@ -28,15 +28,16 @@ type: raw                # required — delivery type
 user: wardnet            # required — no-login system user the service runs as
 pki: wardnet-mesh        # required — name of the two-tier (mesh) PKI this service is a member of
 reload: /bin/kill -HUP $MAINPID  # optional — ExecReload command to apply a renewed mesh leaf without a restart
-ingress:                  # optional — typed inbound routes realized on the host's nginx
+ingress: edge             # FK -> ingress resource (same scope) whose nginx fronts the routes below
+routes:                   # optional — typed inbound routes realized on the ingress's nginx
   - type: tls-termination #   required — tls-termination | forward
-    listen: 443           #   required — public port the host accepts traffic on
-    target: 8080          #   required (tls-termination) — local port to reverse-proxy to
+    listen: 443           #   required — public port the ingress accepts traffic on
+    target: 8080          #   required — backend port nginx reverse-proxies to
     vanity:               #   optional — extra public FQDNs beyond the auto-derived <svc>.svc name
       - api.{BASE_DOMAIN}
   - type: forward         #   a second route — raw L4 forward (PROXY protocol)
     listen: 853           #   required — public port
-    target: 5353          #   optional (forward) — omit to bind the port directly (firewall only)
+    target: 5353          #   required — backend port to forward to
 ```
 
 `environment.yaml` (optional sidecar — env-var name → source DSL string):
@@ -61,7 +62,8 @@ LOG_LEVEL: info                                 # a literal (non-secret config) 
 | `user` | string | Yes | No-login system user the service runs as. inforge emits `User=<name>` in the systemd unit and creates the account via SSH on first deploy; the bootstrapper drops privilege to it before exec. |
 | `pki` | string | Yes | Name of the **two-tier (mesh) PKI** in `pki.enc.yaml` this service is a leaf member of. `inforge validate` checks it names an existing two-tier PKI with an intermediate for every scope the service deploys under (a global service → `global`; a regional service → every region). See [`inforge pki`](/cli/pki). |
 | `reload` | string | No | `ExecReload=` command the service uses to apply a renewed mesh leaf **without a restart** (e.g. `/bin/kill -HUP $MAINPID`, `nginx -s reload`). When set, the per-service renewal timer reloads the unit; when absent, it restarts (a brief interruption). Must be a **single line** (it becomes one `ExecReload=` directive; a newline would inject extra unit directives). The leaf/key/bundle paths are in the `MTLS_LEAF_CERT_PATH` / `MTLS_LEAF_KEY_PATH` / `MTLS_TRUST_BUNDLE_PATH` env vars — these names are **reserved**: a service's own `environment:` may not use them. |
-| `ingress` | array | No | Typed inbound routes (`tls-termination` / `forward`) fronted by nginx. Each entry binds a public `listen` port; the service binds `127.0.0.1:<target>` behind nginx. See [Ingress](#ingress) below. |
+| `ingress` | string | When `routes` is set | **Name** of the [ingress](#ingress-and-routes) resource (same scope) whose nginx fronts this service's `routes`. The ingress host and this service's host must share a network when they differ (cross-host routing). |
+| `routes` | array | No | Typed inbound routes (`tls-termination` / `forward`) realized on the referenced ingress's nginx. Each route binds a public `listen` port and a backend `target` port. See [Ingress and routes](#ingress-and-routes) below. |
 
 **`environment.yaml` sidecar:**
 
@@ -170,43 +172,48 @@ it for non-secret per-service config only; use `vault:`, `env:` or `ref:` for an
 Env-var names in the reserved `INFORGE_DEPLOYMENT_*` namespace are rejected — see
 [Runtime environment](#runtime-environment).
 
-## Ingress
+## Ingress and routes
 
-The optional `ingress` field is a **list** of typed inbound routes. A host with any ingress runs
-**nginx as its sole public entry point** — there is no separate resource to declare; nginx is installed
-and configured automatically wherever a service has ingress, and the service binds `127.0.0.1:<target>`
-behind it. Each entry binds a public `listen` port and is one of two types: **`tls-termination`** (nginx
-terminates ACME TLS and reverse-proxies to the local port) or **`forward`** (nginx forwards the raw L4
-connection to the local port with the PROXY protocol). A service may carry several entries — e.g.
-terminate TLS on `443` *and* forward a second protocol on `853`.
+A service is exposed through a standalone **[ingress](./ingress)** resource — the shared proxy tier
+(nginx) named by the `ingress:` foreign key — which fronts the service's `routes:`. nginx runs on the
+**ingress's host**, not the service's: it terminates/forwards on the public `listen` port and proxies to
+the backend's `target` port over **loopback** when the service is co-located with its ingress host, or
+over the **private network** (the backend's private IP) when they are different hosts. A cross-host
+service and its ingress must share a network (same Hetzner Network — subnets within it are mutually
+routable); `inforge validate` enforces this.
 
-Each entry's fields:
+Each route is one of two types: **`tls-termination`** (nginx terminates ACME TLS and reverse-proxies to
+the backend) or **`forward`** (nginx forwards the raw L4 connection with the PROXY protocol). A service
+may carry several routes — e.g. terminate TLS on `443` *and* forward a second protocol on `853`. A
+service with any `routes:` must name the `ingress:` that fronts them.
+
+Each route's fields:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | Yes | `tls-termination` or `forward`. |
-| `listen` | int | Yes | Public port (1–65535) nginx accepts traffic on. **No default.** Must differ from `target`. |
-| `target` | int | Yes | Loopback port the service listens on; nginx reverse-proxies/forwards to `127.0.0.1:<target>`. Must differ from `listen` (nginx occupies the public port on all interfaces, loopback included). |
-| `vanity` | array | No | Extra public FQDNs a `tls-termination` entry serves, **in addition to** the auto-derived `<svc>.svc` name (see below). Invalid on a `forward` (no SNI). |
+| `listen` | int | Yes | Public port (1–65535) the ingress nginx accepts traffic on. **No default.** Must differ from `target` when the service is co-located with its ingress. |
+| `target` | int | Yes | Backend port the service listens on; nginx reverse-proxies/forwards to it over loopback (co-located) or the private network (cross-host). |
+| `vanity` | array | No | Extra public FQDNs a `tls-termination` route serves, **in addition to** the auto-derived `<svc>.svc` name (see below). Invalid on a `forward` (no SNI). |
 
 ### Types
 
-- **`tls-termination`**: nginx owns an ACME certificate for each of the entry's FQDNs (the auto-derived
-  `<svc>.svc` name plus any `vanity`), terminates TLS on `listen`, and reverse-proxies HTTP to
-  `localhost:<target>`. **Several services may share one `listen` port** — nginx demuxes by SNI
+- **`tls-termination`**: nginx owns an ACME certificate for each of the route's FQDNs (the auto-derived
+  `<svc>.svc` name plus any `vanity`), terminates TLS on `listen`, and reverse-proxies HTTP to the
+  backend `target`. **Several services on one ingress may share a `listen` port** — nginx demuxes by SNI
   (`server_name`).
-- **`forward`**: nginx forwards the raw L4 stream on `listen` to `127.0.0.1:<target>` with
+- **`forward`**: nginx forwards the raw L4 stream on `listen` to the backend `target` with
   `proxy_protocol on` so the backend learns the real client address; the **backend owns its own TLS**.
-  A `forward` port is **single-service-exclusive** (it cannot be SNI-demuxed).
+  A `forward` port is **single-service-exclusive** on its ingress (it cannot be SNI-demuxed).
 
-No host-level resource is needed — nginx realization is driven entirely by ingress presence. ACME owns
-`:80` for HTTP-01 challenges, so a `forward` on `:80` cannot coexist with a `tls-termination` on the
-same host.
+ACME owns `:80` on the ingress host for HTTP-01 challenges, so a `forward` on `:80` cannot coexist with a
+`tls-termination` on the same ingress. The backend's `target` ports are opened only to the private
+network (never the internet); only the ingress host exposes the public `listen` ports.
 
 :::tip Raw public ports
-`ingress` always goes through nginx. To open a **raw** public port with no proxy (no TLS, no remap, no
-PROXY protocol), declare it on the [Compute firewall](./compute#firewall-rules) instead — not as an
-ingress entry.
+A route always goes through the ingress nginx. To open a **raw** public port with no proxy (no TLS, no
+remap, no PROXY protocol), declare it on the [Compute firewall](./compute#firewall-rules) instead — not
+as a route.
 :::
 
 ### Hostnames, DNS and certificates
@@ -243,14 +250,15 @@ container: bridge
 host: bridge
 type: raw
 user: bridge
-ingress:
+ingress: edge             # the ingress resource whose nginx fronts these routes
+routes:
   - type: tls-termination # ACME TLS on :443 for bridge.svc.<env>.<slug>.<base> + the vanity names
     listen: 443
     target: 8080
     vanity:
       - key-broker.{BASE_DOMAIN}
       - key-broker.inforge.wardnet.network
-  - type: forward         # raw L4 forward of :853 to a local backend (PROXY protocol)
+  - type: forward         # raw L4 forward of :853 to a backend (PROXY protocol)
     listen: 853
     target: 5353
 ```

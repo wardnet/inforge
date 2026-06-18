@@ -344,7 +344,7 @@ func loadResourceSet(base string) (types.Resources, error) {
 	}
 	res.PKI = pkiSpecs
 
-	ingressSpecs, _, err := loadTypeFromFolders[types.IngressResourceSpec](filepath.Join(base, "ingress"))
+	ingressSpecs, _, err := loadTypeFromFolders[types.IngressSpec](filepath.Join(base, "ingress"))
 	if err != nil {
 		return types.Resources{}, err
 	}
@@ -394,20 +394,22 @@ func NormalizeDatabase(d *types.DatabaseSpec) {
 	}
 }
 
-// NormalizeService applies service defaults (type defaults to "raw").
+// NormalizeService applies service defaults (type defaults to "raw") and trims the
+// ingress foreign key so a stray space cannot defeat its resolution.
 func NormalizeService(s *types.ServiceSpec) {
 	if s.Type == "" {
 		s.Type = "raw"
 	}
 	s.Pki = strings.TrimSpace(s.Pki)
 	s.Reload = strings.TrimSpace(s.Reload)
+	s.Ingress = strings.TrimSpace(s.Ingress)
 }
 
 // NormalizeIngress trims the ingress spec's free-text fields and its host
 // foreign key so a stray space cannot defeat the host FK resolution. There is no
 // default provider to apply — the provider comes from the compute host the
 // ingress references, not the spec.
-func NormalizeIngress(i *types.IngressResourceSpec) {
+func NormalizeIngress(i *types.IngressSpec) {
 	i.Name = strings.TrimSpace(i.Name)
 	i.Container = strings.TrimSpace(i.Container)
 	i.Host = strings.TrimSpace(i.Host)

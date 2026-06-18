@@ -29,6 +29,13 @@ func block(name string, args []string, children ...*crossplane.Directive) *cross
 func Render(routes []types.IngressRoute) (string, error) {
 	var terminate, forward []types.IngressRoute
 	for _, r := range routes {
+		// Backend is the resolved upstream address the caller must fill — "127.0.0.1"
+		// for a co-located route, the backend's private IP for a cross-host one. An
+		// empty Backend means the program/provider wiring failed to resolve it; render
+		// must fail loud rather than silently proxy the service to localhost.
+		if r.Backend == "" {
+			return "", fmt.Errorf("nginx: ingress route for service %q has no backend address (unresolved upstream)", r.Service)
+		}
 		switch r.Type {
 		case types.IngressTypeTLSTermination:
 			terminate = append(terminate, r)
@@ -103,7 +110,8 @@ func httpBlock(terminate []types.IngressRoute) *crossplane.Directive {
 }
 
 // terminateServer renders one tls-termination server: ACME-managed TLS for the
-// route's SNIs, reverse-proxying cleartext to the local target.
+// route's SNIs, reverse-proxying cleartext to the backend target. Render has
+// already verified r.Backend is non-empty.
 func terminateServer(r types.IngressRoute) *crossplane.Directive {
 	serverName := append([]string{}, r.FQDNs...)
 	return block("server", nil,
@@ -114,7 +122,7 @@ func terminateServer(r types.IngressRoute) *crossplane.Directive {
 		dir("ssl_certificate_key", "$acme_certificate_key"),
 		dir("ssl_certificate_cache", "max=2"),
 		block("location", []string{"/"},
-			dir("proxy_pass", fmt.Sprintf("http://127.0.0.1:%d", r.Target)),
+			dir("proxy_pass", fmt.Sprintf("http://%s:%d", r.Backend, r.Target)),
 			dir("proxy_set_header", "Host", "$host"),
 			dir("proxy_set_header", "X-Forwarded-For", "$proxy_add_x_forwarded_for"),
 			dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
@@ -130,7 +138,7 @@ func streamBlock(forward []types.IngressRoute) *crossplane.Directive {
 	for _, r := range forward {
 		children = append(children, block("server", nil,
 			dir("listen", strconv.Itoa(r.Listen)),
-			dir("proxy_pass", fmt.Sprintf("127.0.0.1:%d", r.Target)),
+			dir("proxy_pass", fmt.Sprintf("%s:%d", r.Backend, r.Target)),
 			dir("proxy_protocol", "on"),
 		))
 	}

@@ -170,13 +170,19 @@ type regionContext struct {
 	computeInstances map[string]int               // canonical specKey -> the compute's instance_count
 	computeDeployer  map[string]bool              // canonical specKey -> declares a deploy_user
 	computeNames     map[string]bool              // bare compute names; service.host must be one of these
+	computeNetwork   map[string]string            // canonical specKey (and bare name) -> network name; for the cross-host same-network check
 	databaseNames    map[string]bool
 	// ingressNames holds the ingress resource names declared in this scope. An
-	// app's `ingress:` foreign key must resolve to one of them — same-scope only,
-	// exactly like a service's host must be a compute in the same set (a global/
-	// prefix is rejected in checkApp). Name *uniqueness* is enforced generically in
-	// validateType; this map only answers FK existence.
+	// app's or service's `ingress:` foreign key must resolve to one of them —
+	// same-scope only, exactly like a service's host must be a compute in the same
+	// set (a global/ prefix is rejected in checkApp/checkService). Name *uniqueness*
+	// is enforced generically in validateType; this map only answers FK existence.
 	ingressNames map[string]bool
+	// ingressHost maps an ingress resource name to the canonical specKey of its
+	// host compute, so checkService can decide whether a service's routes are
+	// co-located with their ingress (and, when not, enforce the same-network rule).
+	// An ingress whose host FK does not resolve is absent (checkIngress reports it).
+	ingressHost map[string]string
 	// appSubdomainCounts counts app subdomain declarations per value in this scope so
 	// checkApp can flag a collision: two apps sharing a subdomain would resolve to
 	// the same public FQDN. (Bare-name uniqueness is handled generically in
@@ -188,18 +194,20 @@ type regionContext struct {
 	// reaches its own region's PKI resources or a global/<name> one (the
 	// cross-region boundary, mirrored from databaseNames).
 	pkiResources map[string]string
-	// portUsersByHost maps a canonical host specKey to, per listen port, the names
-	// of the services with an ingress entry on that port. It enforces that a
-	// forward port is single-service-exclusive (and, since forward is the only
-	// non-terminating type, that any shared port is tls-termination).
+	// portUsersByHost maps a canonical INGRESS host specKey to, per listen port, the
+	// names of the services with a route on that port (where the ingress nginx
+	// holds the public port). It enforces that a forward port is
+	// single-service-exclusive (and, since forward is the only non-terminating type,
+	// that any shared port is tls-termination).
 	portUsersByHost map[string]map[int][]string
-	// targetUsersByHost maps a canonical host specKey to, per loopback target port,
-	// the names of the services binding it. nginx forwards to 127.0.0.1:<target>, so
-	// a target must belong to a single service and must not collide with any public
-	// listen port nginx holds on the host (see checkService).
+	// targetUsersByHost maps a canonical BACKEND host specKey (the service's own
+	// host) to, per target port, the names of the services binding it. A target must
+	// belong to a single service on its host, and — only when the service is
+	// co-located with its ingress — must not collide with a public listen port nginx
+	// holds on that host (see checkService).
 	targetUsersByHost map[string]map[int][]string
-	// tlsTermIngressByHost marks a canonical host specKey that has at least one
-	// tls-termination ingress entry across its services — so a forward on :80
+	// tlsTermIngressByHost marks a canonical INGRESS host specKey that has at least
+	// one tls-termination route across the services it fronts — so a forward on :80
 	// (which ACME needs) can be rejected.
 	tlsTermIngressByHost map[string]bool
 	// encStore is the environment's committed encrypted secret store
@@ -335,7 +343,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	if err != nil {
 		return err
 	}
-	ingressFiles, _, err := readFolders[types.IngressResourceSpec](filepath.Join(base, "ingress"))
+	ingressFiles, _, err := readFolders[types.IngressSpec](filepath.Join(base, "ingress"))
 	if err != nil {
 		return err
 	}
@@ -403,8 +411,10 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		computeInstances:     map[string]int{},
 		computeDeployer:      map[string]bool{},
 		computeNames:         map[string]bool{},
+		computeNetwork:       map[string]string{},
 		databaseNames:        map[string]bool{},
 		ingressNames:         map[string]bool{},
+		ingressHost:          map[string]string{},
 		appSubdomainCounts:   map[string]int{},
 		portUsersByHost:      map[string]map[int][]string{},
 		targetUsersByHost:    map[string]map[int][]string{},
@@ -425,8 +435,10 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			ctx.computeKind[key] = f.spec.Kind
 			ctx.computeInstances[key] = f.spec.InstanceCount
 			ctx.computeDeployer[key] = hasDeployer
+			ctx.computeNetwork[key] = f.spec.Network
 		}
 		ctx.computeNames[f.spec.Name] = true
+		ctx.computeNetwork[f.spec.Name] = f.spec.Network
 		if f.spec.InstanceCount == 1 {
 			// bridge and bridge-01 both reference the same host.
 			ctx.computeKind[f.spec.Name] = f.spec.Kind
@@ -447,6 +459,12 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for _, f := range ingressFiles {
 		if f.parseErr == nil {
 			ctx.ingressNames[f.spec.Name] = true
+			// Record the ingress's host (canonical specKey) so checkService can test
+			// co-location and the same-network rule. A host FK that does not resolve
+			// is left absent — checkIngress reports it.
+			if hk := canonicalHost(f.spec.Host, ctx); hk != "" {
+				ctx.ingressHost[f.spec.Name] = hk
+			}
 		}
 	}
 	for _, f := range appFiles {
@@ -454,26 +472,35 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			ctx.appSubdomainCounts[f.spec.Subdomain]++
 		}
 	}
-	// Aggregate per-host ingress so checkService can enforce the cross-service
-	// rules: which services use each listen port (forward ports are
-	// single-service-exclusive) and whether the host has any tls-termination entry
-	// (so a forward on :80, which ACME owns, can be rejected).
+	// Aggregate the routes so checkService can enforce the cross-service rules. The
+	// listen-port aggregations (which services use each listen port, whether a
+	// tls-termination route exists) are keyed by the route's INGRESS host — that is
+	// where the nginx public port lives. The target aggregation is keyed by the
+	// service's own (BACKEND) host — that is where the service binds the target.
 	for _, f := range serviceFiles {
-		c, ok := ctx.computeCanonical[f.spec.Host]
-		if !ok {
+		if f.parseErr != nil {
 			continue
 		}
-		for _, in := range f.spec.Ingress {
-			if ctx.portUsersByHost[c] == nil {
-				ctx.portUsersByHost[c] = map[int][]string{}
+		if f.spec.Ingress == "" || len(f.spec.Routes) == 0 {
+			continue
+		}
+		ingHost, ingOK := ctx.ingressHost[f.spec.Ingress]
+		backendHost := canonicalHost(f.spec.Host, ctx)
+		for _, rt := range f.spec.Routes {
+			if ingOK {
+				if ctx.portUsersByHost[ingHost] == nil {
+					ctx.portUsersByHost[ingHost] = map[int][]string{}
+				}
+				ctx.portUsersByHost[ingHost][rt.Listen] = append(ctx.portUsersByHost[ingHost][rt.Listen], f.spec.Name)
+				if rt.Type == types.IngressTypeTLSTermination {
+					ctx.tlsTermIngressByHost[ingHost] = true
+				}
 			}
-			if ctx.targetUsersByHost[c] == nil {
-				ctx.targetUsersByHost[c] = map[int][]string{}
-			}
-			ctx.portUsersByHost[c][in.Listen] = append(ctx.portUsersByHost[c][in.Listen], f.spec.Name)
-			ctx.targetUsersByHost[c][in.Target] = append(ctx.targetUsersByHost[c][in.Target], f.spec.Name)
-			if in.Type == types.IngressTypeTLSTermination {
-				ctx.tlsTermIngressByHost[c] = true
+			if backendHost != "" {
+				if ctx.targetUsersByHost[backendHost] == nil {
+					ctx.targetUsersByHost[backendHost] = map[int][]string{}
+				}
+				ctx.targetUsersByHost[backendHost][rt.Target] = append(ctx.targetUsersByHost[backendHost][rt.Target], f.spec.Name)
 			}
 		}
 	}
@@ -508,7 +535,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	validateType(r, schemaSet["pkiresource"], pkiFiles, func(s types.PKIResourceSpec) string { return s.Name }, func(s types.PKIResourceSpec) ([]string, []string) {
 		return checkPKIResource(s)
 	})
-	validateType(r, schemaSet["ingress"], ingressFiles, func(s types.IngressResourceSpec) string { return s.Name }, func(s types.IngressResourceSpec) ([]string, []string) {
+	validateType(r, schemaSet["ingress"], ingressFiles, func(s types.IngressSpec) string { return s.Name }, func(s types.IngressSpec) ([]string, []string) {
 		return checkIngress(s, ctx)
 	})
 	validateType(r, schemaSet["app"], appFiles, func(s types.AppSpec) string { return s.Name }, func(s types.AppSpec) ([]string, []string) {
@@ -1015,6 +1042,21 @@ func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []strin
 // it first, with a resource-specific message and control flow — nor is the
 // deploy_user requirement (service-only). It returns the canonical specKey ("" when
 // the host does not resolve) plus any host errors.
+// canonicalHost resolves a compute host FK (a bare compute name) to its canonical
+// specKey without emitting errors — resolveComputeHost owns the error messages.
+// Returns "" when the host is not a known compute name in this scope. Used to map
+// ingress.host and service.host to a comparable host identity for co-location and
+// same-network checks.
+func canonicalHost(host string, ctx regionContext) string {
+	if _, ok := ctx.computeNames[host]; !ok {
+		return ""
+	}
+	if c := ctx.computeCanonical[host]; c != "" {
+		return c
+	}
+	return naming.SpecKey(host, 1)
+}
+
 func resolveComputeHost(host, noun string, ctx regionContext) (canonical string, errs []string) {
 	if _, ok := ctx.computeNames[host]; !ok {
 		if ctx.computeCanonical[host] != "" {
@@ -1071,62 +1113,89 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	if s.User == "" {
 		errs = append(errs, "user: a service must declare the no-login user it runs as")
 	}
-	if len(s.Ingress) > 0 {
-		// canonical is "" when the host did not resolve; the maps below tolerate that.
-		host := canonical
-		// nginx is always the host's sole public entry point when any ingress exists;
-		// the service binds 127.0.0.1:target behind it. No host-level resource is
-		// needed — realization is driven by ingress presence (provider from compute).
-		for _, in := range s.Ingress {
-			switch in.Type {
+	// The ingress FK: a service with routes must name an ingress resource in the
+	// same scope that fronts them (ADR-0026). A global/ ingress is rejected, exactly
+	// like a global host — a service fronted by a global ingress is declared in the
+	// global slice itself.
+	if s.Ingress != "" {
+		switch {
+		case strings.HasPrefix(s.Ingress, "global/"):
+			errs = append(errs, fmt.Sprintf("ingress: %q references a global ingress; a service fronted by a global ingress is declared in the global slice itself, not referenced from a region", s.Ingress))
+		case !ctx.ingressNames[s.Ingress]:
+			errs = append(errs, fmt.Sprintf("ingress: %q does not resolve to an ingress resource in this scope", s.Ingress))
+		}
+	}
+	if len(s.Routes) > 0 {
+		if s.Ingress == "" {
+			errs = append(errs, "ingress: a service with routes must name the ingress resource that fronts them")
+		}
+		// ingHost is the ingress's host ("" when the FK did not resolve); backendHost
+		// is the service's own host. The maps below tolerate an empty key.
+		ingHost := ctx.ingressHost[s.Ingress]
+		backendHost := canonical
+		coLocated := ingHost != "" && backendHost != "" && ingHost == backendHost
+		// Cross-host routing rides the private network, so the ingress host and the
+		// backend host must share a network (same Hetzner Network — subnets within it
+		// are mutually routable).
+		if ingHost != "" && backendHost != "" && ingHost != backendHost {
+			if ingNet, svcNet := ctx.computeNetwork[ingHost], ctx.computeNetwork[backendHost]; ingNet != svcNet {
+				errs = append(errs, fmt.Sprintf("ingress: cross-host routing requires ingress %q and this service to share a network, but the ingress host is on network %q and this service's host is on %q", s.Ingress, ingNet, svcNet))
+			}
+		}
+		for _, rt := range s.Routes {
+			switch rt.Type {
 			case types.IngressTypeTLSTermination, types.IngressTypeForward:
 			default:
-				errs = append(errs, fmt.Sprintf("ingress: type %q is invalid; must be %q or %q", in.Type, types.IngressTypeTLSTermination, types.IngressTypeForward))
+				errs = append(errs, fmt.Sprintf("routes: type %q is invalid; must be %q or %q", rt.Type, types.IngressTypeTLSTermination, types.IngressTypeForward))
 			}
 			// Both ports are mandatory and explicit (no implicit defaults).
-			if in.Listen < 1 || in.Listen > 65535 {
-				errs = append(errs, fmt.Sprintf("ingress: listen %d is invalid; a public port (1..65535) is required on every ingress entry", in.Listen))
+			if rt.Listen < 1 || rt.Listen > 65535 {
+				errs = append(errs, fmt.Sprintf("routes: listen %d is invalid; a public port (1..65535) is required on every route", rt.Listen))
 			}
-			if in.Target < 1 || in.Target > 65535 {
-				errs = append(errs, fmt.Sprintf("ingress: listen %d needs a target (1..65535) — the loopback port the service listens on", in.Listen))
+			if rt.Target < 1 || rt.Target > 65535 {
+				errs = append(errs, fmt.Sprintf("routes: target for listen %d is invalid; a backend port (1..65535) is required", rt.Listen))
 			}
-			// nginx binds *:listen (all interfaces, incl. loopback), so the service
-			// cannot also bind 127.0.0.1:listen — listen and target must differ.
-			if in.Listen == in.Target && in.Listen != 0 {
-				errs = append(errs, fmt.Sprintf("ingress: listen and target must differ (both %d); nginx occupies the public port on all interfaces, so the service must listen on a different loopback port", in.Listen))
+			// The service binds rt.Target on its BACKEND host. If that host also runs
+			// nginx — because it is some ingress's host (its own co-located ingress, or
+			// the ingress fronting another co-located service) — nginx holds *:<listen>
+			// on all interfaces there, so the target must not equal any public listen
+			// port on the backend host. Keying on backendHost (not the ingress host)
+			// catches the cross-host case where the backend host independently hosts an
+			// ingress. When co-located and listen == target, the clearer "must differ"
+			// message subsumes the collision (same port), so report only that.
+			if coLocated && rt.Listen == rt.Target && rt.Listen != 0 {
+				errs = append(errs, fmt.Sprintf("routes: listen and target must differ (both %d) when the service is co-located with its ingress; nginx occupies the public port on all interfaces", rt.Listen))
+			} else if backendHost != "" && len(ctx.portUsersByHost[backendHost][rt.Target]) > 0 {
+				errs = append(errs, fmt.Sprintf("routes: target %d collides with a public listen port on the backend host %q; nginx runs there and occupies that port on all interfaces, so the service cannot bind it", rt.Target, s.Host))
 			}
-			// The collision is host-wide: a target must not equal ANY public listen
-			// port on the host (nginx holds *:<listen> on loopback too). The == own
-			// listen case is reported above, so guard against a double error.
-			if in.Listen != in.Target && len(ctx.portUsersByHost[host][in.Target]) > 0 {
-				errs = append(errs, fmt.Sprintf("ingress: target %d collides with a public listen port on host %q; nginx occupies that port on all interfaces, so the service cannot bind it on loopback", in.Target, s.Host))
-			}
-			// A loopback target is bound by one process, so two different services
-			// cannot share it (the same service may reuse its target across entries).
-			if others := otherUsers(ctx.targetUsersByHost[host][in.Target], s.Name); len(others) > 0 {
-				errs = append(errs, fmt.Sprintf("ingress: target %d on host %q is also used by service(s) %s; a loopback port belongs to a single service", in.Target, s.Host, strings.Join(others, ", ")))
-			}
-			if in.Type == types.IngressTypeForward {
-				// vanity is an SNI/cert concept; a forward route has no SNI.
-				if len(in.Vanity) > 0 {
-					errs = append(errs, fmt.Sprintf("ingress: forward on listen %d has no SNI; remove vanity", in.Listen))
+			// A backend port is bound by one process, so two services on the same
+			// backend host cannot share a target (a service may reuse its own).
+			if backendHost != "" {
+				if others := otherUsers(ctx.targetUsersByHost[backendHost][rt.Target], s.Name); len(others) > 0 {
+					errs = append(errs, fmt.Sprintf("routes: target %d on host %q is also used by service(s) %s; a backend port belongs to a single service", rt.Target, s.Host, strings.Join(others, ", ")))
 				}
-				// A forward port is single-service-exclusive: nginx stream cannot
-				// demux it, so no other ingress entry on the host may share it. (Since
-				// forward is the only non-terminating type, this also guarantees any
-				// shared listen port is tls-termination.)
-				if users := ctx.portUsersByHost[host][in.Listen]; len(users) > 1 {
+			}
+			if rt.Type == types.IngressTypeForward {
+				// vanity is an SNI/cert concept; a forward route has no SNI.
+				if len(rt.Vanity) > 0 {
+					errs = append(errs, fmt.Sprintf("routes: forward on listen %d has no SNI; remove vanity", rt.Listen))
+				}
+				// A forward port is single-service-exclusive on its ingress: nginx
+				// stream cannot demux it, so no other route on the ingress may share it.
+				// (Since forward is the only non-terminating type, this also guarantees
+				// any shared listen port is tls-termination.)
+				if users := ctx.portUsersByHost[ingHost][rt.Listen]; len(users) > 1 {
 					others := otherUsers(users, s.Name)
-					who := "another ingress entry on the same service"
+					who := "another route on the same service"
 					if len(others) > 0 {
 						who = "service(s) " + strings.Join(others, ", ")
 					}
-					errs = append(errs, fmt.Sprintf("ingress: forward on listen %d is single-service-exclusive, but that port is also used by %s on host %q", in.Listen, who, s.Host))
+					errs = append(errs, fmt.Sprintf("routes: forward on listen %d is single-service-exclusive, but that port on ingress %q is also used by %s", rt.Listen, s.Ingress, who))
 				}
-				// ACME owns :80 for HTTP-01 challenges, so a forward there collides
-				// with any tls-termination on the same host.
-				if in.Listen == 80 && ctx.tlsTermIngressByHost[host] {
-					errs = append(errs, fmt.Sprintf("ingress: forward on :80 conflicts with a tls-termination on host %q (ACME owns :80 for HTTP-01 challenges)", s.Host))
+				// ACME owns :80 on the ingress host for HTTP-01 challenges, so a
+				// forward there collides with any tls-termination on the same ingress.
+				if rt.Listen == 80 && ctx.tlsTermIngressByHost[ingHost] {
+					errs = append(errs, fmt.Sprintf("routes: forward on :80 conflicts with a tls-termination on ingress %q (ACME owns :80 for HTTP-01 challenges)", s.Ingress))
 				}
 			}
 		}
@@ -1195,7 +1264,7 @@ func checkPKIResource(s types.PKIResourceSpec) (errs, warns []string) {
 // itself, not referenced from a region (mirroring service.host). The ingress
 // carries no provider; it inherits its host's. Its name must be unique among the
 // scope's ingress resources.
-func checkIngress(s types.IngressResourceSpec, ctx regionContext) (errs, warns []string) {
+func checkIngress(s types.IngressSpec, ctx regionContext) (errs, warns []string) {
 	// An ingress on a global host (host: global/<name>) is rejected: it is declared
 	// in the global slice itself, not referenced from a region. Detected before host
 	// resolution so the message is specific (mirrors checkService).

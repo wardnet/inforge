@@ -204,14 +204,14 @@ func ingressCtx() regionContext {
 // TestCheckIngressValid: an ingress whose host: resolves to a same-scope
 // single-instance vm compute passes.
 func TestCheckIngressValid(t *testing.T) {
-	errs, _ := checkIngress(types.IngressResourceSpec{Name: "web", Host: "bridge"}, ingressCtx())
+	errs, _ := checkIngress(types.IngressSpec{Name: "web", Host: "bridge"}, ingressCtx())
 	assert.Empty(t, errs)
 }
 
 // TestCheckIngressGlobalHostRejected: an ingress referencing a global compute is
 // rejected — like service.host, it is declared in the global slice itself.
 func TestCheckIngressGlobalHostRejected(t *testing.T) {
-	errs, _ := checkIngress(types.IngressResourceSpec{Name: "web", Host: "global/edge"}, ingressCtx())
+	errs, _ := checkIngress(types.IngressSpec{Name: "web", Host: "global/edge"}, ingressCtx())
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "global slice itself")
 }
@@ -219,7 +219,7 @@ func TestCheckIngressGlobalHostRejected(t *testing.T) {
 // TestCheckIngressUnknownHostRejected: an ingress whose host: does not resolve to
 // a compute in the same scope fails the foreign-key check.
 func TestCheckIngressUnknownHostRejected(t *testing.T) {
-	errs, _ := checkIngress(types.IngressResourceSpec{Name: "web", Host: "ghost"}, ingressCtx())
+	errs, _ := checkIngress(types.IngressSpec{Name: "web", Host: "ghost"}, ingressCtx())
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "does not resolve to a compute")
 }
@@ -491,102 +491,175 @@ func TestCheckServiceRejectsSpecKeyHost(t *testing.T) {
 	assert.Contains(t, strings.Join(errs, "\n"), "specKey")
 }
 
+// ingressFKCtx seeds a baseCtx with one ingress "web" co-located on the bridge
+// host, so a service's ingress FK resolves and its routes are treated as
+// co-located (ingress host == service host).
+func ingressFKCtx() regionContext {
+	c := baseCtx()
+	c.ingressNames = map[string]bool{"web": true}
+	c.ingressHost = map[string]string{"web": "bridge-01"}
+	c.computeNetwork = map[string]string{"bridge-01": "net", "bridge": "net"}
+	return c
+}
+
 func TestCheckServiceIngress(t *testing.T) {
-	svc := func(in ...types.IngressSpec) types.ServiceSpec {
-		return types.ServiceSpec{Host: "bridge", Type: "raw", User: "svc", Ingress: in}
+	svc := func(in ...types.RouteSpec) types.ServiceSpec {
+		return types.ServiceSpec{Host: "bridge", Type: "raw", User: "svc", Ingress: "web", Routes: in}
 	}
 
-	// tls-termination needs no host resource — nginx is realized from ingress -> OK.
+	// tls-termination route fronted by a resolvable ingress -> OK.
+	errs, _ := checkService(svc(types.RouteSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), ingressFKCtx())
+	assert.Empty(t, errs)
+
+	// A forward route is equally fine -> OK.
+	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeForward, Listen: 853, Target: 5353}), ingressFKCtx())
+	assert.Empty(t, errs)
+
+	// No routes (and no ingress) -> OK.
+	errs, _ = checkService(types.ServiceSpec{Host: "bridge", Type: "raw", User: "svc"}, baseCtx())
+	assert.Empty(t, errs)
+
+	// Routes without an ingress FK -> FAIL.
+	errs, _ = checkService(types.ServiceSpec{Host: "bridge", Type: "raw", User: "svc",
+		Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}}, baseCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "must name the ingress")
+
+	// An ingress FK that resolves to no ingress in scope -> FAIL.
+	errs, _ = checkService(types.ServiceSpec{Host: "bridge", Type: "raw", User: "svc", Ingress: "ghost",
+		Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}}, baseCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "does not resolve to an ingress")
+}
+
+// TestCheckServiceCrossHostSameNetwork: a service whose backend host is on a
+// different network than its ingress host fails the same-network rule; sharing a
+// network passes.
+func TestCheckServiceCrossHostSameNetwork(t *testing.T) {
 	ctx := baseCtx()
-	errs, _ := checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), ctx)
-	assert.Empty(t, errs)
+	// Two hosts: bridge (backend) and edge (ingress).
+	ctx.computeNames["edge"] = true
+	ctx.computeKind["edge-01"] = "vm"
+	ctx.computeCanonical["edge"] = "edge-01"
+	ctx.computeCanonical["edge-01"] = "edge-01"
+	ctx.ingressNames = map[string]bool{"web": true}
+	ctx.ingressHost = map[string]string{"web": "edge-01"}
+	ctx.computeNetwork = map[string]string{"bridge-01": "back-net", "bridge": "back-net", "edge-01": "edge-net", "edge": "edge-net"}
 
-	// A forward entry is equally fine without any host resource -> OK.
-	ctx = baseCtx()
-	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeForward, Listen: 853, Target: 5353}), ctx)
-	assert.Empty(t, errs)
+	svc := types.ServiceSpec{Name: "svc", Host: "bridge", Type: "raw", User: "svc", Ingress: "web",
+		Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}}
+	errs, _ := checkService(svc, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "share a network")
 
-	// No ingress -> OK.
-	ctx = baseCtx()
-	errs, _ = checkService(types.ServiceSpec{Host: "bridge", Type: "raw", User: "svc"}, ctx)
+	// Same network -> OK.
+	ctx.computeNetwork["edge-01"] = "back-net"
+	ctx.computeNetwork["edge"] = "back-net"
+	errs, _ = checkService(svc, ctx)
 	assert.Empty(t, errs)
+}
+
+// TestCheckServiceCrossHostTargetCollidesWithBackendListen: a cross-host service
+// whose target port equals a public listen port held by nginx on its OWN backend
+// host (because another ingress is co-located there) is rejected — the backend
+// process could not bind that port. The collision check keys on the backend host,
+// not the ingress host.
+func TestCheckServiceCrossHostTargetCollidesWithBackendListen(t *testing.T) {
+	ctx := baseCtx()
+	// edge is the (different) ingress host; bridge is the backend host, which also
+	// runs nginx (holding :9000) for some co-located ingress.
+	ctx.computeNames["edge"] = true
+	ctx.computeKind["edge-01"] = "vm"
+	ctx.computeCanonical["edge"] = "edge-01"
+	ctx.computeCanonical["edge-01"] = "edge-01"
+	ctx.ingressNames = map[string]bool{"web": true}
+	ctx.ingressHost = map[string]string{"web": "edge-01"} // cross-host: ingress on edge, service on bridge
+	ctx.computeNetwork = map[string]string{"bridge-01": "net", "bridge": "net", "edge-01": "net", "edge": "net"}
+	ctx.portUsersByHost = map[string]map[int][]string{"bridge-01": {9000: {"other"}}}
+	ctx.targetUsersByHost = map[string]map[int][]string{}
+	ctx.tlsTermIngressByHost = map[string]bool{}
+
+	errs, _ := checkService(types.ServiceSpec{Name: "api", Host: "bridge", Type: "raw", User: "svc", Ingress: "web",
+		Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 9000}}}, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "collides with a public listen port on the backend host")
 }
 
 func TestCheckServiceIngressRules(t *testing.T) {
 	base := func() regionContext {
-		c := baseCtx()
+		c := ingressFKCtx()
 		c.portUsersByHost = map[string]map[int][]string{}
 		c.targetUsersByHost = map[string]map[int][]string{}
 		c.tlsTermIngressByHost = map[string]bool{}
 		return c
 	}
-	svc := func(in ...types.IngressSpec) types.ServiceSpec {
-		return types.ServiceSpec{Name: "svc", Host: "bridge", Type: "raw", User: "svc", Ingress: in}
+	svc := func(in ...types.RouteSpec) types.ServiceSpec {
+		return types.ServiceSpec{Name: "svc", Host: "bridge", Type: "raw", User: "svc", Ingress: "web", Routes: in}
 	}
 
-	// A tls-termination + a forward entry on one service is the bridge shape -> OK.
+	// A tls-termination + a forward route on one service is the bridge shape -> OK.
 	ctx := base()
 	ctx.portUsersByHost["bridge-01"] = map[int][]string{443: {"svc"}, 853: {"svc"}}
 	ctx.tlsTermIngressByHost["bridge-01"] = true
 	errs, _ := checkService(svc(
-		types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: []string{"key-broker.inforge.example.com"}},
-		types.IngressSpec{Type: types.IngressTypeForward, Listen: 853, Target: 5353},
+		types.RouteSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: []string{"key-broker.inforge.example.com"}},
+		types.RouteSpec{Type: types.IngressTypeForward, Listen: 853, Target: 5353},
 	), ctx)
 	assert.Empty(t, errs)
 
 	// An invalid type is rejected.
-	errs, _ = checkService(svc(types.IngressSpec{Type: "passthrough", Listen: 443, Target: 8080}), base())
+	errs, _ = checkService(svc(types.RouteSpec{Type: "passthrough", Listen: 443, Target: 8080}), base())
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "is invalid")
 
-	// listen is required on every entry.
-	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Target: 8080}), base())
+	// listen is required on every route.
+	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeTLSTermination, Target: 8080}), base())
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "listen")
 
-	// target is required on every entry.
-	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443}), base())
+	// target is required on every route.
+	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeTLSTermination, Listen: 443}), base())
 	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0], "needs a target")
+	assert.Contains(t, errs[0], "target")
 
-	// listen and target must differ (nginx occupies the public port on loopback too).
-	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 443}), base())
+	// listen and target must differ when co-located (nginx occupies the public port).
+	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 443}), base())
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "must differ")
 
-	// target collides with ANOTHER entry's public listen port on the host -> FAIL.
+	// target collides with ANOTHER route's public listen port on the ingress host -> FAIL.
 	ctx = base()
 	ctx.portUsersByHost["bridge-01"] = map[int][]string{443: {"svc"}, 8080: {"other"}}
-	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), ctx)
+	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "collides with a public listen port")
 
-	// two different services binding the same loopback target -> FAIL.
+	// two different services binding the same backend target -> FAIL.
 	ctx = base()
 	ctx.targetUsersByHost["bridge-01"] = map[int][]string{8080: {"svc", "other"}}
-	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), ctx)
+	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "belongs to a single service")
 
 	// vanity on a forward is meaningless -> FAIL.
 	ctx = base()
 	ctx.portUsersByHost["bridge-01"] = map[int][]string{853: {"svc"}}
-	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeForward, Listen: 853, Target: 5353, Vanity: []string{"x"}}), ctx)
+	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeForward, Listen: 853, Target: 5353, Vanity: []string{"x"}}), ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "remove vanity")
 
 	// A forward port shared with another service -> FAIL (single-service-exclusive).
 	ctx = base()
 	ctx.portUsersByHost["bridge-01"] = map[int][]string{443: {"svc", "other"}}
-	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeForward, Listen: 443, Target: 8080}), ctx)
+	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeForward, Listen: 443, Target: 8080}), ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "single-service-exclusive")
 
-	// A forward on :80 collides with a tls-termination on the host (ACME owns :80).
+	// A forward on :80 collides with a tls-termination on the ingress (ACME owns :80).
 	ctx = base()
 	ctx.portUsersByHost["bridge-01"] = map[int][]string{80: {"svc"}}
 	ctx.tlsTermIngressByHost["bridge-01"] = true
-	errs, _ = checkService(svc(types.IngressSpec{Type: types.IngressTypeForward, Listen: 80, Target: 8080}), ctx)
+	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeForward, Listen: 80, Target: 8080}), ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "ACME owns :80")
 }

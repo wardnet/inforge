@@ -209,10 +209,12 @@ func createInfra(
 	computeOutputs[region] = map[string]types.ComputeOutputs{}
 	databaseOutputs[region] = map[string]types.DatabaseOutputs{}
 
-	// Derive each host's inbound ingress ports up front: the firewall is a pure
-	// consumer of this set, and cp.Create (below) runs before routesByHost, so the
-	// derivation cannot wait for the routes.
-	ingressPorts := ingressPortsByHost(res)
+	// Derive each host's inbound firewall port plan up front: the firewall is a
+	// pure consumer of this set, and cp.Create (below) runs before ingress
+	// realization, so the derivation cannot wait for the routes. It is computed
+	// from static spec data (which ingress fronts which service, co-located or not),
+	// so no outputs are involved.
+	fwPlan := firewallPlanByHost(res)
 
 	for _, spec := range res.Network {
 		np, err := reg.Network(types.ResolveProvider(spec.Provider, "network", "", defaults))
@@ -248,7 +250,7 @@ func createInfra(
 			// The host's SSH / cloud-init domain is derived from the bare compute
 			// name with the "vm" segment — deterministic, never a free-form record.
 			domain := naming.HostFQDN(env, slug, spec.Name, baseDomain)
-			out, err := cp.Create(ctx, spec, netOut, env, region, domain, man, ingressPorts[key])
+			out, err := cp.Create(ctx, spec, netOut, env, region, domain, man, fwPlan[key])
 			if err != nil {
 				return err
 			}
@@ -763,28 +765,30 @@ func serviceDeprovisionScript(svc types.ServiceSpec) string {
 	}, "\n")
 }
 
-// realizeIngress installs and configures the host ingress proxy (nginx) on every
-// host that has ingress. There is no host-level ingress resource — realization is
-// driven by ingress presence: routesByHost yields a host iff it has ≥1 ingress
-// entry, and each such host gets nginx realized by its compute provider. FQDNs are
-// env-scoped here so the provider stays a pure installer. Compute FKs resolve
-// through the same canonicalization validation uses, so `host: bridge` and
-// `host: bridge-01` agree on the host. Hosts are realized in sorted order so the
+// realizeIngress installs and configures the nginx proxy on every ingress host —
+// the compute an ingress resource references — that fronts at least one service
+// route. Realization is driven by the ingress tier (ADR-0026): a service names an
+// ingress via its Ingress FK and contributes its Routes; ingressRoutesByHost
+// groups those routes under the ingress's host (merging several ingresses that
+// share a host). nginx moves OFF the service host onto the ingress host; it
+// proxies to the backend over loopback (co-located) or the private network
+// (cross-host, using the backend's PrivateIP). FQDNs are env-scoped here so the
+// provider stays a pure installer. Hosts are realized in sorted order so the
 // resource graph is stable across runs.
 func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, deployPrivateKey, env, slug, baseDomain string, defaults types.ProviderDefaults) error {
 	canonical := naming.CanonicalComputeKeys(res.Compute)
-	routesByCompute, err := routesByHost(res, canonical, env, slug, baseDomain)
+	routesByHostKey, crossHost, err := ingressRoutesByHost(res, canonical, env, slug, baseDomain)
 	if err != nil {
 		return fmt.Errorf("ingress: %w", err)
 	}
-	if len(routesByCompute) == 0 {
+	if len(routesByHostKey) == 0 {
 		return nil
 	}
 
 	deployUserByCompute := deployUsersByHost(res.Compute)
 	providerByCompute := ingressProvidersByHost(res.Compute, defaults)
 
-	for _, hostKey := range sortedKeys(routesByCompute) {
+	for _, hostKey := range sortedKeys(routesByHostKey) {
 		host, ok := computeOut[hostKey]
 		if !ok {
 			return fmt.Errorf("ingress: host %q has no compute output (available: %v)", hostKey, sortedKeys(computeOut))
@@ -793,16 +797,40 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		if err != nil {
 			return fmt.Errorf("ingress: host %q: %w", hostKey, err)
 		}
-		// The realization SSHes the host, so it waits on the host's cloud-init gate.
+		// Wire each cross-host route's backend private IP from its backend host's
+		// compute output; co-located routes already carry Backend "127.0.0.1".
+		backendIPs := map[string]pulumi.StringOutput{}
+		for svcName, backendHostKey := range crossHost[hostKey] {
+			backend, ok := computeOut[backendHostKey]
+			if !ok {
+				return fmt.Errorf("ingress: host %q: service %q backend host %q has no compute output (available: %v)", hostKey, svcName, backendHostKey, sortedKeys(computeOut))
+			}
+			backendIPs[svcName] = backend.PrivateIP
+		}
+		// The realization SSHes the ingress host, so it waits on that host's
+		// cloud-init gate (shared with service provisioning when co-located).
 		gate, err := cloudInitGate(ctx, gates, hostKey, host, deployPrivateKey, env, slug)
 		if err != nil {
 			return err
 		}
-		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByCompute[hostKey], env, []pulumi.Resource{gate}); err != nil {
+		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], backendIPs, env, []pulumi.Resource{gate}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// ingressHostsByName maps each ingress resource name to the canonical specKey of
+// its host. Validation guarantees the host FK resolves; an unresolved one is
+// skipped defensively (the caller then finds no routes for it).
+func ingressHostsByName(res types.Resources, canonical map[string]string) map[string]string {
+	byName := map[string]string{}
+	for _, ing := range res.Ingress {
+		if hk, ok := canonical[ing.Host]; ok {
+			byName[ing.Name] = hk
+		}
+	}
+	return byName
 }
 
 // ingressProvidersByHost maps each expanded compute specKey to the provider that
@@ -836,115 +864,216 @@ func deployUsersByHost(computes []types.ComputeSpec) map[string]string {
 	return byHost
 }
 
-// ingressFQDNs returns the env-scoped FQDNs one ingress entry serves: the
-// auto-derived "<svc>.svc" FQDN plus every expanded vanity entry. (A forward entry
-// carries no vanity, so it yields just the "<svc>.svc" name — a reachable A-record
-// even though nginx stream demands no server_name.) This is the single source of
-// truth for ingress FQDNs — both routesByHost (the tls-termination server_names /
-// ACME certs) and derivedRecords (the A-records) call it, so a cert FQDN and its
-// A-record can never drift apart.
-func ingressFQDNs(svcName string, in types.IngressSpec, env, slug, baseDomain string) []string {
+// ingressFQDNs returns the env-scoped FQDNs one route serves: the auto-derived
+// "<svc>.svc" FQDN plus every expanded vanity entry. (A forward route carries no
+// vanity, so it yields just the "<svc>.svc" name — a reachable A-record even though
+// nginx stream demands no server_name.) This is the single source of truth for a
+// service's ingress FQDNs — both ingressRoutesByHost (the tls-termination
+// server_names / ACME certs) and derivedRecords (the A-records) call it, so a cert
+// FQDN and its A-record can never drift apart.
+func ingressFQDNs(svcName string, rt types.RouteSpec, env, slug, baseDomain string) []string {
 	fqdns := []string{naming.ServiceFQDN(env, slug, svcName, baseDomain)}
-	for _, v := range in.Vanity {
+	for _, v := range rt.Vanity {
 		fqdns = append(fqdns, naming.ExpandVanity(v, env, slug, baseDomain))
 	}
 	return fqdns
 }
 
-// ingressPortsByHost derives each host's inbound ingress ports, keyed by canonical
-// compute specKey: the union of every service's ingress listen ports on the host,
-// plus :80 when the host has at least one tls-termination entry (nginx serves the
-// ACME HTTP-01 challenge there). SSH (22) is not included — the firewall always
-// permits it regardless. The result per host is sorted and de-duplicated so the
-// rendered firewall is stable across runs.
-func ingressPortsByHost(res types.Resources) map[string][]int {
-	canonical := naming.CanonicalComputeKeys(res.Compute)
-	set := map[string]map[int]bool{}
-	add := func(host string, port int) {
-		if set[host] == nil {
-			set[host] = map[int]bool{}
-		}
-		set[host][port] = true
-	}
+// ingressService is one service resolved to the hosts that matter for the ingress
+// tier: the canonical specKey of its ingress's host (ingHost), of its own backend
+// host (svcHost), and whether the two are the same (coLocated). It is produced once
+// by resolveIngressServices and consumed by every derivation below.
+type ingressService struct {
+	svc       types.ServiceSpec
+	ingHost   string
+	svcHost   string
+	coLocated bool
+}
+
+// resolveIngressServices derives, once, the (service, ingress host, backend host,
+// co-located) tuples for every service that exposes routes through a resolvable
+// ingress. The firewall plan, the realized nginx routes, and the derived DNS
+// records all consume it, so the three cannot drift on the skip guard, the FK
+// resolution, or the co-location test (which previously lived as three copies). A
+// service with no routes, no ingress, or an unresolvable ingress/host FK is
+// skipped — validation guarantees resolution, so the skip is purely defensive.
+func resolveIngressServices(res types.Resources, canonical map[string]string) []ingressService {
+	ingressHost := ingressHostsByName(res, canonical)
+	out := make([]ingressService, 0, len(res.Service))
 	for _, svc := range res.Service {
-		hostKey, ok := canonical[svc.Host]
+		if svc.Ingress == "" || len(svc.Routes) == 0 {
+			continue
+		}
+		ingHost, ok := ingressHost[svc.Ingress]
 		if !ok {
-			continue // validation guarantees resolution; skip defensively
+			continue
 		}
-		for _, in := range svc.Ingress {
-			add(hostKey, in.Listen)
-			if in.Type == types.IngressTypeTLSTermination {
-				add(hostKey, 80) // ACME HTTP-01
-			}
+		svcHost, ok := canonical[svc.Host]
+		if !ok {
+			continue
 		}
-	}
-	out := map[string][]int{}
-	for host, ports := range set {
-		list := make([]int, 0, len(ports))
-		for p := range ports {
-			list = append(list, p)
-		}
-		sort.Ints(list)
-		out[host] = list
+		out = append(out, ingressService{svc: svc, ingHost: ingHost, svcHost: svcHost, coLocated: svcHost == ingHost})
 	}
 	return out
 }
 
-// routesByHost derives the typed inbound ingress routes for every ingress-bearing
-// service, grouped by the canonical specKey of the host it runs on. One IngressRoute
-// is emitted per ingress entry (nginx fronts every entry):
-//   - tls-termination: the route carries every SNI the entry serves (the
-//     auto-derived "<svc>.svc" name plus vanity), rendered as one nginx server
-//     block (server_name lists them all) with one ACME certificate.
-//   - forward: a stream-forward route to 127.0.0.1:target with the PROXY protocol.
+// firewallPlanByHost derives each host's inbound firewall port plan, keyed by
+// canonical compute specKey (ADR-0026 ingress tier). It is purely static (which
+// ingress fronts which service, co-located or not) so the firewall can be built
+// before any output resolves:
+//   - An ingress host opens, publicly, the Listen port of every route of every
+//     service that references it, plus :80 when any of those routes is
+//     tls-termination (nginx serves the ACME HTTP-01 challenge there).
+//   - A backend host (a service whose host differs from its ingress's host) opens
+//     each cross-host route's Target port privately, scoped to the host's network
+//     CIDR — reachable only from a co-tenant ingress over the private network.
 //
-// A non-empty result for a host is the realization trigger: a host appears here iff
-// it has at least one ingress entry, and that is exactly when nginx is installed.
-// Within a host, routes are sorted (by listen port, then service) so realized
-// resources are stable across runs. It rejects an SNI claimed by two routes on the
-// same listen port of a host — the preview/deploy half of the rule validate also
-// enforces, so the guarantee holds even when `up` runs without a prior `validate`.
-func routesByHost(res types.Resources, canonical map[string]string, env, slug, baseDomain string) (map[string][]types.IngressRoute, error) {
-	byHost := map[string][]types.IngressRoute{}
-	for _, svc := range res.Service {
-		hostKey, ok := canonical[svc.Host]
-		if !ok {
-			// Validation guarantees the host resolves; skip defensively.
-			continue
+// A co-located route needs no rule: nginx reaches the backend over loopback, which
+// the firewall never filters. SSH (22) is not included — the firewall always
+// permits it. Lists are sorted and de-duplicated so the rendered firewall is stable.
+func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	netCIDR := networkCIDRByCompute(res, canonical)
+
+	public := map[string]map[int]bool{}
+	private := map[string]map[int]bool{}
+	addPublic := func(host string, port int) {
+		if public[host] == nil {
+			public[host] = map[int]bool{}
 		}
-		for _, in := range svc.Ingress {
-			var fqdns []string
-			if in.Type == types.IngressTypeTLSTermination {
-				fqdns = ingressFQDNs(svc.Name, in, env, slug, baseDomain)
-				sort.Strings(fqdns) // canonical server_name / cert SNI order
+		public[host][port] = true
+	}
+	addPrivate := func(host string, port int) {
+		if private[host] == nil {
+			private[host] = map[int]bool{}
+		}
+		private[host][port] = true
+	}
+	for _, is := range resolveIngressServices(res, canonical) {
+		for _, rt := range is.svc.Routes {
+			addPublic(is.ingHost, rt.Listen)
+			if rt.Type == types.IngressTypeTLSTermination {
+				addPublic(is.ingHost, 80) // ACME HTTP-01 on the ingress host
 			}
-			byHost[hostKey] = append(byHost[hostKey], types.IngressRoute{
-				Service: svc.Name,
-				Type:    in.Type,
-				FQDNs:   fqdns,
-				Listen:  in.Listen,
-				Target:  in.Target,
-			})
+			if !is.coLocated {
+				addPrivate(is.svcHost, rt.Target) // backend target reachable over the private net
+			}
 		}
 	}
-	// Two services on one host can resolve to the same SNI on the same listen port
-	// (e.g. the same vanity FQDN), which nginx could not demux. The same FQDN on
-	// different listen ports is fine, so the guard keys on (listen, SNI).
+
+	out := map[string]types.FirewallPorts{}
+	hosts := map[string]bool{}
+	for h := range public {
+		hosts[h] = true
+	}
+	for h := range private {
+		hosts[h] = true
+	}
+	for h := range hosts {
+		fp := types.FirewallPorts{Public: sortedInts(public[h]), Private: sortedInts(private[h])}
+		if len(fp.Private) > 0 {
+			fp.PrivateSourceCIDR = netCIDR[h]
+		}
+		out[h] = fp
+	}
+	return out
+}
+
+// networkCIDRByCompute maps every canonical compute specKey (and bare name) to the
+// CIDR of the network it attaches to, so the firewall can scope a backend's private
+// target ports to that network. An unresolved network leaves the entry empty.
+func networkCIDRByCompute(res types.Resources, canonical map[string]string) map[string]string {
+	cidrByNet := map[string]string{}
+	for _, n := range res.Network {
+		cidrByNet[n.Name] = n.CIDR
+	}
+	out := map[string]string{}
+	for _, c := range res.Compute {
+		cidr := cidrByNet[c.Network]
+		for i := 1; i <= c.InstanceCount; i++ {
+			out[naming.SpecKey(c.Name, i)] = cidr
+		}
+		out[c.Name] = cidr
+	}
+	return out
+}
+
+// sortedInts returns the keys of a set as a sorted slice (nil for an empty set).
+func sortedInts(set map[int]bool) []int {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// ingressRoutesByHost derives the typed inbound routes for every service that
+// references an ingress, grouped by the canonical specKey of the ingress's host
+// (ADR-0026). One IngressRoute is emitted per route:
+//   - tls-termination: the route carries every SNI it serves (the auto-derived
+//     "<svc>.svc" name plus vanity), rendered as one nginx server block with one
+//     ACME certificate.
+//   - forward: a stream-forward route to the backend with the PROXY protocol.
+//
+// A co-located route (service host == ingress host) carries Backend "127.0.0.1"; a
+// cross-host route leaves Backend empty and records its service → backend host
+// specKey in crossHost[ingHost] so the caller supplies the backend's private IP. A
+// non-empty result for a host is the realization trigger: nginx is installed on an
+// ingress host iff at least one route targets it. Within a host, routes are sorted
+// (by listen port, then service) so realized resources are stable across runs. It
+// rejects an SNI claimed by two routes on the same listen port of one ingress host
+// — the preview/deploy half of the rule validate also enforces, so the guarantee
+// holds even when `up` runs without a prior `validate`.
+func ingressRoutesByHost(res types.Resources, canonical map[string]string, env, slug, baseDomain string) (routesByHost map[string][]types.IngressRoute, crossHost map[string]map[string]string, err error) {
+	routesByHost = map[string][]types.IngressRoute{}
+	crossHost = map[string]map[string]string{}
+	for _, is := range resolveIngressServices(res, canonical) {
+		for _, rt := range is.svc.Routes {
+			var fqdns []string
+			if rt.Type == types.IngressTypeTLSTermination {
+				fqdns = ingressFQDNs(is.svc.Name, rt, env, slug, baseDomain)
+				sort.Strings(fqdns) // canonical server_name / cert SNI order
+			}
+			route := types.IngressRoute{
+				Service: is.svc.Name,
+				Type:    rt.Type,
+				FQDNs:   fqdns,
+				Listen:  rt.Listen,
+				Target:  rt.Target,
+			}
+			if is.coLocated {
+				route.Backend = "127.0.0.1"
+			} else {
+				if crossHost[is.ingHost] == nil {
+					crossHost[is.ingHost] = map[string]string{}
+				}
+				crossHost[is.ingHost][is.svc.Name] = is.svcHost
+			}
+			routesByHost[is.ingHost] = append(routesByHost[is.ingHost], route)
+		}
+	}
+	// Two services on one ingress can resolve to the same SNI on the same listen
+	// port (e.g. the same vanity FQDN), which nginx could not demux. The same FQDN
+	// on different listen ports is fine, so the guard keys on (listen, SNI).
 	// derivedRecords guards the DNS side, but it is a no-op when the region has no
 	// DNS authority, so guard the route side here too.
-	for hostKey, routes := range byHost {
+	for hostKey, routes := range routesByHost {
 		seen := map[string]string{} // "listen|fqdn" -> service
 		for _, rt := range routes {
 			for _, fqdn := range rt.FQDNs {
 				key := fmt.Sprintf("%d|%s", rt.Listen, fqdn)
 				if prev, dup := seen[key]; dup {
-					return nil, fmt.Errorf("host %q has two ingress routes for SNI %q on listen %d (services %s and %s); an SNI must be unique per listen port", hostKey, fqdn, rt.Listen, prev, rt.Service)
+					return nil, nil, fmt.Errorf("ingress host %q has two routes for SNI %q on listen %d (services %s and %s); an SNI must be unique per listen port", hostKey, fqdn, rt.Listen, prev, rt.Service)
 				}
 				seen[key] = rt.Service
 			}
 		}
 	}
-	for _, routes := range byHost {
+	for _, routes := range routesByHost {
 		sort.Slice(routes, func(i, j int) bool {
 			if routes[i].Listen != routes[j].Listen {
 				return routes[i].Listen < routes[j].Listen
@@ -952,7 +1081,7 @@ func routesByHost(res types.Resources, canonical map[string]string, env, slug, b
 			return routes[i].Service < routes[j].Service
 		})
 	}
-	return byHost, nil
+	return routesByHost, crossHost, nil
 }
 
 // resolveNetworkOutput returns the NetworkOutputs for the subnet a compute spec
@@ -1010,11 +1139,12 @@ type derivedRecord struct {
 }
 
 // derivedRecords derives every A-record for a region: one "<compute>.vm" host
-// record per compute (its SSH/cloud-init domain, pointing at instance 1), plus
-// one record per non-catch-all ingress FQDN (the auto "<svc>.svc" name and every
-// vanity). It shares its FQDN derivation with the TLS routes (ingressFQDNs), so a
-// cert and its A-record never drift. Catch-all ingress emits no record (it has no
-// SNI to resolve). The result is deterministic (compute then service order).
+// record per compute (its SSH/cloud-init domain, pointing at instance 1), plus one
+// record per service ingress FQDN (the auto "<svc>.svc" name and every vanity),
+// pointing at the service's INGRESS host — where nginx terminates — not the backend
+// (ADR-0026). It shares its FQDN derivation with the TLS routes (ingressFQDNs), so a
+// cert and its A-record never drift. The result is deterministic (compute then
+// service order).
 func derivedRecords(res types.Resources, env, slug, baseDomain string) []derivedRecord {
 	var out []derivedRecord
 	add := func(fqdn, container, hostKey string) {
@@ -1046,15 +1176,13 @@ func derivedRecords(res types.Resources, env, slug, baseDomain string) []derived
 		fqdn := naming.HostFQDN(env, slug, spec.Name, baseDomain)
 		dedupAdd(fqdn, spec.Container, naming.SpecKey(spec.Name, 1))
 	}
-	canonical := naming.CanonicalComputeKeys(res.Compute)
-	for _, svc := range res.Service {
-		hostKey, ok := canonical[svc.Host]
-		if !ok {
-			continue // validation guarantees resolution; skip defensively
-		}
-		for _, in := range svc.Ingress {
-			for _, fqdn := range ingressFQDNs(svc.Name, in, env, slug, baseDomain) {
-				dedupAdd(fqdn, svc.Container, hostKey)
+	// A service's ingress FQDNs resolve to its INGRESS host (where nginx terminates),
+	// not its backend host — so they share resolveIngressServices with the firewall
+	// and route derivations and cannot point at a different host than nginx runs on.
+	for _, is := range resolveIngressServices(res, naming.CanonicalComputeKeys(res.Compute)) {
+		for _, rt := range is.svc.Routes {
+			for _, fqdn := range ingressFQDNs(is.svc.Name, rt, env, slug, baseDomain) {
+				dedupAdd(fqdn, is.svc.Container, is.ingHost)
 			}
 		}
 	}
