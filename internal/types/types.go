@@ -259,6 +259,22 @@ type IngressRoute struct {
 	Backend string   // backend address nginx proxies to ("127.0.0.1" co-located; private IP cross-host)
 }
 
+// IngressApp is one static front-end (SPA) the ingress proxy (nginx) serves from
+// disk, derived from one app resource that references the ingress (ADR-0026,
+// slice C). Unlike an IngressRoute it has no backend: nginx terminates ACME TLS
+// for the app's single FQDN and serves files from Root (the on-host document
+// root, an inforge-managed `current` symlink the release path swaps). FQDN is the
+// clean dotted app form (naming.AppFQDN), fully resolved (scope slug + base
+// domain) before it reaches the provider, so the provider stays a pure
+// renderer/installer. Spa selects the deep-link fallback: any non-file path
+// serves index.html when true, else a 404.
+type IngressApp struct {
+	Name string // app resource name (used to name the Pulumi command resources)
+	FQDN string // fully-qualified app domain (single SNI / ACME cert)
+	Root string // on-host document root nginx serves (the `current` symlink)
+	Spa  bool   // true -> try_files fallback to /index.html (SPA deep links)
+}
+
 // NetworkOutputs are the values a NetworkProvider returns after creating a
 // network, consumed by the compute provider.
 type NetworkOutputs struct {
@@ -380,26 +396,30 @@ type DnsProvider interface {
 
 // IngressProvider realizes an ingress host's nginx proxy. It is invoked once per
 // ingress host — the compute an ingress resource references — with the merged
-// routes of every service (and app, slice C) pointing at that host. hostKey is the
+// routes of every service and the apps that point at that host. hostKey is the
 // canonical compute specKey of the ingress host (used to name the Pulumi command
 // resources); host carries its public IP; deployUser is the sudo-capable account
 // inforge connects as over SSH (the ingress host's deploy user); routes are the
 // typed inbound routing entries (tls-termination / forward), with FQDNs already
-// env-scoped by the caller and Backend filled for co-located routes.
+// env-scoped by the caller and Backend filled for co-located routes; apps are the
+// static front-ends nginx serves from disk (slice C), each with its FQDN and root
+// already resolved. A host with apps but no routes still realizes — nginx is
+// installed and its ACME cert provisioned for the app FQDNs alone.
 //
 // backendIPs maps a service name to its backend host's private-IP output, present
 // only for cross-host routes (a route whose service runs on a host other than the
 // ingress host). The provider renders the config inside an apply over these
 // outputs, substituting each cross-host route's Backend with the resolved private
-// IP; co-located routes already carry "127.0.0.1". Realize installs nginx once per
-// host, writes its config, and reloads — and must be safe to re-run as routes change.
+// IP; co-located routes already carry "127.0.0.1". Apps carry no backend, so they
+// render synchronously. Realize installs nginx once per host, writes its config,
+// and reloads — and must be safe to re-run as routes/apps change.
 //
 // env scopes the names of the Pulumi resources it creates. dependsOn carries the
 // host's cloud-init readiness gate (and any other prerequisites): the provider must
 // make its first per-host SSH command depend on it so realization never races
 // deploy_user creation.
 type IngressProvider interface {
-	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, backendIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
+	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, apps []IngressApp, backendIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
 }
 
 // DatabaseProvider creates a managed database.

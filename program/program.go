@@ -14,6 +14,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 	"github.com/wardnet/inforge/internal/agehost"
+	"github.com/wardnet/inforge/internal/app"
 	"github.com/wardnet/inforge/internal/bootstrapper"
 	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/loader"
@@ -125,6 +126,15 @@ func Run(ctx *pulumi.Context) error {
 	}
 	ctx.Export("deployDescriptor", pulumi.Any(desc))
 
+	// The app deploy descriptor mirrors the service one: it is the contract the app
+	// release path (slice D) resolves an app's ingress host, deploy path, FQDN, and
+	// SPA flag from. Derived purely from resolved resources, exported once.
+	appDesc, err := app.BuildDeployDescriptor(env, vars.BaseDomain, res, regionTable)
+	if err != nil {
+		return err
+	}
+	ctx.Export("appDeployDescriptor", pulumi.Any(appDesc))
+
 	registries := make(map[string]registry.ProviderRegistry, len(regionNames))
 	for _, region := range regionNames {
 		registries[region] = registry.BuildRegistry(ctx, regionTable[region].Providers, regionTable[region].Dns, vars.SSH, regionTable, ctx.Project(), env, region)
@@ -176,6 +186,11 @@ func Run(ctx *pulumi.Context) error {
 		// the gate they each depend on must be the same resource — share the map.
 		gates := map[string]pulumi.Resource{}
 		if err := realizeIngress(ctx, reg, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain, providerDefaults); err != nil {
+			return err
+		}
+		// Seed each app's placeholder bundle on its ingress host so its server block
+		// and ACME cert provision before the first release (slice D delivers bundles).
+		if err := provisionApps(ctx, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug); err != nil {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
@@ -392,6 +407,71 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 		return fmt.Errorf("service %q: provision unit: %w", svc.Name, err)
 	}
 	return nil
+}
+
+// provisionApps seeds each app's on-host folder with a placeholder bundle on its
+// ingress host, so the app's nginx server block and Let's Encrypt certificate
+// provision before the first real release (slice D). It runs once per app over
+// SSH, waiting on the ingress host's cloud-init gate (shared with ingress
+// realization). It is idempotent and re-runnable: the placeholder bytes are
+// rewritten, but the `current` symlink is pointed at the placeholder only when no
+// release has already claimed it — so re-running never reverts a deployed app.
+func provisionApps(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, deployPrivateKey, env, slug string) error {
+	if len(res.App) == 0 {
+		return nil
+	}
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	deployUserByCompute := deployUsersByHost(res.Compute)
+	for _, ia := range resolveIngressApps(res, canonical) {
+		host, ok := computeOut[ia.ingHost]
+		if !ok {
+			return fmt.Errorf("app %q: ingress host %q has no compute output (available: %v)", ia.app.Name, ia.ingHost, sortedKeys(computeOut))
+		}
+		deployUser := deployUserByCompute[ia.ingHost]
+		// Enforced only at up time; during preview command.remote never connects.
+		if !ctx.DryRun() {
+			if deployUser == "" {
+				return fmt.Errorf("app %q: ingress host %q has no deploy_user; inforge needs one to SSH and seed the app placeholder", ia.app.Name, ia.ingHost)
+			}
+			if deployPrivateKey == "" {
+				return fmt.Errorf("app %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", ia.app.Name)
+			}
+		}
+		gate, err := cloudInitGate(ctx, gates, ia.ingHost, host, deployPrivateKey, env, slug)
+		if err != nil {
+			return err
+		}
+		conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
+		script := appProvisionScript(ia.app.Name)
+		name := naming.Resource(env, slug, "app", ia.app.Name)
+		if _, err := remote.NewCommand(ctx, name+"-provision", &remote.CommandArgs{
+			Connection: conn,
+			Create:     pulumi.String(script),
+			Update:     pulumi.String(script),
+			Triggers:   pulumi.Array{pulumi.String(script)},
+		}, pulumi.DependsOn([]pulumi.Resource{gate})); err != nil {
+			return fmt.Errorf("app %q: seed placeholder: %w", ia.app.Name, err)
+		}
+	}
+	return nil
+}
+
+// appProvisionScript renders the host shell that seeds an app's placeholder
+// bundle and points `current` at it on first provision. The placeholder index is
+// always (re)written; the symlink is created only when nothing already occupies
+// `current`, so a re-run never clobbers a released bundle. All paths are quoted.
+func appProvisionScript(name string) string {
+	current := app.CurrentPath(name)
+	return strings.Join([]string{
+		"set -euo pipefail",
+		// WriteFileScript creates the placeholder dir (and the app folder) and writes
+		// the index; it embeds its own `set -euo pipefail`, harmless when nested.
+		iremote.WriteFileScript(app.PlaceholderIndexPath(name), app.PlaceholderIndexHTML),
+		// Point current -> placeholder only when nothing is there yet (no file and no
+		// symlink, even a broken one), so a real release's `current` survives re-runs.
+		fmt.Sprintf("if [ ! -e %s ] && [ ! -L %s ]; then sudo ln -s %s %s; fi",
+			iremote.Quote(current), iremote.Quote(current), iremote.Quote(app.PlaceholderSubdir), iremote.Quote(current)),
+	}, "\n")
 }
 
 // provisionServiceSecrets provisions each service's runtime secrets bundle: it
@@ -781,14 +861,19 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 	if err != nil {
 		return fmt.Errorf("ingress: %w", err)
 	}
-	if len(routesByHostKey) == 0 {
+	appsByHostKey := ingressAppsByHost(res, canonical, slug, baseDomain)
+	// nginx is installed on an ingress host iff at least one route OR app targets
+	// it; an app-only ingress (apps, no service routes) still realizes — its server
+	// blocks and ACME certs provision for the app FQDNs alone.
+	hostKeys := unionKeys(routesByHostKey, appsByHostKey)
+	if len(hostKeys) == 0 {
 		return nil
 	}
 
 	deployUserByCompute := deployUsersByHost(res.Compute)
 	providerByCompute := ingressProvidersByHost(res.Compute, defaults)
 
-	for _, hostKey := range sortedKeys(routesByHostKey) {
+	for _, hostKey := range hostKeys {
 		host, ok := computeOut[hostKey]
 		if !ok {
 			return fmt.Errorf("ingress: host %q has no compute output (available: %v)", hostKey, sortedKeys(computeOut))
@@ -813,11 +898,30 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		if err != nil {
 			return err
 		}
-		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], backendIPs, env, []pulumi.Resource{gate}); err != nil {
+		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], appsByHostKey[hostKey], backendIPs, env, []pulumi.Resource{gate}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// unionKeys returns the sorted union of two maps' keys — the ingress hosts that
+// have routes, apps, or both — so realization visits each host exactly once in a
+// stable order.
+func unionKeys[A, B any](a map[string]A, b map[string]B) []string {
+	set := map[string]bool{}
+	for k := range a {
+		set[k] = true
+	}
+	for k := range b {
+		set[k] = true
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ingressHostsByName maps each ingress resource name to the canonical specKey of
@@ -917,6 +1021,58 @@ func resolveIngressServices(res types.Resources, canonical map[string]string) []
 	return out
 }
 
+// ingressApp is one app resolved to its ingress's host (ADR-0026, slice C): the
+// canonical specKey of the compute its ingress references. It is produced once by
+// resolveIngressApps and consumed by the firewall plan, the realized nginx app
+// servers, and the derived app DNS records — so the three cannot drift on the skip
+// guard or the FK resolution. An app with no ingress, or an unresolvable
+// ingress/host FK, is skipped — validation guarantees resolution, so the skip is
+// purely defensive.
+type ingressApp struct {
+	app     types.AppSpec
+	ingHost string
+}
+
+// resolveIngressApps derives, once, the (app, ingress host) tuples for every app
+// served through a resolvable ingress.
+func resolveIngressApps(res types.Resources, canonical map[string]string) []ingressApp {
+	ingressHost := ingressHostsByName(res, canonical)
+	out := make([]ingressApp, 0, len(res.App))
+	for _, a := range res.App {
+		if a.Ingress == "" {
+			continue
+		}
+		ingHost, ok := ingressHost[a.Ingress]
+		if !ok {
+			continue
+		}
+		out = append(out, ingressApp{app: a, ingHost: ingHost})
+	}
+	return out
+}
+
+// ingressAppsByHost groups the typed nginx app servers by the canonical specKey of
+// their ingress's host. Each IngressApp carries its fully-resolved FQDN (the clean
+// dotted app form), document root (the on-host `current` symlink), and SPA flag, so
+// the provider stays a pure renderer. A non-empty result for a host is, together
+// with ingressRoutesByHost, a realization trigger — nginx is installed on an
+// ingress host iff at least one route or app targets it.
+func ingressAppsByHost(res types.Resources, canonical map[string]string, slug, baseDomain string) map[string][]types.IngressApp {
+	byHost := map[string][]types.IngressApp{}
+	for _, ia := range resolveIngressApps(res, canonical) {
+		byHost[ia.ingHost] = append(byHost[ia.ingHost], types.IngressApp{
+			Name: ia.app.Name,
+			FQDN: naming.AppFQDN(ia.app.Subdomain, slug, baseDomain),
+			Root: app.CurrentPath(ia.app.Name),
+			Spa:  ia.app.Spa,
+		})
+	}
+	for _, apps := range byHost {
+		sort.Slice(apps, func(i, j int) bool { return apps[i].FQDN < apps[j].FQDN })
+	}
+	return byHost
+}
+
 // firewallPlanByHost derives each host's inbound firewall port plan, keyed by
 // canonical compute specKey (ADR-0026 ingress tier). It is purely static (which
 // ingress fronts which service, co-located or not) so the firewall can be built
@@ -959,6 +1115,12 @@ func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
 				addPrivate(is.svcHost, rt.Target) // backend target reachable over the private net
 			}
 		}
+	}
+	// An app-serving ingress host opens 443 (HTTPS) and :80 (ACME HTTP-01 +
+	// redirect). Apps have no backend, so no private rule is needed.
+	for _, ia := range resolveIngressApps(res, canonical) {
+		addPublic(ia.ingHost, 443)
+		addPublic(ia.ingHost, 80)
 	}
 
 	out := map[string]types.FirewallPorts{}
@@ -1179,12 +1341,21 @@ func derivedRecords(res types.Resources, env, slug, baseDomain string) []derived
 	// A service's ingress FQDNs resolve to its INGRESS host (where nginx terminates),
 	// not its backend host — so they share resolveIngressServices with the firewall
 	// and route derivations and cannot point at a different host than nginx runs on.
-	for _, is := range resolveIngressServices(res, naming.CanonicalComputeKeys(res.Compute)) {
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	for _, is := range resolveIngressServices(res, canonical) {
 		for _, rt := range is.svc.Routes {
 			for _, fqdn := range ingressFQDNs(is.svc.Name, rt, env, slug, baseDomain) {
 				dedupAdd(fqdn, is.svc.Container, is.ingHost)
 			}
 		}
+	}
+	// An app's FQDN (the clean dotted form) is a grey-cloud A record at its ingress
+	// host — the same host nginx serves it from, sharing resolveIngressApps with the
+	// firewall and nginx derivations so the record can never point elsewhere. Proxied
+	// defaults to false so Let's Encrypt HTTP-01 reaches the origin (ADR-0026).
+	for _, ia := range resolveIngressApps(res, canonical) {
+		fqdn := naming.AppFQDN(ia.app.Subdomain, slug, baseDomain)
+		dedupAdd(fqdn, ia.app.Container, ia.ingHost)
 	}
 	return out
 }

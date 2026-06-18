@@ -330,6 +330,95 @@ func TestFirewallPlanByHostCrossHost(t *testing.T) {
 	assert.Empty(t, got["back-01"].Public, "backend opens no public ingress port")
 }
 
+// TestDerivedRecordsApps: an app's FQDN is a grey-cloud A record at its ingress
+// host (the clean dotted form, regional carries the slug). The host's own "<vm>"
+// record is unaffected.
+func TestDerivedRecordsApps(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "edge", Container: "frontend", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
+		App: []types.AppSpec{
+			{Name: "dashboard", Container: "frontend", Ingress: "web", Subdomain: "my", Spa: true},
+		},
+	}
+	got := derivedRecords(res, "prd", "use1", "wardnet.network")
+	byRecord := map[string]struct{ host, container string }{}
+	for _, d := range got {
+		byRecord[d.rec.RecordName] = struct{ host, container string }{d.hostKey, d.rec.Container}
+		assert.False(t, d.rec.Proxied, "app records are grey-cloud so LE HTTP-01 reaches the origin")
+	}
+	assert.Equal(t, "edge-01", byRecord["edge.vm.prd.use1"].host)
+	// AppFQDN regional form: my.use1.wardnet.network -> zone-relative "my.use1".
+	assert.Equal(t, "edge-01", byRecord["my.use1"].host, "app FQDN resolves to its ingress host")
+	assert.Equal(t, "frontend", byRecord["my.use1"].container)
+}
+
+// TestDerivedRecordsAppsGlobalForm: with an empty slug (global scope) an app's
+// record is the flat "<subdomain>" zone-relative form (no env, no slug segment).
+func TestDerivedRecordsAppsGlobalForm(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "edge", Container: "frontend", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
+		App: []types.AppSpec{
+			{Name: "marketing", Container: "frontend", Ingress: "web", Subdomain: "www"},
+		},
+	}
+	got := derivedRecords(res, "prd", "", "wardnet.network")
+	byRecord := map[string]string{}
+	for _, d := range got {
+		byRecord[d.rec.RecordName] = d.hostKey
+	}
+	// AppFQDN global form: www.wardnet.network -> zone-relative "www".
+	assert.Equal(t, "edge-01", byRecord["www"], "global app FQDN is the flat subdomain form")
+}
+
+// TestFirewallPlanByHostApps: an app-only ingress host opens public 80 + 443 and
+// no private ports (apps have no backend).
+func TestFirewallPlanByHostApps(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "edge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
+		App: []types.AppSpec{
+			{Name: "dashboard", Ingress: "web", Subdomain: "my", Spa: true},
+		},
+	}
+	got := firewallPlanByHost(res)
+	assert.Equal(t, []int{80, 443}, got["edge-01"].Public, "app ingress host opens HTTPS + ACME")
+	assert.Empty(t, got["edge-01"].Private, "apps have no backend, so no private ports")
+}
+
+// TestIngressAppsByHostResolvesFQDNAndRoot: apps group under their ingress host
+// with the resolved FQDN, document root (the current symlink), and SPA flag.
+func TestIngressAppsByHostResolvesFQDNAndRoot(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "edge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
+		App: []types.AppSpec{
+			{Name: "dashboard", Ingress: "web", Subdomain: "my", Spa: true},
+		},
+	}
+	got := ingressAppsByHost(res, naming.CanonicalComputeKeys(res.Compute), "use1", "wardnet.network")
+	apps := got["edge-01"]
+	require.Len(t, apps, 1)
+	assert.Equal(t, "dashboard", apps[0].Name)
+	assert.Equal(t, "my.use1.wardnet.network", apps[0].FQDN)
+	assert.Equal(t, "/srv/wardnet/app/dashboard/current", apps[0].Root)
+	assert.True(t, apps[0].Spa)
+}
+
+// TestAppProvisionScript: the placeholder is written and `current` is symlinked
+// only when nothing already occupies it — so a re-run never clobbers a release.
+func TestAppProvisionScript(t *testing.T) {
+	script := appProvisionScript("dashboard")
+	// The placeholder index is written (its bytes are base64-encoded into the script).
+	assert.Contains(t, script, "/srv/wardnet/app/dashboard/placeholder/index.html")
+	assert.Contains(t, script, "base64 -d | sudo tee")
+	// The symlink is guarded: created only when no file and no symlink exist.
+	assert.Contains(t, script, "if [ ! -e '/srv/wardnet/app/dashboard/current' ] && [ ! -L '/srv/wardnet/app/dashboard/current' ]; then")
+	assert.Contains(t, script, "ln -s 'placeholder' '/srv/wardnet/app/dashboard/current'")
+	assert.NotContains(t, script, "ln -sf", "must not force-overwrite an existing current symlink")
+}
+
 // TestServiceProvisionScriptEnablesNeverStarts guards the headline constraint:
 // provisioning writes + enables the unit but must NEVER start/restart it —
 // ExecStart=<folder>/run doesn't exist until release delivers code, so a start
@@ -436,4 +525,3 @@ func TestRenderDescriptorSecretLess(t *testing.T) {
 	assert.Equal(t, "ghost.svc.prd.use1.wardnet.network", d.Deployment.FQDN)
 	assert.Equal(t, "prd.use1.ghost", d.Deployment.Namespace)
 }
-

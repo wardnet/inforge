@@ -212,9 +212,9 @@ is now rejected — DB credentials flow only through grants). slice C = the PKI 
 `ingress` and `app` are the two declarative resource types for front-end (React SPA) deployment. Apps
 are **origin-served by our own nginx** (Let's Encrypt, HTTP-01 — no CDN edge: free Cloudflare Universal
 SSL can't cover deep app hosts), and `ingress` is a **standalone, shared proxy tier** that fronts both
-services (slice B, live) and apps (slice C). See ADR-0026 (which supersedes the "realization-driven, no
-host-level resource" parts of ADR-0015). Slice landing: A = schema; **B (live) = ingress realization +
-service migration**; C = app static serving + DNS; D = app release delivery.
+services (slice B, live) and apps (slice C, live). See ADR-0026 (which supersedes the "realization-driven,
+no host-level resource" parts of ADR-0015). Slice landing: A = schema; B = ingress realization +
+service migration; **C (live) = app static serving + DNS + descriptor**; D = app release delivery.
 
 - **Slice B — the type rename.** The inline per-service route struct is now `types.RouteSpec` and the
   ingress resource is `types.IngressSpec` (the slice-A `IngressResourceSpec` name is gone). `ServiceSpec`
@@ -242,6 +242,25 @@ service migration**; C = app static serving + DNS; D = app release delivery.
   index.html). Like ingress, it carries no provider field — it inherits the ingress's (its host's). The
   public FQDN is the clean dotted form `naming.AppFQDN` (`<subdomain>.<base>` global,
   `<subdomain>.<slug>.<base>` regional — **no env segment**, flatter than `ServiceFQDN`).
+- **Slice C realization (`program.go` + `internal/nginx` + `providers/hetzner` + new `internal/app`):**
+  the ingress nginx serves each referencing app from disk. `ingressAppsByHost` groups apps under their
+  ingress's host as `types.IngressApp{Name,FQDN,Root,Spa}` (FQDN + `current`-symlink root pre-resolved);
+  `nginx.Render(routes, apps)` adds one `server { listen 443 ssl; acme_certificate …; root <dir>/current;
+  location / { try_files … } }` per app — `$uri $uri/ /index.html` when `spa`, else `=404` — sharing the
+  one ACME issuer and the `:80` challenge/redirect server. `realizeIngress` now triggers on the **union**
+  of route hosts and app hosts (`unionKeys`), so an **app-only ingress** (apps, no service routes) still
+  installs nginx and provisions its cert. Firewall: an app ingress host opens public `80`+`443` (apps have
+  no backend → no private rule). DNS: a grey-cloud A record per app (`naming.AppFQDN` → ingress host's
+  public IP; `Proxied=false` so LE HTTP-01 reaches the origin), sharing `resolveIngressApps` with the
+  firewall + nginx derivations so the three can't drift. `provisionApps` seeds a **placeholder bundle**
+  (`internal/app.PlaceholderIndexHTML` at `<folder>/placeholder/index.html`) and points `current` at it
+  **only when nothing already occupies it** — so a re-run never reverts a released app — so the server
+  block + cert provision before the first release.
+- **`internal/app`** is the app analogue of `internal/service`: pure on-host path scheme (`Folder` =
+  `/srv/wardnet/app/<name>`, `CurrentPath` = `<folder>/current` — the nginx doc root the release path
+  swaps) + the **app deploy descriptor** (`app.BuildDeployDescriptor` → exported as the
+  `appDeployDescriptor` stack output: `{app, ingress_host_dns, deploy_path, fqdn, spa, ssh_user}` per
+  region), the contract slice D's `inforge release app` resolves an app's ingress host/path/FQDN from.
 - **`internal/loader`** — `NormalizeIngress` and `NormalizeApp` trim free-text fields; loader reads
   `ingress/` and `app/` sub-folders in both scopes alongside the existing resource folders.
 - **`internal/validate`** — `checkIngress` enforces the same-scope `host:` FK (single-instance vm,
