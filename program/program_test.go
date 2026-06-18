@@ -16,7 +16,7 @@ func TestDeployUsersByHost(t *testing.T) {
 		{Name: "bridge", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
 		{Name: "worker", InstanceCount: 2}, // no deploy user
 	}
-	got := deployUsersByHost(computes)
+	got := naming.DeployUsersByHost(computes)
 
 	assert.Equal(t, "deploy", got["bridge-01"])
 	assert.Equal(t, "", got["worker-01"])
@@ -404,6 +404,48 @@ func TestIngressAppsByHostResolvesFQDNAndRoot(t *testing.T) {
 	assert.Equal(t, "my.use1.wardnet.network", apps[0].FQDN)
 	assert.Equal(t, "/srv/wardnet/app/dashboard/current", apps[0].Root)
 	assert.True(t, apps[0].Spa)
+}
+
+// TestRealizeIngressRejectsAppRouteSNICollision: an app FQDN equal to a :443
+// tls-termination route's vanity SNI on the same ingress host is rejected — nginx
+// could not demux two server blocks sharing one (listen 443, server_name).
+func TestRealizeIngressRejectsAppRouteSNICollision(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "edge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
+		Service: []types.ServiceSpec{
+			{Name: "api", Host: "edge-01", Ingress: "web", Routes: []types.RouteSpec{
+				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: []string{"my.use1.wardnet.network"}},
+			}},
+		},
+		App: []types.AppSpec{
+			{Name: "dashboard", Ingress: "web", Subdomain: "my", Spa: true}, // -> my.use1.wardnet.network
+		},
+	}
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	routesByHost, _, err := ingressRoutesByHost(res, canonical, "prd", "use1", "wardnet.network")
+	require.NoError(t, err)
+	appsByHost := ingressAppsByHost(res, canonical, "use1", "wardnet.network")
+
+	err = checkAppSNICollisions(routesByHost, appsByHost)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "my.use1.wardnet.network")
+	assert.Contains(t, err.Error(), "service api")
+}
+
+// TestCheckAppSNICollisionsAllows: the same FQDN on a non-:443 route does not
+// collide (nginx demuxes per listen port), and a distinct app FQDN is fine.
+func TestCheckAppSNICollisionsAllows(t *testing.T) {
+	routesByHost := map[string][]types.IngressRoute{
+		"edge-01": {
+			// Same name as the app, but on a different listen port -> no collision.
+			{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 8443, FQDNs: []string{"my.use1.wardnet.network"}},
+		},
+	}
+	appsByHost := map[string][]types.IngressApp{
+		"edge-01": {{Name: "dashboard", FQDN: "my.use1.wardnet.network"}},
+	}
+	require.NoError(t, checkAppSNICollisions(routesByHost, appsByHost))
 }
 
 // TestAppProvisionScript: the placeholder is written and `current` is symlinked

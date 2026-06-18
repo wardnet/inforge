@@ -105,7 +105,7 @@ func BuildDeployDescriptor(env, baseDomain string, res types.Resources, table re
 	sort.Strings(regionNames)
 
 	ingressHostName := ingressHostNamesByApp(res)
-	deployUsers := deployUsersByHost(res.Compute)
+	deployUsers := naming.DeployUsersByHost(res.Compute)
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	for _, region := range regionNames {
 		slug, err := table.Slug(region)
@@ -149,21 +149,6 @@ func ingressHostNamesByApp(res types.Resources) map[string]string {
 		}
 	}
 	return out
-}
-
-// deployUsersByHost maps each expanded compute specKey to its deploy_user (empty
-// when the compute declares none). Mirrors service.deployUsersByHost.
-func deployUsersByHost(computes []types.ComputeSpec) map[string]string {
-	byHost := map[string]string{}
-	for _, c := range computes {
-		if c.DeployUser == nil {
-			continue
-		}
-		for i := 1; i <= c.InstanceCount; i++ {
-			byHost[naming.SpecKey(c.Name, i)] = c.DeployUser.Name
-		}
-	}
-	return byHost
 }
 
 // Marshal renders the app deploy descriptor as YAML for the release workflow.

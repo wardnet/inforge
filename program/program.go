@@ -341,7 +341,7 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		return fmt.Errorf("cannot provision services: inforge build is 'dev' — no inforge-bootstrap release asset to download; deploy with a released inforge binary")
 	}
 	canonical := naming.CanonicalComputeKeys(res.Compute)
-	deployUserByCompute := deployUsersByHost(res.Compute)
+	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
 
 	for _, svc := range res.Service {
 		hostKey, ok := canonical[svc.Host]
@@ -421,7 +421,7 @@ func provisionApps(ctx *pulumi.Context, res types.Resources, computeOut map[stri
 		return nil
 	}
 	canonical := naming.CanonicalComputeKeys(res.Compute)
-	deployUserByCompute := deployUsersByHost(res.Compute)
+	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
 	for _, ia := range resolveIngressApps(res, canonical) {
 		host, ok := computeOut[ia.ingHost]
 		if !ok {
@@ -862,6 +862,15 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		return fmt.Errorf("ingress: %w", err)
 	}
 	appsByHostKey := ingressAppsByHost(res, canonical, slug, baseDomain)
+	// An app always serves on :443, so its FQDN must not collide with a :443
+	// tls-termination route's SNI (or another app) on the same host — nginx cannot
+	// demux two server blocks with one (listen, server_name) and would race two ACME
+	// orders for the hostname. The route-vs-route half of this rule lives in
+	// ingressRoutesByHost; this closes the app-vs-route/app-vs-app half so the
+	// guarantee holds even when `up` runs without a prior `validate`.
+	if err := checkAppSNICollisions(routesByHostKey, appsByHostKey); err != nil {
+		return fmt.Errorf("ingress: %w", err)
+	}
 	// nginx is installed on an ingress host iff at least one route OR app targets
 	// it; an app-only ingress (apps, no service routes) still realizes — its server
 	// blocks and ACME certs provision for the app FQDNs alone.
@@ -870,7 +879,7 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		return nil
 	}
 
-	deployUserByCompute := deployUsersByHost(res.Compute)
+	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
 	providerByCompute := ingressProvidersByHost(res.Compute, defaults)
 
 	for _, hostKey := range hostKeys {
@@ -946,23 +955,6 @@ func ingressProvidersByHost(computes []types.ComputeSpec, defaults types.Provide
 		provider := types.ResolveProvider(c.Provider, "compute", "", defaults)
 		for i := 1; i <= c.InstanceCount; i++ {
 			byHost[naming.SpecKey(c.Name, i)] = provider
-		}
-	}
-	return byHost
-}
-
-// deployUsersByHost maps each expanded compute specKey to its deploy user (empty
-// when the compute declares none). inforge SSHes as this user to realize
-// host-level resources.
-func deployUsersByHost(computes []types.ComputeSpec) map[string]string {
-	byHost := map[string]string{}
-	for _, c := range computes {
-		user := ""
-		if c.DeployUser != nil {
-			user = c.DeployUser.Name
-		}
-		for i := 1; i <= c.InstanceCount; i++ {
-			byHost[naming.SpecKey(c.Name, i)] = user
 		}
 	}
 	return byHost
@@ -1071,6 +1063,33 @@ func ingressAppsByHost(res types.Resources, canonical map[string]string, slug, b
 		sort.Slice(apps, func(i, j int) bool { return apps[i].FQDN < apps[j].FQDN })
 	}
 	return byHost
+}
+
+// checkAppSNICollisions rejects an app whose FQDN collides, on its ingress host's
+// :443 listener, with a tls-termination route's SNI or another app — a clash nginx
+// cannot demux (two server blocks sharing one (listen, server_name)) that would also
+// race two ACME orders for the same hostname. Apps always serve on :443, so the
+// conflict set per host is every :443 tls-termination route FQDN plus the app FQDNs.
+// It mirrors the route-vs-route guard in ingressRoutesByHost for the app side.
+func checkAppSNICollisions(routesByHost map[string][]types.IngressRoute, appsByHost map[string][]types.IngressApp) error {
+	for _, hostKey := range sortedKeys(appsByHost) {
+		owner := map[string]string{} // fqdn -> "service X" | "app Y"
+		for _, rt := range routesByHost[hostKey] {
+			if rt.Type != types.IngressTypeTLSTermination || rt.Listen != 443 {
+				continue
+			}
+			for _, fqdn := range rt.FQDNs {
+				owner[fqdn] = "service " + rt.Service
+			}
+		}
+		for _, a := range appsByHost[hostKey] {
+			if prev, dup := owner[a.FQDN]; dup {
+				return fmt.Errorf("ingress host %q: app %q FQDN %q collides with %s on listen 443; an SNI must be unique per listen port", hostKey, a.Name, a.FQDN, prev)
+			}
+			owner[a.FQDN] = "app " + a.Name
+		}
+	}
+	return nil
 }
 
 // firewallPlanByHost derives each host's inbound firewall port plan, keyed by

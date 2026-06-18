@@ -34,6 +34,24 @@ func CanonicalComputeKeys(computes []types.ComputeSpec) map[string]string {
 	return canonical
 }
 
+// DeployUsersByHost maps each expanded compute specKey to its deploy_user (empty
+// when the compute declares none — the key is simply absent, so a lookup yields
+// ""). inforge SSHes as this user to realize host-level resources; the realization
+// path (program) and the deploy descriptors (internal/service, internal/app) share
+// this one derivation so they can never disagree on a host's SSH account.
+func DeployUsersByHost(computes []types.ComputeSpec) map[string]string {
+	byHost := map[string]string{}
+	for _, c := range computes {
+		if c.DeployUser == nil {
+			continue
+		}
+		for i := 1; i <= c.InstanceCount; i++ {
+			byHost[SpecKey(c.Name, i)] = c.DeployUser.Name
+		}
+	}
+	return byHost
+}
+
 // SpecKey returns a resource instance's identity, "<name>-<NN>" with the
 // instance number zero-padded to two digits (e.g. SpecKey("bridge", 1) ==
 // "bridge-01"). It is the value other resources use as a foreign key.

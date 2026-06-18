@@ -203,7 +203,7 @@ func BuildDeployDescriptor(env, baseDomain string, res types.Resources, table re
 	sort.Strings(regionNames)
 
 	canonical := naming.CanonicalComputeKeys(res.Compute)
-	deployUsers := deployUsersByHost(res.Compute)
+	deployUsers := naming.DeployUsersByHost(res.Compute)
 	for _, region := range regionNames {
 		slug, err := table.Slug(region)
 		if err != nil {
@@ -226,21 +226,6 @@ func BuildDeployDescriptor(env, baseDomain string, res types.Resources, table re
 		}
 	}
 	return desc, nil
-}
-
-// deployUsersByHost maps each expanded compute specKey to its deploy_user (empty
-// when the compute declares none).
-func deployUsersByHost(computes []types.ComputeSpec) map[string]string {
-	byHost := map[string]string{}
-	for _, c := range computes {
-		if c.DeployUser == nil {
-			continue
-		}
-		for i := 1; i <= c.InstanceCount; i++ {
-			byHost[naming.SpecKey(c.Name, i)] = c.DeployUser.Name
-		}
-	}
-	return byHost
 }
 
 // hostDNS computes the fully-qualified SSH/cloud-init domain for a host compute
