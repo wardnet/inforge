@@ -53,6 +53,7 @@ func (h *HetznerTLS) Realize(
 	host types.ComputeOutputs,
 	deployUser string,
 	routes []types.IngressRoute,
+	apps []types.IngressApp,
 	backendIPs map[string]pulumi.StringOutput,
 	env string,
 	dependsOn []pulumi.Resource,
@@ -71,7 +72,7 @@ func (h *HetznerTLS) Realize(
 		}
 	}
 
-	writeScript, err := h.renderWriteScript(hostKey, routes, backendIPs)
+	writeScript, err := h.renderWriteScript(hostKey, routes, apps, backendIPs)
 	if err != nil {
 		return fmt.Errorf("ingress %q: %w", hostKey, err)
 	}
@@ -119,16 +120,17 @@ func (h *HetznerTLS) Realize(
 	return nil
 }
 
-// renderWriteScript builds the shell that writes the rendered nginx.conf. When
-// every route is co-located (no cross-host backends), it renders synchronously and
+// renderWriteScript builds the shell that writes the rendered nginx.conf. Apps
+// carry no backend, so they always render synchronously. When every route is also
+// co-located (no cross-host backends), the whole config renders synchronously and
 // returns a plain string. When some routes are cross-host, it renders inside an
 // apply over the backend private-IP outputs, substituting each cross-host route's
 // Backend with the resolved IP before Render — so the upstream addresses are the
 // real private IPs, resolved at deploy time. In preview a cross-host backend IP is
 // unknown, so the apply (and the command that consumes it) is skipped entirely.
-func (h *HetznerTLS) renderWriteScript(hostKey string, routes []types.IngressRoute, backendIPs map[string]pulumi.StringOutput) (pulumi.StringInput, error) {
+func (h *HetznerTLS) renderWriteScript(hostKey string, routes []types.IngressRoute, apps []types.IngressApp, backendIPs map[string]pulumi.StringOutput) (pulumi.StringInput, error) {
 	if len(backendIPs) == 0 {
-		cfg, err := nginx.Render(routes)
+		cfg, err := nginx.Render(routes, apps)
 		if err != nil {
 			return nil, err
 		}
@@ -160,7 +162,7 @@ func (h *HetznerTLS) renderWriteScript(hostKey string, routes []types.IngressRou
 			}
 			rendered[i] = r
 		}
-		cfg, err := nginx.Render(rendered)
+		cfg, err := nginx.Render(rendered, apps)
 		if err != nil {
 			return "", err
 		}

@@ -21,12 +21,14 @@ func block(name string, args []string, children ...*crossplane.Directive) *cross
 	return &crossplane.Directive{Directive: name, Args: args, Block: crossplane.Directives(children)}
 }
 
-// Render builds the complete nginx.conf for a host from its ingress routes. The
-// output is deterministic: tls-termination servers and stream-forward servers are
-// each sorted by (listen, service), so the same route set always renders the same
-// bytes. http{} is emitted only when the host terminates TLS, stream{} only when
-// it has a forward-with-target route; a host with neither yields a minimal config.
-func Render(routes []types.IngressRoute) (string, error) {
+// Render builds the complete nginx.conf for a host from its ingress routes and
+// apps. The output is deterministic: tls-termination servers, app servers, and
+// stream-forward servers are each sorted (routes by (listen, service), apps by
+// FQDN), so the same input always renders the same bytes. http{} is emitted when
+// the host terminates TLS for any route OR serves any app (an app-only ingress
+// still gets the ACME issuer and the :80 challenge/redirect server); stream{} only
+// when it has a forward route; a host with none yields a minimal config.
+func Render(routes []types.IngressRoute, apps []types.IngressApp) (string, error) {
 	var terminate, forward []types.IngressRoute
 	for _, r := range routes {
 		// Backend is the resolved upstream address the caller must fill — "127.0.0.1"
@@ -56,6 +58,17 @@ func Render(routes []types.IngressRoute) (string, error) {
 	sort.Slice(terminate, byListenService(terminate))
 	sort.Slice(forward, byListenService(forward))
 
+	// Apps render in a stable order independent of input order. Each app must carry
+	// a document root — an empty Root means the program wiring failed to resolve it,
+	// and nginx would serve the whole filesystem; fail loud instead.
+	sortedApps := append([]types.IngressApp(nil), apps...)
+	for _, a := range sortedApps {
+		if a.Root == "" {
+			return "", fmt.Errorf("nginx: ingress app %q has no document root", a.Name)
+		}
+	}
+	sort.Slice(sortedApps, func(i, j int) bool { return sortedApps[i].FQDN < sortedApps[j].FQDN })
+
 	var top crossplane.Directives
 	top = append(top,
 		dir("load_module", acmeModule),
@@ -65,8 +78,8 @@ func Render(routes []types.IngressRoute) (string, error) {
 		block("events", nil, dir("worker_connections", "1024")),
 	)
 
-	if len(terminate) > 0 {
-		top = append(top, httpBlock(terminate))
+	if len(terminate) > 0 || len(sortedApps) > 0 {
+		top = append(top, httpBlock(terminate, sortedApps))
 	}
 	if len(forward) > 0 {
 		top = append(top, streamBlock(forward))
@@ -82,9 +95,10 @@ func Render(routes []types.IngressRoute) (string, error) {
 }
 
 // httpBlock renders the http{} context: the ACME issuer + shared zone, one server
-// per tls-termination route, and the :80 server that answers HTTP-01 challenges
-// and redirects everything else to HTTPS.
-func httpBlock(terminate []types.IngressRoute) *crossplane.Directive {
+// per tls-termination route, one server per app (static file serving), and the
+// :80 server that answers HTTP-01 challenges and redirects everything else to
+// HTTPS. Route servers precede app servers; both lists are pre-sorted by Render.
+func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp) *crossplane.Directive {
 	children := crossplane.Directives{
 		dir("resolver", strings.Fields(resolverAddrs)...),
 		block("acme_issuer", []string{acmeIssuer},
@@ -96,6 +110,9 @@ func httpBlock(terminate []types.IngressRoute) *crossplane.Directive {
 	}
 	for _, r := range terminate {
 		children = append(children, terminateServer(r))
+	}
+	for _, a := range apps {
+		children = append(children, appServer(a))
 	}
 	// The :80 server is required for ACME HTTP-01: the module intercepts
 	// /.well-known/acme-challenge/ before location matching, so the catch-all
@@ -126,6 +143,31 @@ func terminateServer(r types.IngressRoute) *crossplane.Directive {
 			dir("proxy_set_header", "Host", "$host"),
 			dir("proxy_set_header", "X-Forwarded-For", "$proxy_add_x_forwarded_for"),
 			dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
+		),
+	)
+}
+
+// appServer renders one app server: ACME-managed TLS for the app's single FQDN,
+// serving static files from the app's document root. A SPA falls any non-file
+// path back to /index.html (client-side routing); a non-SPA returns 404. The
+// index directive makes a directory request ("/") serve index.html. Render has
+// already verified a.Root is non-empty.
+func appServer(a types.IngressApp) *crossplane.Directive {
+	fallback := []string{"$uri", "$uri/", "=404"}
+	if a.Spa {
+		fallback = []string{"$uri", "$uri/", "/index.html"}
+	}
+	return block("server", nil,
+		dir("listen", "443", "ssl"),
+		dir("server_name", a.FQDN),
+		dir("acme_certificate", acmeIssuer),
+		dir("ssl_certificate", "$acme_certificate"),
+		dir("ssl_certificate_key", "$acme_certificate_key"),
+		dir("ssl_certificate_cache", "max=2"),
+		dir("root", a.Root),
+		dir("index", "index.html"),
+		block("location", []string{"/"},
+			dir("try_files", fallback...),
 		),
 	)
 }
