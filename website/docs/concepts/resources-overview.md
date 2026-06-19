@@ -17,7 +17,8 @@ region in `regions.yaml`.
 | [Network](../resources/network) | `regional/network/<name>/` | VPC / network (Hetzner) |
 | [Compute](../resources/compute) | `regional/compute/<name>/` | Virtual machine |
 | [Database](../resources/database) | `regional/database/<name>/` | Managed PostgreSQL (Neon) |
-| [Service](../resources/service) | `regional/service/<name>/` | Application hosted on a VM (with typed nginx ingress) |
+| [Service](../resources/service) | `regional/service/<name>/` | Application hosted on a VM, exposed through an ingress |
+| [Ingress](../resources/ingress) | `regional/ingress/<name>/` | Shared nginx proxy tier (referencing a compute host) that fronts services |
 
 [DNS](../resources/dns) is **not** an authored resource type: inforge derives every record (host,
 service, vanity) automatically and creates it on the region's
