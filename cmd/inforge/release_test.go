@@ -19,16 +19,18 @@ func TestServiceApplyScript(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
-// TestServiceDeliveryTargetsDefaultSSHUser: a target with no SSHUser falls back to
-// the historical "deploy" account.
-func TestServiceDeliveryTargetsDefaultSSHUser(t *testing.T) {
+// TestServiceDeliveryTargets: the SSHUser the descriptor resolved (always set —
+// BuildDeployDescriptor defaults it to "deploy") is passed through, and the apply
+// step's human label carries the folder + unit for operator visibility.
+func TestServiceDeliveryTargets(t *testing.T) {
 	dts := serviceDeliveryTargets([]service.DeployTarget{
-		{HostDNS: "h1", Folder: "/srv/wardnet/api", Unit: "u"},
+		{HostDNS: "h1", Folder: "/srv/wardnet/api", Unit: "wardnet-api.service", SSHUser: "deploy"},
 		{HostDNS: "h2", Folder: "/srv/wardnet/api", Unit: "u", SSHUser: "ops"},
 	})
 	assert.Equal(t, "deploy", dts[0].sshUser)
 	assert.Equal(t, "ops", dts[1].sshUser)
 	assert.Equal(t, "h1", dts[0].host)
+	assert.Equal(t, "extracting to /srv/wardnet/api and restarting wardnet-api.service", dts[0].describe)
 }
 
 // TestAppReleaseScript pins adapter #2's fresh-release command: extract the bundle
@@ -63,12 +65,13 @@ func TestAppDeliveryTargets(t *testing.T) {
 
 	fresh := appDeliveryTargets(targets, "abc123", false)
 	assert.Equal(t, "edge.example.com", fresh[0].host)
-	assert.Equal(t, "deploy", fresh[0].sshUser)
 	assert.Contains(t, fresh[0].applyScript, "tar -xzf")
+	assert.Equal(t, "releasing /srv/wardnet/app/my/abc123", fresh[0].describe)
 
 	roll := appDeliveryTargets(targets, "abc123", true)
 	assert.Contains(t, roll[0].applyScript, "test -d")
 	assert.NotContains(t, roll[0].applyScript, "tar -xzf")
+	assert.Equal(t, "rolling back /srv/wardnet/app/my/abc123", roll[0].describe)
 }
 
 // TestAppArtifactSlug: apps are namespaced under app/ so they never collide with a

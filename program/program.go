@@ -471,16 +471,15 @@ func provisionApps(ctx *pulumi.Context, res types.Resources, computeOut map[stri
 // always (re)written; the symlink is created only when nothing already occupies
 // `current`, so a re-run never clobbers a released bundle. All paths are quoted.
 func appProvisionScript(name string) string {
-	current := app.CurrentPath(name)
 	return strings.Join([]string{
 		"set -euo pipefail",
 		// WriteFileScript creates the placeholder dir (and the app folder) and writes
 		// the index; it embeds its own `set -euo pipefail`, harmless when nested.
 		iremote.WriteFileScript(app.PlaceholderIndexPath(name), app.PlaceholderIndexHTML),
-		// Point current -> placeholder only when nothing is there yet (no file and no
-		// symlink, even a broken one), so a real release's `current` survives re-runs.
-		fmt.Sprintf("if [ ! -e %s ] && [ ! -L %s ]; then sudo ln -s %s %s; fi",
-			iremote.Quote(current), iremote.Quote(current), iremote.Quote(app.PlaceholderSubdir), iremote.Quote(current)),
+		// Point current -> placeholder only when nothing is there yet — the seed
+		// half of the atomic-current-swap contract, centralized in internal/app so
+		// it agrees byte-for-byte with the release path's SwapCurrentScript.
+		app.SeedCurrentScript(name),
 	}, "\n")
 }
 

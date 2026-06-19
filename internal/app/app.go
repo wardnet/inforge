@@ -65,6 +65,20 @@ func SwapCurrentScript(name, sha string) string {
 		shQuote(sha), shQuote(tmp), shQuote(tmp), shQuote(CurrentPath(name)))
 }
 
+// SeedCurrentScript renders the host shell that points `current` at the
+// placeholder bundle, but only when nothing already occupies it (no file, no
+// symlink — even a broken one). It is the provisioning counterpart to
+// SwapCurrentScript: both keep the `current` symlink shape (a relative target) in
+// this package per the atomic-current-swap rule, so a never-released app and a
+// released one agree on the shape. The seed deliberately *creates* and never
+// replaces — a re-provision must not clobber a release's `current`; the atomic
+// replace is the release path's job (SwapCurrentScript).
+func SeedCurrentScript(name string) string {
+	current := CurrentPath(name)
+	return fmt.Sprintf("if [ ! -e %s ] && [ ! -L %s ]; then sudo ln -s %s %s; fi",
+		shQuote(current), shQuote(current), shQuote(PlaceholderSubdir), shQuote(current))
+}
+
 // GCReleasesScript renders the host shell that prunes delivered bundle
 // directories beyond KeepReleases newest, never touching the placeholder or the
 // directory `current` resolves to. `ls -1dt` orders newest-first so `tail` drops

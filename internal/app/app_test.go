@@ -84,6 +84,15 @@ func TestSwapCurrentScript(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// TestSeedCurrentScript: the seed creates `current` -> placeholder only when
+// nothing occupies it (guarded by `[ ! -e ] && [ ! -L ]`), with a relative target.
+func TestSeedCurrentScript(t *testing.T) {
+	got := SeedCurrentScript("my")
+	want := "if [ ! -e '/srv/wardnet/app/my/current' ] && [ ! -L '/srv/wardnet/app/my/current' ]; " +
+		"then sudo ln -s 'placeholder' '/srv/wardnet/app/my/current'; fi"
+	assert.Equal(t, want, got)
+}
+
 // TestGCReleasesScript: GC excludes the placeholder, the literal `current` symlink,
 // and whatever `current` resolves to, keeping the newest KeepReleases bundles.
 func TestGCReleasesScript(t *testing.T) {

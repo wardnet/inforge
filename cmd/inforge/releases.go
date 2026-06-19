@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -388,37 +387,10 @@ func resolveDeployTargets(ctx context.Context, projCfg projectConfig, env, platf
 	// project config the service CI inherits from the infra setup.
 	_ = platform
 
-	s, _, err := upsertStack(ctx, env, projCfg)
+	targets, err := resolveDescriptorTargets(ctx, projCfg, env, "deployDescriptor", stackCfg,
+		func(t service.DeployTarget) bool { return t.Service == svc })
 	if err != nil {
-		return nil, fmt.Errorf("connect to stack %q: %w", env, err)
-	}
-	if err := applyStackConfig(ctx, s, stackCfg); err != nil {
-		return nil, fmt.Errorf("apply stack config: %w", err)
-	}
-	outputs, err := s.Outputs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("read stack outputs: %w", err)
-	}
-	raw, ok := outputs["deployDescriptor"]
-	if !ok {
-		return nil, fmt.Errorf("stack %q has no deployDescriptor output — has inforge deploy been run for this environment?", env)
-	}
-	// The Automation API deserialises pulumi.Any(DeployDescriptor) as
-	// map[string]interface{}; round-trip through JSON to get a typed value.
-	b, err := json.Marshal(raw.Value)
-	if err != nil {
-		return nil, fmt.Errorf("marshal deployDescriptor: %w", err)
-	}
-	var descriptor service.DeployDescriptor
-	if err := json.Unmarshal(b, &descriptor); err != nil {
-		return nil, fmt.Errorf("parse deployDescriptor: %w", err)
-	}
-
-	var targets []service.DeployTarget
-	for _, t := range descriptor.Targets {
-		if t.Service == svc {
-			targets = append(targets, t)
-		}
+		return nil, err
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("service %q not found in deployDescriptor for env %q — is it defined as a ServiceSpec in the infra resources?", svc, env)

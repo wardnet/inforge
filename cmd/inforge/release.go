@@ -34,6 +34,7 @@ type deliveryTarget struct {
 	host        string // SSH host (public DNS name)
 	sshUser     string // connect-as account (the host's deploy_user)
 	applyScript string // remote shell run after the payload is uploaded
+	describe    string // human label for the apply step (folder+unit / bundle path)
 }
 
 // deliverRelease is the shared release orchestrator both the service and app
@@ -55,10 +56,14 @@ func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha st
 				return fmt.Errorf("upload payload to %s: %w\n%s", t.host, err, out)
 			}
 		}
-		fmt.Printf("applying %s on %s...\n", sha, t.host)
+		if t.describe != "" {
+			fmt.Printf("%s on %s...\n", t.describe, t.host)
+		} else {
+			fmt.Printf("applying %s on %s...\n", sha, t.host)
+		}
 		sshRunArgs := append(append([]string{}, sshArgs...), account, t.applyScript)
 		if out, err := exec.CommandContext(ctx, "ssh", sshRunArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("remote release to %s: %w\n%s", t.host, err, out)
+			return fmt.Errorf("remote deploy to %s: %w\n%s", t.host, err, out)
 		}
 		if err := store.SetDeployment(ctx, slug, env, t.host, sha, time.Now()); err != nil {
 			return fmt.Errorf("record manifest entry for %s: %w", t.host, err)
@@ -80,15 +85,17 @@ func serviceApplyScript(t service.DeployTarget) string {
 }
 
 // serviceDeliveryTargets adapts resolved service deploy targets to the shared
-// orchestrator's targets.
+// orchestrator's targets. SSHUser is always set by BuildDeployDescriptor (it
+// defaults to "deploy"), so it is used directly.
 func serviceDeliveryTargets(targets []service.DeployTarget) []deliveryTarget {
 	out := make([]deliveryTarget, 0, len(targets))
 	for _, t := range targets {
-		sshUser := t.SSHUser
-		if sshUser == "" {
-			sshUser = "deploy"
-		}
-		out = append(out, deliveryTarget{host: t.HostDNS, sshUser: sshUser, applyScript: serviceApplyScript(t)})
+		out = append(out, deliveryTarget{
+			host:        t.HostDNS,
+			sshUser:     t.SSHUser,
+			applyScript: serviceApplyScript(t),
+			describe:    fmt.Sprintf("extracting to %s and restarting %s", t.Folder, t.Unit),
+		})
 	}
 	return out
 }
@@ -124,19 +131,21 @@ func appRollbackScript(t iapp.DeployTarget, sha string) string {
 }
 
 // appDeliveryTargets adapts resolved app deploy targets to the orchestrator's
-// targets, choosing the fresh-release or rollback apply script.
+// targets, choosing the fresh-release or rollback apply script. SSHUser is always
+// set by BuildDeployDescriptor (it defaults to "deploy"), so it is used directly.
 func appDeliveryTargets(targets []iapp.DeployTarget, sha string, rollback bool) []deliveryTarget {
 	out := make([]deliveryTarget, 0, len(targets))
 	for _, t := range targets {
-		sshUser := t.SSHUser
-		if sshUser == "" {
-			sshUser = "deploy"
-		}
-		script := appReleaseScript(t, sha)
+		script, verb := appReleaseScript(t, sha), "releasing"
 		if rollback {
-			script = appRollbackScript(t, sha)
+			script, verb = appRollbackScript(t, sha), "rolling back"
 		}
-		out = append(out, deliveryTarget{host: t.IngressHostDNS, sshUser: sshUser, applyScript: script})
+		out = append(out, deliveryTarget{
+			host:        t.IngressHostDNS,
+			sshUser:     t.SSHUser,
+			applyScript: script,
+			describe:    fmt.Sprintf("%s %s", verb, iapp.BundleDir(t.App, sha)),
+		})
 	}
 	return out
 }
@@ -232,6 +241,29 @@ func runReleaseApp(ctx context.Context, configPath, env, name, sha, bundleDir, s
 		return deliverRelease(ctx, store, slug, env, sha, appDeliveryTargets(targets, sha, true), "", sshKeyPath)
 	}
 
+	fmt.Printf("releasing %s @ %s → %d host(s) (env: %s)\n", name, sha, len(targets), env)
+	for _, t := range targets {
+		fmt.Printf("  host: %s  fqdn: %s  path: %s\n", t.IngressHostDNS, t.FQDN, iapp.BundleDir(name, sha))
+	}
+
+	// A dry-run must not mutate the store, so it neither packages+pushes --bundle
+	// nor prunes — it only reports what would happen.
+	if dryRun {
+		if bundleDir != "" {
+			fmt.Printf("(dry-run: would package + push %s then deliver, skipping)\n", bundleDir)
+			return nil
+		}
+		exists, err := store.ArtifactExists(ctx, slug, sha)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("bundle %s/%s.tar.gz not found in release store — pass --bundle <dir> to package and push it", slug, sha)
+		}
+		fmt.Println("(dry-run: artifact present, skipping delivery)")
+		return nil
+	}
+
 	// Optional push: package the local build and upload it under the app slug, so
 	// `release app --bundle ./dist` is a single build→deliver step.
 	if bundleDir != "" {
@@ -246,15 +278,6 @@ func runReleaseApp(ctx context.Context, configPath, env, name, sha, bundleDir, s
 	}
 	if !exists {
 		return fmt.Errorf("bundle %s/%s.tar.gz not found in release store — pass --bundle <dir> to package and push it", slug, sha)
-	}
-
-	fmt.Printf("releasing %s @ %s → %d host(s) (env: %s)\n", name, sha, len(targets), env)
-	for _, t := range targets {
-		fmt.Printf("  host: %s  fqdn: %s  path: %s\n", t.IngressHostDNS, t.FQDN, iapp.BundleDir(name, sha))
-	}
-	if dryRun {
-		fmt.Println("(dry-run: artifact present, skipping delivery)")
-		return nil
 	}
 
 	sshKeyPath, err = resolveSSHKey(sshKeyPath)
@@ -310,11 +333,12 @@ func pushAppBundle(ctx context.Context, store *release.Store, slug, sha, bundleD
 	return nil
 }
 
-// resolveAppDeployTargets connects to the infra Pulumi stack for env and returns
-// every app.DeployTarget for name from the appDeployDescriptor output (one per
-// region a multi-region app fans out to). It mirrors resolveDeployTargets for the
-// service descriptor.
-func resolveAppDeployTargets(ctx context.Context, projCfg projectConfig, env string, stackCfg stackConfig, name string) ([]iapp.DeployTarget, error) {
+// resolveDescriptorTargets connects to the infra Pulumi stack for env, reads the
+// named deploy-descriptor stack output, and returns its targets matching keep. It
+// is the shared resolver behind both the service (deployDescriptor) and app
+// (appDeployDescriptor) release paths — they differ only in the output key,
+// target type, and match predicate, not in the connect → read → decode plumbing.
+func resolveDescriptorTargets[T any](ctx context.Context, projCfg projectConfig, env, outputKey string, stackCfg stackConfig, keep func(T) bool) ([]T, error) {
 	s, _, err := upsertStack(ctx, env, projCfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect to stack %q: %w", env, err)
@@ -326,26 +350,38 @@ func resolveAppDeployTargets(ctx context.Context, projCfg projectConfig, env str
 	if err != nil {
 		return nil, fmt.Errorf("read stack outputs: %w", err)
 	}
-	raw, ok := outputs["appDeployDescriptor"]
+	raw, ok := outputs[outputKey]
 	if !ok {
-		return nil, fmt.Errorf("stack %q has no appDeployDescriptor output — has inforge deploy been run for this environment?", env)
+		return nil, fmt.Errorf("stack %q has no %s output — has inforge deploy been run for this environment?", env, outputKey)
 	}
-	// The Automation API deserialises pulumi.Any(DeployDescriptor) as
-	// map[string]interface{}; round-trip through JSON to get a typed value.
+	// The Automation API deserialises pulumi.Any(descriptor) as
+	// map[string]interface{}; round-trip through JSON to get typed targets.
 	b, err := json.Marshal(raw.Value)
 	if err != nil {
-		return nil, fmt.Errorf("marshal appDeployDescriptor: %w", err)
+		return nil, fmt.Errorf("marshal %s: %w", outputKey, err)
 	}
-	var descriptor iapp.DeployDescriptor
+	var descriptor struct {
+		Targets []T `json:"targets"`
+	}
 	if err := json.Unmarshal(b, &descriptor); err != nil {
-		return nil, fmt.Errorf("parse appDeployDescriptor: %w", err)
+		return nil, fmt.Errorf("parse %s: %w", outputKey, err)
 	}
-
-	var targets []iapp.DeployTarget
+	var targets []T
 	for _, t := range descriptor.Targets {
-		if t.App == name {
+		if keep(t) {
 			targets = append(targets, t)
 		}
+	}
+	return targets, nil
+}
+
+// resolveAppDeployTargets returns every app.DeployTarget for name from the
+// appDeployDescriptor output (one per region a multi-region app fans out to).
+func resolveAppDeployTargets(ctx context.Context, projCfg projectConfig, env string, stackCfg stackConfig, name string) ([]iapp.DeployTarget, error) {
+	targets, err := resolveDescriptorTargets(ctx, projCfg, env, "appDeployDescriptor", stackCfg,
+		func(t iapp.DeployTarget) bool { return t.App == name })
+	if err != nil {
+		return nil, err
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("app %q not found in appDeployDescriptor for env %q — is it defined as an AppSpec in the infra resources?", name, env)
