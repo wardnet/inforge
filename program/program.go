@@ -185,12 +185,15 @@ func Run(ctx *pulumi.Context) error {
 		// Both ingress realization and service provisioning SSH the same hosts, so
 		// the gate they each depend on must be the same resource — share the map.
 		gates := map[string]pulumi.Resource{}
-		if err := realizeIngress(ctx, reg, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain, providerDefaults); err != nil {
+		// Seed each app's placeholder bundle on its ingress host first, so its server
+		// block and ACME cert provision before the first release (slice D delivers
+		// bundles). realizeIngress's nginx reload DependsOn these seeds (appSeeds) so a
+		// reload never serves an app's document root before `current` exists.
+		appSeeds, err := provisionApps(ctx, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug)
+		if err != nil {
 			return err
 		}
-		// Seed each app's placeholder bundle on its ingress host so its server block
-		// and ACME cert provision before the first release (slice D delivers bundles).
-		if err := provisionApps(ctx, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug); err != nil {
+		if err := realizeIngress(ctx, reg, res, computeOutputs[region], gates, appSeeds, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain, providerDefaults); err != nil {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
@@ -416,44 +419,51 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 // realization). It is idempotent and re-runnable: the placeholder bytes are
 // rewritten, but the `current` symlink is pointed at the placeholder only when no
 // release has already claimed it — so re-running never reverts a deployed app.
-func provisionApps(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, deployPrivateKey, env, slug string) error {
+func provisionApps(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, deployPrivateKey, env, slug string) (map[string][]pulumi.Resource, error) {
 	if len(res.App) == 0 {
-		return nil
+		return nil, nil
 	}
+	// seeded collects each app's placeholder-seed command keyed by ingress host, so
+	// the ingress nginx realization can DependsOn them — its reload must not race
+	// ahead of the placeholder existing under `current` (else the freshly reloaded
+	// server block serves a missing document root until the seed lands).
+	seeded := map[string][]pulumi.Resource{}
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
 	for _, ia := range resolveIngressApps(res, canonical) {
 		host, ok := computeOut[ia.ingHost]
 		if !ok {
-			return fmt.Errorf("app %q: ingress host %q has no compute output (available: %v)", ia.app.Name, ia.ingHost, sortedKeys(computeOut))
+			return nil, fmt.Errorf("app %q: ingress host %q has no compute output (available: %v)", ia.app.Name, ia.ingHost, sortedKeys(computeOut))
 		}
 		deployUser := deployUserByCompute[ia.ingHost]
 		// Enforced only at up time; during preview command.remote never connects.
 		if !ctx.DryRun() {
 			if deployUser == "" {
-				return fmt.Errorf("app %q: ingress host %q has no deploy_user; inforge needs one to SSH and seed the app placeholder", ia.app.Name, ia.ingHost)
+				return nil, fmt.Errorf("app %q: ingress host %q has no deploy_user; inforge needs one to SSH and seed the app placeholder", ia.app.Name, ia.ingHost)
 			}
 			if deployPrivateKey == "" {
-				return fmt.Errorf("app %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", ia.app.Name)
+				return nil, fmt.Errorf("app %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", ia.app.Name)
 			}
 		}
 		gate, err := cloudInitGate(ctx, gates, ia.ingHost, host, deployPrivateKey, env, slug)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 		script := appProvisionScript(ia.app.Name)
 		name := naming.Resource(env, slug, "app", ia.app.Name)
-		if _, err := remote.NewCommand(ctx, name+"-provision", &remote.CommandArgs{
+		cmd, err := remote.NewCommand(ctx, name+"-provision", &remote.CommandArgs{
 			Connection: conn,
 			Create:     pulumi.String(script),
 			Update:     pulumi.String(script),
 			Triggers:   pulumi.Array{pulumi.String(script)},
-		}, pulumi.DependsOn([]pulumi.Resource{gate})); err != nil {
-			return fmt.Errorf("app %q: seed placeholder: %w", ia.app.Name, err)
+		}, pulumi.DependsOn([]pulumi.Resource{gate}))
+		if err != nil {
+			return nil, fmt.Errorf("app %q: seed placeholder: %w", ia.app.Name, err)
 		}
+		seeded[ia.ingHost] = append(seeded[ia.ingHost], cmd)
 	}
-	return nil
+	return seeded, nil
 }
 
 // appProvisionScript renders the host shell that seeds an app's placeholder
@@ -461,16 +471,15 @@ func provisionApps(ctx *pulumi.Context, res types.Resources, computeOut map[stri
 // always (re)written; the symlink is created only when nothing already occupies
 // `current`, so a re-run never clobbers a released bundle. All paths are quoted.
 func appProvisionScript(name string) string {
-	current := app.CurrentPath(name)
 	return strings.Join([]string{
 		"set -euo pipefail",
 		// WriteFileScript creates the placeholder dir (and the app folder) and writes
 		// the index; it embeds its own `set -euo pipefail`, harmless when nested.
 		iremote.WriteFileScript(app.PlaceholderIndexPath(name), app.PlaceholderIndexHTML),
-		// Point current -> placeholder only when nothing is there yet (no file and no
-		// symlink, even a broken one), so a real release's `current` survives re-runs.
-		fmt.Sprintf("if [ ! -e %s ] && [ ! -L %s ]; then sudo ln -s %s %s; fi",
-			iremote.Quote(current), iremote.Quote(current), iremote.Quote(app.PlaceholderSubdir), iremote.Quote(current)),
+		// Point current -> placeholder only when nothing is there yet — the seed
+		// half of the atomic-current-swap contract, centralized in internal/app so
+		// it agrees byte-for-byte with the release path's SwapCurrentScript.
+		app.SeedCurrentScript(name),
 	}, "\n")
 }
 
@@ -855,7 +864,7 @@ func serviceDeprovisionScript(svc types.ServiceSpec) string {
 // (cross-host, using the backend's PrivateIP). FQDNs are env-scoped here so the
 // provider stays a pure installer. Hosts are realized in sorted order so the
 // resource graph is stable across runs.
-func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, deployPrivateKey, env, slug, baseDomain string, defaults types.ProviderDefaults) error {
+func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, appSeeds map[string][]pulumi.Resource, deployPrivateKey, env, slug, baseDomain string, defaults types.ProviderDefaults) error {
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	routesByHostKey, crossHost, err := ingressRoutesByHost(res, canonical, env, slug, baseDomain)
 	if err != nil {
@@ -907,7 +916,11 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		if err != nil {
 			return err
 		}
-		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], appsByHostKey[hostKey], backendIPs, env, []pulumi.Resource{gate}); err != nil {
+		// The reload must wait on this host's app placeholder seeds too, so an
+		// app-only or mixed ingress never reloads into a server block whose
+		// `current` document root has not been seeded yet.
+		deps := append([]pulumi.Resource{gate}, appSeeds[hostKey]...)
+		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], appsByHostKey[hostKey], backendIPs, env, deps); err != nil {
 			return err
 		}
 	}

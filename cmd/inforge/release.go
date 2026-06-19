@@ -1,0 +1,390 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+	iapp "github.com/wardnet/inforge/internal/app"
+	"github.com/wardnet/inforge/internal/release"
+	"github.com/wardnet/inforge/internal/remote"
+	"github.com/wardnet/inforge/internal/service"
+)
+
+// release delivery — the workload-agnostic half of `inforge releases deploy`
+// (services) and `inforge release app` (front-ends). Both resolve targets from a
+// stack descriptor, pull the artifact by SHA from the R2 store, and apply it on
+// each host; they differ only in which targets they resolve and the per-host
+// apply script (a service extracts + restarts its unit; an app extracts into a
+// per-SHA dir, atomically swaps `current`, and reloads nginx). deliverRelease is
+// that shared seam — see ADR-0016 / ADR-0026.
+
+// remotePayloadPath is where the orchestrator uploads the artifact tarball on
+// every target before running its apply script (shared by service + app).
+const remotePayloadPath = "/tmp/inforge-payload.tgz"
+
+// deliveryTarget is one host the orchestrator delivers to, plus the
+// workload-specific remote command that applies the uploaded payload.
+type deliveryTarget struct {
+	host        string // SSH host (public DNS name)
+	sshUser     string // connect-as account (the host's deploy_user)
+	applyScript string // remote shell run after the payload is uploaded
+	describe    string // human label for the apply step (folder+unit / bundle path)
+}
+
+// deliverRelease is the shared release orchestrator both the service and app
+// release paths drive (the delivery-adapter seam): for each resolved target it
+// uploads payloadFile over scp — skipped when payloadFile is empty, which is how
+// an app rollback re-points an already-delivered bundle without re-fetching it —
+// runs the target's apply script over ssh, then records the delivered SHA in the
+// per-env manifest under slug. Keeping download-once + scp + manifest record here
+// means the service and app adapters differ only in their resolved targets and
+// apply scripts, not in the transport.
+func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha string, targets []deliveryTarget, payloadFile, sshKeyPath string) error {
+	sshArgs := []string{"-i", sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"}
+	for _, t := range targets {
+		account := fmt.Sprintf("%s@%s", t.sshUser, t.host)
+		if payloadFile != "" {
+			fmt.Printf("uploading to %s...\n", t.host)
+			scpArgs := append(append([]string{}, sshArgs...), payloadFile, account+":"+remotePayloadPath)
+			if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil {
+				return fmt.Errorf("upload payload to %s: %w\n%s", t.host, err, out)
+			}
+		}
+		if t.describe != "" {
+			fmt.Printf("%s on %s...\n", t.describe, t.host)
+		} else {
+			fmt.Printf("applying %s on %s...\n", sha, t.host)
+		}
+		sshRunArgs := append(append([]string{}, sshArgs...), account, t.applyScript)
+		if out, err := exec.CommandContext(ctx, "ssh", sshRunArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("remote deploy to %s: %w\n%s", t.host, err, out)
+		}
+		if err := store.SetDeployment(ctx, slug, env, t.host, sha, time.Now()); err != nil {
+			return fmt.Errorf("record manifest entry for %s: %w", t.host, err)
+		}
+	}
+	return nil
+}
+
+// serviceApplyScript is adapter #1: the remote command that applies a service
+// payload — extract it into the service folder and restart the inforge-managed
+// unit. It reproduces the historical `sshDeliver` body verbatim so the refactor
+// behind the seam is behaviour-preserving.
+func serviceApplyScript(t service.DeployTarget) string {
+	return strings.Join([]string{
+		fmt.Sprintf("sudo tar -xzf %s -C %s", remotePayloadPath, t.Folder),
+		fmt.Sprintf("rm -f %s", remotePayloadPath),
+		fmt.Sprintf("sudo systemctl restart %s", t.Unit),
+	}, " && ")
+}
+
+// serviceDeliveryTargets adapts resolved service deploy targets to the shared
+// orchestrator's targets. SSHUser is always set by BuildDeployDescriptor (it
+// defaults to "deploy"), so it is used directly.
+func serviceDeliveryTargets(targets []service.DeployTarget) []deliveryTarget {
+	out := make([]deliveryTarget, 0, len(targets))
+	for _, t := range targets {
+		out = append(out, deliveryTarget{
+			host:        t.HostDNS,
+			sshUser:     t.SSHUser,
+			applyScript: serviceApplyScript(t),
+			describe:    fmt.Sprintf("extracting to %s and restarting %s", t.Folder, t.Unit),
+		})
+	}
+	return out
+}
+
+// appReleaseScript is adapter #2 (fresh release): extract the uploaded bundle
+// into its per-SHA directory, atomically swap `current` to it, validate + reload
+// nginx, then GC old bundles. Extraction is idempotent — re-releasing a SHA
+// re-populates the same directory.
+func appReleaseScript(t iapp.DeployTarget, sha string) string {
+	bundleDir := iapp.BundleDir(t.App, sha)
+	return strings.Join([]string{
+		fmt.Sprintf("sudo mkdir -p %s", remote.Quote(bundleDir)),
+		fmt.Sprintf("sudo tar -xzf %s -C %s", remotePayloadPath, remote.Quote(bundleDir)),
+		fmt.Sprintf("rm -f %s", remotePayloadPath),
+		iapp.SwapCurrentScript(t.App, sha),
+		"sudo nginx -t && sudo systemctl reload nginx",
+		iapp.GCReleasesScript(t.App),
+	}, " && ")
+}
+
+// appRollbackScript repoints `current` at a bundle already present on the host
+// (no payload upload, no store fetch): it asserts the <sha> directory exists,
+// swaps `current`, and reloads nginx. It fails loudly when the SHA was never
+// delivered to this host rather than leaving `current` dangling.
+func appRollbackScript(t iapp.DeployTarget, sha string) string {
+	bundleDir := iapp.BundleDir(t.App, sha)
+	return strings.Join([]string{
+		fmt.Sprintf("{ test -d %s || { echo \"bundle %s not present on %s — release it before rolling back\" >&2; exit 1; }; }",
+			remote.Quote(bundleDir), sha, t.App),
+		iapp.SwapCurrentScript(t.App, sha),
+		"sudo nginx -t && sudo systemctl reload nginx",
+	}, " && ")
+}
+
+// appDeliveryTargets adapts resolved app deploy targets to the orchestrator's
+// targets, choosing the fresh-release or rollback apply script. SSHUser is always
+// set by BuildDeployDescriptor (it defaults to "deploy"), so it is used directly.
+func appDeliveryTargets(targets []iapp.DeployTarget, sha string, rollback bool) []deliveryTarget {
+	out := make([]deliveryTarget, 0, len(targets))
+	for _, t := range targets {
+		script, verb := appReleaseScript(t, sha), "releasing"
+		if rollback {
+			script, verb = appRollbackScript(t, sha), "rolling back"
+		}
+		out = append(out, deliveryTarget{
+			host:        t.IngressHostDNS,
+			sshUser:     t.SSHUser,
+			applyScript: script,
+			describe:    fmt.Sprintf("%s %s", verb, iapp.BundleDir(t.App, sha)),
+		})
+	}
+	return out
+}
+
+// appArtifactSlug is the R2 key namespace for an app's bundles. Apps are
+// namespaced under `app/` so an app and a service of the same name never collide
+// in the store — mirroring the on-host `/srv/wardnet/app/<name>` segmentation.
+func appArtifactSlug(name string) string { return "app/" + name }
+
+// --- inforge release app ------------------------------------------------------
+
+func newReleaseCmd(configPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "release",
+		Short: "Deliver a front-end (app) release to its ingress host",
+	}
+	cmd.AddCommand(newReleaseAppCmd(configPath))
+	return cmd
+}
+
+func newReleaseAppCmd(configPath *string) *cobra.Command {
+	var sha, bundleDir, stackConfig, sshKeyPath string
+	var rollback, dryRun bool
+	cmd := &cobra.Command{
+		Use:   "app <env> <name>",
+		Short: "Release (or roll back) a static app bundle to its ingress host",
+		Long: "Deliver an app's static bundle to its ingress host and atomically swap\n" +
+			"the served document root. With --bundle the local SPA build is packaged and\n" +
+			"pushed to the release store first; otherwise the bundle for --sha must already\n" +
+			"be in the store. --rollback re-points `current` at a SHA already on the host\n" +
+			"without re-fetching it.",
+		Args:          cobra.ExactArgs(2),
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runReleaseApp(cmd.Context(), *configPath, args[0], args[1], sha, bundleDir, stackConfig, sshKeyPath, rollback, dryRun)
+		},
+	}
+	cmd.Flags().StringVar(&sha, "sha", "", "bundle SHA to release (default: $GITHUB_SHA)")
+	cmd.Flags().StringVar(&bundleDir, "bundle", "", "local SPA build directory to package + push before releasing")
+	cmd.Flags().BoolVar(&rollback, "rollback", false, "re-point `current` at a SHA already on the host (no store fetch; incompatible with --bundle)")
+	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to the infra stack config file (default: inforge.<env>.yaml)")
+	cmd.Flags().StringVar(&sshKeyPath, "ssh-key", "", "path to the SSH deploy key (overrides INFORGE_DEPLOY_KEY)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve targets and verify the artifact without delivering")
+	return cmd
+}
+
+func runReleaseApp(ctx context.Context, configPath, env, name, sha, bundleDir, stackConfigPath, sshKeyPath string, rollback, dryRun bool) error {
+	if rollback && bundleDir != "" {
+		return fmt.Errorf("--rollback re-points an existing on-host bundle and cannot push --bundle")
+	}
+	sha, err := resolveSHA(sha)
+	if err != nil {
+		return err
+	}
+
+	projCfg, err := loadProjectConfig(configPath)
+	if err != nil {
+		return err
+	}
+	stackCfg, err := resolveStackConfig(stackConfigPath, env)
+	if err != nil {
+		return err
+	}
+
+	targets, err := resolveAppDeployTargets(ctx, projCfg, env, stackCfg, name)
+	if err != nil {
+		return err
+	}
+
+	store, err := newArtifactStore(ctx, projCfg)
+	if err != nil {
+		return err
+	}
+	slug := appArtifactSlug(name)
+
+	// Rollback never touches the store: the bundle is already on the host, so we
+	// only re-point `current` and reload. (We still resolve + verify the SSH key
+	// and record the manifest, so `releases list`-style history stays accurate.)
+	if rollback {
+		fmt.Printf("rolling back %s @ %s → %d host(s) (env: %s)\n", name, sha, len(targets), env)
+		for _, t := range targets {
+			fmt.Printf("  host: %s  fqdn: %s  path: %s\n", t.IngressHostDNS, t.FQDN, iapp.BundleDir(name, sha))
+		}
+		if dryRun {
+			fmt.Println("(dry-run: skipping rollback)")
+			return nil
+		}
+		sshKeyPath, err = resolveSSHKey(sshKeyPath)
+		if err != nil {
+			return err
+		}
+		return deliverRelease(ctx, store, slug, env, sha, appDeliveryTargets(targets, sha, true), "", sshKeyPath)
+	}
+
+	fmt.Printf("releasing %s @ %s → %d host(s) (env: %s)\n", name, sha, len(targets), env)
+	for _, t := range targets {
+		fmt.Printf("  host: %s  fqdn: %s  path: %s\n", t.IngressHostDNS, t.FQDN, iapp.BundleDir(name, sha))
+	}
+
+	// A dry-run must not mutate the store, so it neither packages+pushes --bundle
+	// nor prunes — it only reports what would happen.
+	if dryRun {
+		if bundleDir != "" {
+			fmt.Printf("(dry-run: would package + push %s then deliver, skipping)\n", bundleDir)
+			return nil
+		}
+		exists, err := store.ArtifactExists(ctx, slug, sha)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("bundle %s/%s.tar.gz not found in release store — pass --bundle <dir> to package and push it", slug, sha)
+		}
+		fmt.Println("(dry-run: artifact present, skipping delivery)")
+		return nil
+	}
+
+	// Optional push: package the local build and upload it under the app slug, so
+	// `release app --bundle ./dist` is a single build→deliver step.
+	if bundleDir != "" {
+		if err := pushAppBundle(ctx, store, slug, sha, bundleDir, projCfg.Artifacts.Keep); err != nil {
+			return err
+		}
+	}
+
+	exists, err := store.ArtifactExists(ctx, slug, sha)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("bundle %s/%s.tar.gz not found in release store — pass --bundle <dir> to package and push it", slug, sha)
+	}
+
+	sshKeyPath, err = resolveSSHKey(sshKeyPath)
+	if err != nil {
+		return err
+	}
+	payload, cleanup, err := downloadArtifact(ctx, store, slug, sha)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	return deliverRelease(ctx, store, slug, env, sha, appDeliveryTargets(targets, sha, false), payload, sshKeyPath)
+}
+
+// pushAppBundle packages a local SPA build directory and uploads it to the store
+// under the app slug, then prunes — the app analogue of `inforge releases push`,
+// but taking an explicit local directory (an app has no service deploy descriptor
+// to resolve an artifact path from).
+func pushAppBundle(ctx context.Context, store *release.Store, slug, sha, bundleDir string, keep int) error {
+	info, err := os.Stat(bundleDir)
+	if err != nil {
+		return fmt.Errorf("bundle dir: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("bundle dir %q is not a directory", bundleDir)
+	}
+
+	fmt.Printf("packaging bundle from %s...\n", bundleDir)
+	payload, cleanup, err := packageDir(ctx, bundleDir)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	f, err := os.Open(payload)
+	if err != nil {
+		return fmt.Errorf("open payload: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	fmt.Printf("uploading %s/%s.tar.gz...\n", slug, sha)
+	if err := store.PutArtifact(ctx, slug, sha, f); err != nil {
+		return err
+	}
+	deleted, err := store.Prune(ctx, slug, keep)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: prune incomplete: %v\n", err)
+	}
+	if len(deleted) > 0 {
+		fmt.Printf("pruned %d old bundle(s): %s\n", len(deleted), strings.Join(deleted, ", "))
+	}
+	return nil
+}
+
+// resolveDescriptorTargets connects to the infra Pulumi stack for env, reads the
+// named deploy-descriptor stack output, and returns its targets matching keep. It
+// is the shared resolver behind both the service (deployDescriptor) and app
+// (appDeployDescriptor) release paths — they differ only in the output key,
+// target type, and match predicate, not in the connect → read → decode plumbing.
+func resolveDescriptorTargets[T any](ctx context.Context, projCfg projectConfig, env, outputKey string, stackCfg stackConfig, keep func(T) bool) ([]T, error) {
+	s, _, err := upsertStack(ctx, env, projCfg)
+	if err != nil {
+		return nil, fmt.Errorf("connect to stack %q: %w", env, err)
+	}
+	if err := applyStackConfig(ctx, s, stackCfg); err != nil {
+		return nil, fmt.Errorf("apply stack config: %w", err)
+	}
+	outputs, err := s.Outputs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read stack outputs: %w", err)
+	}
+	raw, ok := outputs[outputKey]
+	if !ok {
+		return nil, fmt.Errorf("stack %q has no %s output — has inforge deploy been run for this environment?", env, outputKey)
+	}
+	// The Automation API deserialises pulumi.Any(descriptor) as
+	// map[string]interface{}; round-trip through JSON to get typed targets.
+	b, err := json.Marshal(raw.Value)
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s: %w", outputKey, err)
+	}
+	var descriptor struct {
+		Targets []T `json:"targets"`
+	}
+	if err := json.Unmarshal(b, &descriptor); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", outputKey, err)
+	}
+	var targets []T
+	for _, t := range descriptor.Targets {
+		if keep(t) {
+			targets = append(targets, t)
+		}
+	}
+	return targets, nil
+}
+
+// resolveAppDeployTargets returns every app.DeployTarget for name from the
+// appDeployDescriptor output (one per region a multi-region app fans out to).
+func resolveAppDeployTargets(ctx context.Context, projCfg projectConfig, env string, stackCfg stackConfig, name string) ([]iapp.DeployTarget, error) {
+	targets, err := resolveDescriptorTargets(ctx, projCfg, env, "appDeployDescriptor", stackCfg,
+		func(t iapp.DeployTarget) bool { return t.App == name })
+	if err != nil {
+		return nil, err
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("app %q not found in appDeployDescriptor for env %q — is it defined as an AppSpec in the infra resources?", name, env)
+	}
+	return targets, nil
+}
