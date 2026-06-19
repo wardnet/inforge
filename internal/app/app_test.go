@@ -67,3 +67,33 @@ func TestPaths(t *testing.T) {
 	assert.Equal(t, "/srv/wardnet/app/my/current", CurrentPath("my"))
 	assert.Equal(t, "/srv/wardnet/app/my/placeholder/index.html", PlaceholderIndexPath("my"))
 }
+
+// TestBundleDir: each release SHA gets its own sibling directory under the app
+// folder — the basis for rollback-by-symlink.
+func TestBundleDir(t *testing.T) {
+	assert.Equal(t, "/srv/wardnet/app/my/abc123", BundleDir("my", "abc123"))
+}
+
+// TestSwapCurrentScript: the swap stages a relative symlink under a temp name and
+// renames it over `current` with `mv -T`, so the document root flips atomically.
+// The target is the bare SHA (relative), not an absolute path.
+func TestSwapCurrentScript(t *testing.T) {
+	got := SwapCurrentScript("my", "abc123")
+	want := "sudo ln -sfn 'abc123' '/srv/wardnet/app/my/.current.tmp' && " +
+		"sudo mv -T '/srv/wardnet/app/my/.current.tmp' '/srv/wardnet/app/my/current'"
+	assert.Equal(t, want, got)
+}
+
+// TestGCReleasesScript: GC excludes the placeholder, the literal `current` symlink,
+// and whatever `current` resolves to, keeping the newest KeepReleases bundles.
+func TestGCReleasesScript(t *testing.T) {
+	got := GCReleasesScript("my")
+	assert.Contains(t, got, "cd '/srv/wardnet/app/my'")
+	assert.Contains(t, got, "current=$(readlink current")
+	assert.Contains(t, got, "grep -vx 'placeholder'")
+	assert.Contains(t, got, "grep -vx current")
+	assert.Contains(t, got, `grep -vx "$current"`)
+	// KeepReleases newest are retained: tail starts one past the kept window.
+	assert.Contains(t, got, "tail -n +6")
+	assert.Contains(t, got, "xargs -r sudo rm -rf")
+}

@@ -202,13 +202,8 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 	}
 	defer cleanup()
 
-	for _, t := range targets {
-		if err := sshDeliver(ctx, t, payload, sshKeyPath); err != nil {
-			return err
-		}
-		if err := store.SetDeployment(ctx, svc, env, t.HostDNS, sha, time.Now()); err != nil {
-			return fmt.Errorf("record manifest entry for %s: %w", t.HostDNS, err)
-		}
+	if err := deliverRelease(ctx, store, svc, env, sha, serviceDeliveryTargets(targets), payload, sshKeyPath); err != nil {
+		return err
 	}
 	fmt.Printf("deployed %s @ %s\n", svc, sha)
 	return nil
@@ -383,37 +378,6 @@ func downloadArtifact(ctx context.Context, store *release.Store, svc, sha string
 		return "", func() {}, fmt.Errorf("close payload: %w", err)
 	}
 	return payload, cleanup, nil
-}
-
-// sshDeliver scps an already-packaged payload to the target host, extracts it
-// into the service folder, and restarts the unit. The folder, service user, and
-// unit are provisioned by `inforge deploy`; this only delivers code + restarts.
-func sshDeliver(ctx context.Context, target service.DeployTarget, payloadFile, sshKeyPath string) error {
-	host := target.HostDNS
-	sshUser := target.SSHUser
-	if sshUser == "" {
-		sshUser = "deploy"
-	}
-	account := fmt.Sprintf("%s@%s", sshUser, host)
-	sshArgs := []string{"-i", sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"}
-
-	fmt.Printf("uploading to %s...\n", host)
-	scpArgs := append(sshArgs, payloadFile, account+":/tmp/inforge-payload.tgz")
-	if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("upload payload to %s: %w\n%s", host, err, out)
-	}
-
-	fmt.Printf("extracting to %s and restarting %s...\n", target.Folder, target.Unit)
-	remoteCmd := strings.Join([]string{
-		fmt.Sprintf("sudo tar -xzf /tmp/inforge-payload.tgz -C %s", target.Folder),
-		"rm -f /tmp/inforge-payload.tgz",
-		fmt.Sprintf("sudo systemctl restart %s", target.Unit),
-	}, " && ")
-	sshRunArgs := append(sshArgs, account, remoteCmd)
-	if out, err := exec.CommandContext(ctx, "ssh", sshRunArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("remote deploy to %s: %w\n%s", host, err, out)
-	}
-	return nil
 }
 
 // resolveDeployTargets connects to the infra Pulumi stack for env and returns

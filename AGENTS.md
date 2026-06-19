@@ -214,7 +214,7 @@ are **origin-served by our own nginx** (Let's Encrypt, HTTP-01 — no CDN edge: 
 SSL can't cover deep app hosts), and `ingress` is a **standalone, shared proxy tier** that fronts both
 services (slice B, live) and apps (slice C, live). See ADR-0026 (which supersedes the "realization-driven,
 no host-level resource" parts of ADR-0015). Slice landing: A = schema; B = ingress realization +
-service migration; **C (live) = app static serving + DNS + descriptor**; D = app release delivery.
+service migration; C = app static serving + DNS + descriptor; **D (live) = app release delivery + CLI**.
 
 - **Slice B — the type rename.** The inline per-service route struct is now `types.RouteSpec` and the
   ingress resource is `types.IngressSpec` (the slice-A `IngressResourceSpec` name is gone). `ServiceSpec`
@@ -258,9 +258,21 @@ service migration; **C (live) = app static serving + DNS + descriptor**; D = app
   block + cert provision before the first release.
 - **`internal/app`** is the app analogue of `internal/service`: pure on-host path scheme (`Folder` =
   `/srv/wardnet/app/<name>`, `CurrentPath` = `<folder>/current` — the nginx doc root the release path
-  swaps) + the **app deploy descriptor** (`app.BuildDeployDescriptor` → exported as the
-  `appDeployDescriptor` stack output: `{app, ingress_host_dns, deploy_path, fqdn, spa, ssh_user}` per
-  region), the contract slice D's `inforge release app` resolves an app's ingress host/path/FQDN from.
+  swaps; `BundleDir` = `<folder>/<sha>`; `SwapCurrentScript`/`GCReleasesScript` are the atomic-swap +
+  GC contract, see rule `.agents/rules/use-atomic-current-swap-for-app-releases.md`) + the **app deploy
+  descriptor** (`app.BuildDeployDescriptor` → exported as the `appDeployDescriptor` stack output:
+  `{app, ingress_host_dns, deploy_path, fqdn, spa, ssh_user}` per region), the contract slice D's
+  `inforge release app` resolves an app's ingress host/path/FQDN from.
+- **Slice D realization (`cmd/inforge/release.go`):** `inforge release app <env> <name>` delivers an
+  app bundle to its ingress host and atomically swaps the served root. The **delivery-adapter seam**
+  (`deliverRelease`) is the workload-agnostic transport — resolve targets → fetch by SHA from the R2
+  store → scp + apply on each host → record the per-env manifest. The **service** path
+  (`inforge releases deploy`) is refactored behind it as adapter #1 (`serviceApplyScript`, behaviour
+  unchanged); the **app** path is adapter #2 (`appReleaseScript`: extract into `<sha>` dir → atomic
+  `current` swap → `nginx -t && reload` → GC old bundles beyond `app.KeepReleases`). `--bundle <dir>`
+  packages + pushes a local SPA build first (app artifacts are namespaced under `app/<name>` in the
+  store); `--rollback` re-points `current` at a SHA already on the host without re-fetching. The
+  placeholder seed (`provisionApps`) now precedes the nginx reload via an explicit `DependsOn`.
 - **`internal/loader`** — `NormalizeIngress` and `NormalizeApp` trim free-text fields; loader reads
   `ingress/` and `app/` sub-folders in both scopes alongside the existing resource folders.
 - **`internal/validate`** — `checkIngress` enforces the same-scope `host:` FK (single-instance vm,

@@ -13,6 +13,7 @@ package app
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/regions"
@@ -32,6 +33,57 @@ func Folder(name string) string {
 // release path (slice D) atomically swaps it to a delivered bundle directory.
 func CurrentPath(name string) string {
 	return Folder(name) + "/current"
+}
+
+// BundleDir returns the on-host directory a specific release's bundle is
+// extracted into — <Folder>/<sha>. The release path (slice D) delivers each SHA
+// into its own directory and atomically swaps `current` to it; keeping every SHA
+// in a sibling directory is exactly what makes a rollback a symlink repoint
+// rather than a re-fetch from the store.
+func BundleDir(name, sha string) string {
+	return Folder(name) + "/" + sha
+}
+
+// KeepReleases is how many delivered bundle directories the release path retains
+// on the ingress host (beyond the placeholder and whatever `current` points at),
+// so a recent prior SHA can be rolled back to without re-fetching it. Older
+// bundles are garbage-collected after each swap — see GCReleasesScript.
+const KeepReleases = 5
+
+// SwapCurrentScript renders the host shell that atomically repoints an app's
+// `current` symlink at its <sha> bundle directory. It is the single source of
+// truth for the swap contract both provisioning (slice C placeholder seed) and
+// release (slice D) honour: a relative symlink staged under a temp name and
+// renamed over `current` with `mv -T`, so one rename(2) flips the document root
+// and nginx never observes a missing or half-written `current`. The target is the
+// bare <sha> (relative to the app folder) so the link is independent of the
+// folder's absolute location. See the atomic-current-swap rule in .agents/rules.
+func SwapCurrentScript(name, sha string) string {
+	folder := Folder(name)
+	tmp := folder + "/.current.tmp"
+	return fmt.Sprintf("sudo ln -sfn %s %s && sudo mv -T %s %s",
+		shQuote(sha), shQuote(tmp), shQuote(tmp), shQuote(CurrentPath(name)))
+}
+
+// GCReleasesScript renders the host shell that prunes delivered bundle
+// directories beyond KeepReleases newest, never touching the placeholder or the
+// directory `current` resolves to. `ls -1dt` orders newest-first so `tail` drops
+// only the oldest surplus; `xargs -r` is a no-op when nothing is surplus. It is
+// deliberately conservative — the live bundle and the placeholder are excluded by
+// name so a GC can never remove the document root out from under nginx.
+func GCReleasesScript(name string) string {
+	folder := Folder(name)
+	return fmt.Sprintf("cd %s && current=$(readlink current 2>/dev/null || true) && "+
+		"ls -1dt */ 2>/dev/null | sed 's:/$::' | grep -vx %s | grep -vx current | grep -vx \"$current\" | "+
+		"tail -n +%d | xargs -r sudo rm -rf",
+		shQuote(folder), shQuote(PlaceholderSubdir), KeepReleases+1)
+}
+
+// shQuote single-quote-wraps s for safe interpolation into a host shell command,
+// matching internal/remote.Quote without importing that (Pulumi-heavy) package —
+// internal/app is deliberately free of Pulumi/SSH dependencies.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // PlaceholderSubdir is the bundle directory name the placeholder is seeded into,
