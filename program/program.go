@@ -378,11 +378,11 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		// host-key-encrypted credential.age; a secret-less one (no bundle) gets a
 		// static descriptor with an empty provider and no env.
 		if bundle := bundles[svc.Name]; bundle != nil {
-			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, region, slug, baseDomain, gate); err != nil {
+			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, gate); err != nil {
 				return err
 			}
 		} else {
-			if err := deliverServiceDescriptor(ctx, svc, host, deployUser, deployPrivateKey, env, region, slug, baseDomain, gate); err != nil {
+			if err := deliverServiceDescriptor(ctx, svc, host, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, gate); err != nil {
 				return err
 			}
 		}
@@ -611,7 +611,7 @@ func interpolateGrantOutput(tmpl string, values map[string]pulumi.StringOutput) 
 // second command writes both files. The descriptor's provider.project is the
 // workspace ID, so it too is rendered inside an ApplyT on that output. Connection
 // details and the preview/up guards mirror provisionService.
-func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, region, slug, baseDomain string, gate pulumi.Resource) error {
+func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
@@ -632,7 +632,7 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 	// descriptor.yaml depends on the workspace ID (provider.project), so render it
 	// inside an ApplyT on that output.
 	descriptor := bundle.Project.ApplyT(func(project string) (string, error) {
-		return renderDescriptor(svc, bundle, project, env, region, slug, baseDomain)
+		return renderDescriptor(svc, bundle, project, env, region, slug, baseDomain, computeKey)
 	}).(pulumi.StringOutput)
 
 	// Encrypt {client_id, client_secret} to the host key inside an ApplyT over the
@@ -690,11 +690,11 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 // read, and no credential. The descriptor is fully known at plan time (no
 // workspace ID to resolve), so it needs no ApplyT. Connection details and the
 // preview/up guards mirror provisionService.
-func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, region, slug, baseDomain string, gate pulumi.Resource) error {
+func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
-	descriptor, err := renderDescriptor(svc, nil, "", env, region, slug, baseDomain)
+	descriptor, err := renderDescriptor(svc, nil, "", env, region, slug, baseDomain, computeKey)
 	if err != nil {
 		return err
 	}
@@ -719,9 +719,10 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 // secret-less service: the provider is left zero-valued and env nil, which the
 // bootstrapper reads as "no secrets to fetch". For a secret-bearing service,
 // project is the resolved workspace ID. The deployment block (region/env/domain/
-// namespace/fqdn) is derived from the deployment context and is present for every
-// service, secret-bearing or not.
-func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle, project, env, region, slug, baseDomain string) (string, error) {
+// fqdn/host) is derived from the deployment context and is present for every
+// service, secret-bearing or not. hostKey is the service's resolved compute key
+// ("<name>-<NN>", e.g. "bridge-01"); the host id is its full VM resource name.
+func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle, project, env, region, slug, baseDomain, hostKey string) (string, error) {
 	d := bootstrapper.Descriptor{
 		Version: bootstrapper.SupportedVersion,
 		Service: svc.Name,
@@ -732,8 +733,11 @@ func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle,
 			RegionSlug:  slug,
 			Environment: env,
 			BaseDomain:  baseDomain,
-			Namespace:   env + "." + slug + "." + svc.Name,
 			FQDN:        naming.ServiceFQDN(env, slug, svc.Name, baseDomain),
+			// Full VM resource name "wardnet-<env>-<slug>-vm-<name>-<NN>" — passing the
+			// "<name>-<NN>" hostKey as the name segment yields the same string as
+			// naming.ResourceInstance, so the host id matches the cloud server name.
+			HostID: naming.Resource(env, slug, "vm", hostKey),
 		},
 	}
 	if bundle != nil {

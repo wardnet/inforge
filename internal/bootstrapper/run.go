@@ -2,6 +2,8 @@ package bootstrapper
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 
@@ -63,13 +65,27 @@ func runBoot(dir string) error {
 		return err
 	}
 
-	envv, err := buildEnv(desc, secrets, user.home)
+	envv, err := buildEnv(desc, secrets, user.home, newInstanceID())
 	if err != nil {
 		return err
 	}
 	envv = append(envv, pathEnv...)
 
 	return dropAndExec(desc.Exec, user.uid, user.gid, envv)
+}
+
+// newInstanceID returns a fresh, per-(re)start unique identifier for the service
+// instance — 16 random bytes hex-encoded — injected as INFORGE_INSTANCE_ID (the
+// OTel service.instance.id). Because runBoot runs on every (re)start, a new value
+// is minted each time, distinguishing replicas and restarts. crypto/rand.Read does
+// not fail in practice; on the impossible error we return "" so the boot still
+// proceeds (a missing telemetry label is acceptable; a failed start is not).
+func newInstanceID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // runProject is the renewal-timer path: re-fetch and re-project the mesh PEMs for

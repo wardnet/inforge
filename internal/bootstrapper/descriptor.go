@@ -27,10 +27,11 @@ import (
 // (the producer) stamps this same constant into every descriptor it writes, so
 // producer and consumer can never disagree on the schema version. Because parsing
 // is strict (KnownFields), any field addition is a breaking change for an older
-// reader, so it bumps this major: v2 added the Deployment block and v3 added the
-// Files map, so an older bootstrapper meeting a newer descriptor fails cleanly on
-// the version rather than on an unknown field.
-const SupportedVersion = 3
+// reader, so it bumps this major: v2 added the Deployment block, v3 added the
+// Files map, and v4 swapped Deployment.Namespace for Deployment.HostID, so an older
+// bootstrapper meeting a newer descriptor fails cleanly on the version rather than
+// on an unknown field.
+const SupportedVersion = 4
 
 // Descriptor is the versioned, secret-free on-host contract inforge writes to
 // /etc/wardnet/services/<svc>/descriptor.yaml (0644 root). It names the service,
@@ -54,17 +55,21 @@ type Descriptor struct {
 }
 
 // Deployment is the secret-free deployment context inforge derives for a service
-// and the bootstrapper injects as INFORGE_DEPLOYMENT_* environment variables
-// (alongside, and independent of, the service's secrets). Every value is derived
-// from the environment, region and service — none is a secret — so it is delivered
-// in the plain descriptor and is present for secret-less services too.
+// and the bootstrapper injects as INFORGE_* environment variables (alongside, and
+// independent of, the service's secrets). Every value is derived from the
+// environment, region, service and host — none is a secret — so it is delivered in
+// the plain descriptor and is present for secret-less services too.
 type Deployment struct {
 	Region      string `yaml:"region"`      // abstract region, e.g. "us-east-1"
 	RegionSlug  string `yaml:"region_slug"` // region slug, e.g. "use1"
 	Environment string `yaml:"environment"` // environment name, e.g. "prd"
 	BaseDomain  string `yaml:"base_domain"` // e.g. "wardnet.network"
-	Namespace   string `yaml:"namespace"`   // "<env>.<slug>.<service>", e.g. "prd.use1.bridge"
 	FQDN        string `yaml:"fqdn"`        // service public FQDN, "<service>.svc.<env>.<slug>.<base>"
+	// HostID is the full VM resource name of the host this service runs on,
+	// "wardnet-<env>-<slug>-vm-<name>-<NN>" (e.g. "wardnet-prd-use1-vm-bridge-01").
+	// It is stable per host (does NOT change across restarts), so it is injected as
+	// INFORGE_HOST_ID — the OTel host.id resource attribute.
+	HostID string `yaml:"host_id"`
 }
 
 // LoadDescriptor reads and parses the descriptor at path.
