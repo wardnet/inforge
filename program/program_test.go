@@ -523,7 +523,7 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 		Env:          map[string]string{"DATABASE_URL": "infra/DATABASE_URL"},
 	}
 
-	out, err := renderDescriptor(svc, bundle, "ws-123", "prd", "us-east-1", "use1", "wardnet.network")
+	out, err := renderDescriptor(svc, bundle, "ws-123", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01")
 	require.NoError(t, err)
 
 	d, err := bootstrapper.ParseDescriptor([]byte(out))
@@ -537,13 +537,14 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 	assert.Equal(t, "prod", d.Provider.Environment)
 	assert.Equal(t, "/ghost", d.Provider.SecretPath)
 	assert.Equal(t, "infra/DATABASE_URL", d.Env["DATABASE_URL"])
-	// Deployment context is derived from env/region/slug/baseDomain + service name.
+	// Deployment context is derived from env/region/slug/baseDomain + service + host.
 	assert.Equal(t, "us-east-1", d.Deployment.Region)
 	assert.Equal(t, "use1", d.Deployment.RegionSlug)
 	assert.Equal(t, "prd", d.Deployment.Environment)
 	assert.Equal(t, "wardnet.network", d.Deployment.BaseDomain)
-	assert.Equal(t, "prd.use1.ghost", d.Deployment.Namespace)
 	assert.Equal(t, "ghost.svc.prd.use1.wardnet.network", d.Deployment.FQDN)
+	// host.id is the full VM resource name built from the resolved compute key.
+	assert.Equal(t, "wardnet-prd-use1-vm-ghost-01", d.Deployment.HostID)
 }
 
 // TestRenderDescriptorSecretLess: a nil bundle renders a secret-less descriptor —
@@ -552,7 +553,7 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 func TestRenderDescriptorSecretLess(t *testing.T) {
 	svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost"}
 
-	out, err := renderDescriptor(svc, nil, "", "prd", "us-east-1", "use1", "wardnet.network")
+	out, err := renderDescriptor(svc, nil, "", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01")
 	require.NoError(t, err)
 
 	d, err := bootstrapper.ParseDescriptor([]byte(out))
@@ -565,5 +566,5 @@ func TestRenderDescriptorSecretLess(t *testing.T) {
 	assert.Empty(t, d.Env)
 	// A secret-less service still carries the deployment context.
 	assert.Equal(t, "ghost.svc.prd.use1.wardnet.network", d.Deployment.FQDN)
-	assert.Equal(t, "prd.use1.ghost", d.Deployment.Namespace)
+	assert.Equal(t, "wardnet-prd-use1-vm-ghost-01", d.Deployment.HostID)
 }

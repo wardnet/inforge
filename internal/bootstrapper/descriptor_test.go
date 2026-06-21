@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const validDescriptor = `version: 3
+const validDescriptor = `version: 4
 service: ghost
 exec: /srv/wardnet/ghost/run
 user: ghost
@@ -39,9 +39,9 @@ func TestParseDescriptorValid(t *testing.T) {
 // TestParseDescriptorRejectsUnknownVersion is the fleet-skew safety: a descriptor
 // from a newer major must fail the start, never be misread.
 func TestParseDescriptorRejectsUnknownVersion(t *testing.T) {
-	// version: 2 is the pre-Files schema — a v3 bootstrapper must reject it
+	// version: 3 is the pre-HostID schema — a v4 bootstrapper must reject it
 	// cleanly on the version, not misread it.
-	for _, v := range []string{"version: 1", "version: 0", "version: 2", "version: 99"} {
+	for _, v := range []string{"version: 1", "version: 0", "version: 2", "version: 3", "version: 99"} {
 		doc := v + "\nservice: ghost\nexec: /x\nuser: ghost\nprovider:\n  kind: infisical\n"
 		_, err := ParseDescriptor([]byte(doc))
 		require.Error(t, err)
@@ -59,9 +59,9 @@ func TestParseDescriptorRejectsUnknownField(t *testing.T) {
 
 func TestParseDescriptorRequiresFields(t *testing.T) {
 	cases := map[string]string{
-		"service": "version: 3\nexec: /x\nuser: ghost\nprovider:\n  kind: infisical\n",
-		"exec":    "version: 3\nservice: ghost\nuser: ghost\nprovider:\n  kind: infisical\n",
-		"user":    "version: 3\nservice: ghost\nexec: /x\nprovider:\n  kind: infisical\n",
+		"service": "version: 4\nexec: /x\nuser: ghost\nprovider:\n  kind: infisical\n",
+		"exec":    "version: 4\nservice: ghost\nuser: ghost\nprovider:\n  kind: infisical\n",
+		"user":    "version: 4\nservice: ghost\nexec: /x\nprovider:\n  kind: infisical\n",
 	}
 	for missing, doc := range cases {
 		_, err := ParseDescriptor([]byte(doc))
@@ -72,7 +72,7 @@ func TestParseDescriptorRequiresFields(t *testing.T) {
 // TestParseDescriptorSecretLess: a descriptor with no provider is a secret-less
 // service — valid as long as it carries no env mapping.
 func TestParseDescriptorSecretLess(t *testing.T) {
-	doc := "version: 3\nservice: ghost\nexec: /x\nuser: ghost\n"
+	doc := "version: 4\nservice: ghost\nexec: /x\nuser: ghost\n"
 	d, err := ParseDescriptor([]byte(doc))
 	require.NoError(t, err)
 	assert.Equal(t, "", d.Provider.Kind)
@@ -82,7 +82,7 @@ func TestParseDescriptorSecretLess(t *testing.T) {
 // TestParseDescriptorRejectsEnvWithoutProvider: env with no provider is a
 // producer bug — there is nothing to resolve the keys against.
 func TestParseDescriptorRejectsEnvWithoutProvider(t *testing.T) {
-	doc := "version: 3\nservice: ghost\nexec: /x\nuser: ghost\nenv:\n  DATABASE_URL: infra/DATABASE_URL\n"
+	doc := "version: 4\nservice: ghost\nexec: /x\nuser: ghost\nenv:\n  DATABASE_URL: infra/DATABASE_URL\n"
 	_, err := ParseDescriptor([]byte(doc))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "provider.kind is empty")

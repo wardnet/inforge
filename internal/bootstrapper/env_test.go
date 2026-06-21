@@ -10,7 +10,8 @@ import (
 
 func TestBuildEnv(t *testing.T) {
 	d := Descriptor{
-		User: "ghost",
+		Service: "ghost",
+		User:    "ghost",
 		Env: map[string]string{
 			"DATABASE_URL": "infra/DATABASE_URL",
 			"STRIPE_KEY":   "custom/STRIPE_KEY",
@@ -21,7 +22,7 @@ func TestBuildEnv(t *testing.T) {
 		"custom/STRIPE_KEY":  "sk_live_secret",
 	}
 
-	env, err := buildEnv(d, secrets, "/home/ghost")
+	env, err := buildEnv(d, secrets, "/home/ghost", "abc123")
 	require.NoError(t, err)
 
 	assert.Contains(t, env, "PATH="+minimalPATH)
@@ -30,15 +31,19 @@ func TestBuildEnv(t *testing.T) {
 	assert.Contains(t, env, "LOGNAME=ghost")
 	assert.Contains(t, env, "DATABASE_URL=postgres://secret")
 	assert.Contains(t, env, "STRIPE_KEY=sk_live_secret")
+	// service.namespace = service name; service.instance.id = the per-restart id.
+	assert.Contains(t, env, "INFORGE_SERVICE_NAMESPACE=ghost")
+	assert.Contains(t, env, "INFORGE_INSTANCE_ID=abc123")
 }
 
 // TestBuildEnvSecretLess: a secret-less service (no env mapping, nil secrets)
-// gets only the minimal base env — the path run.go takes when there is no
-// provider, so it never touches a fetcher.
+// gets the minimal base env plus the always-present observability identity
+// (service.namespace) — the path run.go takes when there is no provider, so it
+// never touches a fetcher. An empty instanceID omits INFORGE_INSTANCE_ID.
 func TestBuildEnvSecretLess(t *testing.T) {
-	d := Descriptor{User: "ghost"}
+	d := Descriptor{Service: "ghost", User: "ghost"}
 
-	env, err := buildEnv(d, nil, "/home/ghost")
+	env, err := buildEnv(d, nil, "/home/ghost", "")
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{
@@ -46,33 +51,43 @@ func TestBuildEnvSecretLess(t *testing.T) {
 		"HOME=/home/ghost",
 		"USER=ghost",
 		"LOGNAME=ghost",
+		"INFORGE_SERVICE_NAMESPACE=ghost",
 	}, env)
 }
 
-// TestBuildEnvDeployment: the deployment context is injected as INFORGE_DEPLOYMENT_*
-// for every service (here, secret-less), independent of secrets.
+// TestBuildEnvDeployment: the deployment context is injected as INFORGE_* for
+// every service (here, secret-less), independent of secrets.
 func TestBuildEnvDeployment(t *testing.T) {
 	d := Descriptor{
-		User: "bridge",
+		Service: "bridge",
+		User:    "bridge",
 		Deployment: Deployment{
 			Region:      "us-east-1",
 			RegionSlug:  "use1",
 			Environment: "prd",
 			BaseDomain:  "wardnet.network",
-			Namespace:   "prd.use1.bridge",
 			FQDN:        "bridge.svc.prd.use1.wardnet.network",
+			HostID:      "wardnet-prd-use1-vm-bridge-01",
 		},
 	}
 
-	env, err := buildEnv(d, nil, "/home/bridge")
+	env, err := buildEnv(d, nil, "/home/bridge", "inst-9")
 	require.NoError(t, err)
 
 	assert.Contains(t, env, "INFORGE_DEPLOYMENT_REGION=us-east-1")
 	assert.Contains(t, env, "INFORGE_DEPLOYMENT_REGION_SLUG=use1")
-	assert.Contains(t, env, "INFORGE_DEPLOYMENT_ENVIRONMENT=prd")
+	assert.Contains(t, env, "INFORGE_DEPLOYMENT_ENV=prd")
 	assert.Contains(t, env, "INFORGE_DEPLOYMENT_BASE_DOMAIN=wardnet.network")
-	assert.Contains(t, env, "INFORGE_DEPLOYMENT_NAMESPACE=prd.use1.bridge")
 	assert.Contains(t, env, "INFORGE_DEPLOYMENT_FQDN=bridge.svc.prd.use1.wardnet.network")
+	assert.Contains(t, env, "INFORGE_HOST_ID=wardnet-prd-use1-vm-bridge-01")
+	assert.Contains(t, env, "INFORGE_SERVICE_NAMESPACE=bridge")
+	assert.Contains(t, env, "INFORGE_INSTANCE_ID=inst-9")
+	// The renamed/removed names must NOT appear.
+	assert.NotContains(t, env, "INFORGE_DEPLOYMENT_ENVIRONMENT=prd")
+	for _, e := range env {
+		assert.False(t, strings.HasPrefix(e, "INFORGE_DEPLOYMENT_NAMESPACE="),
+			"INFORGE_DEPLOYMENT_NAMESPACE was dropped in favour of INFORGE_SERVICE_NAMESPACE")
+	}
 }
 
 // TestBuildEnvRejectsReservedName: a secret mapped to a reserved INFORGE_* name
@@ -81,7 +96,7 @@ func TestBuildEnvDeployment(t *testing.T) {
 func TestBuildEnvRejectsReservedName(t *testing.T) {
 	d := Descriptor{User: "ghost", Provider: Provider{Kind: "infisical"}, Env: map[string]string{"INFORGE_DEPLOYMENT_REGION": "infra/INFORGE_DEPLOYMENT_REGION"}}
 
-	_, err := buildEnv(d, map[string]string{"infra/INFORGE_DEPLOYMENT_REGION": "x"}, "/home/ghost")
+	_, err := buildEnv(d, map[string]string{"infra/INFORGE_DEPLOYMENT_REGION": "x"}, "/home/ghost", "i")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reserved")
 }
@@ -91,11 +106,11 @@ func TestBuildEnvRejectsReservedName(t *testing.T) {
 func TestBuildEnvMissingSecretFails(t *testing.T) {
 	d := Descriptor{User: "ghost", Env: map[string]string{"DATABASE_URL": "infra/DATABASE_URL"}}
 
-	_, err := buildEnv(d, map[string]string{}, "/home/ghost")
+	_, err := buildEnv(d, map[string]string{}, "/home/ghost", "i")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found or empty")
 
-	_, err = buildEnv(d, map[string]string{"infra/DATABASE_URL": ""}, "/home/ghost")
+	_, err = buildEnv(d, map[string]string{"infra/DATABASE_URL": ""}, "/home/ghost", "i")
 	require.Error(t, err, "empty value must also fail")
 }
 
@@ -105,7 +120,7 @@ func TestBuildEnvDeterministicOrder(t *testing.T) {
 	d := Descriptor{User: "ghost", Env: map[string]string{"ZED": "infra/ZED", "ABE": "infra/ABE"}}
 	secrets := map[string]string{"infra/ZED": "z", "infra/ABE": "a"}
 
-	env, err := buildEnv(d, secrets, "/home/ghost")
+	env, err := buildEnv(d, secrets, "/home/ghost", "i")
 	require.NoError(t, err)
 	// The four base vars come first, then ABE before ZED.
 	abe, zed := -1, -1

@@ -103,9 +103,20 @@ Deploy-time and renewal leaf minting is live. Key packages:
 - **`providers/infisical.CertWriter`** — imperative (non-Pulumi) write path for `inforge pki renew`;
   authenticates once, caches workspace IDs; uses `workspaceName` / `servicePath` helpers shared with
   the Pulumi deploy path so renewed certs land at the same provider address deploy provisioned.
-- **`internal/bootstrapper.Descriptor`** — `SupportedVersion` is now **3**; the `Files` map
+- **`internal/bootstrapper.Descriptor`** — `SupportedVersion` is now **4**; the `Files` map
   (`env-var → provider secret key`) carries mesh material paths. A descriptor with `files:` but no
   `provider.kind` is rejected.
+- **Observability env-var contract (#134).** `bootstrapper.buildEnv` injects a non-secret OTel
+  resource-identity set into every service (under the reserved `INFORGE_*` prefix):
+  `INFORGE_SERVICE_NAMESPACE` (= service name, `service.namespace`), `INFORGE_INSTANCE_ID`
+  (random per-(re)start, generated in `runBoot` via `newInstanceID`, `service.instance.id`),
+  `INFORGE_DEPLOYMENT_ENV` (`deployment.environment.name`), `INFORGE_DEPLOYMENT_REGION_SLUG`
+  (`region`), and `INFORGE_HOST_ID` (full VM resource name, `host.id`). The v4 bump **dropped**
+  `Deployment.Namespace`/`INFORGE_DEPLOYMENT_NAMESPACE` and **renamed** the emitted env
+  `INFORGE_DEPLOYMENT_ENVIRONMENT` → `INFORGE_DEPLOYMENT_ENV`; it **added** `Deployment.HostID`.
+  The host id is built in `renderDescriptor` from the service's resolved compute key
+  (`naming.Resource(env, slug, "vm", hostKey)`), so it matches the cloud server name and is stable
+  across restarts.
 
 `inforge pki renew <env>` is the CLI entry point: it mints one leaf per (service, scope) and writes
 leaf cert + key + per-scope trust bundle to the secrets provider. It never runs the Pulumi program.

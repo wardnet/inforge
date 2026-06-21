@@ -169,7 +169,7 @@ A literal value (any string without a `ref:`/`env:`/`vault:` prefix) is committe
 it for non-secret per-service config only; use `vault:`, `env:` or `ref:` for anything sensitive.
 :::
 
-Env-var names in the reserved `INFORGE_DEPLOYMENT_*` namespace are rejected — see
+Env-var names in the reserved `INFORGE_*` namespace are rejected — see
 [Runtime environment](#runtime-environment).
 
 ## Ingress and routes
@@ -274,16 +274,19 @@ Every service is started by `inforge-bootstrap` (the systemd `ExecStart`), which
 environment from a minimal base (`PATH`, `HOME`, `USER`, `LOGNAME`), then injects:
 
 - the service's **environment variables** (from `environment.yaml`; see [Secrets](./secrets)), and
-- the **deployment context** as `INFORGE_DEPLOYMENT_*` variables — derived, non-secret values describing
-  where the service is running. These are present for **every** service, including secret-less ones.
+- the **observability/deployment context** as `INFORGE_*` variables — derived, non-secret values
+  describing where the service is running and which signals it emits. These are present for **every**
+  service, including secret-less ones, and double as OpenTelemetry resource attributes.
 
-| Variable | Example | Meaning |
-|----------|---------|---------|
-| `INFORGE_DEPLOYMENT_REGION` | `us-east-1` | Abstract region the service is deployed to. |
-| `INFORGE_DEPLOYMENT_REGION_SLUG` | `use1` | Region slug used in resource names and FQDNs. |
-| `INFORGE_DEPLOYMENT_ENVIRONMENT` | `prd` | Environment name (the `resources/<env>/` directory). |
-| `INFORGE_DEPLOYMENT_BASE_DOMAIN` | `wardnet.network` | The environment's base domain. |
-| `INFORGE_DEPLOYMENT_NAMESPACE` | `prd.use1.bridge` | `<env>.<slug>.<service>` — a unique per-deployment identifier. |
-| `INFORGE_DEPLOYMENT_FQDN` | `bridge.svc.prd.use1.wardnet.network` | The service's auto-derived public FQDN (`<service>.svc.<env>.<slug>.<base>`). |
+| Variable | Example | OTel attribute | Meaning |
+|----------|---------|----------------|---------|
+| `INFORGE_SERVICE_NAMESPACE` | `bridge` | `service.namespace` | The service name — stable across all of its instances, restarts and regions. |
+| `INFORGE_INSTANCE_ID` | `9f3a…` | `service.instance.id` | A unique id **regenerated on every (re)start** — distinguishes replicas and restarts. |
+| `INFORGE_HOST_ID` | `wardnet-prd-use1-vm-bridge-01` | `host.id` | The host's full VM resource name — **stable per host** (does not change across restarts). |
+| `INFORGE_DEPLOYMENT_REGION` | `us-east-1` | — | Abstract region the service is deployed to. |
+| `INFORGE_DEPLOYMENT_REGION_SLUG` | `use1` | `region` | Region slug used in resource names and FQDNs. |
+| `INFORGE_DEPLOYMENT_ENV` | `prd` | `deployment.environment.name` | Environment name (the `resources/<env>/` directory). |
+| `INFORGE_DEPLOYMENT_BASE_DOMAIN` | `wardnet.network` | — | The environment's base domain. |
+| `INFORGE_DEPLOYMENT_FQDN` | `bridge.svc.prd.use1.wardnet.network` | — | The service's auto-derived public FQDN (`<service>.svc.<env>.<slug>.<base>`). |
 
-The `INFORGE_DEPLOYMENT_*` names are reserved — do not map a secret to one of them.
+The `INFORGE_*` names are reserved — do not map a secret to one of them.
