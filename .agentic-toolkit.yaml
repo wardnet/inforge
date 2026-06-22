@@ -1,2 +1,2 @@
 extends:
-  - github.com/wardnet/agentic-stacks/stacks/wardnet.yaml@main
+  - github.com/wardnet/agentic-stacks/wardnet.yaml@main
