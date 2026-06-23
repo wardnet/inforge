@@ -38,4 +38,18 @@ const (
 	// directory host. A public resolver is used rather than 127.0.0.1:53 because
 	// stock cloud images run no local DNS server on :53.
 	resolverAddrs = "1.1.1.1 8.8.8.8 valid=300s"
+
+	// LoopbackBase is the first 127.0.0.1 port used by an internal TLS terminator
+	// when a public listen port is shared by tls-termination/app servers AND a
+	// forward (passthrough) service. In that "mixed" case the public socket moves
+	// to a stream{} ssl_preread server that fans known SNIs to these loopback
+	// terminators and the unknown SNI to the forward backend. One loopback port is
+	// assigned per mixed public port, ascending from this base. Validation reserves
+	// [LoopbackBase, LoopbackBase+MaxMixedPorts) on an ingress host so a co-located
+	// backend target never collides with it.
+	LoopbackBase = 11443
+
+	// MaxMixedPorts bounds the reserved loopback range (far above any real ingress,
+	// which has a handful of listen ports at most).
+	MaxMixedPorts = 64
 )

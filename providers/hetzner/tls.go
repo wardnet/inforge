@@ -54,6 +54,8 @@ func (h *HetznerTLS) Realize(
 	deployUser string,
 	routes []types.IngressRoute,
 	apps []types.IngressApp,
+	health []types.IngressHealth,
+	healthPort int,
 	backendIPs map[string]pulumi.StringOutput,
 	env string,
 	dependsOn []pulumi.Resource,
@@ -72,7 +74,7 @@ func (h *HetznerTLS) Realize(
 		}
 	}
 
-	writeScript, err := h.renderWriteScript(hostKey, routes, apps, backendIPs)
+	writeScript, err := h.renderWriteScript(hostKey, routes, apps, health, healthPort, backendIPs)
 	if err != nil {
 		return fmt.Errorf("ingress %q: %w", hostKey, err)
 	}
@@ -128,9 +130,9 @@ func (h *HetznerTLS) Realize(
 // Backend with the resolved IP before Render — so the upstream addresses are the
 // real private IPs, resolved at deploy time. In preview a cross-host backend IP is
 // unknown, so the apply (and the command that consumes it) is skipped entirely.
-func (h *HetznerTLS) renderWriteScript(hostKey string, routes []types.IngressRoute, apps []types.IngressApp, backendIPs map[string]pulumi.StringOutput) (pulumi.StringInput, error) {
+func (h *HetznerTLS) renderWriteScript(hostKey string, routes []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, backendIPs map[string]pulumi.StringOutput) (pulumi.StringInput, error) {
 	if len(backendIPs) == 0 {
-		cfg, err := nginx.Render(routes, apps)
+		cfg, err := nginx.Render(routes, apps, health, healthPort)
 		if err != nil {
 			return nil, err
 		}
@@ -162,7 +164,18 @@ func (h *HetznerTLS) renderWriteScript(hostKey string, routes []types.IngressRou
 			}
 			rendered[i] = r
 		}
-		cfg, err := nginx.Render(rendered, apps)
+		renderedHealth := make([]types.IngressHealth, len(health))
+		for i, hh := range health {
+			if hh.Backend == "" {
+				ip := resolved[hh.Service]
+				if ip == "" {
+					return "", fmt.Errorf("ingress %q: cross-host health for service %q has no resolved backend private IP", hostKey, hh.Service)
+				}
+				hh.Backend = ip
+			}
+			renderedHealth[i] = hh
+		}
+		cfg, err := nginx.Render(rendered, apps, renderedHealth, healthPort)
 		if err != nil {
 			return "", err
 		}

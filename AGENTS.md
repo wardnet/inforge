@@ -284,19 +284,49 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
   packages + pushes a local SPA build first (app artifacts are namespaced under `app/<name>` in the
   store); `--rollback` re-points `current` at a SHA already on the host without re-fetching. The
   placeholder seed (`provisionApps`) now precedes the nginx reload via an explicit `DependsOn`.
-- **`internal/loader`** — `NormalizeIngress` and `NormalizeApp` trim free-text fields; loader reads
-  `ingress/` and `app/` sub-folders in both scopes alongside the existing resource folders.
+- **SNI-preread coexistence + health tier (ADR-0027).** A `forward` (passthrough) route may now
+  **share a listen port** with `tls-termination` routes/apps. When a port carries both (a "mixed"
+  port), `nginx.Render` moves the public socket into `stream{}` with `ssl_preread`: a
+  `map $ssl_preread_server_name` routes known SNIs to internal `127.0.0.1:<loopback> ssl proxy_protocol`
+  terminators (the moved http servers) and the unknown SNI to the forward backend (the `default` — so
+  **one forward per port**). `set_real_ip_from 127.0.0.1; real_ip_header proxy_protocol;` recovers the
+  client address across the loopback hop. Loopback ports come from the reserved range
+  `[nginx.LoopbackBase, +nginx.MaxMixedPorts)` (`internal/nginx/paths.go`); a co-located backend
+  `target`/`health_probes_port` must avoid it (see rule
+  `.agents/rules/reserve-loopback-range-for-preread-terminators.md`). Non-mixed ports render
+  byte-identically to before. Forward exclusivity is now per-port **against other forwards only**
+  (`validate.checkService` via `ctx.forwardUsersByHost`); `:80` is still forbidden to a forward.
+- **Health probes (ADR-0027).** A service's optional `health_probes_port` (backend port) is surfaced
+  through the ingress's own `health_probes_port` (public listener, **default 81**, same field name on
+  both specs — see rule `.agents/rules/health-probes-port-semantics.md`). `nginx.Render` adds a plain-HTTP `http{}` server per health endpoint on that port,
+  matched **strictly** by `server_name` (the service's `naming.ServiceFQDN`) and reverse-proxied to
+  `backend:<health_probes_port>` — no `default_server`, so a wrong Host is 404. `IngressHealth` is the
+  derived per-host entry (`program.ingressHealthByHost`), backend-resolved like a route (cross-host
+  substituted in the provider apply). Firewall (`firewallPlanByHost`): the ingress host opens the
+  public health port (`0.0.0.0/0`) when ≥1 referencing service declares one; a cross-host backend opens
+  its `health_probes_port` privately to the network CIDR. `Render(routes, apps, health, healthPort)` and
+  `IngressProvider.Realize(... health, healthPort ...)` carry the new arguments; `resolveIngressServices`
+  now also admits health-only services (route-less).
+- **`internal/loader`** — `NormalizeIngress` and `NormalizeApp` trim free-text fields (and
+  `NormalizeIngress` defaults `health_probes_port` to 81); loader reads `ingress/` and `app/`
+  sub-folders in both scopes alongside the existing resource folders.
 - **`internal/validate`** — `checkIngress` enforces the same-scope `host:` FK (single-instance vm,
-  `global/` rejected) and unique ingress names; `checkApp` enforces the same-scope `ingress:` FK (see
-  rule `.agents/rules/app-ingress-fk-is-same-scope-only.md`) and unique app names/subdomains; `schemaSet`
-  now includes `ingress` and `app`. There is **no** cdn authority or dedicated availability pass — an
-  ingress inherits its compute host's provider, already covered by the compute provider-availability check.
-  **Name uniqueness is enforced generically:** `validateType` (the single validation pass used for
-  every resource type) rejects a duplicate `name:` within a scope for all types — network, compute,
-  database, service, pkiresource, ingress, app. When adding a new resource type, pass a name-extractor
-  func as the third argument to `validateType`; forgetting it would bypass the uniqueness check.
-  **`host:` FK resolution for compute-backed resources** (`service.host`, `ingress.host`) is
-  centralized in `resolveComputeHost(host, noun, ctx)` — see rule
+  `global/` rejected), unique ingress names, **one ingress per host** (`ingressNamesByHost` — see rule
+  `.agents/rules/one-ingress-per-host.md`), and health-port collision checks (must not be 80, must not
+  equal a route listen port, must stay out of the loopback reserved range); `checkApp` enforces the
+  same-scope `ingress:` FK (see rule `.agents/rules/app-ingress-fk-is-same-scope-only.md`) and unique
+  app names/subdomains; `schemaSet` now includes `ingress` and `app`. **Forward exclusivity** is now
+  per-port against other forwards only (`forwardUsersByHost`; a forward may coexist with
+  tls-termination on the same port). **Cross-host same-network check** is hoisted outside the
+  per-route loop so a health-only service (no routes, just `health_probes_port`) is also covered (see
+  rule `.agents/rules/cross-host-route-requires-same-network.md`). There is **no** cdn authority or
+  dedicated availability pass — an ingress inherits its compute host's provider, already covered by
+  the compute provider-availability check. **Name uniqueness is enforced generically:** `validateType`
+  (the single validation pass used for every resource type) rejects a duplicate `name:` within a scope
+  for all types — network, compute, database, service, pkiresource, ingress, app. When adding a new
+  resource type, pass a name-extractor func as the third argument to `validateType`; forgetting it
+  would bypass the uniqueness check. **`host:` FK resolution for compute-backed resources**
+  (`service.host`, `ingress.host`) is centralized in `resolveComputeHost(host, noun, ctx)` — see rule
   `.agents/rules/use-resolve-compute-host-for-host-fk.md`.
 
 ## Conventions

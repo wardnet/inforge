@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wardnet/inforge/internal/nginx"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/sizes"
 	"github.com/wardnet/inforge/internal/types"
@@ -589,8 +590,10 @@ func TestCheckServiceIngressRules(t *testing.T) {
 	base := func() regionContext {
 		c := ingressFKCtx()
 		c.portUsersByHost = map[string]map[int][]string{}
+		c.forwardUsersByHost = map[string]map[int][]string{}
 		c.targetUsersByHost = map[string]map[int][]string{}
 		c.tlsTermIngressByHost = map[string]bool{}
+		c.ingressHealthPort = map[string]int{}
 		return c
 	}
 	svc := func(in ...types.RouteSpec) types.ServiceSpec {
@@ -648,12 +651,23 @@ func TestCheckServiceIngressRules(t *testing.T) {
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "remove vanity")
 
-	// A forward port shared with another service -> FAIL (single-service-exclusive).
+	// Two forwards share one port -> FAIL (one passthrough per port: a single map default).
 	ctx = base()
 	ctx.portUsersByHost["bridge-01"] = map[int][]string{443: {"svc", "other"}}
+	ctx.forwardUsersByHost["bridge-01"] = map[int][]string{443: {"svc", "other"}}
 	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeForward, Listen: 443, Target: 8080}), ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "single-service-exclusive")
+
+	// A forward coexisting with a tls-termination on the SAME port -> OK (ssl_preread
+	// demuxes: known SNIs to the terminator, the unknown SNI to the forward). Only
+	// this service has the forward on 443, so it is the single map default.
+	ctx = base()
+	ctx.portUsersByHost["bridge-01"] = map[int][]string{443: {"svc", "other"}}
+	ctx.forwardUsersByHost["bridge-01"] = map[int][]string{443: {"svc"}}
+	ctx.tlsTermIngressByHost["bridge-01"] = true
+	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeForward, Listen: 443, Target: 8080}), ctx)
+	assert.Empty(t, errs)
 
 	// A forward on :80 collides with a tls-termination on the ingress (ACME owns :80).
 	ctx = base()
@@ -662,6 +676,118 @@ func TestCheckServiceIngressRules(t *testing.T) {
 	errs, _ = checkService(svc(types.RouteSpec{Type: types.IngressTypeForward, Listen: 80, Target: 8080}), ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "ACME owns :80")
+}
+
+func TestCheckServiceHealthRules(t *testing.T) {
+	base := func() regionContext {
+		c := ingressFKCtx()
+		c.portUsersByHost = map[string]map[int][]string{}
+		c.forwardUsersByHost = map[string]map[int][]string{}
+		c.targetUsersByHost = map[string]map[int][]string{}
+		c.tlsTermIngressByHost = map[string]bool{}
+		c.ingressHealthPort = map[string]int{"web": 81}
+		return c
+	}
+	svc := func(hp int, routes ...types.RouteSpec) types.ServiceSpec {
+		return types.ServiceSpec{Name: "svc", Host: "bridge", Type: "raw", User: "svc", Ingress: "web", HealthProbesPort: hp, Routes: routes}
+	}
+
+	// A backend health port distinct from everything -> OK.
+	errs, _ := checkService(svc(8081, types.RouteSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), base())
+	assert.Empty(t, errs)
+
+	// Co-located backend health port == the ingress's public health port -> FAIL.
+	errs, _ = checkService(svc(81), base())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "public health port")
+
+	// Backend health port collides with the service's own route target -> FAIL.
+	errs, _ = checkService(svc(8080, types.RouteSpec{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}), base())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "route target")
+
+	// Co-located health port in the reserved internal loopback range -> FAIL.
+	errs, _ = checkService(svc(nginx.LoopbackBase), base())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "reserved internal range")
+
+	// Backend health port collides with a public listen port on the backend host -> FAIL.
+	pubCtx := base()
+	pubCtx.portUsersByHost["bridge-01"] = map[int][]string{9999: {"other"}}
+	errs, _ = checkService(svc(9999), pubCtx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "public listen port")
+
+	// Backend health port is another service's backend target on the same host -> FAIL.
+	tgtCtx := base()
+	tgtCtx.targetUsersByHost["bridge-01"] = map[int][]string{9998: {"other"}}
+	errs, _ = checkService(svc(9998), tgtCtx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "belongs to a single service")
+
+	// A health endpoint without an ingress -> FAIL.
+	s := svc(8081)
+	s.Ingress = ""
+	errs, _ = checkService(s, base())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "|"), "must name the ingress")
+}
+
+func TestCheckIngressHealthPort(t *testing.T) {
+	base := func(healthPort int) (types.IngressSpec, regionContext) {
+		// baseCtx already resolves "bridge" -> single-instance vm "bridge-01".
+		c := baseCtx()
+		c.portUsersByHost = map[string]map[int][]string{"bridge-01": {443: {"svc"}}}
+		return types.IngressSpec{Name: "edge", Container: "bridge", Host: "bridge", HealthProbesPort: healthPort}, c
+	}
+
+	// Health port 81, distinct from the 443 listen -> no health error.
+	s, ctx := base(81)
+	errs, _ := checkIngress(s, ctx)
+	assert.NotContains(t, strings.Join(errs, "|"), "health_probes_port")
+
+	// Health port equals a route listen on this host -> FAIL.
+	s, ctx = base(443)
+	errs, _ = checkIngress(s, ctx)
+	assert.Contains(t, strings.Join(errs, "|"), "collides with a route listen port")
+
+	// Health port 80 is reserved for ACME -> FAIL.
+	s, ctx = base(80)
+	errs, _ = checkIngress(s, ctx)
+	assert.Contains(t, strings.Join(errs, "|"), "must not be 80")
+
+	// Health port in the reserved ssl_preread loopback range -> FAIL.
+	s, ctx = base(nginx.LoopbackBase)
+	errs, _ = checkIngress(s, ctx)
+	assert.Contains(t, strings.Join(errs, "|"), "reserved internal range")
+
+	// Two ingresses sharing one compute host -> FAIL.
+	s, ctx = base(81)
+	ctx.ingressNamesByHost = map[string][]string{"bridge-01": {"other-ingress", "edge"}}
+	errs, _ = checkIngress(s, ctx)
+	assert.Contains(t, strings.Join(errs, "|"), "hosts at most one ingress")
+}
+
+// TestCheckServiceHealthCrossHostNetwork: a health-only service (no routes) whose
+// host is on a different network than its ingress is rejected — the same-network
+// rule now covers health, not just routes.
+func TestCheckServiceHealthCrossHostNetwork(t *testing.T) {
+	c := baseCtx()
+	c.computeNames = map[string]bool{"bridge": true, "gateway": true}
+	c.computeCanonical = map[string]string{"bridge-01": "bridge-01", "bridge": "bridge-01", "gateway-01": "gateway-01", "gateway": "gateway-01"}
+	c.computeKind = map[string]string{"bridge-01": "vm", "gateway-01": "vm"}
+	c.computeDeployer = map[string]bool{"gateway-01": true}
+	c.computeNetwork = map[string]string{"bridge-01": "net", "gateway-01": "othernet"}
+	c.ingressNames = map[string]bool{"web": true}
+	c.ingressHost = map[string]string{"web": "bridge-01"}
+	c.ingressHealthPort = map[string]int{"web": 81}
+	c.portUsersByHost = map[string]map[int][]string{}
+	c.targetUsersByHost = map[string]map[int][]string{}
+
+	// gateway (othernet) hosts the service; ingress web is on bridge (net) -> FAIL.
+	s := types.ServiceSpec{Name: "probe", Host: "gateway", Type: "raw", User: "probe", Ingress: "web", HealthProbesPort: 8081}
+	errs, _ := checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "share a network")
 }
 
 func TestCheckServiceDeployUser(t *testing.T) {

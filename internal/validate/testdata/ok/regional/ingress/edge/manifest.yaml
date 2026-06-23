@@ -2,3 +2,6 @@
 name: edge
 container: bridge
 host: bridge
+# Public health port (default 81) — opened only because a service declares its own
+# health_probes_port (see web).
+health_probes_port: 81
