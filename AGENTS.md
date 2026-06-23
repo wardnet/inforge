@@ -252,7 +252,9 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
   name in the **same scope** (`ingress:` FK). `spa: true` enables the SPA deep-link fallback (404 →
   index.html). Like ingress, it carries no provider field — it inherits the ingress's (its host's). The
   public FQDN is the clean dotted form `naming.AppFQDN` (`<subdomain>.<base>` global,
-  `<subdomain>.<slug>.<base>` regional — **no env segment**, flatter than `ServiceFQDN`).
+  `<subdomain>.<slug>.<base>` regional — **no env segment for a static env**, flatter than
+  `ServiceFQDN`; the no-env-segment property is conditional — an ephemeral env inserts its slug
+  identity segment, see ADR-0028 and the Ephemeral environments section below).
 - **Slice C realization (`program.go` + `internal/nginx` + `providers/hetzner` + new `internal/app`):**
   the ingress nginx serves each referencing app from disk. `ingressAppsByHost` groups apps under their
   ingress's host as `types.IngressApp{Name,FQDN,Root,Spa}` (FQDN + `current`-symlink root pre-resolved);
@@ -328,6 +330,43 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
   would bypass the uniqueness check. **`host:` FK resolution for compute-backed resources**
   (`service.host`, `ingress.host`) is centralized in `resolveComputeHost(host, noun, ctx)` — see rule
   `.agents/rules/use-resolve-compute-host-for-host-fk.md`.
+
+## Ephemeral environments (ADR-0028)
+
+`inforge ephemeral up | down | reap` (alias `eph`) spins up, tears down, and reaps **ephemeral
+(preview) environments**: TTL-bounded, network-segregated clones of a source env's *definition*,
+deployed under a distinct generated slug identity, running the exact service/app SHAs live in the
+source. The grain is create-and-destroy (Hetzner bills a server until it is deleted, even powered off).
+
+- **Identity is decoupled from config source.** `program.Run` reads two stack-config values: the
+  identity `environment` (= the slug — every name, FQDN, label, SPIFFE scope) and the config-source
+  `source_environment` (the `resources/<src>/` tree, secrets, and `pki.enc.yaml` the loaders read).
+  `source_environment` defaults to `environment`, so a static env is byte-for-byte unchanged. **Only**
+  the loaders / secret-decrypt / PKI-store path switch to `source_environment`; everything else keeps
+  using the slug. The mesh-cert path mirrors this split via `renewMeshCertsAs(configEnv, identityEnv)`.
+- **`naming.AppFQDN` takes an `ephemeralSlug`** (ADR-0028 exception). A static env passes `""`
+  (URLs unchanged); an ephemeral env passes its slug, inserted after the subdomain
+  (`<sub>.<slug>.<base>` / `<sub>.<slug>.<region>.<base>`) so the clone never collides with the source's
+  app hostname. The flag/slug is threaded to `resolveIngressApps`/DNS/nginx/cert so all three agree.
+- **Hetzner labels** carry `ephemeral=true` + `expires_at` (epoch seconds — label values forbid `:`),
+  via `tags.Ephemeral` threaded `BuildRegistry → hetzner.New/NewCompute`. The labels are for orphan
+  **auditing only** — the reaper classifies from stack config, never from labels.
+- **`up`** = provision (Pulumi up under the slug) + replicate-deploy (no service/SHA args): for every
+  source service/app it reads `LoadManifest(name, source_environment)`, resolves each ephemeral host's
+  source counterpart (env-label swap on host DNS, `sourceHostDNS`), and delivers that host's SHA via the
+  existing `deliverRelease` path, writing `manifest.<slug>.yaml`. Per-host faithful; skip-and-reports a
+  workload not deployed in the source rather than failing `up`.
+- **`reap`** is three-signal, no confirmation: reap iff stack-config `ephemeral == "true"` AND
+  `expires_at` is past (the pure decision is `reapDecision`). Both are written only by `up`, so no
+  permanent stack can match. A missing or unreadable `expires_at` on an otherwise-ephemeral stack
+  triggers a **fail-safe reap** (the stack is a disposable preview; letting it run forever leaks
+  billing). A stack where the Pulumi config itself can't be read is warned and skipped, not reaped.
+  Destroys by default; `--dry-run` lists only.
+- **State backend is a hard requirement** (`requireObjectBackend`): the ephemeral commands need an
+  `r2`/`s3` backend (per-stack object keying + `ListStacks` enumeration) and hard-fail on
+  `git-branch`/`file`.
+- **Network segregation** is a structural invariant — never peer Networks or share one across envs;
+  see `.agents/rules/ephemeral-network-segregation.md`.
 
 ## Conventions
 

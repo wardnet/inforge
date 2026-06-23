@@ -5,10 +5,15 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/wardnet/inforge/internal/types"
 	"gopkg.in/yaml.v3"
 )
+
+// defaultEphemeralMaxTTL is the built-in hard ceiling on an ephemeral env's TTL,
+// applied when inforge.yaml's ephemeral.maxTtl is unset (ADR-0028).
+const defaultEphemeralMaxTTL = 24 * time.Hour
 
 type backendConfig struct {
 	// Type is one of: file, git-branch, s3, r2.
@@ -30,6 +35,35 @@ type projectConfig struct {
 	// Providers carries project-level provider defaults applied when a resource
 	// spec omits its provider field.
 	Providers types.ProviderDefaults `yaml:"providers"`
+	// Ephemeral configures the `inforge ephemeral` command group (ADR-0028).
+	// Optional — only the ephemeral commands read it.
+	Ephemeral ephemeralConfig `yaml:"ephemeral"`
+}
+
+// ephemeralConfig is the inforge.yaml `ephemeral:` block (ADR-0028).
+type ephemeralConfig struct {
+	// MaxTTL is the hard ceiling on an ephemeral env's TTL (a Go duration string,
+	// e.g. "24h"). A larger --ttl is rejected. Empty defaults to 24h.
+	MaxTTL string `yaml:"maxTtl"`
+}
+
+// maxTTL returns the configured TTL ceiling, defaulting to 24h when unset.
+func (e ephemeralConfig) maxTTL() (time.Duration, error) {
+	if e.MaxTTL == "" {
+		return defaultEphemeralMaxTTL, nil
+	}
+	d, err := time.ParseDuration(e.MaxTTL)
+	if err != nil {
+		return 0, fmt.Errorf("ephemeral.maxTtl %q: %w", e.MaxTTL, err)
+	}
+	// The ceiling must leave the [minEphemeralTTL, maxTtl] window non-empty —
+	// otherwise resolveTTL rejects every --ttl (the default and any explicit value)
+	// with a confusing per-invocation error. Catch the misconfiguration here, at
+	// the knob, rather than letting `up` fail unsatisfiably.
+	if d < minEphemeralTTL {
+		return 0, fmt.Errorf("ephemeral.maxTtl %q is below the minimum ephemeral TTL %s — no --ttl could ever satisfy both bounds", e.MaxTTL, minEphemeralTTL)
+	}
+	return d, nil
 }
 
 // artifactsConfig is the inforge.yaml `artifacts:` block: the release-store

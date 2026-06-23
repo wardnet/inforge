@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wardnet/inforge/internal/tags"
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
@@ -15,7 +16,7 @@ import (
 func TestRegistryUnknownProvider(t *testing.T) {
 	// nil ctx + nil regionTable: providers are built lazily, so construction is
 	// not triggered during this test. Only the "unknown provider" paths are hit.
-	r := BuildRegistry(nil, map[string]map[string]any{"hetzner": {"apiToken": "x"}}, nil, types.SSHConfig{}, nil, "test-project", "test", "us-east-1")
+	r := BuildRegistry(nil, map[string]map[string]any{"hetzner": {"apiToken": "x"}}, nil, types.SSHConfig{}, nil, "test-project", "test", "us-east-1", tags.Ephemeral{})
 
 	// "hetzner" is now a known network provider — must succeed.
 	np, err := r.Network("hetzner")

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/events"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/output"
@@ -93,30 +94,18 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 		humanW = os.Stderr
 	}
 
-	// The buffered channel decouples the Pulumi engine's blocking event sends
-	// from the consumer goroutine so a slow writer never stalls the engine.
-	p := output.NewPrinter(humanW)
-	ch := output.NewEventChannel()
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for ev := range ch {
-			p.Handle(ev)
-		}
-	}()
-
+	header := ""
 	if !jsonMode {
-		_, _ = fmt.Fprintf(os.Stdout, "Deploying (%s):\n\n", stackName)
+		header = fmt.Sprintf("Deploying (%s):\n\n", stackName)
 	}
-	var errBuf bytes.Buffer
-	_, upErr := s.Up(ctx,
-		optup.EventStreams(ch),
-		optup.ProgressStreams(io.Discard),
-		optup.ErrorProgressStreams(&errBuf),
-	)
-	wg.Wait()
-	p.Finish()
+	p, upErr := streamEngineRun(humanW, header, func(ch chan events.EngineEvent, progress, errProgress io.Writer) error {
+		_, err := s.Up(ctx,
+			optup.EventStreams(ch),
+			optup.ProgressStreams(progress),
+			optup.ErrorProgressStreams(errProgress),
+		)
+		return err
+	})
 
 	// Always produce the run report (file + $GITHUB_STEP_SUMMARY if set), on
 	// success or failure, so CI can surface it without any GitHub API call here.
@@ -128,12 +117,6 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 		if jsonMode {
 			_ = printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
 		}
-		// A per-resource failure is already explained in the Printer summary; only
-		// dump the raw engine error stream when nothing else accounts for the
-		// failure (e.g. a config error or plugin crash before any resource op).
-		if len(p.Failures()) == 0 && errBuf.Len() > 0 {
-			_, _ = fmt.Fprint(os.Stderr, errBuf.String())
-		}
 		return fmt.Errorf("deploy: %w", upErr)
 	}
 
@@ -144,4 +127,47 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 		return printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
 	}
 	return nil
+}
+
+// streamEngineRun renders a Pulumi engine event stream through the shared Printer
+// — per-resource lines plus an end-of-run summary — replacing Pulumi's raw
+// progress tree. It is the one place the engine-output plumbing lives, shared by
+// `deploy`, `ephemeral up`, and `ephemeral down`/`reap`: it owns the buffered
+// event channel (decoupling the engine's blocking sends from the draining
+// goroutine so a slow writer never stalls the engine), discards the raw progress
+// tree, and buffers ErrorProgressStreams so the two renderers never duplicate
+// output. run wires the provided channel + writers into an s.Up/s.Destroy call
+// and returns its error. On failure with no per-resource Failure recorded (e.g. a
+// config error before any op), the buffered engine error stream is dumped to
+// stderr. It returns the Printer (for report/summary access) and run's error.
+func streamEngineRun(w io.Writer, header string, run func(ch chan events.EngineEvent, progress, errProgress io.Writer) error) (*output.Printer, error) {
+	p := output.NewPrinter(w)
+	ch := output.NewEventChannel()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ev := range ch {
+			p.Handle(ev)
+		}
+	}()
+
+	if header != "" {
+		_, _ = fmt.Fprint(w, header)
+	}
+	var errBuf bytes.Buffer
+	runErr := run(ch, io.Discard, &errBuf)
+	wg.Wait()
+	p.Finish()
+
+	// The raw engine error stream is the fallback when the Printer recorded no
+	// per-resource Failure (e.g. a config error before any op). Write it to w — the
+	// same stream the Printer summary it substitutes for uses — so a caller whose
+	// human output is stdout (ephemeral up/down) doesn't have this one line split
+	// off to stderr. In JSON-mode deploy w is already stderr, so behaviour there is
+	// unchanged.
+	if runErr != nil && len(p.Failures()) == 0 && errBuf.Len() > 0 {
+		_, _ = fmt.Fprint(w, errBuf.String())
+	}
+	return p, runErr
 }

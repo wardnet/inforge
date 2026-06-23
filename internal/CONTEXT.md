@@ -14,6 +14,16 @@ A top-level deployment target the whole config is scoped to (e.g. `prd`, `dev`).
 exactly one; inforge never acts on multiple environments at once.
 _Avoid_: stage, tier.
 
+**Ephemeral environment**:
+A TTL-bounded, network-segregated clone of a source **Environment**, created on demand by
+`inforge ephemeral up` and torn down by `reap`/`down` (ADR-0028). Its defining property is that
+**identity is decoupled from config source**: the env's identity (a generated slug, e.g. `eph-7f3k`)
+drives every name, FQDN, label, and trust scope, while a `source_environment` stack-config value
+points the loaders, secret store, and PKI store at the source's `resources/<src>/` tree. So it deploys
+the *source's* definition under its *own* isolated identity, running the exact service/app SHAs live in
+the source, with empty data. A static **Environment** has `source_environment == environment` and is
+unchanged. _Avoid_: preview env (UI term), staging.
+
 **Region target**:
 An abstract region an environment deploys into, a key under `regions:` in `regions.yaml`. The shared
 resource set is defined **once** under `resources/<env>/{network,compute,…}` and instantiated into

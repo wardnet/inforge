@@ -27,6 +27,7 @@ type HetznerCompute struct {
 	provider          *hcloud.Provider
 	project           string
 	slug              string
+	eph               tags.Ephemeral
 	mu                sync.Mutex
 	firewalls         map[string]*hcloud.Firewall
 	// sshKeys is keyed by env since SSH keys are env-scoped (not region-scoped).
@@ -39,10 +40,11 @@ type HetznerCompute struct {
 
 // NewCompute creates a HetznerCompute provider. project is the inforge project
 // name used to label cloud resources. slug is the region slug used for resource
-// naming. regionOverrides is the output of ExtractRegionConfigs (the per-region
+// naming. eph carries the ADR-0028 ephemeral-env labels (zero value for a static
+// env). regionOverrides is the output of ExtractRegionConfigs (the per-region
 // realizations) and may be nil — Create then fails closed for any region that
 // has no realization.
-func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *hcloud.Provider, project, slug string, regionOverrides map[string]RegionConfig) *HetznerCompute {
+func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *hcloud.Provider, project, slug string, eph tags.Ephemeral, regionOverrides map[string]RegionConfig) *HetznerCompute {
 	if regionOverrides == nil {
 		regionOverrides = map[string]RegionConfig{}
 	}
@@ -53,6 +55,7 @@ func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *h
 		provider:          provider,
 		project:           project,
 		slug:              slug,
+		eph:               eph,
 		firewalls:         map[string]*hcloud.Firewall{},
 		sshKeys:           map[string][]*hcloud.SshKey{},
 		instanceCounters:  map[string]int{},
@@ -127,7 +130,7 @@ func (h *HetznerCompute) Create(
 				SubnetId: network.SubnetID.ToStringPtrOutput(),
 			},
 		},
-		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container)),
+		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container, h.eph)),
 	}
 
 	if spec.CloudInit != "" {
@@ -258,7 +261,7 @@ func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeS
 
 	fw, err := hcloud.NewFirewall(ctx, fwName, &hcloud.FirewallArgs{
 		Name:   pulumi.String(fwName),
-		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container)),
+		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container, h.eph)),
 		Rules:  rules,
 	}, h.providerOpts()...)
 	if err != nil {
@@ -282,7 +285,7 @@ func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, env string) ([]*hclo
 	}
 
 	// SSH keys are env-scoped, not container-scoped: omit container label.
-	keyLabels := toStringMap(tags.HetznerLabels(h.project, env, h.slug, ""))
+	keyLabels := toStringMap(tags.HetznerLabels(h.project, env, h.slug, "", h.eph))
 
 	userKeyName := naming.GlobalResource(env, "key", "user")
 	userKey, err := h.newOrImportSshKey(ctx, userKeyName, h.sshAuthorizedKeys, keyLabels)

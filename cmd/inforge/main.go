@@ -50,6 +50,7 @@ func rootCmd() *cobra.Command {
 		newSecretCmd(&dir),
 		newPkiCmd(&dir),
 		newServiceCmd(&cfg),
+		newEphemeralCmd(&cfg, &dir),
 	)
 
 	return root

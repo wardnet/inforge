@@ -12,6 +12,7 @@ import (
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/registry"
+	"github.com/wardnet/inforge/internal/tags"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -85,7 +86,7 @@ func TestCreateInfraGlobalScope(t *testing.T) {
 			},
 			"neon": {"apiKey": "k", "region": "aws-us-east-2"},
 		}
-		reg := registry.BuildRegistry(ctx, config, nil, types.SSHConfig{}, regions.Table{}, "proj", "prd", globalScope)
+		reg := registry.BuildRegistry(ctx, config, nil, types.SSHConfig{}, regions.Table{}, "proj", "prd", globalScope, tags.Ephemeral{})
 
 		res := types.Resources{
 			Network: []types.NetworkSpec{{

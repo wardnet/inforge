@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/registry"
+	"github.com/wardnet/inforge/internal/tags"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -167,7 +168,7 @@ func TestTLSAndServiceShareOneGate(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		reg := registry.BuildRegistry(ctx,
 			map[string]map[string]any{"hetzner": {"apiToken": "x"}},
-			nil, types.SSHConfig{DeployPrivateKey: "priv"}, nil, "proj", "prd", "us-east-1")
+			nil, types.SSHConfig{DeployPrivateKey: "priv"}, nil, "proj", "prd", "us-east-1", tags.Ephemeral{})
 		res := types.Resources{
 			Compute: []types.ComputeSpec{
 				{Name: "bridge", Provider: "hetzner", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
@@ -185,7 +186,7 @@ func TestTLSAndServiceShareOneGate(t *testing.T) {
 			"bridge-01": {PublicIP: pulumi.String("1.2.3.4").ToStringOutput()},
 		}
 		gates := map[string]pulumi.Resource{}
-		if err := realizeIngress(ctx, reg, res, computeOut, gates, nil, "priv", "prd", "use1", "example.com", types.ProviderDefaults{}); err != nil {
+		if err := realizeIngress(ctx, reg, res, computeOut, gates, nil, "priv", "prd", "use1", "example.com", "", types.ProviderDefaults{}); err != nil {
 			return err
 		}
 		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", "us-east-1", "use1", "example.com", "1.2.3")

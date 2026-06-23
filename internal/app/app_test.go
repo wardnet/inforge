@@ -24,7 +24,7 @@ func TestBuildDeployDescriptor(t *testing.T) {
 	}
 	table := regions.Table{"us-east-1": {Slug: "use1"}}
 
-	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, table)
+	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, table, "")
 	require.NoError(t, err)
 	require.Len(t, desc.Targets, 1)
 	tg := desc.Targets[0]
@@ -44,7 +44,7 @@ func TestBuildDeployDescriptorDefaultSSHUser(t *testing.T) {
 		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
 		App:     []types.AppSpec{{Name: "my", Ingress: "web", Subdomain: "my"}},
 	}
-	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, regions.Table{"us-east-1": {Slug: "use1"}})
+	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, regions.Table{"us-east-1": {Slug: "use1"}}, "")
 	require.NoError(t, err)
 	require.Len(t, desc.Targets, 1)
 	assert.Equal(t, "deploy", desc.Targets[0].SSHUser)
@@ -56,7 +56,7 @@ func TestBuildDeployDescriptorSkipsUnresolvedIngress(t *testing.T) {
 	res := types.Resources{
 		App: []types.AppSpec{{Name: "orphan", Ingress: "missing", Subdomain: "x"}},
 	}
-	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, regions.Table{"us-east-1": {Slug: "use1"}})
+	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, regions.Table{"us-east-1": {Slug: "use1"}}, "")
 	require.NoError(t, err)
 	assert.Empty(t, desc.Targets)
 }
