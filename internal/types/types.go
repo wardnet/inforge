@@ -40,9 +40,10 @@ type NetworkSpec struct {
 // from the apps and services that reference this ingress (a service via its
 // Ingress FK, contributing its Routes; an app via its Ingress FK).
 type IngressSpec struct {
-	Name      string `yaml:"name"`
-	Container string `yaml:"container"`
-	Host      string `yaml:"host"` // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
+	Name             string `yaml:"name"`
+	Container        string `yaml:"container"`
+	Host             string `yaml:"host"`                         // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
+	HealthProbesPort int    `yaml:"health_probes_port,omitempty"` // public port nginx exposes service health checks on (defaults to 81 when omitted); opened only when a referencing service declares its own health_probes_port
 }
 
 // AppSpec is one front-end (static SPA) resource — a bundle served from an
@@ -179,6 +180,22 @@ const (
 	IngressTypeForward        = "forward"
 )
 
+// DefaultHealthProbesPort is the public port an ingress exposes service health
+// checks on when its manifest omits health_probes_port.
+const DefaultHealthProbesPort = 81
+
+// EffectiveHealthProbesPort is the single source of truth for the public health
+// port an ingress exposes: its declared health_probes_port, or DefaultHealthProbesPort
+// when omitted. The loader normalizes the field to this value, but validation and the
+// deploy program also call it so a spec built without the loader still resolves
+// correctly.
+func (s IngressSpec) EffectiveHealthProbesPort() int {
+	if s.HealthProbesPort == 0 {
+		return DefaultHealthProbesPort
+	}
+	return s.HealthProbesPort
+}
+
 // GrantSpec is one entry in a service's grants: list — a declared, permissioned
 // access to a Grantable resource (a Database or a PKI resource), materialized as
 // the env vars in Outputs (ADR-0025). It is topological — it wires the service to
@@ -201,17 +218,18 @@ type GrantSpec struct {
 
 // ServiceSpec is one service resource — a workload hosted on a compute.
 type ServiceSpec struct {
-	Name        string            `yaml:"name"`
-	Container   string            `yaml:"container"`
-	Host        string            `yaml:"host"`              // FK -> bare compute name (e.g. "bridge", not "bridge-01"); kind must be vm
-	Type        string            `yaml:"type"`              // "raw" (built) | "container" (reserved)
-	User        string            `yaml:"user,omitempty"`    // no-login system user the service runs as; raw only
-	Pki         string            `yaml:"pki"`               // FK -> two-tier (mesh) PKI name in pki.enc.yaml this service is a leaf member of (required)
-	Reload      string            `yaml:"reload,omitempty"`  // optional ExecReload command to apply a renewed mesh leaf without downtime (e.g. "/bin/kill -HUP $MAINPID"); absent -> renewal restarts the unit
-	Ingress     string            `yaml:"ingress,omitempty"` // FK -> ingress resource name (same scope) whose nginx fronts this service's Routes; required when Routes is non-empty
-	Routes      []RouteSpec       `yaml:"routes,omitempty"`  // typed inbound routes (tls-termination / forward) realized on the referenced ingress's nginx
-	Grants      []GrantSpec       `yaml:"grants,omitempty"`  // permissioned access to Grantable resources (database/pki), materialized as env vars (ADR-0025)
-	Environment map[string]string `yaml:"-"`                 // env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); loaded from the service's sibling environment.yaml, not the manifest; the secrets provider is derived from the region, not the service
+	Name             string            `yaml:"name"`
+	Container        string            `yaml:"container"`
+	Host             string            `yaml:"host"`                         // FK -> bare compute name (e.g. "bridge", not "bridge-01"); kind must be vm
+	Type             string            `yaml:"type"`                         // "raw" (built) | "container" (reserved)
+	User             string            `yaml:"user,omitempty"`               // no-login system user the service runs as; raw only
+	Pki              string            `yaml:"pki"`                          // FK -> two-tier (mesh) PKI name in pki.enc.yaml this service is a leaf member of (required)
+	Reload           string            `yaml:"reload,omitempty"`             // optional ExecReload command to apply a renewed mesh leaf without downtime (e.g. "/bin/kill -HUP $MAINPID"); absent -> renewal restarts the unit
+	Ingress          string            `yaml:"ingress,omitempty"`            // FK -> ingress resource name (same scope) whose nginx fronts this service's Routes; required when Routes is non-empty
+	Routes           []RouteSpec       `yaml:"routes,omitempty"`             // typed inbound routes (tls-termination / forward) realized on the referenced ingress's nginx
+	HealthProbesPort int               `yaml:"health_probes_port,omitempty"` // backend port this service serves health checks on; surfaced through the ingress's public health port, Host-demuxed by the service FQDN (requires Ingress)
+	Grants           []GrantSpec       `yaml:"grants,omitempty"`             // permissioned access to Grantable resources (database/pki), materialized as env vars (ADR-0025)
+	Environment      map[string]string `yaml:"-"`                            // env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); loaded from the service's sibling environment.yaml, not the manifest; the secrets provider is derived from the region, not the service
 }
 
 // PKIResourceSpec is one PKI resource — a root-only Certificate Authority that
@@ -273,6 +291,22 @@ type IngressApp struct {
 	FQDN string // fully-qualified app domain (single SNI / ACME cert)
 	Root string // on-host document root nginx serves (the `current` symlink)
 	Spa  bool   // true -> try_files fallback to /index.html (SPA deep links)
+}
+
+// IngressHealth is one service health endpoint the ingress proxy (nginx) surfaces,
+// derived from a service that references the ingress and declares a
+// HealthProbesPort. Unlike a route it is plain HTTP (no TLS): every health entry
+// on a host shares the ingress's single public health port and is demuxed strictly
+// by FQDN (the request Host header / server_name), then reverse-proxied to the
+// service's backend health port. FQDN is the service's canonical naming.ServiceFQDN
+// (a forward-only service still has this derived name); Backend is resolved like a
+// route's ("127.0.0.1" co-located, the backend's private IP cross-host) before it
+// reaches the provider; Target is the backend health port.
+type IngressHealth struct {
+	Service string
+	FQDN    string // canonical service FQDN matched as server_name / Host
+	Target  int    // backend port the service serves health checks on
+	Backend string // backend address nginx proxies to ("127.0.0.1" co-located; private IP cross-host)
 }
 
 // NetworkOutputs are the values a NetworkProvider returns after creating a
@@ -411,15 +445,17 @@ type DnsProvider interface {
 // ingress host). The provider renders the config inside an apply over these
 // outputs, substituting each cross-host route's Backend with the resolved private
 // IP; co-located routes already carry "127.0.0.1". Apps carry no backend, so they
-// render synchronously. Realize installs nginx once per host, writes its config,
-// and reloads — and must be safe to re-run as routes/apps change.
+// render synchronously. health entries resolve their backend the same way routes
+// do (cross-host substituted from backendIPs); healthPort is the ingress's public
+// health listener port. Realize installs nginx once per host, writes its config,
+// and reloads — and must be safe to re-run as routes/apps/health change.
 //
 // env scopes the names of the Pulumi resources it creates. dependsOn carries the
 // host's cloud-init readiness gate (and any other prerequisites): the provider must
 // make its first per-host SSH command depend on it so realization never races
 // deploy_user creation.
 type IngressProvider interface {
-	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, apps []IngressApp, backendIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
+	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, apps []IngressApp, health []IngressHealth, healthPort int, backendIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
 }
 
 // DatabaseProvider creates a managed database.

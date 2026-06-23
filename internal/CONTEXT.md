@@ -103,13 +103,24 @@ and `vanity` (tls-termination only). nginx is **always** the host's sole public 
 service has ingress: the service binds `127.0.0.1:<target>` and nginx fronts it. `tls-termination`
 terminates ACME TLS and reverse-proxies to the target (several services may share a `listen` port,
 SNI-demuxed by `server_name`); `forward` stream-forwards the raw L4 connection to the target with the
-PROXY protocol (single-service-exclusive port; backend owns its TLS). A `tls-termination` entry owns the
+PROXY protocol (one passthrough per port; backend owns its TLS). A `forward` **may share a port** with
+`tls-termination` routes: nginx `ssl_preread` routes known SNIs to the terminators and the unknown SNI
+to the forward (the map default — hence one forward per port). See ADR-0027. A `tls-termination` entry owns the
 service's auto-derived `<svc>.svc` SNI/cert FQDN plus any **vanity** names. There is **no** host-level
 ingress resource — nginx realization is driven by ingress presence, provider taken from the host's
 compute. A truly raw public port (no proxy) is a `compute.firewall.inbound` rule, not ingress. ACME owns
 `:80`, so a `forward` on `:80` can't coexist with a `tls-termination` on the host. See ADR-0015.
 _Avoid_: a "tls-termination resource" (removed — it is a route *type*, not a resource); authoring SNIs
 by hand (they are derived — see **DNS authority**); "passthrough"/"catch-all" (the old model).
+
+**Health probe**:
+A service's optional `health_probes_port` — the **backend** port it serves health checks on. The
+**Ingress** declares its own `health_probes_port` (the **public** listener, default `81`), opened only
+when a referencing service declares one. nginx surfaces health as **plain HTTP** on that public port,
+demuxed **strictly** by request `Host` (= the service's `<svc>.svc` FQDN / `server_name`) and
+reverse-proxied to `backend:<health_probes_port>`; a wrong/absent Host is a 404 (no default server).
+See ADR-0027. _Avoid_: TLS on the health port; a per-service public health port; relying on a default
+server to match any Host.
 
 **DNS authority**:
 The single DNS provider + zone for one (env, region), declared in `regions.yaml` under `dns:`

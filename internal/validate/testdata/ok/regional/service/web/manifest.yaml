@@ -5,9 +5,19 @@ type: raw
 user: web
 pki: wardnet-mesh
 ingress: edge
+# Backend port web serves health checks on; surfaced through edge's public health
+# port (81), Host-demuxed by web's FQDN. Distinct from its route target (3000).
+health_probes_port: 3001
 routes:
   # web shares listen 443 with api: two tls-termination services on one host are
   # demuxed by nginx server_name (SNI), so a shared port is legal here.
   - type: tls-termination
     listen: 443
     target: 3000
+  # web also exposes a passthrough (forward) on 443: ssl_preread routes the known
+  # tls-termination SNIs to the terminators and the unknown SNI to this forward. A
+  # forward MAY coexist with tls-termination on one port; it is the single map
+  # default, so at most one forward per (host, port).
+  - type: forward
+    listen: 443
+    target: 3443

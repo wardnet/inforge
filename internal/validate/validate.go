@@ -22,6 +22,7 @@ import (
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/meshcert"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/nginx"
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/secretstore"
@@ -196,10 +197,25 @@ type regionContext struct {
 	pkiResources map[string]string
 	// portUsersByHost maps a canonical INGRESS host specKey to, per listen port, the
 	// names of the services with a route on that port (where the ingress nginx
-	// holds the public port). It enforces that a forward port is
-	// single-service-exclusive (and, since forward is the only non-terminating type,
-	// that any shared port is tls-termination).
+	// holds the public port). It is the public-port collision oracle (e.g. a backend
+	// target may not equal a public listen port on its host).
 	portUsersByHost map[string]map[int][]string
+	// forwardUsersByHost maps a canonical INGRESS host specKey to, per listen port,
+	// the names of the services with a FORWARD route on that port. A forward port is
+	// single-service-exclusive — at most one passthrough per (ingress host, port) —
+	// but a forward MAY coexist with tls-termination routes on the same port (nginx
+	// ssl_preread demuxes known SNIs to the terminators and the unknown SNI to the
+	// forward). So exclusivity is enforced against forwards only, not all routes.
+	forwardUsersByHost map[string]map[int][]string
+	// ingressHealthPort maps an ingress resource name to the public health port it
+	// exposes (its health_probes_port, defaulting to 81) so checkService/checkIngress
+	// can enforce the health-port collision rules.
+	ingressHealthPort map[string]int
+	// ingressNamesByHost maps a canonical compute host specKey to the ingress resources
+	// that reference it. A host may host at most one ingress — the derived nginx config,
+	// firewall, and health port are per-host, so two ingresses on one host would silently
+	// merge/override. checkIngress rejects a shared host.
+	ingressNamesByHost map[string][]string
 	// targetUsersByHost maps a canonical BACKEND host specKey (the service's own
 	// host) to, per target port, the names of the services binding it. A target must
 	// belong to a single service on its host, and — only when the service is
@@ -417,8 +433,11 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		ingressHost:          map[string]string{},
 		appSubdomainCounts:   map[string]int{},
 		portUsersByHost:      map[string]map[int][]string{},
+		forwardUsersByHost:   map[string]map[int][]string{},
 		targetUsersByHost:    map[string]map[int][]string{},
 		tlsTermIngressByHost: map[string]bool{},
+		ingressHealthPort:    map[string]int{},
+		ingressNamesByHost:   map[string][]string{},
 		pkiResources:         map[string]string{},
 		encStore:             encStore,
 		providerDefaults:     defaults,
@@ -459,11 +478,13 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for _, f := range ingressFiles {
 		if f.parseErr == nil {
 			ctx.ingressNames[f.spec.Name] = true
+			ctx.ingressHealthPort[f.spec.Name] = f.spec.EffectiveHealthProbesPort()
 			// Record the ingress's host (canonical specKey) so checkService can test
 			// co-location and the same-network rule. A host FK that does not resolve
 			// is left absent — checkIngress reports it.
 			if hk := canonicalHost(f.spec.Host, ctx); hk != "" {
 				ctx.ingressHost[f.spec.Name] = hk
+				ctx.ingressNamesByHost[hk] = append(ctx.ingressNamesByHost[hk], f.spec.Name)
 			}
 		}
 	}
@@ -481,11 +502,23 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		if f.parseErr != nil {
 			continue
 		}
-		if f.spec.Ingress == "" || len(f.spec.Routes) == 0 {
+		// A service is in the ingress tier when it exposes routes OR a health endpoint
+		// (a health-only service still binds a backend health port that must be
+		// collision-checked like a route target).
+		if f.spec.Ingress == "" || (len(f.spec.Routes) == 0 && f.spec.HealthProbesPort == 0) {
 			continue
 		}
 		ingHost, ingOK := ctx.ingressHost[f.spec.Ingress]
 		backendHost := canonicalHost(f.spec.Host, ctx)
+		// The backend health port is a backend bind, so it shares the target space of
+		// the service's host — register it alongside route targets so a collision with
+		// another service's target (or this service's own routes) is detectable.
+		if f.spec.HealthProbesPort != 0 && backendHost != "" {
+			if ctx.targetUsersByHost[backendHost] == nil {
+				ctx.targetUsersByHost[backendHost] = map[int][]string{}
+			}
+			ctx.targetUsersByHost[backendHost][f.spec.HealthProbesPort] = append(ctx.targetUsersByHost[backendHost][f.spec.HealthProbesPort], f.spec.Name)
+		}
 		for _, rt := range f.spec.Routes {
 			if ingOK {
 				if ctx.portUsersByHost[ingHost] == nil {
@@ -494,6 +527,12 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 				ctx.portUsersByHost[ingHost][rt.Listen] = append(ctx.portUsersByHost[ingHost][rt.Listen], f.spec.Name)
 				if rt.Type == types.IngressTypeTLSTermination {
 					ctx.tlsTermIngressByHost[ingHost] = true
+				}
+				if rt.Type == types.IngressTypeForward {
+					if ctx.forwardUsersByHost[ingHost] == nil {
+						ctx.forwardUsersByHost[ingHost] = map[int][]string{}
+					}
+					ctx.forwardUsersByHost[ingHost][rt.Listen] = append(ctx.forwardUsersByHost[ingHost][rt.Listen], f.spec.Name)
 				}
 			}
 			if backendHost != "" {
@@ -1125,22 +1164,26 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 			errs = append(errs, fmt.Sprintf("ingress: %q does not resolve to an ingress resource in this scope", s.Ingress))
 		}
 	}
+	// ingHost is the ingress's host ("" when the FK did not resolve); backendHost is
+	// the service's own host. The maps below tolerate an empty key. Hoisted out of
+	// the routes block so the health checks (a service may expose health without any
+	// route) share the same co-location test.
+	ingHost := ctx.ingressHost[s.Ingress]
+	backendHost := canonical
+	coLocated := ingHost != "" && backendHost != "" && ingHost == backendHost
+	// Cross-host reachability (a route's backend OR a health endpoint) rides the
+	// private network, so the ingress host and the backend host must share a network
+	// (same Hetzner Network — subnets within it are mutually routable). Checked once
+	// for the whole ingress tier, not only for routes, so a health-only service on a
+	// different network is rejected rather than silently unreachable.
+	if (len(s.Routes) > 0 || s.HealthProbesPort != 0) && ingHost != "" && backendHost != "" && ingHost != backendHost {
+		if ingNet, svcNet := ctx.computeNetwork[ingHost], ctx.computeNetwork[backendHost]; ingNet != svcNet {
+			errs = append(errs, fmt.Sprintf("ingress: cross-host routing requires ingress %q and this service to share a network, but the ingress host is on network %q and this service's host is on %q", s.Ingress, ingNet, svcNet))
+		}
+	}
 	if len(s.Routes) > 0 {
 		if s.Ingress == "" {
 			errs = append(errs, "ingress: a service with routes must name the ingress resource that fronts them")
-		}
-		// ingHost is the ingress's host ("" when the FK did not resolve); backendHost
-		// is the service's own host. The maps below tolerate an empty key.
-		ingHost := ctx.ingressHost[s.Ingress]
-		backendHost := canonical
-		coLocated := ingHost != "" && backendHost != "" && ingHost == backendHost
-		// Cross-host routing rides the private network, so the ingress host and the
-		// backend host must share a network (same Hetzner Network — subnets within it
-		// are mutually routable).
-		if ingHost != "" && backendHost != "" && ingHost != backendHost {
-			if ingNet, svcNet := ctx.computeNetwork[ingHost], ctx.computeNetwork[backendHost]; ingNet != svcNet {
-				errs = append(errs, fmt.Sprintf("ingress: cross-host routing requires ingress %q and this service to share a network, but the ingress host is on network %q and this service's host is on %q", s.Ingress, ingNet, svcNet))
-			}
 		}
 		for _, rt := range s.Routes {
 			switch rt.Type {
@@ -1168,6 +1211,12 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 			} else if backendHost != "" && len(ctx.portUsersByHost[backendHost][rt.Target]) > 0 {
 				errs = append(errs, fmt.Sprintf("routes: target %d collides with a public listen port on the backend host %q; nginx runs there and occupies that port on all interfaces, so the service cannot bind it", rt.Target, s.Host))
 			}
+			// When co-located, nginx may run internal TLS terminators on loopback ports
+			// in the reserved range (mixed ssl_preread ports). A co-located backend binds
+			// 127.0.0.1:<target>, so the target must stay out of that range.
+			if coLocated && inReservedLoopbackRange(rt.Target) {
+				errs = append(errs, fmt.Sprintf("routes: target %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a backend port outside it", rt.Target, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
+			}
 			// A backend port is bound by one process, so two services on the same
 			// backend host cannot share a target (a service may reuse its own).
 			if backendHost != "" {
@@ -1180,22 +1229,68 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 				if len(rt.Vanity) > 0 {
 					errs = append(errs, fmt.Sprintf("routes: forward on listen %d has no SNI; remove vanity", rt.Listen))
 				}
-				// A forward port is single-service-exclusive on its ingress: nginx
-				// stream cannot demux it, so no other route on the ingress may share it.
-				// (Since forward is the only non-terminating type, this also guarantees
-				// any shared listen port is tls-termination.)
-				if users := ctx.portUsersByHost[ingHost][rt.Listen]; len(users) > 1 {
-					others := otherUsers(users, s.Name)
-					who := "another route on the same service"
+				// A forward (passthrough) port is single-service-exclusive on its
+				// ingress: there is exactly one map default per port, so at most one
+				// forward may bind a given (ingress host, listen). It MAY coexist with
+				// tls-termination routes on the same port — nginx ssl_preread routes
+				// known SNIs to the terminators and the unknown SNI to this forward — so
+				// exclusivity is checked against other forwards only, not all routes.
+				if fwd := ctx.forwardUsersByHost[ingHost][rt.Listen]; len(fwd) > 1 {
+					others := otherUsers(fwd, s.Name)
+					who := "another forward route on the same service"
 					if len(others) > 0 {
 						who = "service(s) " + strings.Join(others, ", ")
 					}
-					errs = append(errs, fmt.Sprintf("routes: forward on listen %d is single-service-exclusive, but that port on ingress %q is also used by %s", rt.Listen, s.Ingress, who))
+					errs = append(errs, fmt.Sprintf("routes: forward on listen %d is single-service-exclusive (one passthrough per port), but that port on ingress %q already has a forward from %s", rt.Listen, s.Ingress, who))
 				}
 				// ACME owns :80 on the ingress host for HTTP-01 challenges, so a
 				// forward there collides with any tls-termination on the same ingress.
 				if rt.Listen == 80 && ctx.tlsTermIngressByHost[ingHost] {
 					errs = append(errs, fmt.Sprintf("routes: forward on :80 conflicts with a tls-termination on ingress %q (ACME owns :80 for HTTP-01 challenges)", s.Ingress))
+				}
+			}
+		}
+	}
+	// Health endpoint: the service serves health on HealthProbesPort, surfaced through
+	// its ingress's public health port (Host-demuxed). A service exposing health must
+	// name a resolvable ingress; the per-port collision checks only make sense once it
+	// does, so they are gated behind a resolved ingress to avoid piling cascading
+	// errors on top of the FK failure. (When the ingress FK is unresolved, ingHost is
+	// "" and coLocated is false — the FK error already fails validation.)
+	if s.HealthProbesPort != 0 {
+		if s.Ingress == "" {
+			errs = append(errs, "health_probes_port: a service exposing health must name the ingress resource that surfaces it")
+		} else {
+			// The backend health port is a distinct bind, so it must differ from every
+			// one of the service's own route targets.
+			for _, rt := range s.Routes {
+				if rt.Target == s.HealthProbesPort {
+					errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with route target %d on the same service; the backend health port must differ from every route target", s.HealthProbesPort, rt.Target))
+					break
+				}
+			}
+			// Like a route target, the health port is a backend bind on the service's
+			// host, so it must not equal a public listen port nginx holds there (whether
+			// this host is the ingress or independently hosts one), nor another service's
+			// backend target on that host.
+			if backendHost != "" {
+				if len(ctx.portUsersByHost[backendHost][s.HealthProbesPort]) > 0 {
+					errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with a public listen port on the backend host %q; nginx occupies that port on all interfaces, so the service cannot bind it for health", s.HealthProbesPort, s.Host))
+				}
+				if others := otherUsers(ctx.targetUsersByHost[backendHost][s.HealthProbesPort], s.Name); len(others) > 0 {
+					errs = append(errs, fmt.Sprintf("health_probes_port: %d on host %q is also a backend port of service(s) %s; a backend port belongs to a single service", s.HealthProbesPort, s.Host, strings.Join(others, ", ")))
+				}
+			}
+			// Co-located only: nginx binds the public health port (and any ssl_preread
+			// loopback terminator) on the host where the service also binds its backend
+			// health port, so those must not clash. Cross-host backends bind on another
+			// host, so no clash is possible there.
+			if coLocated {
+				if healthIngressPort := ctx.ingressHealthPort[s.Ingress]; healthIngressPort != 0 && s.HealthProbesPort == healthIngressPort {
+					errs = append(errs, fmt.Sprintf("health_probes_port: %d equals ingress %q's public health port; when co-located the backend health port must differ (nginx binds the public port on all interfaces)", s.HealthProbesPort, s.Ingress))
+				}
+				if inReservedLoopbackRange(s.HealthProbesPort) {
+					errs = append(errs, fmt.Sprintf("health_probes_port: %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a port outside it", s.HealthProbesPort, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
 				}
 			}
 		}
@@ -1272,9 +1367,45 @@ func checkIngress(s types.IngressSpec, ctx regionContext) (errs, warns []string)
 		errs = append(errs, fmt.Sprintf("host: %q references a global compute; an ingress on a global host is declared in the global slice itself, not referenced from a region", s.Host))
 		return errs, warns
 	}
-	_, hostErrs := resolveComputeHost(s.Host, "an ingress", ctx)
+	hostKey, hostErrs := resolveComputeHost(s.Host, "an ingress", ctx)
 	errs = append(errs, hostErrs...)
+
+	// One ingress per host: the nginx config, firewall, and health port are derived
+	// per host, so two ingresses sharing a host would silently merge or override each
+	// other (e.g. only one health port survives). Reject the collision.
+	if hostKey != "" {
+		if others := otherUsers(ctx.ingressNamesByHost[hostKey], s.Name); len(others) > 0 {
+			errs = append(errs, fmt.Sprintf("host: %q is already used by ingress %s; a compute host hosts at most one ingress (the derived nginx config and firewall are per-host)", s.Host, strings.Join(others, ", ")))
+		}
+	}
+
+	// The public health port nginx exposes (health_probes_port, default 81) must not
+	// collide with anything else nginx binds on this host: :80 (ACME HTTP-01) or any
+	// service route's public listen port. The backend health port is validated on the
+	// service (checkService), since that is where the service binds it.
+	healthPort := s.EffectiveHealthProbesPort()
+	if healthPort == 80 {
+		errs = append(errs, "health_probes_port: must not be 80 (ACME HTTP-01 owns :80 on the ingress host)")
+	}
+	// nginx may run internal ssl_preread TLS terminators on loopback ports in the
+	// reserved range when a port is mixed; the public health server would bind the
+	// same port number, so keep the health port out of that range.
+	if inReservedLoopbackRange(healthPort) {
+		errs = append(errs, fmt.Sprintf("health_probes_port: %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a health port outside it", healthPort, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
+	}
+	if hostKey != "" {
+		if users := ctx.portUsersByHost[hostKey][healthPort]; len(users) > 0 {
+			errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with a route listen port on this ingress host (used by service(s) %s); pick a distinct health port", healthPort, strings.Join(users, ", ")))
+		}
+	}
 	return errs, warns
+}
+
+// inReservedLoopbackRange reports whether a backend port falls in the range nginx
+// reserves for internal ssl_preread TLS terminators on an ingress host. A co-located
+// backend binding such a port would clash with a loopback terminator.
+func inReservedLoopbackRange(port int) bool {
+	return port >= nginx.LoopbackBase && port < nginx.LoopbackBase+nginx.MaxMixedPorts
 }
 
 // checkApp validates an app (front-end) resource: its ingress: foreign key must

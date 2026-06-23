@@ -870,11 +870,21 @@ func serviceDeprovisionScript(svc types.ServiceSpec) string {
 // resource graph is stable across runs.
 func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, appSeeds map[string][]pulumi.Resource, deployPrivateKey, env, slug, baseDomain string, defaults types.ProviderDefaults) error {
 	canonical := naming.CanonicalComputeKeys(res.Compute)
-	routesByHostKey, crossHost, err := ingressRoutesByHost(res, canonical, env, slug, baseDomain)
+	routesByHostKey, _, err := ingressRoutesByHost(res, canonical, env, slug, baseDomain)
 	if err != nil {
 		return fmt.Errorf("ingress: %w", err)
 	}
 	appsByHostKey := ingressAppsByHost(res, canonical, slug, baseDomain)
+	// Resolve the ingress-tier services once and feed both derivations below — the
+	// health entries and the cross-host backend set — so the service list is walked a
+	// single time per host realization.
+	ingressSvcs := resolveIngressServices(res, canonical)
+	healthByHostKey := ingressHealthByHost(ingressSvcs, env, slug, baseDomain)
+	healthPortByHostKey := ingressHealthPortByHost(res, canonical)
+	// A backend's private IP is needed whenever a service's route OR health endpoint
+	// is cross-host, so resolve cross-host backends once over the whole ingress tier
+	// (routes and health-only services alike) rather than from routes only.
+	crossHost := ingressCrossHostBackends(ingressSvcs)
 	// An app always serves on :443, so its FQDN must not collide with a :443
 	// tls-termination route's SNI (or another app) on the same host — nginx cannot
 	// demux two server blocks with one (listen, server_name) and would race two ACME
@@ -884,10 +894,10 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 	if err := checkAppSNICollisions(routesByHostKey, appsByHostKey); err != nil {
 		return fmt.Errorf("ingress: %w", err)
 	}
-	// nginx is installed on an ingress host iff at least one route OR app targets
-	// it; an app-only ingress (apps, no service routes) still realizes — its server
-	// blocks and ACME certs provision for the app FQDNs alone.
-	hostKeys := unionKeys(routesByHostKey, appsByHostKey)
+	// nginx is installed on an ingress host iff at least one route, app, OR health
+	// endpoint targets it; an app-only or health-only ingress still realizes — its
+	// server blocks and ACME certs provision for the app/service FQDNs alone.
+	hostKeys := ingressHostUnion(routesByHostKey, appsByHostKey, healthByHostKey)
 	if len(hostKeys) == 0 {
 		return nil
 	}
@@ -924,30 +934,15 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		// app-only or mixed ingress never reloads into a server block whose
 		// `current` document root has not been seeded yet.
 		deps := append([]pulumi.Resource{gate}, appSeeds[hostKey]...)
-		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], appsByHostKey[hostKey], backendIPs, env, deps); err != nil {
+		healthPort := healthPortByHostKey[hostKey]
+		if healthPort == 0 {
+			healthPort = types.DefaultHealthProbesPort
+		}
+		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], appsByHostKey[hostKey], healthByHostKey[hostKey], healthPort, backendIPs, env, deps); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// unionKeys returns the sorted union of two maps' keys — the ingress hosts that
-// have routes, apps, or both — so realization visits each host exactly once in a
-// stable order.
-func unionKeys[A, B any](a map[string]A, b map[string]B) []string {
-	set := map[string]bool{}
-	for k := range a {
-		set[k] = true
-	}
-	for k := range b {
-		set[k] = true
-	}
-	out := make([]string, 0, len(set))
-	for k := range set {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // ingressHostsByName maps each ingress resource name to the canonical specKey of
@@ -1014,7 +1009,10 @@ func resolveIngressServices(res types.Resources, canonical map[string]string) []
 	ingressHost := ingressHostsByName(res, canonical)
 	out := make([]ingressService, 0, len(res.Service))
 	for _, svc := range res.Service {
-		if svc.Ingress == "" || len(svc.Routes) == 0 {
+		// A service is part of the ingress tier when it exposes routes OR a health
+		// endpoint through its ingress; a health-only service (no routes) still needs
+		// its backend resolved and its health server rendered.
+		if svc.Ingress == "" || (len(svc.Routes) == 0 && svc.HealthProbesPort == 0) {
 			continue
 		}
 		ingHost, ok := ingressHost[svc.Ingress]
@@ -1082,6 +1080,98 @@ func ingressAppsByHost(res types.Resources, canonical map[string]string, slug, b
 	return byHost
 }
 
+// ingressHealthByHost groups service health endpoints by the canonical specKey of
+// their ingress's host. Each IngressHealth carries the service's canonical FQDN (the
+// strict server_name / Host the ingress demuxes on), the backend health port, and a
+// resolved Backend ("127.0.0.1" co-located; left empty for the provider to fill with
+// the backend's private IP cross-host — exactly like a route). A non-empty result for
+// a host is, with routes and apps, a realization trigger.
+func ingressHealthByHost(svcs []ingressService, env, slug, baseDomain string) map[string][]types.IngressHealth {
+	byHost := map[string][]types.IngressHealth{}
+	for _, is := range svcs {
+		if is.svc.HealthProbesPort == 0 {
+			continue
+		}
+		h := types.IngressHealth{
+			Service: is.svc.Name,
+			FQDN:    naming.ServiceFQDN(env, slug, is.svc.Name, baseDomain),
+			Target:  is.svc.HealthProbesPort,
+		}
+		if is.coLocated {
+			h.Backend = "127.0.0.1"
+		}
+		byHost[is.ingHost] = append(byHost[is.ingHost], h)
+	}
+	for _, hs := range byHost {
+		sort.Slice(hs, func(i, j int) bool { return hs[i].FQDN < hs[j].FQDN })
+	}
+	return byHost
+}
+
+// ingressHealthPortByHost maps each ingress host's canonical specKey to the public
+// health port nginx exposes there (the ingress's HealthProbesPort, defaulting to 81).
+func ingressHealthPortByHost(res types.Resources, canonical map[string]string) map[string]int {
+	out := map[string]int{}
+	for _, ing := range res.Ingress {
+		hk, ok := canonical[ing.Host]
+		if !ok {
+			continue
+		}
+		out[hk] = ing.EffectiveHealthProbesPort()
+	}
+	return out
+}
+
+// ingressHealthPortByName maps each ingress resource name to its public health port,
+// so the firewall can open the right port for a service that references it.
+func ingressHealthPortByName(res types.Resources) map[string]int {
+	out := map[string]int{}
+	for _, ing := range res.Ingress {
+		out[ing.Name] = ing.EffectiveHealthProbesPort()
+	}
+	return out
+}
+
+// ingressCrossHostBackends returns, per ingress host, the backend host specKey of
+// every service whose backend is NOT co-located with the ingress — the services for
+// which the provider must resolve a private IP (routes and health-only alike). A
+// co-located service already carries Backend "127.0.0.1" and needs no entry.
+func ingressCrossHostBackends(svcs []ingressService) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, is := range svcs {
+		if is.coLocated {
+			continue
+		}
+		if out[is.ingHost] == nil {
+			out[is.ingHost] = map[string]string{}
+		}
+		out[is.ingHost][is.svc.Name] = is.svcHost
+	}
+	return out
+}
+
+// ingressHostUnion returns the sorted union of the three ingress-host maps' keys —
+// the hosts that have routes, apps, and/or health endpoints — so realization visits
+// each host exactly once in a stable order.
+func ingressHostUnion(routes map[string][]types.IngressRoute, apps map[string][]types.IngressApp, health map[string][]types.IngressHealth) []string {
+	set := map[string]bool{}
+	for k := range routes {
+		set[k] = true
+	}
+	for k := range apps {
+		set[k] = true
+	}
+	for k := range health {
+		set[k] = true
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // checkAppSNICollisions rejects an app whose FQDN collides, on its ingress host's
 // :443 listener, with a tls-termination route's SNI or another app — a clash nginx
 // cannot demux (two server blocks sharing one (listen, server_name)) that would also
@@ -1141,6 +1231,7 @@ func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
 		}
 		private[host][port] = true
 	}
+	healthPortByName := ingressHealthPortByName(res)
 	for _, is := range resolveIngressServices(res, canonical) {
 		for _, rt := range is.svc.Routes {
 			addPublic(is.ingHost, rt.Listen)
@@ -1149,6 +1240,14 @@ func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
 			}
 			if !is.coLocated {
 				addPrivate(is.svcHost, rt.Target) // backend target reachable over the private net
+			}
+		}
+		// A health endpoint opens the ingress's public health port (default 81) on the
+		// ingress host, and the backend health port privately on a cross-host backend.
+		if is.svc.HealthProbesPort > 0 {
+			addPublic(is.ingHost, healthPortByName[is.svc.Ingress])
+			if !is.coLocated {
+				addPrivate(is.svcHost, is.svc.HealthProbesPort)
 			}
 		}
 	}

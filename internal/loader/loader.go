@@ -413,6 +413,7 @@ func NormalizeIngress(i *types.IngressSpec) {
 	i.Name = strings.TrimSpace(i.Name)
 	i.Container = strings.TrimSpace(i.Container)
 	i.Host = strings.TrimSpace(i.Host)
+	i.HealthProbesPort = i.EffectiveHealthProbesPort()
 }
 
 // NormalizeApp trims the app spec's foreign-key and domain fields so a stray
