@@ -12,6 +12,7 @@ import (
 	hcloud "github.com/pulumi/pulumi-hcloud/sdk/go/hcloud"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/wardnet/inforge/internal/regions"
+	"github.com/wardnet/inforge/internal/tags"
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
@@ -39,6 +40,7 @@ type registry struct {
 	env         string
 	region      string
 	slug        string
+	eph         tags.Ephemeral
 	config      map[string]map[string]any
 	dns         *regions.DnsAuthority
 	ssh         types.SSHConfig
@@ -71,10 +73,11 @@ type registry struct {
 
 // BuildRegistry constructs a ProviderRegistry from the provider config, SSH
 // material, and region table for one region. project, env, and region are used
-// to label cloud resources. ctx is stored and used lazily when provider objects
+// to label cloud resources; eph carries the ADR-0028 ephemeral-env labels (zero
+// value for a static env). ctx is stored and used lazily when provider objects
 // are first constructed — it must be the context passed to the Pulumi program's
 // run function.
-func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, dns *regions.DnsAuthority, ssh types.SSHConfig, regionTable regions.Table, project, env, region string) ProviderRegistry {
+func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, dns *regions.DnsAuthority, ssh types.SSHConfig, regionTable regions.Table, project, env, region string, eph tags.Ephemeral) ProviderRegistry {
 	slug, _ := regionTable.Slug(region) // already validated by loader
 	return &registry{
 		ctx:         ctx,
@@ -82,6 +85,7 @@ func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, dns *r
 		env:         env,
 		region:      region,
 		slug:        slug,
+		eph:         eph,
 		config:      config,
 		dns:         dns,
 		ssh:         ssh,
@@ -110,7 +114,7 @@ func (r *registry) Network(name string) (types.NetworkProvider, error) {
 	case "hetzner":
 		r.hetznerNetOnce.Do(func() {
 			realizations := hetzner.ExtractRegionConfigs(r.region, r.config)
-			r.hetznerNet = hetzner.New(r.hetznerProv(), r.project, r.slug, realizations)
+			r.hetznerNet = hetzner.New(r.hetznerProv(), r.project, r.slug, r.eph, realizations)
 		})
 		return r.hetznerNet, nil
 	default:
@@ -130,6 +134,7 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 				r.hetznerProv(),
 				r.project,
 				r.slug,
+				r.eph,
 				realizations,
 			)
 		})

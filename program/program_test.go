@@ -172,7 +172,7 @@ func TestDerivedRecordsBridge(t *testing.T) {
 		},
 	}
 
-	got := derivedRecords(res, "prd", "use1", "wardnet.network")
+	got := derivedRecords(res, "prd", "use1", "wardnet.network", "")
 
 	type rn struct{ name, record, host string }
 	var flat []rn
@@ -204,7 +204,7 @@ func TestDerivedRecordsCrossHostIngress(t *testing.T) {
 			}},
 		},
 	}
-	got := derivedRecords(res, "prd", "use1", "wardnet.network")
+	got := derivedRecords(res, "prd", "use1", "wardnet.network", "")
 	byRecord := map[string]string{}
 	for _, d := range got {
 		byRecord[d.rec.RecordName] = d.hostKey
@@ -341,7 +341,7 @@ func TestDerivedRecordsApps(t *testing.T) {
 			{Name: "dashboard", Container: "frontend", Ingress: "web", Subdomain: "my", Spa: true},
 		},
 	}
-	got := derivedRecords(res, "prd", "use1", "wardnet.network")
+	got := derivedRecords(res, "prd", "use1", "wardnet.network", "")
 	byRecord := map[string]struct{ host, container string }{}
 	for _, d := range got {
 		byRecord[d.rec.RecordName] = struct{ host, container string }{d.hostKey, d.rec.Container}
@@ -363,7 +363,7 @@ func TestDerivedRecordsAppsGlobalForm(t *testing.T) {
 			{Name: "marketing", Container: "frontend", Ingress: "web", Subdomain: "www"},
 		},
 	}
-	got := derivedRecords(res, "prd", "", "wardnet.network")
+	got := derivedRecords(res, "prd", "", "wardnet.network", "")
 	byRecord := map[string]string{}
 	for _, d := range got {
 		byRecord[d.rec.RecordName] = d.hostKey
@@ -397,7 +397,7 @@ func TestIngressAppsByHostResolvesFQDNAndRoot(t *testing.T) {
 			{Name: "dashboard", Ingress: "web", Subdomain: "my", Spa: true},
 		},
 	}
-	got := ingressAppsByHost(res, naming.CanonicalComputeKeys(res.Compute), "use1", "wardnet.network")
+	got := ingressAppsByHost(res, naming.CanonicalComputeKeys(res.Compute), "use1", "wardnet.network", "")
 	apps := got["edge-01"]
 	require.Len(t, apps, 1)
 	assert.Equal(t, "dashboard", apps[0].Name)
@@ -425,7 +425,7 @@ func TestRealizeIngressRejectsAppRouteSNICollision(t *testing.T) {
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	routesByHost, _, err := ingressRoutesByHost(res, canonical, "prd", "use1", "wardnet.network")
 	require.NoError(t, err)
-	appsByHost := ingressAppsByHost(res, canonical, "use1", "wardnet.network")
+	appsByHost := ingressAppsByHost(res, canonical, "use1", "wardnet.network", "")
 
 	err = checkAppSNICollisions(routesByHost, appsByHost)
 	require.Error(t, err)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -350,24 +349,18 @@ func resolveDescriptorTargets[T any](ctx context.Context, projCfg projectConfig,
 	if err != nil {
 		return nil, fmt.Errorf("read stack outputs: %w", err)
 	}
-	raw, ok := outputs[outputKey]
-	if !ok {
+	if _, ok := outputs[outputKey]; !ok {
 		return nil, fmt.Errorf("stack %q has no %s output — has inforge deploy been run for this environment?", env, outputKey)
 	}
-	// The Automation API deserialises pulumi.Any(descriptor) as
-	// map[string]interface{}; round-trip through JSON to get typed targets.
-	b, err := json.Marshal(raw.Value)
+	// decodeTargets owns the pulumi.Any-as-map JSON round-trip (shared with the
+	// ephemeral replicate path); here we additionally filter to the caller's keep
+	// predicate after the (already error-checked) presence of the output.
+	all, err := decodeTargets[T](outputs, outputKey)
 	if err != nil {
-		return nil, fmt.Errorf("marshal %s: %w", outputKey, err)
-	}
-	var descriptor struct {
-		Targets []T `json:"targets"`
-	}
-	if err := json.Unmarshal(b, &descriptor); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", outputKey, err)
+		return nil, err
 	}
 	var targets []T
-	for _, t := range descriptor.Targets {
+	for _, t := range all {
 		if keep(t) {
 			targets = append(targets, t)
 		}

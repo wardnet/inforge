@@ -20,6 +20,7 @@ type HetznerNetwork struct {
 	provider *hcloud.Provider
 	project  string
 	slug     string
+	eph      tags.Ephemeral
 	mu       sync.Mutex
 	// containers caches created hcloud.Network objects keyed by container name
 	// to avoid creating duplicates.
@@ -31,10 +32,11 @@ type HetznerNetwork struct {
 
 // New creates a HetznerNetwork provider. project is the inforge project name
 // used to label cloud resources. slug is the region slug used for resource
-// naming. regionOverrides is the output of ExtractRegionConfigs (the per-region
+// naming. eph carries the ADR-0028 ephemeral-env labels (zero value for a static
+// env). regionOverrides is the output of ExtractRegionConfigs (the per-region
 // realizations) and may be nil — Create then fails closed for any region that
 // has no realization.
-func New(provider *hcloud.Provider, project, slug string, regionOverrides map[string]RegionConfig) *HetznerNetwork {
+func New(provider *hcloud.Provider, project, slug string, eph tags.Ephemeral, regionOverrides map[string]RegionConfig) *HetznerNetwork {
 	if regionOverrides == nil {
 		regionOverrides = map[string]RegionConfig{}
 	}
@@ -42,6 +44,7 @@ func New(provider *hcloud.Provider, project, slug string, regionOverrides map[st
 		provider:   provider,
 		project:    project,
 		slug:       slug,
+		eph:        eph,
 		containers: map[string]*hcloud.Network{},
 		regions:    regionOverrides,
 	}
@@ -106,7 +109,7 @@ func (h *HetznerNetwork) ensureContainer(ctx *pulumi.Context, container, env, ci
 	net, err := hcloud.NewNetwork(ctx, netName, &hcloud.NetworkArgs{
 		Name:    pulumi.String(netName),
 		IpRange: pulumi.String(cidr),
-		Labels:  toStringMap(tags.HetznerLabels(h.project, env, h.slug, container)),
+		Labels:  toStringMap(tags.HetznerLabels(h.project, env, h.slug, container, h.eph)),
 	}, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create hcloud network %s: %w", netName, err)

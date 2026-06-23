@@ -105,6 +105,26 @@ func setupGitBranchBackend(ctx context.Context, branch string) (stateDir string,
 	return absDir, push, nil
 }
 
+// requireObjectBackend enforces the ADR-0028 hard requirement that the ephemeral
+// commands run against an object-store Pulumi backend (s3 or r2). The reaper
+// enumerates candidate stacks with ListStacks and classifies each from its
+// per-stack persisted config; the git-branch backend serialises all state into a
+// single branch tree (no per-stack object keying, no concurrent-up isolation) and
+// the file backend is single-host, so neither supports the enumerate-and-reap
+// model. It fails closed with the fix rather than degrading silently.
+func requireObjectBackend(projCfg projectConfig) error {
+	switch projCfg.Backend.Type {
+	case "s3", "r2":
+		return nil
+	default:
+		t := projCfg.Backend.Type
+		if t == "" {
+			t = "file"
+		}
+		return fmt.Errorf("ephemeral environments require an object-store state backend (s3 or r2), but inforge.yaml declares backend.type %q — per-stack object keying and ListStacks enumeration are not available on git-branch/file backends; configure an r2/s3 backend to use `inforge ephemeral`", t)
+	}
+}
+
 // setProviderDefaults injects the project-level provider defaults into stack config
 // so program.Run can resolve effective providers without the project file. It is a
 // no-op when no defaults are configured, matching applyStackConfig's empty-guard.
@@ -117,6 +137,73 @@ func setProviderDefaults(ctx context.Context, s auto.Stack, d types.ProviderDefa
 		return fmt.Errorf("marshal provider defaults: %w", err)
 	}
 	return s.SetConfig(ctx, "provider_defaults", auto.ConfigValue{Value: string(b)})
+}
+
+// ephemeralWorkspace builds a Pulumi LocalWorkspace bound to the project's
+// object-store backend, for enumerating stacks during `reap` (ListStacks) without
+// first selecting one. The inline program is attached so a stack selected from
+// this workspace can later be destroyed. Callers must have already passed
+// requireObjectBackend, so the git-branch state-fetch path is never reached here.
+func ephemeralWorkspace(ctx context.Context, projCfg projectConfig) (auto.Workspace, error) {
+	backendURL, err := projCfg.backendURL()
+	if err != nil {
+		return nil, err
+	}
+	proj := workspace.Project{
+		Name:    tokens.PackageName(projCfg.Name),
+		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
+		Backend: &workspace.ProjectBackend{URL: backendURL},
+	}
+	return auto.NewLocalWorkspace(ctx,
+		auto.Project(proj),
+		auto.Program(program.Run),
+		auto.WorkDir("."),
+	)
+}
+
+// createStack initialises a NEW Pulumi stack for an ephemeral env, failing if a
+// stack with that name already exists. Unlike upsertStack — which SELECTs an
+// existing stack of the same name — creation itself is the atomic collision
+// guard: two concurrent `ephemeral up` runs with the same slug cannot both
+// succeed, so neither can stamp ephemeral+expires_at config onto a stack the
+// other (or a permanent env) already owns. This closes the check-then-act race a
+// separate "does it exist?" probe would leave open. Ephemeral commands require an
+// object-store backend (requireObjectBackend), so the git-branch state path that
+// upsertStack handles is unreachable here.
+func createStack(ctx context.Context, stackName string, projCfg projectConfig) (auto.Stack, error) {
+	backendURL, err := projCfg.backendURL()
+	if err != nil {
+		return auto.Stack{}, err
+	}
+	proj := workspace.Project{
+		Name:    tokens.PackageName(projCfg.Name),
+		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
+		Backend: &workspace.ProjectBackend{URL: backendURL},
+	}
+	s, err := auto.NewStackInlineSource(ctx, stackName, projCfg.Name, program.Run,
+		auto.Project(proj),
+		auto.WorkDir("."),
+	)
+	if err != nil {
+		if auto.IsCreateStack409Error(err) {
+			return auto.Stack{}, fmt.Errorf("a stack named %q already exists — `up` creates a NEW ephemeral env and will not adopt an existing stack (a permanent env or a live ephemeral one); pick a different --slug, or run `inforge ephemeral down %s` first", stackName, stackName)
+		}
+		return auto.Stack{}, fmt.Errorf("create ephemeral stack %q: %w", stackName, err)
+	}
+	return s, nil
+}
+
+// stackConfigValue reads a plain config key from a stack's config map, tolerating
+// the project-namespace prefix the backend stores keys under (e.g. "ephemeral" is
+// persisted as "<project>:ephemeral"). It returns "" when the key is absent.
+func stackConfigValue(cfg auto.ConfigMap, projName, key string) string {
+	if v, ok := cfg[key]; ok {
+		return v.Value
+	}
+	if v, ok := cfg[projName+":"+key]; ok {
+		return v.Value
+	}
+	return ""
 }
 
 func applyStackConfig(ctx context.Context, s auto.Stack, stackCfg stackConfig) error {

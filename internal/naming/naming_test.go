@@ -133,12 +133,20 @@ func TestServiceFQDN(t *testing.T) {
 func TestAppFQDN(t *testing.T) {
 	// Regional: the slug segment is present, but NO env segment (unlike
 	// RecordFQDN/ServiceFQDN) — an app uses a per-env base domain.
-	if got, want := AppFQDN("my", "use1", "wardnet.network"), "my.use1.wardnet.network"; got != want {
+	if got, want := AppFQDN("my", "use1", "wardnet.network", ""), "my.use1.wardnet.network"; got != want {
 		t.Errorf("AppFQDN regional = %q, want %q", got, want)
 	}
 	// Global: an empty slug drops the region segment entirely.
-	if got, want := AppFQDN("marketing", "", "wardnet.network"), "marketing.wardnet.network"; got != want {
+	if got, want := AppFQDN("marketing", "", "wardnet.network", ""), "marketing.wardnet.network"; got != want {
 		t.Errorf("AppFQDN global = %q, want %q", got, want)
+	}
+	// Ephemeral (ADR-0028): the slug identity segment is inserted right after the
+	// subdomain so the clone never collides with the source's app hostname.
+	if got, want := AppFQDN("my", "use1", "wardnet.network", "eph-7f3k"), "my.eph-7f3k.use1.wardnet.network"; got != want {
+		t.Errorf("AppFQDN ephemeral regional = %q, want %q", got, want)
+	}
+	if got, want := AppFQDN("marketing", "", "wardnet.network", "eph-7f3k"), "marketing.eph-7f3k.wardnet.network"; got != want {
+		t.Errorf("AppFQDN ephemeral global = %q, want %q", got, want)
 	}
 }
 

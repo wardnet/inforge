@@ -162,7 +162,12 @@ type DeployDescriptor struct {
 // app's ingress host DNS is the HostFQDN of the compute its ingress references; an
 // app whose ingress (or that ingress's host) does not resolve is skipped — the
 // realization side validates resolution, so the skip is purely defensive.
-func BuildDeployDescriptor(env, baseDomain string, res types.Resources, table regions.Table) (DeployDescriptor, error) {
+//
+// ephemeralSlug is the ADR-0028 ephemeral-env exception threaded into each app's
+// FQDN (see naming.AppFQDN): "" for a static env (unchanged URLs), the env's slug
+// identity for an ephemeral env so its app hostname never collides with the
+// source's. It does NOT affect the ingress host DNS, which is already env-scoped.
+func BuildDeployDescriptor(env, baseDomain string, res types.Resources, table regions.Table, ephemeralSlug string) (DeployDescriptor, error) {
 	desc := DeployDescriptor{Environment: env}
 	regionNames := make([]string, 0, len(table))
 	for region := range table {
@@ -191,7 +196,7 @@ func BuildDeployDescriptor(env, baseDomain string, res types.Resources, table re
 				App:            a.Name,
 				IngressHostDNS: naming.HostFQDN(env, slug, hostName, baseDomain),
 				DeployPath:     Folder(a.Name),
-				FQDN:           naming.AppFQDN(a.Subdomain, slug, baseDomain),
+				FQDN:           naming.AppFQDN(a.Subdomain, slug, baseDomain, ephemeralSlug),
 				Spa:            a.Spa,
 				SSHUser:        sshUser,
 			})

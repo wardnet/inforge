@@ -7,6 +7,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wardnet/inforge/internal/tags"
 	"gopkg.in/yaml.v3"
 )
 
@@ -156,7 +157,7 @@ func (m *testMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.
 
 func TestEnsureContainerIdempotency(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := New(nil, "test-project", "use1", nil)
+		h := New(nil, "test-project", "use1", tags.Ephemeral{}, nil)
 
 		net1, err := h.ensureContainer(ctx, "vpc", "prod", "10.0.0.0/8")
 		if err != nil {

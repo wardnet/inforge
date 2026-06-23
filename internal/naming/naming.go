@@ -130,17 +130,34 @@ func ServiceFQDN(env, regionSlug, service, baseDomain string) string {
 }
 
 // AppFQDN returns an app's public fully-qualified domain — the clean dotted form
-// a front-end is served on, with NO env segment (each environment carries its own
-// base_domain): the global scope is "<subdomain>.<base>" (e.g.
-// "marketing.wardnet.network") and a regional scope is "<subdomain>.<slug>.<base>"
-// (e.g. "my.use1.wardnet.network"). An EMPTY regionSlug is the global scope. It is
-// deliberately flatter than ServiceFQDN/RecordFQDN (which carry an env and a type
-// segment): an app is a public-facing site, not an internal derived record.
-func AppFQDN(subdomain, regionSlug, baseDomain string) string {
-	if regionSlug == "" {
-		return fmt.Sprintf("%s.%s", subdomain, baseDomain)
+// a front-end is served on. For a STATIC env (ephemeralSlug == "") it carries NO
+// env segment — each environment has its own base_domain: the global scope is
+// "<subdomain>.<base>" (e.g. "marketing.wardnet.network") and a regional scope is
+// "<subdomain>.<slug>.<base>" (e.g. "my.use1.wardnet.network"). An EMPTY
+// regionSlug is the global scope. It is deliberately flatter than
+// ServiceFQDN/RecordFQDN (which carry an env and a type segment): an app is a
+// public-facing site, not an internal derived record. The no-env-segment property
+// is CONDITIONAL — it holds only for a static env; an ephemeral env (below) carries
+// its slug identity segment, so callers must not assume an app URL is env-stable.
+//
+// ephemeralSlug is the ADR-0028 ephemeral-environment exception: a static env
+// passes "" and its app URLs are unchanged, but an ephemeral env passes its
+// identity slug (e.g. "eph-7f3k"), inserted right after the subdomain
+// ("<subdomain>.<ephemeralSlug>.<base>" global /
+// "<subdomain>.<ephemeralSlug>.<slug>.<base>" regional). An ephemeral env clones
+// the source's base_domain, so without this segment its app hostname would
+// collide with the source's; the slug segment keeps the clone's app URLs distinct.
+func AppFQDN(subdomain, regionSlug, baseDomain, ephemeralSlug string) string {
+	parts := make([]string, 0, 4)
+	parts = append(parts, subdomain)
+	if ephemeralSlug != "" {
+		parts = append(parts, ephemeralSlug)
 	}
-	return fmt.Sprintf("%s.%s.%s", subdomain, regionSlug, baseDomain)
+	if regionSlug != "" {
+		parts = append(parts, regionSlug)
+	}
+	parts = append(parts, baseDomain)
+	return strings.Join(parts, ".")
 }
 
 // ExpandVanity resolves one vanity entry to a fully-qualified domain. A bare

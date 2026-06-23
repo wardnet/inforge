@@ -53,7 +53,25 @@ func Run(ctx *pulumi.Context) error {
 		dir = d
 	}
 
-	vars, err := loader.LoadVariables(env, dir)
+	// srcEnv is the config SOURCE — the resources/<srcEnv>/ tree, secrets, and PKI
+	// store this stack reads its definition from. It decouples WHAT to deploy from
+	// the identity it deploys UNDER (ADR-0028): an ephemeral env clones a source
+	// env's definition while keeping its own slug identity (env). srcEnv defaults
+	// to env, so a static env reads its own config and is byte-for-byte unchanged.
+	srcEnv := cfg.Get("source_environment")
+	if srcEnv == "" {
+		srcEnv = env
+	}
+	// Ephemeral-env labels (ADR-0028) stamped on every cloud resource, and the
+	// slug segment the ephemeral AppFQDN exception carries. A static env has
+	// ephemeral=false and an empty ephemeralSlug, so nothing downstream changes.
+	eph := tags.Ephemeral{Enabled: cfg.GetBool("ephemeral"), ExpiresAt: cfg.Get("expires_at")}
+	ephemeralSlug := ""
+	if eph.Enabled {
+		ephemeralSlug = env
+	}
+
+	vars, err := loader.LoadVariables(srcEnv, dir)
 	if err != nil {
 		return err
 	}
@@ -82,7 +100,7 @@ func Run(ctx *pulumi.Context) error {
 		inforgeVersion = "dev"
 	}
 
-	regionTable, globalBlock, err := loader.LoadRegionTable(env, dir)
+	regionTable, globalBlock, err := loader.LoadRegionTable(srcEnv, dir)
 	if err != nil {
 		return err
 	}
@@ -100,14 +118,14 @@ func Run(ctx *pulumi.Context) error {
 	regionNames := sortedKeys(regionTable)
 	// The resource set is defined ONCE and instantiated into every region; the
 	// region slug baked into each cloud name keeps instances unique per region.
-	res, err := loader.LoadResources(env, dir)
+	res, err := loader.LoadResources(srcEnv, dir)
 	if err != nil {
 		return err
 	}
 	// The global slice is instantiated once, region-less, before any region — its
 	// outputs land in the "global" slot so a regional secrets ref:database/global/…
 	// can resolve against them. Optional: an absent global/ dir yields an empty set.
-	globalRes, err := loader.LoadGlobalResources(env, dir)
+	globalRes, err := loader.LoadGlobalResources(srcEnv, dir)
 	if err != nil {
 		return err
 	}
@@ -115,7 +133,7 @@ func Run(ctx *pulumi.Context) error {
 	// Encrypted secret values (ADR-0017) are decrypted once, up front and
 	// provider-neutrally, then threaded to every region's secrets provisioning
 	// via AllOutputs. Nil unless some service declares a `vault:` secret.
-	encSecrets, err := decryptEncryptedSecrets(res, globalRes, dir, env, ctx.DryRun())
+	encSecrets, err := decryptEncryptedSecrets(res, globalRes, dir, srcEnv, ctx.DryRun())
 	if err != nil {
 		return err
 	}
@@ -129,7 +147,7 @@ func Run(ctx *pulumi.Context) error {
 	// The app deploy descriptor mirrors the service one: it is the contract the app
 	// release path (slice D) resolves an app's ingress host, deploy path, FQDN, and
 	// SPA flag from. Derived purely from resolved resources, exported once.
-	appDesc, err := app.BuildDeployDescriptor(env, vars.BaseDomain, res, regionTable)
+	appDesc, err := app.BuildDeployDescriptor(env, vars.BaseDomain, res, regionTable, ephemeralSlug)
 	if err != nil {
 		return err
 	}
@@ -137,7 +155,7 @@ func Run(ctx *pulumi.Context) error {
 
 	registries := make(map[string]registry.ProviderRegistry, len(regionNames))
 	for _, region := range regionNames {
-		registries[region] = registry.BuildRegistry(ctx, regionTable[region].Providers, regionTable[region].Dns, vars.SSH, regionTable, ctx.Project(), env, region)
+		registries[region] = registry.BuildRegistry(ctx, regionTable[region].Providers, regionTable[region].Dns, vars.SSH, regionTable, ctx.Project(), env, region, eph)
 	}
 
 	// networkOutputs: region → specName+"/"+subnetName → NetworkOutputs. The
@@ -155,7 +173,7 @@ func Run(ctx *pulumi.Context) error {
 		// The region-less global slice has no DNS authority (records are per-region).
 		// TODO(ADR-0023): pass globalBlock.PlacementRegion as the region once the
 		// global registry is wired to use it for provider-realization lookups.
-		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, nil, vars.SSH, regionTable, ctx.Project(), env, globalScope)
+		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, nil, vars.SSH, regionTable, ctx.Project(), env, globalScope, eph)
 		if err := createInfra(ctx, globalReg, globalRes, env, globalScope, "", vars.BaseDomain, providerDefaults, networkOutputs, computeOutputs, databaseOutputs); err != nil {
 			return err
 		}
@@ -177,7 +195,7 @@ func Run(ctx *pulumi.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := createDNSRecords(ctx, reg, regionTable[region].Dns, res, computeOutputs[region], env, slug, vars.BaseDomain); err != nil {
+		if err := createDNSRecords(ctx, reg, regionTable[region].Dns, res, computeOutputs[region], env, slug, vars.BaseDomain, ephemeralSlug); err != nil {
 			return err
 		}
 
@@ -193,7 +211,7 @@ func Run(ctx *pulumi.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := realizeIngress(ctx, reg, res, computeOutputs[region], gates, appSeeds, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain, providerDefaults); err != nil {
+		if err := realizeIngress(ctx, reg, res, computeOutputs[region], gates, appSeeds, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain, ephemeralSlug, providerDefaults); err != nil {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
@@ -868,13 +886,13 @@ func serviceDeprovisionScript(svc types.ServiceSpec) string {
 // (cross-host, using the backend's PrivateIP). FQDNs are env-scoped here so the
 // provider stays a pure installer. Hosts are realized in sorted order so the
 // resource graph is stable across runs.
-func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, appSeeds map[string][]pulumi.Resource, deployPrivateKey, env, slug, baseDomain string, defaults types.ProviderDefaults) error {
+func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, appSeeds map[string][]pulumi.Resource, deployPrivateKey, env, slug, baseDomain, ephemeralSlug string, defaults types.ProviderDefaults) error {
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	routesByHostKey, _, err := ingressRoutesByHost(res, canonical, env, slug, baseDomain)
 	if err != nil {
 		return fmt.Errorf("ingress: %w", err)
 	}
-	appsByHostKey := ingressAppsByHost(res, canonical, slug, baseDomain)
+	appsByHostKey := ingressAppsByHost(res, canonical, slug, baseDomain, ephemeralSlug)
 	// Resolve the ingress-tier services once and feed both derivations below — the
 	// health entries and the cross-host backend set — so the service list is walked a
 	// single time per host realization.
@@ -1064,12 +1082,12 @@ func resolveIngressApps(res types.Resources, canonical map[string]string) []ingr
 // the provider stays a pure renderer. A non-empty result for a host is, together
 // with ingressRoutesByHost, a realization trigger — nginx is installed on an
 // ingress host iff at least one route or app targets it.
-func ingressAppsByHost(res types.Resources, canonical map[string]string, slug, baseDomain string) map[string][]types.IngressApp {
+func ingressAppsByHost(res types.Resources, canonical map[string]string, slug, baseDomain, ephemeralSlug string) map[string][]types.IngressApp {
 	byHost := map[string][]types.IngressApp{}
 	for _, ia := range resolveIngressApps(res, canonical) {
 		byHost[ia.ingHost] = append(byHost[ia.ingHost], types.IngressApp{
 			Name: ia.app.Name,
-			FQDN: naming.AppFQDN(ia.app.Subdomain, slug, baseDomain),
+			FQDN: naming.AppFQDN(ia.app.Subdomain, slug, baseDomain, ephemeralSlug),
 			Root: app.CurrentPath(ia.app.Name),
 			Spa:  ia.app.Spa,
 		})
@@ -1442,7 +1460,7 @@ type derivedRecord struct {
 // (ADR-0026). It shares its FQDN derivation with the TLS routes (ingressFQDNs), so a
 // cert and its A-record never drift. The result is deterministic (compute then
 // service order).
-func derivedRecords(res types.Resources, env, slug, baseDomain string) []derivedRecord {
+func derivedRecords(res types.Resources, env, slug, baseDomain, ephemeralSlug string) []derivedRecord {
 	var out []derivedRecord
 	add := func(fqdn, container, hostKey string) {
 		rel := naming.ZoneRelative(fqdn, baseDomain)
@@ -1489,7 +1507,7 @@ func derivedRecords(res types.Resources, env, slug, baseDomain string) []derived
 	// firewall and nginx derivations so the record can never point elsewhere. Proxied
 	// defaults to false so Let's Encrypt HTTP-01 reaches the origin (ADR-0026).
 	for _, ia := range resolveIngressApps(res, canonical) {
-		fqdn := naming.AppFQDN(ia.app.Subdomain, slug, baseDomain)
+		fqdn := naming.AppFQDN(ia.app.Subdomain, slug, baseDomain, ephemeralSlug)
 		dedupAdd(fqdn, ia.app.Container, ia.ingHost)
 	}
 	return out
@@ -1498,7 +1516,7 @@ func derivedRecords(res types.Resources, env, slug, baseDomain string) []derived
 // createDNSRecords creates every derived A-record for a region against its DNS
 // authority, each pointing at its host's public IP. When the region declares no
 // DNS authority, it is a no-op.
-func createDNSRecords(ctx *pulumi.Context, reg registry.ProviderRegistry, authority *regions.DnsAuthority, res types.Resources, computeOut map[string]types.ComputeOutputs, env, slug, baseDomain string) error {
+func createDNSRecords(ctx *pulumi.Context, reg registry.ProviderRegistry, authority *regions.DnsAuthority, res types.Resources, computeOut map[string]types.ComputeOutputs, env, slug, baseDomain, ephemeralSlug string) error {
 	if authority == nil {
 		return nil
 	}
@@ -1512,7 +1530,7 @@ func createDNSRecords(ctx *pulumi.Context, reg registry.ProviderRegistry, author
 	// a vanity FQDN) — reject it rather than letting the apply fail mid-way. (An SNI
 	// claimed twice on one host is a cert conflict, caught by routesByHost.)
 	seen := map[string]string{}
-	for _, dr := range derivedRecords(res, env, slug, baseDomain) {
+	for _, dr := range derivedRecords(res, env, slug, baseDomain, ephemeralSlug) {
 		if prev, dup := seen[dr.rec.RecordName]; dup {
 			return fmt.Errorf("dns: record %q is derived more than once (%s and %s); a DNS name must resolve to one host", dr.rec.RecordName, prev, dr.rec.Name)
 		}

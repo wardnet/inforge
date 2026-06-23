@@ -696,10 +696,24 @@ func runPkiRenew(ctx context.Context, dir, env string) error {
 // restarts into a provider that already holds the service's leaf). Returns the
 // number of leaves written.
 func renewMeshCerts(ctx context.Context, dir, env string, globalSvcs, regionalSvcs []types.ServiceSpec) (int, error) {
-	store, err := pki.Load(pki.Path(dir, env))
+	// A static env reads its config and mints its identity under the same name.
+	return renewMeshCertsAs(ctx, dir, env, env, globalSvcs, regionalSvcs)
+}
+
+// renewMeshCertsAs is the config/identity-decoupled core of renewMeshCerts
+// (ADR-0028). configEnv selects the source of truth — the pki.enc.yaml store,
+// variables.yaml, and regions.yaml under resources/<configEnv>/ — while
+// identityEnv is the env stamped into each minted leaf's SPIFFE ID and the
+// Infisical workspace the cert is written to. A static env passes configEnv ==
+// identityEnv. An ephemeral env passes configEnv = the source env (whose PKI it
+// clones) and identityEnv = its own slug, so its services get their own trust
+// scope (spiffe://…/<slug>/…) signed by the source's intermediate, written to the
+// slug-scoped workspace the ephemeral deploy provisioned.
+func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, globalSvcs, regionalSvcs []types.ServiceSpec) (int, error) {
+	store, err := pki.Load(pki.Path(dir, configEnv))
 	if err != nil {
 		if errors.Is(err, pki.ErrNotFound) {
-			return 0, fmt.Errorf("%w — run `inforge pki init %s` first", err, env)
+			return 0, fmt.Errorf("%w — run `inforge pki init %s` first", err, configEnv)
 		}
 		return 0, err
 	}
@@ -707,11 +721,11 @@ func renewMeshCerts(ctx context.Context, dir, env string, globalSvcs, regionalSv
 	if err != nil {
 		return 0, err
 	}
-	vars, err := loader.LoadVariables(env, dir)
+	vars, err := loader.LoadVariables(configEnv, dir)
 	if err != nil {
 		return 0, err
 	}
-	regionTable, global, err := loader.LoadRegionTable(env, dir)
+	regionTable, global, err := loader.LoadRegionTable(configEnv, dir)
 	if err != nil {
 		return 0, err
 	}
@@ -754,7 +768,7 @@ func renewMeshCerts(ctx context.Context, dir, env string, globalSvcs, regionalSv
 			if err != nil {
 				return fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
 			}
-			leafPEM, keyPEM, err := meshcert.MintLeaf(interCert, interKey, vars.BaseDomain, env, scope, svc.Name)
+			leafPEM, keyPEM, err := meshcert.MintLeaf(interCert, interKey, vars.BaseDomain, identityEnv, scope, svc.Name)
 			if err != nil {
 				return fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
 			}
@@ -780,7 +794,7 @@ func renewMeshCerts(ctx context.Context, dir, env string, globalSvcs, regionalSv
 		if err != nil {
 			return 0, err
 		}
-		writer, err := infisical.NewCertWriter(ctx, env, "", cID, cSecret, site, org)
+		writer, err := infisical.NewCertWriter(ctx, identityEnv, "", cID, cSecret, site, org)
 		if err != nil {
 			return 0, err
 		}
@@ -796,7 +810,7 @@ func renewMeshCerts(ctx context.Context, dir, env string, globalSvcs, regionalSv
 			if err != nil {
 				return 0, err
 			}
-			writer, err := infisical.NewCertWriter(ctx, env, ar.Slug, cID, cSecret, site, org)
+			writer, err := infisical.NewCertWriter(ctx, identityEnv, ar.Slug, cID, cSecret, site, org)
 			if err != nil {
 				return 0, err
 			}
