@@ -38,6 +38,7 @@ routes:                   # optional — typed inbound routes realized on the in
   - type: forward         #   a second route — raw L4 forward (PROXY protocol)
     listen: 853           #   required — public port
     target: 5353          #   required — backend port to forward to
+health_probes_port: 8081  # optional — backend port the ingress surfaces as a health check
 ```
 
 `environment.yaml` (optional sidecar — env-var name → source DSL string):
@@ -64,6 +65,7 @@ LOG_LEVEL: info                                 # a literal (non-secret config) 
 | `reload` | string | No | `ExecReload=` command the service uses to apply a renewed mesh leaf **without a restart** (e.g. `/bin/kill -HUP $MAINPID`, `nginx -s reload`). When set, the per-service renewal timer reloads the unit; when absent, it restarts (a brief interruption). Must be a **single line** (it becomes one `ExecReload=` directive; a newline would inject extra unit directives). The leaf/key/bundle paths are in the `MTLS_LEAF_CERT_PATH` / `MTLS_LEAF_KEY_PATH` / `MTLS_TRUST_BUNDLE_PATH` env vars — these names are **reserved**: a service's own `environment:` may not use them. |
 | `ingress` | string | When `routes` is set | **Name** of the [ingress](#ingress-and-routes) resource (same scope) whose nginx fronts this service's `routes`. The ingress host and this service's host must share a network when they differ (cross-host routing). |
 | `routes` | array | No | Typed inbound routes (`tls-termination` / `forward`) realized on the referenced ingress's nginx. Each route binds a public `listen` port and a backend `target` port. See [Ingress and routes](#ingress-and-routes) below. |
+| `health_probes_port` | int | No | Backend port the service serves health checks on. The ingress surfaces it on its public [health port](./ingress#health-probes) (default `81`), demuxed by the service's FQDN. Requires `ingress`. See [Health probes](#health-probes) below. |
 
 **`environment.yaml` sidecar:**
 
@@ -204,17 +206,38 @@ Each route's fields:
   (`server_name`).
 - **`forward`**: nginx forwards the raw L4 stream on `listen` to the backend `target` with
   `proxy_protocol on` so the backend learns the real client address; the **backend owns its own TLS**.
-  A `forward` port is **single-service-exclusive** on its ingress (it cannot be SNI-demuxed).
+  A `listen` port admits **at most one `forward`** (it is the single passthrough on that port).
 
-ACME owns `:80` on the ingress host for HTTP-01 challenges, so a `forward` on `:80` cannot coexist with a
-`tls-termination` on the same ingress. The backend's `target` ports are opened only to the private
-network (never the internet); only the ingress host exposes the public `listen` ports.
+A `forward` **may share a `listen` port with `tls-termination` routes** (e.g. several services terminating
+TLS on `443` plus one service forwarding `443`). nginx inspects the TLS SNI without terminating
+(`ssl_preread`) and routes each known SNI to its terminator and the **one** unknown SNI to the forward —
+which is why only a single forward is allowed per port. ACME owns `:80` on the ingress host for HTTP-01
+challenges, so a `forward` on `:80` still cannot coexist with a `tls-termination` on the same ingress. The
+backend's `target` ports are opened only to the private network (never the internet); only the ingress host
+exposes the public `listen` ports.
 
 :::tip Raw public ports
 A route always goes through the ingress nginx. To open a **raw** public port with no proxy (no TLS, no
 remap, no PROXY protocol), declare it on the [Compute firewall](./compute#firewall-rules) instead — not
 as a route.
 :::
+
+### Health probes
+
+A service may expose a health endpoint through its ingress with `health_probes_port` — the **backend**
+port it serves health checks on. The ingress publishes a single [public health port](./ingress#health-probes)
+(default `81`) and reverse-proxies each probe to the right backend, demuxed **by request `Host`** (the
+service's `<svc>.svc` FQDN). The health endpoint is **plain HTTP** (no TLS), and the public port is opened
+to the internet only when at least one service on the ingress declares a `health_probes_port`.
+
+```yaml
+ingress: edge
+health_probes_port: 8081   # the ingress exposes this on its public health port (:81)
+```
+
+A probe reaches it as `GET http://<ingress-host>:81/healthz` with `Host: <svc>.svc.<env>.<slug>.<base>`;
+a missing or wrong `Host` returns `404` (each backend is matched strictly). `health_probes_port` must
+differ from the service's own route `target`s and, when co-located, from the ingress's public health port.
 
 ### Hostnames, DNS and certificates
 
