@@ -12,3 +12,7 @@ go.work.sum
 
 # goreleaser build artifacts
 dist/
+
+# Agentic toolkit generated config
+/.claude/
+/CLAUDE.md
