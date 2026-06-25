@@ -1,0 +1,18 @@
+# exposed_ports collision cases (ADR-0029) -> FAIL:
+#   - tcp/8080 collides with this service's own route target 8080
+#   - udp/7000 is declared twice (duplicate proto+port on one service)
+name: peernode
+container: bridge
+host: bridge
+type: raw
+user: peernode
+pki: wardnet-mesh
+ingress: edge
+routes:
+  - type: tls-termination
+    listen: 443
+    target: 8080
+exposed_ports:
+  - { proto: tcp, port: 8080 }
+  - { proto: udp, port: 7000 }
+  - { proto: udp, port: 7000 }

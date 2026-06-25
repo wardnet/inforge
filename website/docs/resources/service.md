@@ -39,6 +39,9 @@ routes:                   # optional — typed inbound routes realized on the in
     listen: 853           #   required — public port
     target: 5353          #   required — backend port to forward to
 health_probes_port: 8081  # optional — backend port the ingress surfaces as a health check
+exposed_ports:            # optional — ports opened on the host's PRIVATE network only (no ingress, no nginx)
+  - { proto: tcp, port: 9444 }   #   inter-node mesh mTLS — reachable only on the host's network CIDR
+  - { proto: udp, port: 51820 }  #   a peer link
 ```
 
 `environment.yaml` (optional sidecar — env-var name → source DSL string):
@@ -66,6 +69,7 @@ LOG_LEVEL: info                                 # a literal (non-secret config) 
 | `ingress` | string | When `routes` is set | **Name** of the [ingress](#ingress-and-routes) resource (same scope) whose nginx fronts this service's `routes`. The ingress host and this service's host must share a network when they differ (cross-host routing). |
 | `routes` | array | No | Typed inbound routes (`tls-termination` / `forward`) realized on the referenced ingress's nginx. Each route binds a public `listen` port and a backend `target` port. See [Ingress and routes](#ingress-and-routes) below. |
 | `health_probes_port` | int | No | Backend port the service serves health checks on. The ingress surfaces it on its public [health port](./ingress#health-probes) (default `81`), demuxed by the service's FQDN. Requires `ingress`. See [Health probes](#health-probes) below. |
+| `exposed_ports` | array | No | Ports the service binds that inforge opens on the host's **private network only** (never the public internet) — for peer / service-to-service traffic. Each entry is `{proto: tcp\|udp, port: 1..65535}`. Needs **no** ingress and uses **no** nginx (distinct from `routes`); it is the private sibling of [`compute.firewall.inbound`](./compute#firewall) (which is public). See [Exposed ports](#exposed-ports) below. |
 
 **`environment.yaml` sidecar:**
 
@@ -238,6 +242,37 @@ health_probes_port: 8081   # the ingress exposes this on its public health port 
 A probe reaches it as `GET http://<ingress-host>:81/healthz` with `Host: <svc>.svc.<env>.<slug>.<base>`;
 a missing or wrong `Host` returns `404` (each backend is matched strictly). `health_probes_port` must
 differ from the service's own route `target`s and, when co-located, from the ingress's public health port.
+
+### Exposed ports
+
+Some ports a service binds are not public endpoints at all — they are reachable **only by peers on the
+same private network** (service-to-service / node-to-node traffic). `exposed_ports` declares them:
+
+```yaml
+exposed_ports:
+  - { proto: tcp, port: 9444 }   # an inter-node mesh-mTLS listener
+  - { proto: udp, port: 51820 }  # a peer link
+```
+
+inforge opens each port on the host's **private-network CIDR only** — never `0.0.0.0/0`. There is **no
+ingress and no nginx**: the port is realized purely as a private inbound firewall rule on the service's
+own host. A service may declare `exposed_ports` with **no ingress and no routes** (a *private-only*
+service is valid).
+
+This is the **private sibling** of [`compute.firewall.inbound`](./compute#firewall): same "raw port,
+no proxy" intent, but private instead of public. Use `firewall.inbound` for a port that must be open to
+the internet, `exposed_ports` for one that must stay on the private network, and a `routes` entry when
+nginx should front it.
+
+Each entry is `{proto: tcp|udp, port: 1..65535}`. `tcp/N` and `udp/N` are distinct binds and may
+coexist. An exposed port must not collide with the service's own route `target`s or `health_probes_port`,
+with a public listen port nginx holds on that host, or with another service's backend port on the host.
+
+:::note Reachability is the operator's contract
+inforge opens the firewall rule; it does **not** provide service discovery, peer enumeration, or private
+DNS. It is up to you to ensure the peers that need the port sit on the same private network and know how
+to address each other.
+:::
 
 ### Hostnames, DNS and certificates
 

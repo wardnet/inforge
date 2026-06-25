@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wardnet/inforge/internal/types"
 )
 
 // testdataDir reuses the validate package's fixture environments.
@@ -56,11 +57,19 @@ func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
 	assert.Equal(t, 1, c.InstanceCount, "instance_count should default to 1")
 	assert.True(t, filepath.IsAbs(c.CloudInit), "cloud_init should resolve to an absolute path")
 
-	require.Len(t, res.Service, 2)
-	// Services load in filename order: api before web.
+	require.Len(t, res.Service, 3)
+	// Services load in filename order: api, tunneller, web.
 	api := res.Service[0]
 	assert.Equal(t, "api", api.Name)
 	assert.Equal(t, "raw", api.Type, "service type should default to raw")
+
+	// the tunneller service is private-only: no ingress/routes, just exposed_ports.
+	tunneller := res.Service[1]
+	assert.Equal(t, "tunneller", tunneller.Name)
+	assert.Empty(t, tunneller.Ingress, "a private-only service declares no ingress")
+	require.Len(t, tunneller.ExposedPorts, 2, "tunneller declares two exposed ports")
+	assert.Equal(t, types.ExposedPort{Proto: "tcp", Port: 9444}, tunneller.ExposedPorts[0])
+	assert.Equal(t, types.ExposedPort{Proto: "udp", Port: 51820}, tunneller.ExposedPorts[1])
 
 	// the api service declares a tls-termination and a forward route.
 	require.Len(t, api.Routes, 2, "api service should declare two routes")

@@ -330,6 +330,28 @@ func TestFirewallPlanByHostCrossHost(t *testing.T) {
 	assert.Empty(t, got["back-01"].Public, "backend opens no public ingress port")
 }
 
+// TestFirewallPlanByHostExposedPorts: a private-only service (no ingress, no routes)
+// contributes its exposed_ports as proto-aware private binds scoped to the host's
+// network CIDR — never public (ADR-0029).
+func TestFirewallPlanByHostExposedPorts(t *testing.T) {
+	res := types.Resources{
+		Network: []types.NetworkSpec{{Name: "net", CIDR: "10.0.0.0/16"}},
+		Compute: []types.ComputeSpec{{Name: "edge", Network: "net", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "tunneller", Host: "edge", ExposedPorts: []types.ExposedPort{
+				{Proto: "udp", Port: 51820},
+				{Proto: "tcp", Port: 9444},
+			}},
+		},
+	}
+	got := firewallPlanByHost(res)
+	assert.Equal(t, []types.ExposedPort{{Proto: "tcp", Port: 9444}, {Proto: "udp", Port: 51820}}, got["edge-01"].PrivateExposed,
+		"exposed ports are sorted by proto then port")
+	assert.Equal(t, "10.0.0.0/16", got["edge-01"].PrivateSourceCIDR, "exposed ports scope to the host's network CIDR")
+	assert.Empty(t, got["edge-01"].Public, "a private-only service opens no public port")
+	assert.Empty(t, got["edge-01"].Private, "exposed ports are carried in PrivateExposed, not Private")
+}
+
 // TestDerivedRecordsApps: an app's FQDN is a grey-cloud A record at its ingress
 // host (the clean dotted form, regional carries the slug). The host's own "<vm>"
 // record is unaffected.

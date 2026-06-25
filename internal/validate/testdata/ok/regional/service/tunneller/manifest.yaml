@@ -1,0 +1,14 @@
+name: tunneller
+container: bridge
+host: bridge
+type: raw
+user: tunneller
+pki: wardnet-mesh
+# A private-only service (ADR-0029): no ingress, no routes. inforge opens these
+# ports on the host's private-network CIDR only — never the public internet, no
+# nginx. The inter-node mesh-mTLS listener (tcp/9444) and a peer link (udp/51820)
+# must reach siblings on the same regional private network. tcp/9444 and udp/51820
+# are distinct OS binds, so they may share a port number with each other.
+exposed_ports:
+  - { proto: tcp, port: 9444 }
+  - { proto: udp, port: 51820 }

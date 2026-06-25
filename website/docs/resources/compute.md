@@ -121,11 +121,14 @@ The inbound rule set is **derived**, not hand-maintained:
 - **SSH (22)** is always permitted (management access is never locked out).
 - Every service's [ingress](./service#ingress) `listen` port on this host is opened automatically, plus
   **`:80`** when the host terminates TLS (nginx serves the ACME HTTP-01 challenge there).
-- Any rules in the `firewall.inbound` block are unioned on top — for **raw** ports not fronted by nginx
-  (a port a service binds directly, with no proxy).
+- A cross-host service's route `target` ports, and every service's [`exposed_ports`](./service#exposed-ports),
+  are opened **only to this host's private-network CIDR** — never the internet.
+- Any rules in the `firewall.inbound` block are unioned on top — for **raw public** ports not fronted by
+  nginx (a port a service binds directly, with no proxy).
 
-Outbound traffic is always fully allowed. So you only declare a `firewall.inbound` rule for a raw public
-port; ports behind nginx ingress open themselves.
+Outbound traffic is always fully allowed. So `firewall.inbound` is for a raw **public** port; for a raw
+port that must stay on the **private** network, declare it as a service
+[`exposed_ports`](./service#exposed-ports) entry instead; ports behind nginx ingress open themselves.
 
 ```yaml title="regional/compute/bridge/manifest.yaml"
 name: bridge

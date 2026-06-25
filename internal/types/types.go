@@ -228,8 +228,19 @@ type ServiceSpec struct {
 	Ingress          string            `yaml:"ingress,omitempty"`            // FK -> ingress resource name (same scope) whose nginx fronts this service's Routes; required when Routes is non-empty
 	Routes           []RouteSpec       `yaml:"routes,omitempty"`             // typed inbound routes (tls-termination / forward) realized on the referenced ingress's nginx
 	HealthProbesPort int               `yaml:"health_probes_port,omitempty"` // backend port this service serves health checks on; surfaced through the ingress's public health port, Host-demuxed by the service FQDN (requires Ingress)
+	ExposedPorts     []ExposedPort     `yaml:"exposed_ports,omitempty"`      // ports the service binds that inforge opens on the host's private network only (never the public internet), for peer/service-to-service traffic; needs no ingress (ADR-0029)
 	Grants           []GrantSpec       `yaml:"grants,omitempty"`             // permissioned access to Grantable resources (database/pki), materialized as env vars (ADR-0025)
 	Environment      map[string]string `yaml:"-"`                            // env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); loaded from the service's sibling environment.yaml, not the manifest; the secrets provider is derived from the region, not the service
+}
+
+// ExposedPort is one private-network port a service binds (ADR-0029): inforge opens
+// it on the host's private-network CIDR only, never the public internet. It is the
+// private sibling of compute.firewall.inbound (which is public). Unlike that rule,
+// the port is a plain integer (no ranges) and proto is tcp/udp only (no icmp), so it
+// is comparable and usable directly as a map key.
+type ExposedPort struct {
+	Proto string `yaml:"proto"` // "tcp" | "udp"
+	Port  int    `yaml:"port"`  // 1..65535
 }
 
 // PKIResourceSpec is one PKI resource — a root-only Certificate Authority that
@@ -330,11 +341,14 @@ type ComputeOutputs struct {
 // internet (0.0.0.0/0 + ::/0) — an ingress host's route Listen ports plus :80 for
 // ACME HTTP-01. Private ports are opened only to PrivateSourceCIDR (the host's
 // private network CIDR) — a backend's route Target ports, reachable solely from a
-// co-tenant ingress over the private network. Both lists are deduped and sorted.
+// co-tenant ingress over the private network. PrivateExposed carries a service's
+// exposed_ports (ADR-0029): proto-aware private binds opened to PrivateSourceCIDR
+// too, never the internet. All lists are deduped and sorted.
 type FirewallPorts struct {
 	Public            []int
 	Private           []int
-	PrivateSourceCIDR string // private network CIDR scoping Private; "" when Private is empty
+	PrivateExposed    []ExposedPort // proto-aware service exposed_ports, opened only to PrivateSourceCIDR (ADR-0029)
+	PrivateSourceCIDR string        // private network CIDR scoping Private/PrivateExposed; "" when both are empty
 }
 
 // DatabaseOutputs are the values a DatabaseProvider returns after creating a

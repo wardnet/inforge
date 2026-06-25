@@ -132,6 +132,18 @@ reverse-proxied to `backend:<health_probes_port>`; a wrong/absent Host is a 404 
 See ADR-0027. _Avoid_: TLS on the health port; a per-service public health port; relying on a default
 server to match any Host.
 
+**Exposed port**:
+A service's optional `exposed_ports` entry (`{proto: tcp|udp, port}`): a port the service binds that
+inforge opens on the host's **private-network CIDR only** — never the public internet — for
+peer/service-to-service traffic. It is the **private sibling** of `compute.firewall.inbound` (raw port,
+no proxy, but private not public) and is distinct from an **Ingress route** (no nginx, no `listen`) and
+from mesh `pki:` membership. Realized as a private inbound firewall rule on the service's **own** host
+(`FirewallPorts.PrivateExposed`, scoped to the host network CIDR), reusing the cross-host-target private
+path. Needs **no** ingress — a *private-only* service (exposed ports, no routes, no ingress) is valid.
+Collisions are proto-aware (`tcp/N` and `udp/N` may coexist). See ADR-0029. _Avoid_: using
+`firewall.inbound` for a private port (it is always public); expecting service discovery / private DNS
+(inforge opens the port, reachability is the operator's contract).
+
 **DNS authority**:
 The single DNS provider + zone for one (env, region), declared in `regions.yaml` under `dns:`
 (sibling of `providers:`; credentials stay in the providers block). inforge authors no DNS records —

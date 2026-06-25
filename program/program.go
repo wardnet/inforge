@@ -1249,6 +1249,16 @@ func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
 		}
 		private[host][port] = true
 	}
+	// exposed holds each host's service exposed_ports (ADR-0029), proto-aware and
+	// deduped. Like a cross-host backend target they are opened only to the host's
+	// private CIDR — never the internet.
+	exposed := map[string]map[types.ExposedPort]bool{}
+	addExposed := func(host string, ep types.ExposedPort) {
+		if exposed[host] == nil {
+			exposed[host] = map[types.ExposedPort]bool{}
+		}
+		exposed[host][ep] = true
+	}
 	healthPortByName := ingressHealthPortByName(res)
 	for _, is := range resolveIngressServices(res, canonical) {
 		for _, rt := range is.svc.Routes {
@@ -1275,6 +1285,22 @@ func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
 		addPublic(ia.ingHost, 443)
 		addPublic(ia.ingHost, 80)
 	}
+	// exposed_ports are private binds on the service's own host, with no ingress
+	// involvement — so they are read from every service directly (not via
+	// resolveIngressServices, which skips ingress-less services). A private-only
+	// service contributes only here.
+	for _, svc := range res.Service {
+		if len(svc.ExposedPorts) == 0 {
+			continue
+		}
+		svcHost, ok := canonical[svc.Host]
+		if !ok {
+			continue
+		}
+		for _, ep := range svc.ExposedPorts {
+			addExposed(svcHost, ep)
+		}
+	}
 
 	out := map[string]types.FirewallPorts{}
 	hosts := map[string]bool{}
@@ -1284,13 +1310,35 @@ func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
 	for h := range private {
 		hosts[h] = true
 	}
+	for h := range exposed {
+		hosts[h] = true
+	}
 	for h := range hosts {
-		fp := types.FirewallPorts{Public: sortedInts(public[h]), Private: sortedInts(private[h])}
-		if len(fp.Private) > 0 {
+		fp := types.FirewallPorts{Public: sortedInts(public[h]), Private: sortedInts(private[h]), PrivateExposed: sortedExposedPorts(exposed[h])}
+		if len(fp.Private) > 0 || len(fp.PrivateExposed) > 0 {
 			fp.PrivateSourceCIDR = netCIDR[h]
 		}
 		out[h] = fp
 	}
+	return out
+}
+
+// sortedExposedPorts returns the set's exposed ports in a stable order (proto, then
+// port) so the rendered firewall is deterministic.
+func sortedExposedPorts(set map[types.ExposedPort]bool) []types.ExposedPort {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]types.ExposedPort, 0, len(set))
+	for ep := range set {
+		out = append(out, ep)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Proto != out[j].Proto {
+			return out[i].Proto < out[j].Proto
+		}
+		return out[i].Port < out[j].Port
+	})
 	return out
 }
 

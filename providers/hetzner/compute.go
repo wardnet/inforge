@@ -168,10 +168,11 @@ func (h *HetznerCompute) Create(
 // does not yet exist. The inbound rule set is derived, not hand-maintained: SSH
 // (22) is always permitted from anywhere, the host's derived public ports (an
 // ingress host's route listen ports, plus :80 when it terminates TLS) are opened
-// to the internet, the derived private ports (a backend's route target ports) are
-// opened only to the private network CIDR (reachable from a co-tenant ingress
-// over the private network, never the internet), and any explicit
-// spec.Firewall.Inbound rules are added on top as public. Duplicate (proto, port,
+// to the internet, the derived private ports (a backend's route target ports and a
+// service's exposed_ports, ADR-0029) are opened only to the private network CIDR
+// (reachable from a co-tenant ingress or sibling node over the private network,
+// never the internet), and any explicit spec.Firewall.Inbound rules are added on
+// top as public. exposed_ports are proto-aware (tcp/udp). Duplicate (proto, port,
 // source) tuples are collapsed so the rendered firewall is stable. It is safe to
 // call concurrently.
 func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeSpec, env string, fwPorts types.FirewallPorts) (*hcloud.Firewall, error) {
@@ -193,22 +194,25 @@ func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeS
 		privateSources = pulumi.StringArray{pulumi.String(fwPorts.PrivateSourceCIDR)}
 	}
 
-	rules := make(hcloud.FirewallRuleArray, 0, len(fwPorts.Public)+len(fwPorts.Private)+4)
+	rules := make(hcloud.FirewallRuleArray, 0, len(fwPorts.Public)+len(fwPorts.Private)+len(fwPorts.PrivateExposed)+4)
 	// De-duplicate by (proto, port, scope) so a port that is both derived and
 	// declared, or appears in two lists, is rendered once.
 	seen := map[string]bool{}
-	addTCP := func(port string, sources pulumi.StringArray, scope string) {
-		key := "tcp/" + port + "/" + scope
+	addRule := func(proto, port string, sources pulumi.StringArray, scope string) {
+		key := proto + "/" + port + "/" + scope
 		if seen[key] {
 			return
 		}
 		seen[key] = true
 		rules = append(rules, &hcloud.FirewallRuleArgs{
 			Direction: pulumi.String("in"),
-			Protocol:  pulumi.String("tcp"),
+			Protocol:  pulumi.String(proto),
 			Port:      pulumi.StringPtr(port),
 			SourceIps: sources,
 		})
+	}
+	addTCP := func(port string, sources pulumi.StringArray, scope string) {
+		addRule("tcp", port, sources, scope)
 	}
 	// SSH first (management access is never locked out).
 	addTCP("22", publicSources, "public")
@@ -220,6 +224,11 @@ func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeS
 	if privateSources != nil {
 		for _, p := range fwPorts.Private {
 			addTCP(strconv.Itoa(p), privateSources, "private")
+		}
+		// Service exposed_ports (ADR-0029): proto-aware private binds, opened only to
+		// the host's private CIDR — never publicSources.
+		for _, ep := range fwPorts.PrivateExposed {
+			addRule(ep.Proto, strconv.Itoa(ep.Port), privateSources, "private")
 		}
 	}
 	if spec.Firewall != nil {

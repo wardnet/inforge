@@ -309,6 +309,21 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
   its `health_probes_port` privately to the network CIDR. `Render(routes, apps, health, healthPort)` and
   `IngressProvider.Realize(... health, healthPort ...)` carry the new arguments; `resolveIngressServices`
   now also admits health-only services (route-less).
+- **Exposed ports (ADR-0029).** A service's optional `exposed_ports` (`[]types.ExposedPort{Proto,Port}`)
+  are ports inforge opens on the host's **private-network CIDR only** — never the public internet, with
+  **no ingress and no nginx**. They are the private sibling of `compute.firewall.inbound` (which is
+  public). Realization: `firewallPlanByHost` reads them from **every** service directly (not via
+  `resolveIngressServices`, so a private-only service with no ingress is included), collects them onto
+  the service's own host as `FirewallPorts.PrivateExposed` (proto-aware, deduped, sorted), and the
+  Hetzner `ensureFirewall` opens each scoped to `PrivateSourceCIDR` (reusing the cross-host-target
+  private path; the TCP-only `addTCP` was generalized to `addRule(proto,…)`). They never touch
+  `publicSources` — see rule `.agents/rules/exposed-ports-are-private-only.md`. Validation
+  (`checkService`): no ingress required; a tcp exposed port shares the int-keyed (implicitly-TCP)
+  `targetUsersByHost` space with route targets + health (must differ from the service's own route
+  targets/health, a public listen port nginx holds on the host, another service's backend port, and —
+  when the host runs an ingress — the reserved loopback range); a udp exposed port lives in the new
+  proto-aware `udpExposedUsersByHost` and collides only with another udp exposed port; a duplicate
+  `(proto,port)` on one service is rejected.
 - **`internal/loader`** — `NormalizeIngress` and `NormalizeApp` trim free-text fields (and
   `NormalizeIngress` defaults `health_probes_port` to 81); loader reads `ingress/` and `app/`
   sub-folders in both scopes alongside the existing resource folders.
