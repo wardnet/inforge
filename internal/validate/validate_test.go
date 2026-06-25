@@ -768,6 +768,82 @@ func TestCheckIngressHealthPort(t *testing.T) {
 	assert.Contains(t, strings.Join(errs, "|"), "hosts at most one ingress")
 }
 
+func TestCheckServiceExposedPorts(t *testing.T) {
+	// A private-only service: no ingress, no routes, just exposed_ports.
+	svc := func(eps ...types.ExposedPort) types.ServiceSpec {
+		return types.ServiceSpec{Name: "tunneller", Host: "bridge", Type: "raw", User: "svc", ExposedPorts: eps}
+	}
+	tcp := func(p int) types.ExposedPort { return types.ExposedPort{Proto: "tcp", Port: p} }
+	udp := func(p int) types.ExposedPort { return types.ExposedPort{Proto: "udp", Port: p} }
+
+	// Private-only service with no ingress -> OK (exposed_ports require no ingress).
+	errs, _ := checkService(svc(tcp(9444)), baseCtx())
+	assert.Empty(t, errs)
+
+	// tcp/N and udp/N coexist on one service (distinct OS binds) -> OK.
+	errs, _ = checkService(svc(tcp(9444), udp(9444)), baseCtx())
+	assert.Empty(t, errs)
+
+	// Duplicate (proto, port) on the same service -> FAIL.
+	errs, _ = checkService(svc(tcp(9444), tcp(9444)), baseCtx())
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "declared more than once")
+
+	// tcp exposed port equals the service's own route target -> FAIL.
+	s := svc(tcp(8080))
+	s.Ingress = "web"
+	s.Routes = []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}
+	errs, _ = checkService(s, ingressFKCtx())
+	assert.Contains(t, strings.Join(errs, "|"), "route target")
+
+	// tcp exposed port equals the service's own health_probes_port -> FAIL.
+	s = svc(tcp(8081))
+	s.Ingress = "web"
+	s.HealthProbesPort = 8081
+	c := ingressFKCtx()
+	c.ingressHealthPort = map[string]int{"web": 81}
+	errs, _ = checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "health_probes_port")
+
+	// tcp exposed port equals a public listen port on the backend host -> FAIL.
+	pubCtx := baseCtx()
+	pubCtx.portUsersByHost = map[string]map[int][]string{"bridge-01": {9999: {"other"}}}
+	errs, _ = checkService(svc(tcp(9999)), pubCtx)
+	assert.Contains(t, strings.Join(errs, "|"), "public listen port")
+
+	// tcp exposed port is another service's backend target on the same host -> FAIL.
+	tgtCtx := baseCtx()
+	tgtCtx.targetUsersByHost = map[string]map[int][]string{"bridge-01": {9998: {"other"}}}
+	errs, _ = checkService(svc(tcp(9998)), tgtCtx)
+	assert.Contains(t, strings.Join(errs, "|"), "belongs to a single service")
+
+	// udp exposed port is another service's udp exposed port on the same host -> FAIL.
+	udpCtx := baseCtx()
+	udpCtx.udpExposedUsersByHost = map[string]map[int][]string{"bridge-01": {9444: {"other"}}}
+	errs, _ = checkService(svc(udp(9444)), udpCtx)
+	assert.Contains(t, strings.Join(errs, "|"), "belongs to a single service")
+
+	// udp exposed port does NOT collide with another service's TCP backend target -> OK.
+	mixCtx := baseCtx()
+	mixCtx.targetUsersByHost = map[string]map[int][]string{"bridge-01": {9444: {"other"}}}
+	errs, _ = checkService(svc(udp(9444)), mixCtx)
+	assert.Empty(t, errs)
+
+	// tcp exposed port in the reserved loopback range when the host runs an ingress -> FAIL.
+	loopCtx := baseCtx()
+	loopCtx.ingressNamesByHost = map[string][]string{"bridge-01": {"edge"}}
+	errs, _ = checkService(svc(tcp(nginx.LoopbackBase)), loopCtx)
+	assert.Contains(t, strings.Join(errs, "|"), "reserved internal range")
+
+	// Same reserved-range port, but the host runs no ingress -> OK (no terminator).
+	errs, _ = checkService(svc(tcp(nginx.LoopbackBase)), baseCtx())
+	assert.Empty(t, errs)
+
+	// An invalid proto -> FAIL.
+	errs, _ = checkService(svc(types.ExposedPort{Proto: "sctp", Port: 9444}), baseCtx())
+	assert.Contains(t, strings.Join(errs, "|"), "proto")
+}
+
 // TestCheckServiceHealthCrossHostNetwork: a health-only service (no routes) whose
 // host is on a different network than its ingress is rejected — the same-network
 // rule now covers health, not just routes.

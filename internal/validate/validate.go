@@ -222,6 +222,13 @@ type regionContext struct {
 	// co-located with its ingress — must not collide with a public listen port nginx
 	// holds on that host (see checkService).
 	targetUsersByHost map[string]map[int][]string
+	// udpExposedUsersByHost maps a canonical BACKEND host specKey to, per UDP port,
+	// the names of services declaring that udp exposed_port (ADR-0029). UDP exposed
+	// ports are tracked separately from the int-keyed (implicitly-TCP) target space
+	// so tcp/N and udp/N may coexist (distinct OS binds); a udp exposed port collides
+	// only with another service's udp exposed port. TCP exposed ports share
+	// targetUsersByHost with route targets and health ports.
+	udpExposedUsersByHost map[string]map[int][]string
 	// tlsTermIngressByHost marks a canonical INGRESS host specKey that has at least
 	// one tls-termination route across the services it fronts — so a forward on :80
 	// (which ACME needs) can be rejected.
@@ -419,28 +426,29 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	}
 
 	ctx := regionContext{
-		available:            available,
-		sizeTable:            sizeTable,
-		networks:             map[string]types.NetworkSpec{},
-		computeKind:          map[string]string{},
-		computeCanonical:     map[string]string{},
-		computeInstances:     map[string]int{},
-		computeDeployer:      map[string]bool{},
-		computeNames:         map[string]bool{},
-		computeNetwork:       map[string]string{},
-		databaseNames:        map[string]bool{},
-		ingressNames:         map[string]bool{},
-		ingressHost:          map[string]string{},
-		appSubdomainCounts:   map[string]int{},
-		portUsersByHost:      map[string]map[int][]string{},
-		forwardUsersByHost:   map[string]map[int][]string{},
-		targetUsersByHost:    map[string]map[int][]string{},
-		tlsTermIngressByHost: map[string]bool{},
-		ingressHealthPort:    map[string]int{},
-		ingressNamesByHost:   map[string][]string{},
-		pkiResources:         map[string]string{},
-		encStore:             encStore,
-		providerDefaults:     defaults,
+		available:             available,
+		sizeTable:             sizeTable,
+		networks:              map[string]types.NetworkSpec{},
+		computeKind:           map[string]string{},
+		computeCanonical:      map[string]string{},
+		computeInstances:      map[string]int{},
+		computeDeployer:       map[string]bool{},
+		computeNames:          map[string]bool{},
+		computeNetwork:        map[string]string{},
+		databaseNames:         map[string]bool{},
+		ingressNames:          map[string]bool{},
+		ingressHost:           map[string]string{},
+		appSubdomainCounts:    map[string]int{},
+		portUsersByHost:       map[string]map[int][]string{},
+		forwardUsersByHost:    map[string]map[int][]string{},
+		targetUsersByHost:     map[string]map[int][]string{},
+		udpExposedUsersByHost: map[string]map[int][]string{},
+		tlsTermIngressByHost:  map[string]bool{},
+		ingressHealthPort:     map[string]int{},
+		ingressNamesByHost:    map[string][]string{},
+		pkiResources:          map[string]string{},
+		encStore:              encStore,
+		providerDefaults:      defaults,
 	}
 	for _, f := range networkFiles {
 		ctx.networks[f.spec.Name] = f.spec
@@ -541,6 +549,34 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 				}
 				ctx.targetUsersByHost[backendHost][rt.Target] = append(ctx.targetUsersByHost[backendHost][rt.Target], f.spec.Name)
 			}
+		}
+	}
+	// Register exposed_ports separately and UNGATED: a service may declare exposed
+	// ports with no ingress and no routes (a private-only service), so this cannot
+	// live in the ingress-tier loop above. A tcp exposed port is a backend bind, so
+	// it shares the int-keyed (implicitly-TCP) target space with route targets and
+	// health ports; a udp exposed port lives in its own proto-aware space so tcp/N
+	// and udp/N do not collide (ADR-0029).
+	for _, f := range serviceFiles {
+		if f.parseErr != nil || len(f.spec.ExposedPorts) == 0 {
+			continue
+		}
+		backendHost := canonicalHost(f.spec.Host, ctx)
+		if backendHost == "" {
+			continue
+		}
+		for _, ep := range f.spec.ExposedPorts {
+			if ep.Proto == "udp" {
+				if ctx.udpExposedUsersByHost[backendHost] == nil {
+					ctx.udpExposedUsersByHost[backendHost] = map[int][]string{}
+				}
+				ctx.udpExposedUsersByHost[backendHost][ep.Port] = append(ctx.udpExposedUsersByHost[backendHost][ep.Port], f.spec.Name)
+				continue
+			}
+			if ctx.targetUsersByHost[backendHost] == nil {
+				ctx.targetUsersByHost[backendHost] = map[int][]string{}
+			}
+			ctx.targetUsersByHost[backendHost][ep.Port] = append(ctx.targetUsersByHost[backendHost][ep.Port], f.spec.Name)
 		}
 	}
 	// Seed the global slice's referenceable outputs under a `global/` prefix so a
@@ -1292,6 +1328,63 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 				if inReservedLoopbackRange(s.HealthProbesPort) {
 					errs = append(errs, fmt.Sprintf("health_probes_port: %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a port outside it", s.HealthProbesPort, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
 				}
+			}
+		}
+	}
+	// exposed_ports (ADR-0029): each is a private-network backend bind inforge opens
+	// only to the host's private CIDR. Unlike health, a service MAY declare them with
+	// no ingress (a private-only service), so there is no ingress requirement. The
+	// collision model is proto-aware: a tcp exposed port shares the backend TCP space
+	// with route targets and health ports; a udp exposed port collides only with
+	// another udp exposed port.
+	if len(s.ExposedPorts) > 0 {
+		hostRunsIngress := backendHost != "" && len(ctx.ingressNamesByHost[backendHost]) > 0
+		seen := map[types.ExposedPort]bool{}
+		for _, ep := range s.ExposedPorts {
+			if ep.Proto != "tcp" && ep.Proto != "udp" {
+				errs = append(errs, fmt.Sprintf("exposed_ports: proto %q is invalid (want tcp or udp)", ep.Proto))
+				continue
+			}
+			if seen[ep] {
+				errs = append(errs, fmt.Sprintf("exposed_ports: %s/%d is declared more than once on this service", ep.Proto, ep.Port))
+				continue
+			}
+			seen[ep] = true
+			if ep.Proto == "udp" {
+				// A udp exposed port collides only with another service's udp exposed
+				// port on this host (tcp/N and udp/N are distinct OS binds).
+				if backendHost != "" {
+					if others := otherUsers(ctx.udpExposedUsersByHost[backendHost][ep.Port], s.Name); len(others) > 0 {
+						errs = append(errs, fmt.Sprintf("exposed_ports: udp/%d on host %q is also exposed by service(s) %s; a private backend port belongs to a single service", ep.Port, s.Host, strings.Join(others, ", ")))
+					}
+				}
+				continue
+			}
+			// A tcp exposed port is a backend bind: it must differ from this service's
+			// own route targets and health port.
+			for _, rt := range s.Routes {
+				if rt.Target == ep.Port {
+					errs = append(errs, fmt.Sprintf("exposed_ports: tcp/%d collides with route target %d on the same service; an exposed backend port must differ from every route target", ep.Port, rt.Target))
+					break
+				}
+			}
+			if s.HealthProbesPort != 0 && s.HealthProbesPort == ep.Port {
+				errs = append(errs, fmt.Sprintf("exposed_ports: tcp/%d collides with this service's health_probes_port; the two are distinct backend binds", ep.Port))
+			}
+			if backendHost != "" {
+				// It must not equal a public listen port nginx holds on this host, nor
+				// another service's tcp backend port (route target / health / exposed).
+				if len(ctx.portUsersByHost[backendHost][ep.Port]) > 0 {
+					errs = append(errs, fmt.Sprintf("exposed_ports: tcp/%d collides with a public listen port on host %q; nginx occupies that port on all interfaces, so the service cannot bind it", ep.Port, s.Host))
+				}
+				if others := otherUsers(ctx.targetUsersByHost[backendHost][ep.Port], s.Name); len(others) > 0 {
+					errs = append(errs, fmt.Sprintf("exposed_ports: tcp/%d on host %q is also a backend port of service(s) %s; a backend port belongs to a single service", ep.Port, s.Host, strings.Join(others, ", ")))
+				}
+			}
+			// When this host runs an ingress, nginx may bind a loopback ssl_preread
+			// terminator in the reserved range; a co-located tcp bind there clashes.
+			if hostRunsIngress && inReservedLoopbackRange(ep.Port) {
+				errs = append(errs, fmt.Sprintf("exposed_ports: tcp/%d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators on this ingress host; pick a port outside it", ep.Port, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
 			}
 		}
 	}

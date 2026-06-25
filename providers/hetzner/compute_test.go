@@ -143,6 +143,48 @@ func TestEnsureFirewallSourceScoping(t *testing.T) {
 	assert.Equal(t, []string{"10.0.0.0/16"}, srcByPort["8080"], "a private backend port opens only to the network CIDR")
 }
 
+// TestEnsureFirewallExposedPorts: a service's exposed_ports (ADR-0029) open on the
+// host's private CIDR only — proto-aware (tcp + udp), never to the internet.
+func TestEnsureFirewallExposedPorts(t *testing.T) {
+	mocks := &fwCaptureMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil)
+		spec := types.ComputeSpec{Name: "edge", Container: "vpc", Provider: "hetzner"}
+		_, err := h.ensureFirewall(ctx, spec, "prod", types.FirewallPorts{
+			PrivateExposed: []types.ExposedPort{
+				{Proto: "tcp", Port: 9444},
+				{Proto: "udp", Port: 9444},
+			},
+			PrivateSourceCIDR: "10.0.0.0/16",
+		})
+		return err
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+
+	// Collect (proto/port -> sourceIps) for every inbound rule.
+	srcByRule := map[string][]string{}
+	for _, r := range mocks.rules {
+		o := r.ObjectValue()
+		if o["direction"].StringValue() != "in" {
+			continue
+		}
+		port := ""
+		if p, ok := o["port"]; ok && p.IsString() {
+			port = p.StringValue()
+		}
+		proto := o["protocol"].StringValue()
+		var srcs []string
+		for _, s := range o["sourceIps"].ArrayValue() {
+			srcs = append(srcs, s.StringValue())
+		}
+		srcByRule[proto+"/"+port] = srcs
+	}
+	assert.Equal(t, []string{"10.0.0.0/16"}, srcByRule["tcp/9444"], "an exposed tcp port opens only to the network CIDR")
+	assert.Equal(t, []string{"10.0.0.0/16"}, srcByRule["udp/9444"], "an exposed udp port opens only to the network CIDR")
+	assert.NotContains(t, srcByRule["tcp/9444"], "0.0.0.0/0", "an exposed port must never open to the internet")
+	assert.NotContains(t, srcByRule["udp/9444"], "0.0.0.0/0", "an exposed port must never open to the internet")
+}
+
 func TestEnsureFirewallCustomRules(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil)
