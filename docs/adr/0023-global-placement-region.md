@@ -63,11 +63,24 @@ service) was therefore undeployable.
   unit + mesh leaf) — driven by a single "scopes" list whose first entry is the global slice
   (empty slug) followed by each region. Global is realized first so a regional
   `ref:database/global/<name>` still resolves against the already-populated global outputs.
-- **`inforge validate` rejects a global slice that needs DNS but has no authority.** If the
-  global slice declares a service with routes or health probes, or any ingress, and the
-  `placementRegion` declares no `dns:` block, validation fails with an actionable error rather
-  than silently deploying nothing.
+- **`inforge validate` rejects a global slice that needs DNS but has no authority.** A global
+  slice with **any compute** realizes a `<compute>.vm.<env>` host record (plus service/app
+  records), so if the `placementRegion` declares no `dns:` block, validation fails with an
+  actionable error rather than silently deploying nothing. `program.Run` re-checks the same
+  condition (via `derivedRecords`) and fails fast at deploy if validate was bypassed. The guard
+  only fires when the `placementRegion` is itself a defined region, so a typo'd placement region
+  reports just the "not a defined region" error, not a second misleading one.
 
-This resolves the former `TODO(ADR-0023)`. Regional services have the same latent requirement
-(a region with `tls-termination`/health but no `dns:`) — left unchanged here and tracked
-separately.
+This resolves the former `TODO(ADR-0023)`.
+
+### Known limitations (follow-ups)
+
+- The derived host/service records are env-scoped and region-less (`<svc>.svc.<env>`), so they
+  cannot collide with the slug-bearing regional records in the shared zone. A **literal** vanity
+  or apex FQDN (e.g. `account.<base>`) declared identically on a global service *and* a service
+  in the placement region would collide, and the per-scope dedup does not catch it. (This is an
+  extension of the pre-existing cross-region case where two regions share a zone.)
+- Neither the global nor the regional `dns:` guard checks that the DNS authority's *provider*
+  credentials are present in the realizing providers block — a separate, pre-existing gap.
+- Regional services have the same latent DNS requirement (a region with `tls-termination`/health
+  but no `dns:`) — left unchanged here.

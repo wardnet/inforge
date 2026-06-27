@@ -121,6 +121,21 @@ func TestValidateResourcesGlobalDNSMissing(t *testing.T) {
 		"the failure must name the missing-dns guard, not some unrelated error")
 }
 
+// TestValidateResourcesGlobalPlacementUndefined: when placementRegion names an
+// undefined region, the DNS guard must stay silent — indexing the region table with
+// a bad key yields a zero-value (nil Dns) that would otherwise pile a misleading "no
+// dns: authority" error on top of the real "not a defined region" error. The
+// operator should see only the latter.
+func TestValidateResourcesGlobalPlacementUndefined(t *testing.T) {
+	out := captureStdout(t, func() {
+		err := ValidateResources("global-placement-undefined", testdataDir, types.ProviderDefaults{})
+		require.Error(t, err, "an undefined placementRegion must fail validation")
+	})
+	assert.Contains(t, out, "is not a defined region", "the real error must be reported")
+	assert.NotContains(t, out, "has no dns: authority",
+		"the DNS guard must not fire for a region that does not exist")
+}
+
 // TestValidateResourcesEncryptedOK: a `vault:KEY` secret whose (container, KEY)
 // ciphertext exists in the env's secrets.enc.yaml validates
 // cleanly — the check is presence-only, so the fixture ciphertext is a dummy.

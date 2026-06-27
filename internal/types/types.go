@@ -552,6 +552,15 @@ type Resources struct {
 	App      []AppSpec
 }
 
+// HasAny reports whether the set declares any resource of any kind. Used to decide
+// whether a scope (notably the optional global slice) is worth realizing at all —
+// an absent global/ dir loads as the zero Resources. Counting every field keeps it
+// honest as new resource kinds are added.
+func (r Resources) HasAny() bool {
+	return len(r.Network)+len(r.Compute)+len(r.Database)+
+		len(r.Service)+len(r.PKI)+len(r.Ingress)+len(r.App) > 0
+}
+
 // ProviderDefaults are project-level provider fallbacks. When a resource spec omits
 // its provider field, the effective provider is resolved from this block.
 // Compute applies to both network and compute specs (they share one cloud provider).

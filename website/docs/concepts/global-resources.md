@@ -113,7 +113,15 @@ once, with region-less names:
   authority of the `placementRegion` (`regions.<placementRegion>.dns`). Global records carry no slug,
   so they never collide with the slug-bearing regional records.
 
-Because a global service/ingress realizes DNS and ACME against the placement region's authority,
-`inforge validate` **rejects** a global slice that declares a service with routes/health or any
-ingress when the `placementRegion` has no `dns:` block. Validation also enforces the full per-type
-rules (e.g. a global service host must declare a `deploy_user`).
+Because a global slice realizes DNS and ACME against the placement region's authority, `inforge
+validate` **rejects** a global slice with any compute (every host derives a `.vm` record) when the
+`placementRegion` has no `dns:` block; `inforge deploy` re-checks and fails fast if validate was
+skipped. Validation also enforces the full per-type rules (e.g. a global service host must declare a
+`deploy_user`).
+
+:::note
+The derived host/service records are env-scoped and region-less, so they never collide with the
+slug-bearing regional records. One case a shared zone still allows: a **literal** vanity/apex FQDN
+(e.g. `account.<base>`) declared identically on both a global service and a service in the placement
+region — operator-avoidable and not yet validated.
+:::

@@ -1,0 +1,9 @@
+name: host
+container: core
+provider: hetzner
+network: edge-net
+size: SMALL
+image: ubuntu-24.04
+instance_count: 1
+deploy_user:
+  name: deploy

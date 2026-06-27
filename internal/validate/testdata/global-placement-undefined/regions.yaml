@@ -1,0 +1,24 @@
+# global.placementRegion names a region that is NOT defined under regions:. The
+# global slice has a compute (which derives a .vm DNS record), so the DNS guard
+# would fire — but it must stay silent here so the operator sees only the real
+# "placementRegion not defined" error, not a misleading "no dns: authority" error
+# about a region that doesn't exist.
+regions:
+  us-east-1:
+    slug: use1
+    providers:
+      hetzner:
+        apiToken: test-token
+        location: ash
+        network_zone: us-east
+        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+        images: {ubuntu-24.04: ubuntu-24.04}
+global:
+  placementRegion: eu-west-1
+  providers:
+    hetzner:
+      apiToken: test-token
+      location: ash
+      network_zone: us-east
+      serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+      images: {ubuntu-24.04: ubuntu-24.04}

@@ -51,8 +51,9 @@ provider config in the top-level `global:` block of `regions.yaml`. The `global:
 required `placementRegion` naming one of the abstract regions under `regions:` — used to look up
 provider credentials/realizations **and the DNS authority** (`regions.<placementRegion>.dns`) the
 slice's region-less records (`<svc>.svc.<env>`, `<compute>.vm.<env>`, vanity) and ACME certs are
-written into; it does not affect resource names (see ADR-0023). A global service/ingress that needs
-DNS but whose `placementRegion` declares no `dns:` block is rejected at validate time. A regional service's
+written into; it does not affect resource names (see ADR-0023). A global slice with **any compute**
+(every host derives a `.vm` record) whose `placementRegion` declares no `dns:` block is rejected at
+validate time (and `program.Run` re-checks at deploy). A regional service's
 `environment.yaml` `ref:` may target a global database/compute output via a `global/` name prefix
 (`ref:database/global/<name>.<output>`) — the one allowed cross-region reference; `service.host`/
 `compute.network` to global are rejected, and a global resource may reference only other global

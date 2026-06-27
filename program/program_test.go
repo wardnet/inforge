@@ -569,6 +569,26 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 	assert.Equal(t, "wardnet-prd-use1-vm-ghost-01", d.Deployment.HostID)
 }
 
+// TestRenderDescriptorGlobalScopeIsRegionLess: a global service is region-less, so
+// its descriptor's Deployment.Region (INFORGE_DEPLOYMENT_REGION) must be empty — the
+// globalScope output-map key must not leak through as a fake region — matching the
+// already-empty RegionSlug and the region-less FQDN/HostID.
+func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
+	svc := types.ServiceSpec{Name: "tenants", Container: "tenants", User: "tenants"}
+
+	// Driven exactly as the scopes loop drives the global slice: region=globalScope,
+	// slug="".
+	out, err := renderDescriptor(svc, nil, "", "prd", globalScope, "", "wardnet.network", "tenants-01")
+	require.NoError(t, err)
+
+	d, err := bootstrapper.ParseDescriptor([]byte(out))
+	require.NoError(t, err)
+	assert.Equal(t, "", d.Deployment.Region, "global service must carry an empty region, not the literal \"global\"")
+	assert.Equal(t, "", d.Deployment.RegionSlug)
+	assert.Equal(t, "tenants.svc.prd.wardnet.network", d.Deployment.FQDN, "region-less service FQDN")
+	assert.Equal(t, "wardnet-prd-vm-tenants-01", d.Deployment.HostID, "region-less host id")
+}
+
 // TestRenderDescriptorSecretLess: a nil bundle renders a secret-less descriptor —
 // empty provider, no env — that round-trips through the bootstrapper's parser
 // (which accepts a provider-less descriptor with no env).

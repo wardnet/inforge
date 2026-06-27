@@ -36,15 +36,6 @@ import (
 // empty slug, so naming.Resource/ResourceInstance produce region-less names.
 const globalScope = "global"
 
-// globalHasResources reports whether the global slice declares any resource. An
-// absent global/ dir (or one with only ignorable files) yields an empty set, in
-// which case the global scope is skipped entirely — no registry is built and no
-// realization runs.
-func globalHasResources(r types.Resources) bool {
-	return len(r.Network)+len(r.Compute)+len(r.Database)+
-		len(r.Service)+len(r.PKI)+len(r.Ingress)+len(r.App) > 0
-}
-
 // Run is the Pulumi program entry point, passed to the Automation API as an
 // inline program source.
 func Run(ctx *pulumi.Context) error {
@@ -192,11 +183,23 @@ func Run(ctx *pulumi.Context) error {
 	// createInfra populates below. The global slice realizes against the regions.yaml
 	// global providers block, keyed under globalScope so the per-region provider config
 	// lookup (ExtractRegionConfigs) still resolves. Its DNS authority is the placement
-	// region's (ADR-0023): global records are region-less names written into that zone —
-	// they can't collide with the slug-bearing regional records.
+	// region's (ADR-0023): the derived host/service records are region-less but
+	// env-scoped (<svc>.svc.<env>, <compute>.vm.<env>), so they can't collide with the
+	// slug-bearing regional records (<svc>.svc.<env>.<slug>) in that same zone. The one
+	// cross-scope collision a shared zone still allows is a *literal* vanity/apex FQDN
+	// (e.g. account.<base>) declared identically on both a global service and a service
+	// in the placement region — operator-avoidable, not yet validated (see PR notes).
 	var scopes []scope
-	if globalBlock != nil && globalHasResources(globalRes) {
+	if globalBlock != nil && globalRes.HasAny() {
 		authority := regionTable[globalBlock.PlacementRegion].Dns
+		// Defence in depth for the validate-time guard (globalNeedsDNS): if validate was
+		// bypassed and the global slice realizes DNS records (any compute → a <vm> record,
+		// plus service/app records) but the placement region declares no dns: authority,
+		// createDNSRecords would silently no-op and a tls-termination service's ACME
+		// challenge would then fail mid-apply. Fail fast with the same actionable message.
+		if authority == nil && len(derivedRecords(globalRes, env, "", vars.BaseDomain, ephemeralSlug)) > 0 {
+			return fmt.Errorf("global slice realizes DNS records but its placementRegion %q has no dns: authority — declare a dns: block on that region in regions.yaml", globalBlock.PlacementRegion)
+		}
 		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, authority, vars.SSH, regionTable, ctx.Project(), env, globalScope, eph)
 		scopes = append(scopes, scope{key: globalScope, slug: "", reg: globalReg, authority: authority, res: globalRes})
 	}
@@ -768,6 +771,13 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 // service, secret-bearing or not. hostKey is the service's resolved compute key
 // ("<name>-<NN>", e.g. "bridge-01"); the host id is its full VM resource name.
 func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle, project, env, region, slug, baseDomain, hostKey string) (string, error) {
+	// The global scope is region-less: globalScope is an internal output-map key, not
+	// an abstract region, so it must not leak into the on-host descriptor. Surface an
+	// empty INFORGE_DEPLOYMENT_REGION (matching the already-empty RegionSlug) rather
+	// than the literal "global", which a consumer could mistake for a real region.
+	if region == globalScope {
+		region = ""
+	}
 	d := bootstrapper.Descriptor{
 		Version: bootstrapper.SupportedVersion,
 		Service: svc.Name,

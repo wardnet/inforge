@@ -150,32 +150,16 @@ func buildGlobalRefs(global types.Resources) *globalRefs {
 	return g
 }
 
-// globalHasResources reports whether the global slice declares any resource. PKI
-// resources are counted too: a global PKI resource's cert material is written to
-// the secrets provider (from the global providers block) at deploy, so a global
-// slice that declares one with no providers block must still fail the guard in
-// ValidateResources.
-func globalHasResources(g types.Resources) bool {
-	return len(g.Network)+len(g.Compute)+len(g.Database)+
-		len(g.Service)+len(g.PKI)+len(g.Ingress)+len(g.App) > 0
-}
-
-// globalNeedsDNS reports whether the global slice declares anything that realizes
-// against a DNS authority: an ingress (nginx tier with a derived *.svc record), or
-// a service with routes (tls-termination needs an ACME cert + record, forward needs
-// a record) or a health-probe tier (surfaced through the ingress). Such a slice is
-// undeployable without a DNS authority, so ValidateResources rejects it when the
-// placement region declares no dns: block.
+// globalNeedsDNS reports whether the global slice realizes any DNS record — i.e.
+// whether it needs a DNS authority on its placement region. The deploy layer's
+// derivedRecords emits a host (<compute>.vm) A-record for EVERY compute, a service
+// (<svc>.svc) record + vanity for every ingress-bearing service, and an app record
+// for every app; services, ingress, and apps all sit on a compute host (same-scope
+// host/ingress FKs). So within a single slice "realizes a record" is exactly
+// "declares a compute" — checking compute alone stays in lockstep with
+// derivedRecords without re-deriving it (avoiding a validate→program import).
 func globalNeedsDNS(g types.Resources) bool {
-	if len(g.Ingress) > 0 {
-		return true
-	}
-	for _, s := range g.Service {
-		if len(s.Routes) > 0 || s.HealthProbesPort != 0 {
-			return true
-		}
-	}
-	return false
+	return len(g.Compute) > 0
 }
 
 // regionContext holds the foreign-key targets and tables a region's semantic
@@ -329,18 +313,24 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil, encStore, defaults); err != nil {
 		return err
 	}
-	if global == nil && globalHasResources(globalRes) {
+	if global == nil && globalRes.HasAny() {
 		r.fail("regions.yaml [global]", "resources/"+env+"/global declares resources but regions.yaml has no global providers block")
 	}
-	// A global service/ingress realizes DNS records (and ACME certs) against the
-	// placement region's DNS authority (ADR-0023) — global slices have no region of
-	// their own. If that region declares no dns: block, those records and certs would
-	// silently never deploy, so reject the slice at validate time.
-	if global != nil && globalNeedsDNS(globalRes) && regionTable[global.PlacementRegion].Dns == nil {
-		r.fail("regions.yaml [global]", fmt.Sprintf(
-			"global slice declares a service/ingress that needs DNS (tls-termination, health probes, or an ingress) "+
-				"but placementRegion %q has no dns: authority — declare a dns: block on that region in regions.yaml",
-			global.PlacementRegion))
+	// A global compute (and the service/ingress records it carries) realizes DNS
+	// records and ACME certs against the placement region's DNS authority (ADR-0023)
+	// — global slices have no region of their own. If that region declares no dns:
+	// block, those records and certs would silently never deploy, so reject the slice
+	// at validate time. Only fire when the placement region actually exists: a
+	// missing/typo'd placementRegion indexes the table to a zero-value (nil Dns) and
+	// would otherwise pile a misleading "no dns: authority" error on top of the real
+	// "placementRegion not defined" error checkRegionsFile already reports.
+	if global != nil && globalNeedsDNS(globalRes) {
+		if pr, ok := regionTable[global.PlacementRegion]; ok && pr.Dns == nil {
+			r.fail("regions.yaml [global]", fmt.Sprintf(
+				"global slice declares a compute/service/ingress that needs DNS (host records, tls-termination, "+
+					"health probes, or an ingress) but placementRegion %q has no dns: authority — declare a dns: block "+
+					"on that region in regions.yaml", global.PlacementRegion))
+		}
 	}
 
 	// Validate the shared regional set once: schema + the region-independent FK
