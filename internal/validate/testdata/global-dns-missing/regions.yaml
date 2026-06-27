@@ -1,12 +1,10 @@
+# us-east-1 declares NO dns: authority. The global slice (placementRegion:
+# us-east-1) has a tls-termination service + ingress, which realize DNS records and
+# ACME certs against the placement region's authority — so ValidateResources must
+# reject this slice with a clear "no dns: authority" error.
 regions:
   us-east-1:
     slug: use1
-    # An ingress (and the app/service records it fronts) realizes DNS records and
-    # ACME certs against this authority — the global slice reuses it via
-    # placementRegion, so it must be declared.
-    dns:
-      provider: cloudflare
-      zone: ${INFORGE_TEST_INGRESS_APP_ZONE}
     providers:
       hetzner:
         apiToken: test-token
@@ -14,8 +12,9 @@ regions:
         network_zone: us-east
         serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
         images: {ubuntu-24.04: ubuntu-24.04}
-      cloudflare:
-        apiToken: test-token
+      infisical:
+        clientId: test-id
+        clientSecret: test-secret
 global:
   placementRegion: us-east-1
   providers:
@@ -25,5 +24,6 @@ global:
       network_zone: us-east
       serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
       images: {ubuntu-24.04: ubuntu-24.04}
-    cloudflare:
-      apiToken: test-token
+    infisical:
+      clientId: test-id
+      clientSecret: test-secret

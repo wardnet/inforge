@@ -160,6 +160,24 @@ func globalHasResources(g types.Resources) bool {
 		len(g.Service)+len(g.PKI)+len(g.Ingress)+len(g.App) > 0
 }
 
+// globalNeedsDNS reports whether the global slice declares anything that realizes
+// against a DNS authority: an ingress (nginx tier with a derived *.svc record), or
+// a service with routes (tls-termination needs an ACME cert + record, forward needs
+// a record) or a health-probe tier (surfaced through the ingress). Such a slice is
+// undeployable without a DNS authority, so ValidateResources rejects it when the
+// placement region declares no dns: block.
+func globalNeedsDNS(g types.Resources) bool {
+	if len(g.Ingress) > 0 {
+		return true
+	}
+	for _, s := range g.Service {
+		if len(s.Routes) > 0 || s.HealthProbesPort != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // regionContext holds the foreign-key targets and tables a region's semantic
 // checks resolve against.
 type regionContext struct {
@@ -313,6 +331,16 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	}
 	if global == nil && globalHasResources(globalRes) {
 		r.fail("regions.yaml [global]", "resources/"+env+"/global declares resources but regions.yaml has no global providers block")
+	}
+	// A global service/ingress realizes DNS records (and ACME certs) against the
+	// placement region's DNS authority (ADR-0023) — global slices have no region of
+	// their own. If that region declares no dns: block, those records and certs would
+	// silently never deploy, so reject the slice at validate time.
+	if global != nil && globalNeedsDNS(globalRes) && regionTable[global.PlacementRegion].Dns == nil {
+		r.fail("regions.yaml [global]", fmt.Sprintf(
+			"global slice declares a service/ingress that needs DNS (tls-termination, health probes, or an ingress) "+
+				"but placementRegion %q has no dns: authority — declare a dns: block on that region in regions.yaml",
+			global.PlacementRegion))
 	}
 
 	// Validate the shared regional set once: schema + the region-independent FK

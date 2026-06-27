@@ -41,3 +41,33 @@ ambiguity. Rejected.
 block already has its own `providers:` map; extending it to also carry a full realization
 (location, serverTypes, etc.) would duplicate regions.yaml. `placementRegion` delegates to
 an existing, fully specified region entry. Accepted.
+
+## Amendment: `placementRegion` also supplies the DNS authority
+
+The original decision scoped `placementRegion` to *provider-registration lookups only* and the
+Pulumi program built the global slice's registry with a **nil DNS authority**, with an in-code
+`TODO(ADR-0023)` to wire it later. That left the global slice able to realize only its
+region-less network/compute/database — a global `service` or `ingress` validated but produced
+**no DNS records, no nginx/ACME, no systemd unit, and no mesh leaf** (the post-processing
+pipeline ran over regions only). A region-less, deploy-once authority (e.g. an identity/billing
+service) was therefore undeployable.
+
+- **`placementRegion` now also resolves the global slice's DNS authority** —
+  `regionTable[placementRegion].Dns`. The placement region already names a fully-specified
+  abstract region whose `dns:` block (provider + zone) is defined, so no schema change is
+  needed: the global slice writes its **region-less** derived records
+  (`<compute>.vm.<env>.<base>`, `<svc>.svc.<env>.<base>`, and any `vanity`) and ACME certs into
+  that same zone. Region-less names cannot collide with the slug-bearing regional records.
+- **The global slice is realized through the identical pipeline regions use** — `createInfra`,
+  then DNS records → app seeds → ingress (nginx/ACME) → service secrets → services (the systemd
+  unit + mesh leaf) — driven by a single "scopes" list whose first entry is the global slice
+  (empty slug) followed by each region. Global is realized first so a regional
+  `ref:database/global/<name>` still resolves against the already-populated global outputs.
+- **`inforge validate` rejects a global slice that needs DNS but has no authority.** If the
+  global slice declares a service with routes or health probes, or any ingress, and the
+  `placementRegion` declares no `dns:` block, validation fails with an actionable error rather
+  than silently deploying nothing.
+
+This resolves the former `TODO(ADR-0023)`. Regional services have the same latent requirement
+(a region with `tls-termination`/health but no `dns:`) — left unchanged here and tracked
+separately.

@@ -1,0 +1,15 @@
+# A global tls-termination service: it needs an ACME cert + DNS record on the
+# placement region's authority. us-east-1 has no dns: block, so validation fails.
+name: tenants
+container: tenants
+host: tenants
+type: raw
+user: tenants
+pki: wardnet-mesh
+ingress: web
+routes:
+  - type: tls-termination
+    listen: 443
+    target: 8080
+    vanity:
+      - account.{BASE_DOMAIN}

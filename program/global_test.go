@@ -123,3 +123,93 @@ func TestCreateInfraGlobalScope(t *testing.T) {
 	assert.True(t, mocks.has(naming.Resource("prd", "", "db", "shared")),
 		"global database should have a region-less name (wardnet-prd-db-shared)")
 }
+
+// TestDerivedRecordsGlobalService: a global service (empty slug) derives REGION-LESS
+// records — the host <compute>.vm.<env>, the service <svc>.svc.<env>, and any vanity
+// — all keyed to the service's ingress host. This mirrors the consumer's global
+// `tenants` slice (tls-termination :443 with vanity account.<base>) and is the DNS
+// half of the global-realization fix: before it, the global scope never reached
+// createDNSRecords, so none of these records deployed.
+func TestDerivedRecordsGlobalService(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "tenants", Container: "tenants", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "tenants", Host: "tenants"}},
+		Service: []types.ServiceSpec{
+			{Name: "tenants", Container: "tenants", Host: "tenants-01", Ingress: "tenants", Routes: []types.RouteSpec{
+				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: []string{
+					"account.{BASE_DOMAIN}",
+				}},
+			}},
+		},
+	}
+
+	// Empty slug → the global slice's region-less naming.
+	got := derivedRecords(res, "prd", "", "wardnet.network", "")
+
+	type rn struct{ name, record, host string }
+	var flat []rn
+	for _, d := range got {
+		flat = append(flat, rn{d.rec.Name, d.rec.RecordName, d.hostKey})
+		assert.Equal(t, "tenants", d.rec.Container)
+	}
+	assert.Equal(t, []rn{
+		{"tenants-vm-prd", "tenants.vm.prd", "tenants-01"},
+		{"tenants-svc-prd", "tenants.svc.prd", "tenants-01"},
+		{"account", "account", "tenants-01"}, // account.{BASE_DOMAIN} -> account.wardnet.network
+	}, flat, "global records carry no slug segment")
+}
+
+// TestGlobalServiceRealizesRegionLess: the global scope must reach the SAME host
+// pipeline regions use — realizeIngress (nginx/ACME) and provisionServices (the
+// systemd unit) — with an EMPTY slug, so the cloud-init gate and the unit-provision
+// step register under region-less names and the unit waits on the gate. Before the
+// fix this never ran for the global scope (post-processing looped over regions
+// only), so a global service deployed no nginx and no unit. Mirrors
+// TestTLSAndServiceShareOneGate but with slug "" / region globalScope.
+func TestGlobalServiceRealizesRegionLess(t *testing.T) {
+	mocks := newCommandMocks()
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		// A global registry: built from the global block's providers with the
+		// placement region's DNS authority, keyed under globalScope (empty slug).
+		reg := registry.BuildRegistry(ctx,
+			map[string]map[string]any{"hetzner": {"apiToken": "x"}},
+			&regions.DnsAuthority{Provider: "cloudflare", Zone: "z"},
+			types.SSHConfig{DeployPrivateKey: "priv"}, nil, "proj", "prd", globalScope, tags.Ephemeral{})
+		res := types.Resources{
+			Compute: []types.ComputeSpec{
+				{Name: "tenants", Provider: "hetzner", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
+			},
+			Ingress: []types.IngressSpec{{Name: "tenants", Host: "tenants"}},
+			Service: []types.ServiceSpec{
+				{Name: "tenants", Container: "tenants", Host: "tenants-01", Type: "raw", User: "tenants",
+					Ingress: "tenants",
+					Routes:  []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080}}},
+			},
+		}
+		computeOut := map[string]types.ComputeOutputs{
+			"tenants-01": {PublicIP: pulumi.String("1.2.3.4").ToStringOutput()},
+		}
+		gates := map[string]pulumi.Resource{}
+		// Empty slug throughout — exactly how the scopes loop drives the global slice.
+		if err := realizeIngress(ctx, reg, res, computeOut, gates, nil, "priv", "prd", "", "wardnet.network", "", types.ProviderDefaults{}); err != nil {
+			return err
+		}
+		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", globalScope, "", "wardnet.network", "1.2.3")
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	// The gate and the unit-provision step are region-less (slug ""), and the unit
+	// waits on the host's single cloud-init gate.
+	gate := gateName("prd", "", "tenants-01")
+	svc := naming.Resource("prd", "", "svc", "tenants")
+	require.Contains(t, mocks.captured, gate, "global host realizes a region-less cloud-init gate")
+	require.Contains(t, mocks.captured, svc+"-provision", "global service realizes a region-less systemd unit")
+	assert.True(t, mocks.dependsOn(svc+"-provision", gate), "unit provision must wait on the gate")
+
+	// No region slug leaked into any registered command name.
+	mocks.mu.Lock()
+	defer mocks.mu.Unlock()
+	for name := range mocks.captured {
+		assert.NotContains(t, name, "-use1-", "global realization names must be region-less")
+	}
+}

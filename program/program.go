@@ -36,6 +36,15 @@ import (
 // empty slug, so naming.Resource/ResourceInstance produce region-less names.
 const globalScope = "global"
 
+// globalHasResources reports whether the global slice declares any resource. An
+// absent global/ dir (or one with only ignorable files) yields an empty set, in
+// which case the global scope is skipped entirely — no registry is built and no
+// realization runs.
+func globalHasResources(r types.Resources) bool {
+	return len(r.Network)+len(r.Compute)+len(r.Database)+
+		len(r.Service)+len(r.PKI)+len(r.Ingress)+len(r.App) > 0
+}
+
 // Run is the Pulumi program entry point, passed to the Automation API as an
 // inline program source.
 func Run(ctx *pulumi.Context) error {
@@ -164,62 +173,80 @@ func Run(ctx *pulumi.Context) error {
 	computeOutputs := map[string]map[string]types.ComputeOutputs{}
 	databaseOutputs := map[string]map[string]types.DatabaseOutputs{}
 
-	// Global resources are created FIRST, with an empty slug (region-less naming),
-	// into the "global" slot — so a regional secrets ref:database/global/<name>
-	// resolves against them. The global slice realizes against the regions.yaml
-	// global providers block; its realization is keyed under globalScope so the
-	// hetzner per-region config lookup (ExtractRegionConfigs) still resolves.
-	if globalBlock != nil {
-		// The region-less global slice has no DNS authority (records are per-region).
-		// TODO(ADR-0023): pass globalBlock.PlacementRegion as the region once the
-		// global registry is wired to use it for provider-realization lookups.
-		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, nil, vars.SSH, regionTable, ctx.Project(), env, globalScope, eph)
-		if err := createInfra(ctx, globalReg, globalRes, env, globalScope, "", vars.BaseDomain, providerDefaults, networkOutputs, computeOutputs, databaseOutputs); err != nil {
-			return err
-		}
+	// scope is one realization unit: the region-less global slice or one region.
+	// Both realize through the identical pipeline — createInfra, then DNS records →
+	// app seeds → ingress → service secrets → services — and differ only in their
+	// output-map key, the naming slug (empty for global → region-less names), the
+	// provider registry, the DNS authority records are written into, and which
+	// resource set deploys.
+	type scope struct {
+		key       string // output-map key: globalScope or the region name
+		slug      string // naming slug; "" for the global slice (region-less)
+		reg       registry.ProviderRegistry
+		authority *regions.DnsAuthority
+		res       types.Resources
 	}
 
+	// The global slice is realized FIRST so a regional secrets ref:database/global/<name>
+	// resolves against computeOutputs[globalScope]/databaseOutputs[globalScope], which
+	// createInfra populates below. The global slice realizes against the regions.yaml
+	// global providers block, keyed under globalScope so the per-region provider config
+	// lookup (ExtractRegionConfigs) still resolves. Its DNS authority is the placement
+	// region's (ADR-0023): global records are region-less names written into that zone —
+	// they can't collide with the slug-bearing regional records.
+	var scopes []scope
+	if globalBlock != nil && globalHasResources(globalRes) {
+		authority := regionTable[globalBlock.PlacementRegion].Dns
+		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, authority, vars.SSH, regionTable, ctx.Project(), env, globalScope, eph)
+		scopes = append(scopes, scope{key: globalScope, slug: "", reg: globalReg, authority: authority, res: globalRes})
+	}
 	for _, region := range regionNames {
 		slug, err := regionTable.Slug(region)
 		if err != nil {
 			return err
 		}
-		if err := createInfra(ctx, registries[region], res, env, region, slug, vars.BaseDomain, providerDefaults, networkOutputs, computeOutputs, databaseOutputs); err != nil {
+		scopes = append(scopes, scope{key: region, slug: slug, reg: registries[region], authority: regionTable[region].Dns, res: res})
+	}
+
+	// Instantiate each scope's referenceable infrastructure (network, compute,
+	// database) first, in scope order — global before regions, so a regional
+	// ref:database/global/<name> sees the global outputs already populated.
+	for _, sc := range scopes {
+		if err := createInfra(ctx, sc.reg, sc.res, env, sc.key, sc.slug, vars.BaseDomain, providerDefaults, networkOutputs, computeOutputs, databaseOutputs); err != nil {
 			return err
 		}
 	}
 
-	for _, region := range regionNames {
-		reg := registries[region]
-		slug, err := regionTable.Slug(region)
-		if err != nil {
-			return err
-		}
-		if err := createDNSRecords(ctx, reg, regionTable[region].Dns, res, computeOutputs[region], env, slug, vars.BaseDomain, ephemeralSlug); err != nil {
+	// Post-process each scope through the host-level pipeline. The order within a
+	// scope is load-bearing: DNS records first (ACME HTTP-01 needs the A-record to
+	// exist), then app seeds + ingress (nginx/ACME), then service secrets, then the
+	// services that depend on them.
+	for _, sc := range scopes {
+		if err := createDNSRecords(ctx, sc.reg, sc.authority, sc.res, computeOutputs[sc.key], env, sc.slug, vars.BaseDomain, ephemeralSlug); err != nil {
 			return err
 		}
 
-		// gates memoizes one cloud-init readiness gate per host in this region.
-		// Both ingress realization and service provisioning SSH the same hosts, so
-		// the gate they each depend on must be the same resource — share the map.
+		// gates memoizes one cloud-init readiness gate per host in this scope. Both
+		// ingress realization and service provisioning SSH the same hosts, so the gate
+		// they each depend on must be the same resource — share the map (per scope).
 		gates := map[string]pulumi.Resource{}
 		// Seed each app's placeholder bundle on its ingress host first, so its server
 		// block and ACME cert provision before the first release (slice D delivers
 		// bundles). realizeIngress's nginx reload DependsOn these seeds (appSeeds) so a
 		// reload never serves an app's document root before `current` exists.
-		appSeeds, err := provisionApps(ctx, res, computeOutputs[region], gates, vars.SSH.DeployPrivateKey, env, slug)
+		appSeeds, err := provisionApps(ctx, sc.res, computeOutputs[sc.key], gates, vars.SSH.DeployPrivateKey, env, sc.slug)
 		if err != nil {
 			return err
 		}
-		if err := realizeIngress(ctx, reg, res, computeOutputs[region], gates, appSeeds, vars.SSH.DeployPrivateKey, env, slug, vars.BaseDomain, ephemeralSlug, providerDefaults); err != nil {
+		if err := realizeIngress(ctx, sc.reg, sc.res, computeOutputs[sc.key], gates, appSeeds, vars.SSH.DeployPrivateKey, env, sc.slug, vars.BaseDomain, ephemeralSlug, providerDefaults); err != nil {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
-		bundles, err := provisionServiceSecrets(ctx, reg, res, all, env, region, slug)
+		bundles, err := provisionServiceSecrets(ctx, sc.reg, sc.res, all, env, sc.key, sc.slug)
 		if err != nil {
 			return err
 		}
-		if err := provisionServices(ctx, res, computeOutputs[region], bundles, gates, vars.SSH.DeployPrivateKey, env, region, slug, vars.BaseDomain, inforgeVersion); err != nil {
+		if err := provisionServices(ctx, sc.res, computeOutputs[sc.key], bundles, gates, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug, vars.BaseDomain, inforgeVersion); err != nil {
 			return err
 		}
 	}

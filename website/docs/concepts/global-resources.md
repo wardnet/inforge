@@ -102,8 +102,18 @@ service's region.
 
 ## What realizes today
 
-This slice realizes the global **network**, **compute**, and **database** resources (the referenceable
-outputs). Global **service** resources are loaded and validated, but their host-level provisioning is
-not wired yet — only the output-producing types deploy globally for now. Note that validation still
-enforces the **full** rules for these types (e.g. a global service host must declare a `deploy_user`),
-even though they do not deploy yet.
+The global slice realizes the **same resource types as a region**, through the same pipeline — just
+once, with region-less names:
+
+- the referenceable infrastructure: **network**, **compute**, **database**;
+- **ingress** tiers (nginx + ACME) and **service** host provisioning (the systemd unit, runtime
+  secrets, and the mesh leaf from the service's `pki:` membership);
+- the derived **DNS records** and ACME certificates — the host record `<compute>.vm.<env>.<base>`,
+  the service record `<svc>.svc.<env>.<base>`, and any route `vanity` — written into the DNS
+  authority of the `placementRegion` (`regions.<placementRegion>.dns`). Global records carry no slug,
+  so they never collide with the slug-bearing regional records.
+
+Because a global service/ingress realizes DNS and ACME against the placement region's authority,
+`inforge validate` **rejects** a global slice that declares a service with routes/health or any
+ingress when the `placementRegion` has no `dns:` block. Validation also enforces the full per-type
+rules (e.g. a global service host must declare a `deploy_user`).
