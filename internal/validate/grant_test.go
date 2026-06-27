@@ -116,8 +116,8 @@ func TestCheckGrantsUnresolvedTargetNoCascade(t *testing.T) {
 // must still count as non-empty, so the "global resources need a providers block"
 // guard fires (the PKI cert material is written to that block's secrets provider).
 func TestGlobalHasResourcesCountsPKI(t *testing.T) {
-	assert.False(t, globalHasResources(types.Resources{}))
-	assert.True(t, globalHasResources(types.Resources{PKI: []types.PKIResourceSpec{{Name: "rootca"}}}),
+	assert.False(t, types.Resources{}.HasAny())
+	assert.True(t, types.Resources{PKI: []types.PKIResourceSpec{{Name: "rootca"}}}.HasAny(),
 		"a global slice with only a PKI resource must count as having resources")
 }
 

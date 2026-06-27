@@ -1,0 +1,7 @@
+name: edge-net
+container: core
+provider: hetzner
+cidr: 10.0.0.0/16
+subnets:
+  - name: main
+    cidr: 10.0.0.0/24

@@ -44,11 +44,16 @@ there is no default fallback table.
 
 **Global slice**:
 The reserved, region-less scope under `resources/<env>/global/`: resources deployed **once** instead
-of into every region. Not a new resource kind — the same types and schemas — with **region-less
-naming** (`wardnet-<env>-<type>-<name>`, empty slug) and its own provider config in the top-level
-`global:` block of `regions.yaml`. The `global:` block carries a required `placementRegion` naming
-one of the abstract regions under `regions:` — used only to look up provider credentials and
-realizations for global-slice resources; it does not affect resource names (see ADR-0023). A regional service's
+of into every region. Not a new resource kind — the same types and schemas, realized through the **same pipeline**
+(network/compute/database, then DNS records, ingress nginx/ACME, the systemd unit, and the mesh
+leaf) — with **region-less naming** (`wardnet-<env>-<type>-<name>`, empty slug) and its own
+provider config in the top-level `global:` block of `regions.yaml`. The `global:` block carries a
+required `placementRegion` naming one of the abstract regions under `regions:` — used to look up
+provider credentials/realizations **and the DNS authority** (`regions.<placementRegion>.dns`) the
+slice's region-less records (`<svc>.svc.<env>`, `<compute>.vm.<env>`, vanity) and ACME certs are
+written into; it does not affect resource names (see ADR-0023). A global slice with **any compute**
+(every host derives a `.vm` record) whose `placementRegion` declares no `dns:` block is rejected at
+validate time (and `program.Run` re-checks at deploy). A regional service's
 `environment.yaml` `ref:` may target a global database/compute output via a `global/` name prefix
 (`ref:database/global/<name>.<output>`) — the one allowed cross-region reference; `service.host`/
 `compute.network` to global are rejected, and a global resource may reference only other global

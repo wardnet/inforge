@@ -1,12 +1,11 @@
+# global.placementRegion names a region that is NOT defined under regions:. The
+# global slice has a compute (which derives a .vm DNS record), so the DNS guard
+# would fire — but it must stay silent here so the operator sees only the real
+# "placementRegion not defined" error, not a misleading "no dns: authority" error
+# about a region that doesn't exist.
 regions:
   us-east-1:
     slug: use1
-    # An ingress (and the app/service records it fronts) realizes DNS records and
-    # ACME certs against this authority — the global slice reuses it via
-    # placementRegion, so it must be declared.
-    dns:
-      provider: cloudflare
-      zone: ${INFORGE_TEST_INGRESS_APP_ZONE}
     providers:
       hetzner:
         apiToken: test-token
@@ -14,10 +13,8 @@ regions:
         network_zone: us-east
         serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
         images: {ubuntu-24.04: ubuntu-24.04}
-      cloudflare:
-        apiToken: test-token
 global:
-  placementRegion: us-east-1
+  placementRegion: eu-west-1
   providers:
     hetzner:
       apiToken: test-token
@@ -25,5 +22,3 @@ global:
       network_zone: us-east
       serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
       images: {ubuntu-24.04: ubuntu-24.04}
-    cloudflare:
-      apiToken: test-token

@@ -53,8 +53,11 @@ We decided:
   reserved `"global"` output slot, via a registry built from the `global:` providers with an empty slug
   — then instantiates the regional set per region. Because the global outputs are present before any
   region's secrets resolve, a regional `ref:database/global/<name>` resolves against
-  `all.Database["global"]`. The global slice's service/dns/tls-termination resources are loaded and
-  validated but **not provisioned** this slice (only network/compute/database realize globally).
+  `all.Database["global"]`. (At the time of this ADR the global slice's service/dns/tls-termination
+  resources were loaded and validated but **not provisioned** — only network/compute/database realized
+  globally. This was later superseded: the global slice now realizes its services, ingress, DNS records,
+  and mesh leaves through the same pipeline as a region, region-less, using the `placementRegion`'s DNS
+  authority — see the amendment to ADR-0023.)
 - **Validation.** Two contexts. The global slice is validated in a **global-only** context, so a global
   resource referencing a regional one fails as not-found (enforcing "global → global only"). The
   regional set is validated with the global database/compute names injected under a `global/` prefix, so
