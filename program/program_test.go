@@ -545,7 +545,14 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 		Env:          map[string]string{"DATABASE_URL": "infra/DATABASE_URL"},
 	}
 
-	out, err := renderDescriptor(svc, bundle, "ws-123", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01")
+	// Provider-supplied cloud/host identity flows off the host's outputs (ADR-0030).
+	host := types.ComputeOutputs{
+		CloudProvider:    "hetzner",
+		CloudRegion:      "us-east",
+		AvailabilityZone: "ash",
+		MachineType:      "cx23",
+	}
+	out, err := renderDescriptor(svc, host, bundle, "ws-123", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01")
 	require.NoError(t, err)
 
 	d, err := bootstrapper.ParseDescriptor([]byte(out))
@@ -567,6 +574,11 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 	assert.Equal(t, "ghost.svc.prd.use1.wardnet.network", d.Deployment.FQDN)
 	// host.id is the full VM resource name built from the resolved compute key.
 	assert.Equal(t, "wardnet-prd-use1-vm-ghost-01", d.Deployment.HostID)
+	// Provider-supplied cloud/host resource identity round-trips (ADR-0030).
+	assert.Equal(t, "hetzner", d.Deployment.CloudProvider)
+	assert.Equal(t, "us-east", d.Deployment.CloudRegion)
+	assert.Equal(t, "ash", d.Deployment.AvailabilityZone)
+	assert.Equal(t, "cx23", d.Deployment.MachineType)
 }
 
 // TestRenderDescriptorGlobalScopeIsRegionLess: a global service is region-less, so
@@ -578,7 +590,7 @@ func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
 
 	// Driven exactly as the scopes loop drives the global slice: region=globalScope,
 	// slug="".
-	out, err := renderDescriptor(svc, nil, "", "prd", globalScope, "", "wardnet.network", "tenants-01")
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "", "prd", globalScope, "", "wardnet.network", "tenants-01")
 	require.NoError(t, err)
 
 	d, err := bootstrapper.ParseDescriptor([]byte(out))
@@ -595,7 +607,7 @@ func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
 func TestRenderDescriptorSecretLess(t *testing.T) {
 	svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost"}
 
-	out, err := renderDescriptor(svc, nil, "", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01")
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01")
 	require.NoError(t, err)
 
 	d, err := bootstrapper.ParseDescriptor([]byte(out))

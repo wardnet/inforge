@@ -331,9 +331,20 @@ type NetworkOutputs struct {
 // PrivateIP is the host's address on its attached private network — empty in
 // preview, and used by the ingress tier to proxy_pass to a backend that lives on
 // a different host within the same Hetzner Network (cross-host routing).
+// The four metadata fields below are provider-supplied OTel resource-identity facts,
+// known at plan time (plain strings, not Pulumi outputs). They are the host/cloud
+// ground truth a running process cannot determine for itself; renderDescriptor reads
+// them off the host's outputs and injects them as INFORGE_* env vars (ADR-0030), and
+// the host metrics collector (ADR-0031) stamps the same values. A provider that does
+// not supply one leaves it empty, and the empty value is omitted downstream.
 type ComputeOutputs struct {
 	PublicIP  pulumi.StringOutput
 	PrivateIP pulumi.StringOutput
+
+	CloudProvider    string // cloud.provider, e.g. "hetzner"
+	CloudRegion      string // cloud.region — the provider's region, e.g. Hetzner network_zone "us-east"
+	AvailabilityZone string // cloud.availability_zone — the datacenter, e.g. Hetzner location "ash"
+	MachineType      string // host.type — the server-type SKU, e.g. "cx23"
 }
 
 // FirewallPorts is the derived inbound port plan for one host, computed by the
@@ -537,8 +548,21 @@ type SSHConfig struct {
 // realizations) now live in regions.yaml (see internal/regions); variables.yaml
 // carries only the base domain and SSH material.
 type EnvironmentVariables struct {
-	BaseDomain string    `yaml:"base_domain"`
-	SSH        SSHConfig `yaml:"ssh"`
+	BaseDomain    string              `yaml:"base_domain"`
+	SSH           SSHConfig           `yaml:"ssh"`
+	Observability ObservabilityConfig `yaml:"observability"`
+}
+
+// ObservabilityConfig is the optional env-level observability block (ADR-0031).
+// When OTLPEndpoint is set (and the matching auth secret exists in the env's
+// secrets.enc.yaml), inforge installs the host VM-metrics collector on every VM.
+// When it is empty, no collector is installed — the agent is always-on but gated
+// on this config being present, so an env that has not set up Grafana Cloud gets
+// nothing. OTLPEndpoint is the non-secret OTLP/HTTP base URL; the Basic-auth
+// credential is NOT here — it lives in secrets.enc.yaml under the reserved
+// observability container (see otelcol.AuthSecretRef).
+type ObservabilityConfig struct {
+	OTLPEndpoint string `yaml:"otlp_endpoint"`
 }
 
 // Resources is the full set of resource specs for one region.

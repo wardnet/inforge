@@ -161,7 +161,17 @@ func (h *HetznerCompute) Create(
 	// omit an explicit Ip; .Elem() unwraps the *string output to "" in preview.
 	privateIP := server.Networks.Index(pulumi.Int(0)).Ip().Elem()
 
-	return types.ComputeOutputs{PublicIP: server.Ipv4Address, PrivateIP: privateIP}, nil
+	return types.ComputeOutputs{
+		PublicIP:  server.Ipv4Address,
+		PrivateIP: privateIP,
+		// Provider-supplied OTel resource identity (ADR-0030): all plan-time constants
+		// resolved above, so they need no Pulumi apply. network_zone ⊃ location maps
+		// onto cloud.region ⊃ cloud.availability_zone.
+		CloudProvider:    "hetzner",
+		CloudRegion:      regionCfg.NetworkZone,
+		AvailabilityZone: regionCfg.Location,
+		MachineType:      serverType,
+	}, nil
 }
 
 // ensureFirewall returns the hcloud.Firewall for the spec name, creating it if it
