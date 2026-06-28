@@ -10,6 +10,19 @@ updates:
     cooldown:
       default-days: 5
     open-pull-requests-limit: 10
+    groups:
+      # The pulumi core modules are released in lockstep and must move
+      # together: sdk/v3 and pkg/v3 share an internal API (plugin.NewContextWithRoot
+      # et al.), and pulumi-go-provider tracks pulumi/pkg/v3's codegen/schema types.
+      # Bumping any one alone produces an unbuildable tree, so group their routine
+      # bumps into a single PR. applies-to defaults to version-updates, so security
+      # advisories on any of these are still raised as separate, immediate PRs.
+      pulumi:
+        applies-to: version-updates
+        patterns:
+          - "github.com/pulumi/pulumi"
+          - "github.com/pulumi/pulumi/*"
+          - "github.com/pulumi/pulumi-go-provider"
 
   # GitHub Actions used in our workflows.
   - package-ecosystem: github-actions
