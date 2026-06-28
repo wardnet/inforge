@@ -155,9 +155,15 @@ func Run(ctx *pulumi.Context) error {
 	}
 	ctx.Export("appDeployDescriptor", pulumi.Any(appDesc))
 
+	// Env-scoped Hetzner SSH keys (wardnet-<env>-key-{user,deploy}) carry no
+	// region slug, so every scope's compute provider would register the same URN.
+	// Share one cache across all registries this run builds so the keys register
+	// exactly once (see .agents/rules/ssh-keys-register-once-across-scopes.md).
+	sshKeyCache := registry.NewSSHKeyCache()
+
 	registries := make(map[string]registry.ProviderRegistry, len(regionNames))
 	for _, region := range regionNames {
-		registries[region] = registry.BuildRegistry(ctx, regionTable[region].Providers, regionTable[region].Dns, vars.SSH, regionTable, ctx.Project(), env, region, eph)
+		registries[region] = registry.BuildRegistry(ctx, regionTable[region].Providers, regionTable[region].Dns, vars.SSH, regionTable, ctx.Project(), env, region, eph, sshKeyCache)
 	}
 
 	// networkOutputs: region → specName+"/"+subnetName → NetworkOutputs. The
@@ -202,7 +208,7 @@ func Run(ctx *pulumi.Context) error {
 		if authority == nil && len(derivedRecords(globalRes, env, "", vars.BaseDomain, ephemeralSlug)) > 0 {
 			return fmt.Errorf("global slice realizes DNS records but its placementRegion %q has no dns: authority — declare a dns: block on that region in regions.yaml", globalBlock.PlacementRegion)
 		}
-		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, authority, vars.SSH, regionTable, ctx.Project(), env, globalScope, eph)
+		globalReg := registry.BuildRegistry(ctx, globalBlock.Providers, authority, vars.SSH, regionTable, ctx.Project(), env, globalScope, eph, sshKeyCache)
 		scopes = append(scopes, scope{key: globalScope, slug: "", reg: globalReg, authority: authority, res: globalRes})
 	}
 	for _, region := range regionNames {

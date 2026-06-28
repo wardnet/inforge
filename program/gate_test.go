@@ -168,7 +168,7 @@ func TestTLSAndServiceShareOneGate(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		reg := registry.BuildRegistry(ctx,
 			map[string]map[string]any{"hetzner": {"apiToken": "x"}},
-			nil, types.SSHConfig{DeployPrivateKey: "priv"}, nil, "proj", "prd", "us-east-1", tags.Ephemeral{})
+			nil, types.SSHConfig{DeployPrivateKey: "priv"}, nil, "proj", "prd", "us-east-1", tags.Ephemeral{}, nil)
 		res := types.Resources{
 			Compute: []types.ComputeSpec{
 				{Name: "bridge", Provider: "hetzner", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},

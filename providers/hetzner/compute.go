@@ -17,9 +17,41 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 )
 
+// SSHKeyCache deduplicates env-scoped SSH key creation across every
+// HetznerCompute instance a single program run builds. program.Run builds one
+// registry — and therefore one HetznerCompute — per realization scope (the
+// region-less global slice plus one per region). SSH keys are Hetzner-account-
+// global resources named only `wardnet-<env>-key-{user,deploy}` (no region
+// slug), so each scope would otherwise register the same URN and fail the
+// preview with "Duplicate resource URN". Sharing one cache across all instances
+// makes ensureSshKeys create each key exactly once, under a single dedicated
+// provider. See .agents/rules/ssh-keys-register-once-across-scopes.md.
+type SSHKeyCache struct {
+	mu sync.Mutex
+	// keys is keyed by env since SSH keys are env-scoped (not region-scoped).
+	keys map[string][]*hcloud.SshKey
+	// provider is the dedicated hcloud provider the account-global SSH keys are
+	// registered under, created once on first use with a fixed (scope-independent)
+	// resource name. Pinning the keys to a stable provider name — rather than the
+	// first realizing scope's region-scoped provider — keeps their owning provider
+	// stable across runs even if the scope set or realization order changes;
+	// otherwise Pulumi could see the provider reference move between runs and
+	// replace an account-global resource every server depends on. It assumes one
+	// Hetzner account per env (the keys' env-scoped names carry no account
+	// dimension). nil in tests, where the instance has no provider.
+	provider *hcloud.Provider
+}
+
+// NewSSHKeyCache returns an empty SSH key cache to thread through every
+// BuildRegistry/NewCompute call of one program run.
+func NewSSHKeyCache() *SSHKeyCache {
+	return &SSHKeyCache{keys: map[string][]*hcloud.SshKey{}}
+}
+
 // HetznerCompute implements types.ComputeProvider for Hetzner Cloud. One
-// instance is shared per registry (i.e. per region). Firewalls and SSH keys
-// are deduplicated across multiple Create calls via mutex-protected maps.
+// instance is shared per registry (i.e. per region/scope). Firewalls are
+// deduplicated per instance via a mutex-protected map; env-scoped SSH keys are
+// deduplicated across instances via a shared SSHKeyCache.
 type HetznerCompute struct {
 	sshAuthorizedKeys string
 	deployPublicKey   string
@@ -30,8 +62,9 @@ type HetznerCompute struct {
 	eph               tags.Ephemeral
 	mu                sync.Mutex
 	firewalls         map[string]*hcloud.Firewall
-	// sshKeys is keyed by env since SSH keys are env-scoped (not region-scoped).
-	sshKeys map[string][]*hcloud.SshKey
+	// sshKeys is shared across every scope's HetznerCompute so env-scoped SSH
+	// keys register once across the whole program run (see SSHKeyCache).
+	sshKeys *SSHKeyCache
 	// instanceCounters tracks how many servers have been created for each
 	// spec name so that Create assigns each call its unique specKey suffix.
 	instanceCounters map[string]int
@@ -43,10 +76,15 @@ type HetznerCompute struct {
 // naming. eph carries the ADR-0028 ephemeral-env labels (zero value for a static
 // env). regionOverrides is the output of ExtractRegionConfigs (the per-region
 // realizations) and may be nil — Create then fails closed for any region that
-// has no realization.
-func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *hcloud.Provider, project, slug string, eph tags.Ephemeral, regionOverrides map[string]RegionConfig) *HetznerCompute {
+// has no realization. sshKeys is the cross-scope SSH key cache shared by every
+// HetznerCompute of one program run; pass nil for a standalone instance (e.g.
+// tests) and a private cache is allocated.
+func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *hcloud.Provider, project, slug string, eph tags.Ephemeral, regionOverrides map[string]RegionConfig, sshKeys *SSHKeyCache) *HetznerCompute {
 	if regionOverrides == nil {
 		regionOverrides = map[string]RegionConfig{}
+	}
+	if sshKeys == nil {
+		sshKeys = NewSSHKeyCache()
 	}
 	return &HetznerCompute{
 		sshAuthorizedKeys: sshAuthorizedKeys,
@@ -57,7 +95,7 @@ func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *h
 		slug:              slug,
 		eph:               eph,
 		firewalls:         map[string]*hcloud.Firewall{},
-		sshKeys:           map[string][]*hcloud.SshKey{},
+		sshKeys:           sshKeys,
 		instanceCounters:  map[string]int{},
 		regions:           regionOverrides,
 	}
@@ -292,43 +330,81 @@ func (h *HetznerCompute) ensureFirewall(ctx *pulumi.Context, spec types.ComputeS
 }
 
 // ensureSshKeys returns the [user, deploy] SSH key pair for env, creating them
-// if they do not yet exist. SSH keys are env-scoped (not region-scoped). It is
-// safe to call concurrently. Index 0 is the user authorized-keys key; index 1
-// is the deploy public key.
+// if they do not yet exist, under the cache's dedicated provider so their owning
+// provider is independent of which scope realizes first. SSH keys are env-scoped
+// (not region-scoped). It is safe to call concurrently. Index 0 is the user
+// authorized-keys key; index 1 is the deploy public key.
 func (h *HetznerCompute) ensureSshKeys(ctx *pulumi.Context, env string) ([]*hcloud.SshKey, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.sshKeys.mu.Lock()
+	defer h.sshKeys.mu.Unlock()
 
-	if keys, ok := h.sshKeys[env]; ok {
+	if keys, ok := h.sshKeys.keys[env]; ok {
 		return keys, nil
 	}
 
-	// SSH keys are env-scoped, not container-scoped: omit container label.
-	keyLabels := toStringMap(tags.HetznerLabels(h.project, env, h.slug, "", h.eph))
+	prov, err := h.sshKeyProvider(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create ssh key provider: %w", err)
+	}
+
+	// SSH keys are env-scoped, not region- or container-scoped: omit both the
+	// region-slug and container labels so the single shared key carries no
+	// scope-specific label regardless of which scope creates it.
+	keyLabels := toStringMap(tags.HetznerLabels(h.project, env, "", "", h.eph))
 
 	userKeyName := naming.GlobalResource(env, "key", "user")
-	userKey, err := h.newOrImportSshKey(ctx, userKeyName, h.sshAuthorizedKeys, keyLabels)
+	userKey, err := h.newOrImportSshKey(ctx, prov, userKeyName, h.sshAuthorizedKeys, keyLabels)
 	if err != nil {
 		return nil, fmt.Errorf("create user ssh key %s: %w", userKeyName, err)
 	}
 
 	deployKeyName := naming.GlobalResource(env, "key", "deploy")
-	deployKey, err := h.newOrImportSshKey(ctx, deployKeyName, h.deployPublicKey, keyLabels)
+	deployKey, err := h.newOrImportSshKey(ctx, prov, deployKeyName, h.deployPublicKey, keyLabels)
 	if err != nil {
 		return nil, fmt.Errorf("create deploy ssh key %s: %w", deployKeyName, err)
 	}
 
 	keys := []*hcloud.SshKey{userKey, deployKey}
-	h.sshKeys[env] = keys
+	h.sshKeys.keys[env] = keys
 	return keys, nil
 }
 
-// newOrImportSshKey creates an SSH key in Hetzner, importing the existing one
-// if a key with the same name is already present (adopt-or-create, idempotent).
-// It uses a direct hcloud API call rather than Pulumi's LookupSshKey invoke,
-// which logs engine-level errors on 404 and fails the stack even when caught.
-func (h *HetznerCompute) newOrImportSshKey(ctx *pulumi.Context, name, publicKey string, labels pulumi.StringMap) (*hcloud.SshKey, error) {
-	opts := h.providerOpts()
+// sshKeyProvider returns the dedicated, stably-named hcloud provider the
+// account-global SSH keys register under, creating it once (memoised on the
+// shared cache). Its resource name is fixed (not region-scoped) so the keys'
+// owning provider does not move when the scope set or realization order changes.
+// Because the cache dedups key creation to a single caller, this provider is
+// registered exactly once — it never collides on URN the way a per-scope provider
+// would (see .agents/rules/registry-provider-names-are-region-scoped.md). Returns
+// nil when the instance has no provider (tests), so keys register provider-less
+// as before. Callers must hold h.sshKeys.mu.
+func (h *HetznerCompute) sshKeyProvider(ctx *pulumi.Context) (*hcloud.Provider, error) {
+	if h.provider == nil {
+		return nil, nil
+	}
+	if h.sshKeys.provider != nil {
+		return h.sshKeys.provider, nil
+	}
+	p, err := hcloud.NewProvider(ctx, "hcloud-ssh-keys", &hcloud.ProviderArgs{
+		Token: pulumi.String(h.apiToken),
+	})
+	if err != nil {
+		return nil, err
+	}
+	h.sshKeys.provider = p
+	return p, nil
+}
+
+// newOrImportSshKey creates an SSH key in Hetzner under prov, importing the
+// existing one if a key with the same name is already present (adopt-or-create,
+// idempotent). It uses a direct hcloud API call rather than Pulumi's
+// LookupSshKey invoke, which logs engine-level errors on 404 and fails the stack
+// even when caught.
+func (h *HetznerCompute) newOrImportSshKey(ctx *pulumi.Context, prov *hcloud.Provider, name, publicKey string, labels pulumi.StringMap) (*hcloud.SshKey, error) {
+	var opts []pulumi.ResourceOption
+	if prov != nil {
+		opts = append(opts, pulumi.Provider(prov))
+	}
 	if id, err := h.lookupSshKeyID(name); err == nil && id != 0 {
 		opts = append(opts, pulumi.Import(pulumi.ID(strconv.Itoa(id))))
 	}

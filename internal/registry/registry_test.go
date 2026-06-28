@@ -66,7 +66,7 @@ func TestProviderResourceNamesAreScopePerRegistry(t *testing.T) {
 		// Mirror program.Run: a global-slice registry and a regional registry over
 		// the same context. Distinct region strings → distinct scopes.
 		for _, region := range []string{"global", "us-east-1"} {
-			reg := BuildRegistry(ctx, config, &regions.DnsAuthority{Zone: "z"}, types.SSHConfig{}, regions.Table{}, "proj", "prd", region, tags.Ephemeral{})
+			reg := BuildRegistry(ctx, config, &regions.DnsAuthority{Zone: "z"}, types.SSHConfig{}, regions.Table{}, "proj", "prd", region, tags.Ephemeral{}, nil)
 			// Compute("hetzner") forces hcloud.NewProvider; DNS("cloudflare") forces
 			// cf.NewProvider. Both are the singleton provider resources that collide.
 			if _, cerr := reg.Compute("hetzner"); cerr != nil {
@@ -90,6 +90,133 @@ func TestProviderResourceNamesAreScopePerRegistry(t *testing.T) {
 	}
 }
 
+// sshKeyMocks records, for every SSH key resource registered, its name and the
+// provider reference it was registered under (args.Provider, whose URN embeds the
+// provider resource name). NewResource also returns inline the IDs/outputs the
+// compute Create path needs (numeric firewall ID, server IPv4), but those are not
+// retained.
+type sshKeyMocks struct {
+	mu           sync.Mutex
+	sshNames     []string
+	sshProviders []string
+}
+
+func (m *sshKeyMocks) Call(pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	return resource.PropertyMap{}, nil
+}
+
+func (m *sshKeyMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
+	switch args.TypeToken {
+	case "hcloud:index/sshKey:SshKey":
+		m.mu.Lock()
+		m.sshNames = append(m.sshNames, args.Name)
+		m.sshProviders = append(m.sshProviders, args.Provider)
+		m.mu.Unlock()
+		return args.Name + "-id", resource.PropertyMap{
+			"name":      resource.NewStringProperty(args.Name),
+			"publicKey": resource.NewStringProperty("ssh-ed25519 AAAA test"),
+		}, nil
+	case "hcloud:index/firewall:Firewall":
+		// Firewall ID is parsed as an int in compute.Create.
+		return "42", resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}, nil
+	case "hcloud:index/server:Server":
+		return args.Name + "-id", resource.PropertyMap{
+			"name":        resource.NewStringProperty(args.Name),
+			"ipv4Address": resource.NewStringProperty("1.2.3.4"),
+		}, nil
+	}
+	return args.Name + "-id", resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}, nil
+}
+
+// TestSshKeysRegisterOncePerEnvAcrossScopes guards the sibling of the
+// provider-URN regression (TestProviderResourceNamesAreScopePerRegistry): Hetzner
+// SSH keys are account-global and named with no region slug
+// (`wardnet-<env>-key-{user,deploy}`, via naming.GlobalResource). program.Run
+// builds one registry — and one HetznerCompute — per scope (the region-less global
+// slice plus each region) over the same Pulumi context. If each scope's compute
+// provider registered the keys independently, the second registration would reuse
+// the URN and the real engine would fail with
+// `Duplicate resource URN '…SshKey::wardnet-<env>-key-user'` — exactly the failure
+// the first real cross-scope deployment hit.
+//
+// program.Run threads ONE shared SSH key cache into every BuildRegistry call. This
+// drives two registries over one context through the real Compute().Create() path
+// and asserts each env-scoped key is registered exactly once. (The mock monitor
+// does not reject duplicate URNs, so we count registrations rather than rely on
+// RunErr returning an error — same approach as the provider-name test above.)
+//
+// Reverting to a per-instance cache makes each scope register the keys again, so
+// each name's count becomes 2 and this test fails.
+func TestSshKeysRegisterOncePerEnvAcrossScopes(t *testing.T) {
+	config := map[string]map[string]any{
+		"hetzner": {
+			"apiToken":     "t",
+			"location":     "ash",
+			"network_zone": "us-east",
+			"serverTypes":  map[string]any{"SMALL": "cx23"},
+			"images":       map[string]any{"ubuntu-24.04": "ubuntu-24.04"},
+		},
+	}
+	// "global" is absent from the table → empty slug (region-less global slice),
+	// exactly as program.Run resolves it; "us-east-1" → "use1".
+	regionTable := regions.Table{"us-east-1": {Slug: "use1"}}
+	mocks := &sshKeyMocks{}
+
+	net := types.NetworkOutputs{
+		NetworkID: pulumi.String("99").ToStringOutput(),
+		SubnetID:  pulumi.String("12345").ToStringOutput(),
+	}
+	spec := types.ComputeSpec{
+		Name:          "bridge",
+		Kind:          "vm",
+		Container:     "vpc",
+		Provider:      "hetzner",
+		Network:       "vpc",
+		Size:          "SMALL",
+		Image:         "ubuntu-24.04",
+		InstanceCount: 1,
+	}
+
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		// One shared cache, threaded into every registry exactly as program.Run does.
+		cache := NewSSHKeyCache()
+		for _, region := range []string{"global", "us-east-1"} {
+			reg := BuildRegistry(ctx, config, nil, types.SSHConfig{}, regionTable, "proj", "prd", region, tags.Ephemeral{}, cache)
+			comp, cerr := reg.Compute("hetzner")
+			if cerr != nil {
+				return cerr
+			}
+			// abstractRegion == the scope key, so ExtractRegionConfigs/ResolveRegion
+			// resolve the realization under that key. Distinct slugs keep the server
+			// and firewall names unique; only the env-scoped SSH keys collide.
+			if _, err := comp.Create(ctx, spec, net, "prd", region, "bridge.example.com", "", types.FirewallPorts{}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, pulumi.WithMocks("proj", "stack", mocks))
+	require.NoError(t, err)
+
+	counts := map[string]int{}
+	for _, n := range mocks.sshNames {
+		counts[n]++
+	}
+	assert.Equal(t, 1, counts["wardnet-prd-key-user"],
+		"user SSH key must register once across scopes, got %v (duplicate-URN regression)", mocks.sshNames)
+	assert.Equal(t, 1, counts["wardnet-prd-key-deploy"],
+		"deploy SSH key must register once across scopes, got %v (duplicate-URN regression)", mocks.sshNames)
+
+	// Each key must be registered under the dedicated, scope-independent provider
+	// (hcloud-ssh-keys) — NOT the winning scope's region-scoped provider
+	// (hcloud-global / hcloud-us-east-1). Pinning to a fixed provider name keeps
+	// the account-global key's owning provider stable when the scope set or
+	// realization order changes, avoiding a provider-change replacement.
+	for _, p := range mocks.sshProviders {
+		assert.Contains(t, p, "hcloud-ssh-keys",
+			"SSH keys must register under the dedicated hcloud-ssh-keys provider, got %q", p)
+	}
+}
+
 func dedupe(in []string) []string {
 	seen := map[string]struct{}{}
 	var out []string
@@ -105,7 +232,7 @@ func dedupe(in []string) []string {
 func TestRegistryUnknownProvider(t *testing.T) {
 	// nil ctx + nil regionTable: providers are built lazily, so construction is
 	// not triggered during this test. Only the "unknown provider" paths are hit.
-	r := BuildRegistry(nil, map[string]map[string]any{"hetzner": {"apiToken": "x"}}, nil, types.SSHConfig{}, nil, "test-project", "test", "us-east-1", tags.Ephemeral{})
+	r := BuildRegistry(nil, map[string]map[string]any{"hetzner": {"apiToken": "x"}}, nil, types.SSHConfig{}, nil, "test-project", "test", "us-east-1", tags.Ephemeral{}, nil)
 
 	// "hetzner" is now a known network provider — must succeed.
 	np, err := r.Network("hetzner")
