@@ -62,18 +62,26 @@ func TestBuildEnvDeployment(t *testing.T) {
 		Service: "bridge",
 		User:    "bridge",
 		Deployment: Deployment{
-			Region:      "us-east-1",
-			RegionSlug:  "use1",
-			Environment: "prd",
-			BaseDomain:  "wardnet.network",
-			FQDN:        "bridge.svc.prd.use1.wardnet.network",
-			HostID:      "wardnet-prd-use1-vm-bridge-01",
+			Region:           "us-east-1",
+			RegionSlug:       "use1",
+			Environment:      "prd",
+			BaseDomain:       "wardnet.network",
+			FQDN:             "bridge.svc.prd.use1.wardnet.network",
+			HostID:           "wardnet-prd-use1-vm-bridge-01",
+			CloudProvider:    "hetzner",
+			CloudRegion:      "us-east",
+			AvailabilityZone: "ash",
+			MachineType:      "cx23",
 		},
 	}
 
 	env, err := buildEnv(d, nil, "/home/bridge", "inst-9")
 	require.NoError(t, err)
 
+	assert.Contains(t, env, "INFORGE_CLOUD_PROVIDER=hetzner")
+	assert.Contains(t, env, "INFORGE_CLOUD_REGION=us-east")
+	assert.Contains(t, env, "INFORGE_CLOUD_AVAILABILITY_ZONE=ash")
+	assert.Contains(t, env, "INFORGE_HOST_TYPE=cx23")
 	assert.Contains(t, env, "INFORGE_DEPLOYMENT_REGION=us-east-1")
 	assert.Contains(t, env, "INFORGE_DEPLOYMENT_REGION_SLUG=use1")
 	assert.Contains(t, env, "INFORGE_DEPLOYMENT_ENV=prd")
@@ -87,6 +95,28 @@ func TestBuildEnvDeployment(t *testing.T) {
 	for _, e := range env {
 		assert.False(t, strings.HasPrefix(e, "INFORGE_DEPLOYMENT_NAMESPACE="),
 			"INFORGE_DEPLOYMENT_NAMESPACE was dropped in favour of INFORGE_SERVICE_NAMESPACE")
+	}
+}
+
+// TestBuildEnvOmitsEmptyCloudAttrs: a deployment whose provider did not supply the
+// cloud/host identity (the fields are empty) emits no INFORGE_CLOUD_*/INFORGE_HOST_TYPE
+// vars at all — they are omitted, not emitted blank (the always-present deployment
+// block still appears).
+func TestBuildEnvOmitsEmptyCloudAttrs(t *testing.T) {
+	d := Descriptor{
+		Service:    "bridge",
+		User:       "bridge",
+		Deployment: Deployment{Region: "us-east-1", HostID: "wardnet-prd-use1-vm-bridge-01"},
+	}
+
+	env, err := buildEnv(d, nil, "/home/bridge", "inst-9")
+	require.NoError(t, err)
+
+	assert.Contains(t, env, "INFORGE_HOST_ID=wardnet-prd-use1-vm-bridge-01")
+	for _, e := range env {
+		for _, name := range []string{"INFORGE_CLOUD_PROVIDER", "INFORGE_CLOUD_REGION", "INFORGE_CLOUD_AVAILABILITY_ZONE", "INFORGE_HOST_TYPE"} {
+			assert.False(t, strings.HasPrefix(e, name+"="), "%s must be omitted when empty", name)
+		}
 	}
 }
 

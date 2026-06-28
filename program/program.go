@@ -4,6 +4,7 @@
 package program
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/meshcert"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/otelcol"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/registry"
 	iremote "github.com/wardnet/inforge/internal/remote"
@@ -220,6 +222,23 @@ func Run(ctx *pulumi.Context) error {
 		}
 	}
 
+	// Env-level observability (ADR-0031): when otlp_endpoint is configured, every VM
+	// gets the host-metrics collector. The OTLP Basic-auth credential lives in the
+	// env secret store as the raw "instanceID:token"; base64 it once into the header
+	// value and mark it secret so it is encrypted in Pulumi state. An endpoint set
+	// with no credential is a hard misconfiguration (fail at up, skipped in preview).
+	var obsAuthB64 pulumi.StringOutput
+	if vars.Observability.OTLPEndpoint != "" {
+		authRaw := ""
+		if c, ok := encSecrets[otelcol.AuthSecretContainer]; ok {
+			authRaw = c[otelcol.AuthSecretKey]
+		}
+		if authRaw == "" && !ctx.DryRun() {
+			return fmt.Errorf("observability: otlp_endpoint is set but secrets.enc.yaml has no %s/%s credential", otelcol.AuthSecretContainer, otelcol.AuthSecretKey)
+		}
+		obsAuthB64 = pulumi.ToSecret(pulumi.String(base64.StdEncoding.EncodeToString([]byte(authRaw)))).(pulumi.StringOutput)
+	}
+
 	// Post-process each scope through the host-level pipeline. The order within a
 	// scope is load-bearing: DNS records first (ACME HTTP-01 needs the A-record to
 	// exist), then app seeds + ingress (nginx/ACME), then service secrets, then the
@@ -250,6 +269,9 @@ func Run(ctx *pulumi.Context) error {
 			return err
 		}
 		if err := provisionServices(ctx, sc.res, computeOutputs[sc.key], bundles, gates, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug, vars.BaseDomain, inforgeVersion); err != nil {
+			return err
+		}
+		if err := provisionObservability(ctx, sc.res, computeOutputs[sc.key], gates, vars.Observability, obsAuthB64, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
 			return err
 		}
 	}
@@ -456,6 +478,82 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 		Triggers: pulumi.Array{pulumi.String(createScript)},
 	}, pulumi.DependsOn([]pulumi.Resource{gate})); err != nil {
 		return fmt.Errorf("service %q: provision unit: %w", svc.Name, err)
+	}
+	return nil
+}
+
+// provisionObservability installs the host VM-metrics collector on every VM in this
+// region (ADR-0031), gated on the env defining observability config: it is a no-op
+// when obs.OTLPEndpoint is empty. The agent is always-on otherwise — every host
+// gets it, no per-compute opt-in — and stamps the same cloud/host resource identity
+// (ADR-0030) inforge injects into app telemetry, so host metrics correlate with app
+// telemetry on host.id. It is scoped to regional hosts, matching provisionServices
+// (global-placement hosts are not service-provisioned in this loop either).
+//
+// authB64 is the base64 OTLP Basic-auth value, already marked secret by the caller;
+// the credential write is built inside an ApplyT over it so the secret is encrypted
+// in Pulumi state (never written as plaintext), mirroring deliverServiceSecrets.
+func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, obs types.ObservabilityConfig, authB64 pulumi.StringOutput, deployPrivateKey, env, slug string) error {
+	if obs.OTLPEndpoint == "" {
+		return nil
+	}
+	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
+	for _, hostKey := range sortedKeys(computeOut) {
+		host := computeOut[hostKey]
+		deployUser := deployUserByCompute[hostKey]
+		if !ctx.DryRun() {
+			if deployUser == "" {
+				return fmt.Errorf("observability: host %q has no deploy_user; inforge needs one to SSH and install the collector", hostKey)
+			}
+			if deployPrivateKey == "" {
+				return fmt.Errorf("observability: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)")
+			}
+		}
+		gate, err := cloudInitGate(ctx, gates, hostKey, host, deployPrivateKey, env, slug)
+		if err != nil {
+			return err
+		}
+		conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
+		name := naming.Resource(env, slug, "otelcol", hostKey)
+
+		install := otelcol.InstallScript(otelcol.DefaultVersion)
+		installCmd, err := remote.NewCommand(ctx, name+"-install", &remote.CommandArgs{
+			Connection: conn,
+			Create:     pulumi.String(install),
+			Update:     pulumi.String(install),
+			Triggers:   pulumi.Array{pulumi.String(install)},
+		}, pulumi.DependsOn([]pulumi.Resource{gate}))
+		if err != nil {
+			return fmt.Errorf("observability: host %q: install collector: %w", hostKey, err)
+		}
+
+		config, err := otelcol.Render(obs.OTLPEndpoint, otelcol.Attributes{
+			HostID:           naming.Resource(env, slug, "vm", hostKey),
+			CloudProvider:    host.CloudProvider,
+			CloudRegion:      host.CloudRegion,
+			AvailabilityZone: host.AvailabilityZone,
+			MachineType:      host.MachineType,
+			Environment:      env,
+			RegionSlug:       slug,
+		})
+		if err != nil {
+			return fmt.Errorf("observability: host %q: render config: %w", hostKey, err)
+		}
+		// The credential is secret; build the write+apply script inside an ApplyT over
+		// the secret so the whole command's Create is encrypted in state. Order: write
+		// the 0600 credential, then the config + enable + restart (a changed ${file:}
+		// credential is only re-read on start).
+		applyScript := authB64.ApplyT(func(b64 string) string {
+			return otelcol.CredentialScript(b64) + "\n" + otelcol.ApplyScript(config)
+		}).(pulumi.StringOutput)
+		if _, err := remote.NewCommand(ctx, name+"-config", &remote.CommandArgs{
+			Connection: conn,
+			Create:     applyScript,
+			Update:     applyScript,
+			Triggers:   pulumi.Array{applyScript},
+		}, pulumi.DependsOn([]pulumi.Resource{installCmd})); err != nil {
+			return fmt.Errorf("observability: host %q: configure collector: %w", hostKey, err)
+		}
 	}
 	return nil
 }
@@ -680,7 +778,7 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 	// descriptor.yaml depends on the workspace ID (provider.project), so render it
 	// inside an ApplyT on that output.
 	descriptor := bundle.Project.ApplyT(func(project string) (string, error) {
-		return renderDescriptor(svc, bundle, project, env, region, slug, baseDomain, computeKey)
+		return renderDescriptor(svc, host, bundle, project, env, region, slug, baseDomain, computeKey)
 	}).(pulumi.StringOutput)
 
 	// Encrypt {client_id, client_secret} to the host key inside an ApplyT over the
@@ -742,7 +840,7 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
-	descriptor, err := renderDescriptor(svc, nil, "", env, region, slug, baseDomain, computeKey)
+	descriptor, err := renderDescriptor(svc, host, nil, "", env, region, slug, baseDomain, computeKey)
 	if err != nil {
 		return err
 	}
@@ -770,7 +868,7 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 // fqdn/host) is derived from the deployment context and is present for every
 // service, secret-bearing or not. hostKey is the service's resolved compute key
 // ("<name>-<NN>", e.g. "bridge-01"); the host id is its full VM resource name.
-func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle, project, env, region, slug, baseDomain, hostKey string) (string, error) {
+func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, project, env, region, slug, baseDomain, hostKey string) (string, error) {
 	// The global scope is region-less: globalScope is an internal output-map key, not
 	// an abstract region, so it must not leak into the on-host descriptor. Surface an
 	// empty INFORGE_DEPLOYMENT_REGION (matching the already-empty RegionSlug) rather
@@ -793,6 +891,12 @@ func renderDescriptor(svc types.ServiceSpec, bundle *types.ServiceSecretsBundle,
 			// "<name>-<NN>" hostKey as the name segment yields the same string as
 			// naming.ResourceInstance, so the host id matches the cloud server name.
 			HostID: naming.Resource(env, slug, "vm", hostKey),
+			// Provider-supplied cloud/host resource identity, off the host's own
+			// outputs (ADR-0030) — empty for a provider that does not supply them.
+			CloudProvider:    host.CloudProvider,
+			CloudRegion:      host.CloudRegion,
+			AvailabilityZone: host.AvailabilityZone,
+			MachineType:      host.MachineType,
 		},
 	}
 	if bundle != nil {

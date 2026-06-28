@@ -13,7 +13,8 @@ const minimalPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bi
 
 // ReservedEnvPrefix is the environment-variable namespace inforge owns and
 // injects itself (the deployment/observability context: INFORGE_DEPLOYMENT_*,
-// INFORGE_SERVICE_NAMESPACE, INFORGE_INSTANCE_ID, INFORGE_HOST_ID). A service must
+// INFORGE_SERVICE_NAMESPACE, INFORGE_INSTANCE_ID, INFORGE_HOST_ID, INFORGE_HOST_TYPE,
+// INFORGE_CLOUD_*). A service must
 // not map a secret to a name under this prefix — validation rejects it up front,
 // and buildEnv rejects it as a backstop — so an injected value can never silently
 // shadow (or be shadowed by) a service secret.
@@ -58,6 +59,20 @@ func buildEnv(d Descriptor, secrets map[string]string, home, instanceID string) 
 			"INFORGE_DEPLOYMENT_FQDN="+dpl.FQDN,
 			"INFORGE_HOST_ID="+dpl.HostID,
 		)
+		// Provider-supplied cloud/host resource identity (ADR-0030) → OTel
+		// cloud.provider/cloud.region/cloud.availability_zone/host.type. Unlike the
+		// always-present block above, each is omitted when empty so a provider that
+		// does not supply it emits nothing (the consumer omits empty attrs anyway).
+		for _, kv := range [][2]string{
+			{"INFORGE_CLOUD_PROVIDER", dpl.CloudProvider},
+			{"INFORGE_CLOUD_REGION", dpl.CloudRegion},
+			{"INFORGE_CLOUD_AVAILABILITY_ZONE", dpl.AvailabilityZone},
+			{"INFORGE_HOST_TYPE", dpl.MachineType},
+		} {
+			if kv[1] != "" {
+				env = append(env, kv[0]+"="+kv[1])
+			}
+		}
 	}
 
 	names := make([]string, 0, len(d.Env))

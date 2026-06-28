@@ -383,6 +383,37 @@ source. The grain is create-and-destroy (Hetzner bills a server until it is dele
 - **Network segregation** is a structural invariant — never peer Networks or share one across envs;
   see `.agents/rules/ephemeral-network-segregation.md`.
 
+## Observability (ADR-0030, ADR-0031)
+
+Two coupled pieces give Grafana Cloud cloud/host context. Both stamp the **same**
+resource-attribute set so VM metrics and app telemetry correlate on `host.id`.
+
+- **Resource-attribute enrichment (ADR-0030).** Beyond the #134 set, inforge injects four
+  more OTel attributes where it is the sole authority: `cloud.provider`
+  (`INFORGE_CLOUD_PROVIDER`), `cloud.region` (`INFORGE_CLOUD_REGION` = Hetzner `network_zone`),
+  `cloud.availability_zone` (`INFORGE_CLOUD_AVAILABILITY_ZONE` = Hetzner `location`), and
+  `host.type` (`INFORGE_HOST_TYPE` = server-type SKU). They are **provider-supplied** plain-string
+  fields on `types.ComputeOutputs` (`CloudProvider/CloudRegion/AvailabilityZone/MachineType`),
+  populated by `hetzner.Create()` (plan-time constants, no apply), read off the host in
+  `renderDescriptor`, carried in `bootstrapper.Deployment`, and emitted by `buildEnv`
+  **omit-if-empty** (a provider that doesn't supply one emits nothing). `host.name`/`os.type`
+  were deliberately dropped (self-detectable by the process). This bumped the descriptor to
+  **v5** (the strict `KnownFields` decoder makes any field addition a major bump). The consumer
+  side is a four-row addition to the `(attribute, env_var)` table in wardnet-cloud
+  `crates/common/src/telemetry.rs::resource()`.
+- **Host VM-metrics collector (ADR-0031).** `internal/otelcol` (pure, Pulumi-free, like
+  `internal/nginx`) renders an off-the-shelf **OTel Collector Contrib** config (`hostmetrics` →
+  `otlphttp`) and the idempotent install shell (download the version-pinned `.deb`, verify the
+  release checksum, `apt-get install` the local file keeping our config on upgrade). The
+  `process` scraper is **off** so the agent runs **unprivileged** as the `.deb`'s `otelcol-contrib`
+  user. `program.provisionObservability` is an **always-on** per-host pass **gated on env-level
+  config**: `variables.yaml` `observability.otlp_endpoint` (non-secret) + the OTLP Basic-auth
+  credential in `secrets.enc.yaml` under the reserved `observability/otlp_auth`
+  (`otelcol.AuthSecret*`). With no endpoint it is a no-op; with an endpoint but no credential it
+  fails the deploy. The credential is base64'd, `pulumi.ToSecret`-wrapped (encrypted in state),
+  written `0600` owned by the collector user, and referenced from the config via the collector's
+  `${file:…}` provider (never inlined). The config stamps the ADR-0030 attribute set + `host.id`.
+
 ## Conventions
 
 - **Provider binary names are load-bearing.** Pulumi locates plugins by the exact filename

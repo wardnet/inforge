@@ -28,10 +28,11 @@ import (
 // producer and consumer can never disagree on the schema version. Because parsing
 // is strict (KnownFields), any field addition is a breaking change for an older
 // reader, so it bumps this major: v2 added the Deployment block, v3 added the
-// Files map, and v4 swapped Deployment.Namespace for Deployment.HostID, so an older
-// bootstrapper meeting a newer descriptor fails cleanly on the version rather than
-// on an unknown field.
-const SupportedVersion = 4
+// Files map, and v4 swapped Deployment.Namespace for Deployment.HostID; v5 added the
+// cloud/host resource-identity fields (CloudProvider/CloudRegion/AvailabilityZone/
+// MachineType, ADR-0030). An older bootstrapper meeting a newer descriptor fails
+// cleanly on the version rather than on an unknown field.
+const SupportedVersion = 5
 
 // Descriptor is the versioned, secret-free on-host contract inforge writes to
 // /etc/wardnet/services/<svc>/descriptor.yaml (0644 root). It names the service,
@@ -70,6 +71,14 @@ type Deployment struct {
 	// It is stable per host (does NOT change across restarts), so it is injected as
 	// INFORGE_HOST_ID — the OTel host.id resource attribute.
 	HostID string `yaml:"host_id"`
+	// The four fields below are provider-supplied cloud/host resource identity
+	// (ADR-0030), injected as INFORGE_CLOUD_*/INFORGE_HOST_TYPE → the OTel
+	// cloud.provider/cloud.region/cloud.availability_zone/host.type attributes.
+	// Each is omitempty: a provider that does not supply one writes nothing.
+	CloudProvider    string `yaml:"cloud_provider,omitempty"`    // cloud.provider, e.g. "hetzner"
+	CloudRegion      string `yaml:"cloud_region,omitempty"`      // cloud.region, e.g. "us-east"
+	AvailabilityZone string `yaml:"availability_zone,omitempty"` // cloud.availability_zone, e.g. "ash"
+	MachineType      string `yaml:"machine_type,omitempty"`      // host.type, e.g. "cx23"
 }
 
 // LoadDescriptor reads and parses the descriptor at path.
