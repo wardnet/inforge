@@ -56,7 +56,7 @@ func (m *computeMocks) NewResource(args pulumi.MockResourceArgs) (string, resour
 
 func TestEnsureFirewallIdempotency(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil, nil)
 
 		bridgeSpec := types.ComputeSpec{Name: "bridge", Container: "vpc", Provider: "hetzner"}
 		fw1, err := h.ensureFirewall(ctx, bridgeSpec, "prod", types.FirewallPorts{})
@@ -110,7 +110,7 @@ func (m *fwCaptureMocks) NewResource(args pulumi.MockResourceArgs) (string, reso
 func TestEnsureFirewallSourceScoping(t *testing.T) {
 	mocks := &fwCaptureMocks{}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil, nil)
 		spec := types.ComputeSpec{Name: "back", Container: "vpc", Provider: "hetzner"}
 		_, err := h.ensureFirewall(ctx, spec, "prod", types.FirewallPorts{
 			Public:            []int{443},
@@ -148,7 +148,7 @@ func TestEnsureFirewallSourceScoping(t *testing.T) {
 func TestEnsureFirewallExposedPorts(t *testing.T) {
 	mocks := &fwCaptureMocks{}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil, nil)
 		spec := types.ComputeSpec{Name: "edge", Container: "vpc", Provider: "hetzner"}
 		_, err := h.ensureFirewall(ctx, spec, "prod", types.FirewallPorts{
 			PrivateExposed: []types.ExposedPort{
@@ -187,7 +187,7 @@ func TestEnsureFirewallExposedPorts(t *testing.T) {
 
 func TestEnsureFirewallCustomRules(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil, nil)
 
 		spec := types.ComputeSpec{
 			Name:      "bridge",
@@ -215,7 +215,7 @@ func TestEnsureFirewallCustomRules(t *testing.T) {
 
 func TestComputeCreateWithCustomFirewall(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1())
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
 
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
@@ -253,7 +253,7 @@ func TestComputeCreateWithCustomFirewall(t *testing.T) {
 
 func TestEnsureSshKeysIdempotency(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil)
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil, nil)
 
 		// SSH keys are env-scoped: same env must return the same keys.
 		keys1, err := h.ensureSshKeys(ctx, "prod")
@@ -282,11 +282,42 @@ func TestEnsureSshKeysIdempotency(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestEnsureSshKeysSharedAcrossInstances reproduces the multi-scope bug: a
+// program run builds one HetznerCompute per scope (the global slice plus each
+// region), all over the same Pulumi context. Env-scoped SSH keys carry no region
+// slug, so two instances registering them independently collide on the same URN.
+// Sharing one SSHKeyCache must make the keys register exactly once — both
+// instances return the identical key objects (a second NewSshKey under the same
+// URN would otherwise fail the run).
+func TestEnsureSshKeysSharedAcrossInstances(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		cache := NewSSHKeyCache()
+		// Distinct slugs model the global slice ("") and a region ("use1").
+		global := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "", tags.Ephemeral{}, nil, cache)
+		regional := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, nil, cache)
+
+		keysGlobal, err := global.ensureSshKeys(ctx, "prod")
+		if err != nil {
+			return err
+		}
+		keysRegional, err := regional.ensureSshKeys(ctx, "prod")
+		if err != nil {
+			return err
+		}
+		if keysGlobal[0] != keysRegional[0] || keysGlobal[1] != keysRegional[1] {
+			t.Error("shared SSHKeyCache must return the same key objects across instances (keys registered twice)")
+		}
+		return nil
+	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
+
+	require.NoError(t, err)
+}
+
 // ---- Create smoke test -------------------------------------------------------
 
 func TestComputeCreateReturnsPublicIP(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1())
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
 
 		// Synthesise a NetworkOutputs with a known subnet ID.
 		subnetID := pulumi.String("12345").ToStringOutput()
@@ -319,7 +350,7 @@ func TestComputeCreateReturnsPublicIP(t *testing.T) {
 
 func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1())
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
 
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
@@ -390,7 +421,7 @@ func (m *capturingMocks) NewResource(args pulumi.MockResourceArgs) (string, reso
 func TestComputeCreateUsesRealization(t *testing.T) {
 	mocks := &capturingMocks{}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1())
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
 			SubnetID:  pulumi.String("12345").ToStringOutput(),
@@ -409,7 +440,7 @@ func TestComputeCreateUsesRealization(t *testing.T) {
 
 func TestComputeCreateUnknownRegionReturnsError(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1())
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
 			SubnetID:  pulumi.String("12345").ToStringOutput(),
@@ -432,7 +463,7 @@ func TestComputeCreateUnknownRegionReturnsError(t *testing.T) {
 
 func TestComputeCreateUnknownSizeReturnsError(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1())
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
 			SubnetID:  pulumi.String("12345").ToStringOutput(),
@@ -455,7 +486,7 @@ func TestComputeCreateUnknownSizeReturnsError(t *testing.T) {
 
 func TestComputeCreateUnknownImageReturnsError(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1())
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
 		net := types.NetworkOutputs{
 			NetworkID: pulumi.String("99").ToStringOutput(),
 			SubnetID:  pulumi.String("12345").ToStringOutput(),

@@ -45,6 +45,9 @@ type registry struct {
 	dns         *regions.DnsAuthority
 	ssh         types.SSHConfig
 	regionTable regions.Table
+	// sshKeys is the cross-scope SSH key cache shared by every registry of one
+	// program run so env-scoped Hetzner SSH keys register under a single URN.
+	sshKeys *hetzner.SSHKeyCache
 
 	hetznerProviderOnce sync.Once
 	hetznerProvider     *hcloud.Provider
@@ -76,8 +79,10 @@ type registry struct {
 // to label cloud resources; eph carries the ADR-0028 ephemeral-env labels (zero
 // value for a static env). ctx is stored and used lazily when provider objects
 // are first constructed — it must be the context passed to the Pulumi program's
-// run function.
-func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, dns *regions.DnsAuthority, ssh types.SSHConfig, regionTable regions.Table, project, env, region string, eph tags.Ephemeral) ProviderRegistry {
+// run function. sshKeys is the cross-scope SSH key cache shared by every
+// registry of one program run (see NewSSHKeyCache); pass nil for a standalone
+// registry (e.g. tests) and hetzner.NewCompute allocates a private cache.
+func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, dns *regions.DnsAuthority, ssh types.SSHConfig, regionTable regions.Table, project, env, region string, eph tags.Ephemeral, sshKeys *hetzner.SSHKeyCache) ProviderRegistry {
 	slug, _ := regionTable.Slug(region) // already validated by loader
 	return &registry{
 		ctx:         ctx,
@@ -90,7 +95,16 @@ func BuildRegistry(ctx *pulumi.Context, config map[string]map[string]any, dns *r
 		dns:         dns,
 		ssh:         ssh,
 		regionTable: regionTable,
+		sshKeys:     sshKeys,
 	}
+}
+
+// NewSSHKeyCache returns the shared SSH key cache program.Run threads into every
+// BuildRegistry call so env-scoped Hetzner SSH keys register exactly once across
+// all realization scopes. It wraps hetzner.NewSSHKeyCache so callers need not
+// import the provider package directly.
+func NewSSHKeyCache() *hetzner.SSHKeyCache {
+	return hetzner.NewSSHKeyCache()
 }
 
 // hetznerProv lazily creates the shared hcloud.Provider for the Hetzner
@@ -141,6 +155,7 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 				r.slug,
 				r.eph,
 				realizations,
+				r.sshKeys,
 			)
 		})
 		return r.hetznerComp, nil

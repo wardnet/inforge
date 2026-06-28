@@ -86,7 +86,7 @@ func TestCreateInfraGlobalScope(t *testing.T) {
 			},
 			"neon": {"apiKey": "k", "region": "aws-us-east-2"},
 		}
-		reg := registry.BuildRegistry(ctx, config, nil, types.SSHConfig{}, regions.Table{}, "proj", "prd", globalScope, tags.Ephemeral{})
+		reg := registry.BuildRegistry(ctx, config, nil, types.SSHConfig{}, regions.Table{}, "proj", "prd", globalScope, tags.Ephemeral{}, nil)
 
 		res := types.Resources{
 			Network: []types.NetworkSpec{{
@@ -174,7 +174,7 @@ func TestGlobalServiceRealizesRegionLess(t *testing.T) {
 		reg := registry.BuildRegistry(ctx,
 			map[string]map[string]any{"hetzner": {"apiToken": "x"}},
 			&regions.DnsAuthority{Provider: "cloudflare", Zone: "z"},
-			types.SSHConfig{DeployPrivateKey: "priv"}, nil, "proj", "prd", globalScope, tags.Ephemeral{})
+			types.SSHConfig{DeployPrivateKey: "priv"}, nil, "proj", "prd", globalScope, tags.Ephemeral{}, nil)
 		res := types.Resources{
 			Compute: []types.ComputeSpec{
 				{Name: "tenants", Provider: "hetzner", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
