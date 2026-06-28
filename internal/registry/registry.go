@@ -101,7 +101,12 @@ func (r *registry) hetznerProv() *hcloud.Provider {
 			return
 		}
 		token := providerCfgString(r.config, "hetzner", "apiToken")
-		p, _ := hcloud.NewProvider(r.ctx, "hcloud", &hcloud.ProviderArgs{
+		// The provider resource name is scoped by region so that a program building
+		// more than one registry over the same Pulumi context — one per region plus
+		// the region-less global slice — does not register two providers under the
+		// same URN (pulumi:providers:hcloud::hcloud). r.region is "global" for the
+		// global slice and the region name otherwise, so it is always unique.
+		p, _ := hcloud.NewProvider(r.ctx, fmt.Sprintf("hcloud-%s", r.region), &hcloud.ProviderArgs{
 			Token: pulumi.String(token),
 		})
 		r.hetznerProvider = p
@@ -165,7 +170,10 @@ func (r *registry) cfProv() *cf.Provider {
 			return
 		}
 		token := providerCfgString(r.config, "cloudflare", "apiToken")
-		p, _ := cf.NewProvider(r.ctx, "cloudflare", &cf.ProviderArgs{
+		// Scoped by region for the same reason as the hcloud provider: each scope's
+		// registry registers its own provider, and a shared name would collide on
+		// URN once more than one scope realizes DNS records.
+		p, _ := cf.NewProvider(r.ctx, fmt.Sprintf("cloudflare-%s", r.region), &cf.ProviderArgs{
 			ApiToken: pulumi.StringPtr(token),
 		})
 		r.cfProvider = p
