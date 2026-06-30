@@ -62,3 +62,19 @@ func Render(template string, vars Vars) string {
 func ProvisionScript() string {
 	return provisionScript
 }
+
+// provisionShebang is the interpreter line a project cloud_init template would
+// normally supply. ProvisionOnly prepends it so the standalone provisioning
+// user-data is a script cloud-init recognises and executes.
+const provisionShebang = "#!/bin/bash"
+
+// ProvisionOnly renders a complete cloud-init user-data script that runs ONLY
+// the inforge first-boot provisioning step (deploy-user creation), for compute
+// specs that declare a deploy_user but supply no project cloud_init template.
+// It mirrors what Render produces from a bare shebang template, so the deploy
+// user is created identically whether or not a project supplies its own
+// cloud-init. Without it, such a host boots with only root reachable and every
+// deploy_user SSH command fails with "[none publickey]".
+func ProvisionOnly(vars Vars) string {
+	return Render(provisionShebang, vars)
+}

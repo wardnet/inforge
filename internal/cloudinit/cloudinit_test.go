@@ -3,6 +3,7 @@ package cloudinit
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -62,4 +63,18 @@ func TestAssemble(t *testing.T) {
 
 func TestProvisionScriptNonEmpty(t *testing.T) {
 	assert.Contains(t, ProvisionScript(), "DEPLOY_USER=")
+}
+
+func TestProvisionOnly(t *testing.T) {
+	out := ProvisionOnly(Vars{
+		DeployPublicKey: "ssh-ed25519 AAAA",
+		DeployUser:      "deploy",
+	})
+	// Must be a standalone script cloud-init executes (no project template
+	// supplies the shebang here).
+	assert.True(t, strings.HasPrefix(out, "#!/bin/bash\n"), "must start with a shebang")
+	assert.Contains(t, out, "inforge user provisioning", "the provision step must be present")
+	assert.Contains(t, out, "DEPLOY_USER='deploy'")
+	assert.Contains(t, out, "ssh-ed25519 AAAA", "the deploy public key must be substituted in")
+	assert.NotContains(t, out, "{{", "all placeholders should be substituted")
 }

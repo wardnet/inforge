@@ -171,22 +171,42 @@ func (h *HetznerCompute) Create(
 		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container, h.eph)),
 	}
 
-	if spec.CloudInit != "" {
-		var deployUserName string
-		if spec.DeployUser != nil {
-			deployUserName = spec.DeployUser.Name
-		}
-		userData, ciErr := cloudinit.Assemble(spec.CloudInit, cloudinit.Vars{
-			Domain:          domain,
-			DeployPublicKey: h.deployPublicKey,
-			DeployUser:      deployUserName,
-			Instance:        instance,
-			Manifest:        manifest,
-		})
+	var deployUserName string
+	if spec.DeployUser != nil {
+		deployUserName = spec.DeployUser.Name
+	}
+	// A declared deploy_user needs the deploy public key to land in its
+	// authorized_keys (provision.sh no-ops without it). Emitting user-data anyway
+	// would replace the server (user_data is ForceNew) yet leave the deploy account
+	// uncreated, so every deploy_user SSH command would still fail with
+	// "[none publickey]". Fail loudly at up time instead. Skipped in preview, where
+	// the key may be absent and no resource is actually created.
+	if deployUserName != "" && h.deployPublicKey == "" && !ctx.DryRun() {
+		return types.ComputeOutputs{}, fmt.Errorf("compute %q declares deploy_user %q but ssh.deployPublicKey is empty — set it (variables.yaml ssh.deployPublicKey / DEPLOY_PUBLIC_KEY) so the deploy account can be provisioned", spec.Name, deployUserName)
+	}
+	ciVars := cloudinit.Vars{
+		Domain:          domain,
+		DeployPublicKey: h.deployPublicKey,
+		DeployUser:      deployUserName,
+		Instance:        instance,
+		Manifest:        manifest,
+	}
+	switch {
+	case spec.CloudInit != "":
+		// A project cloud_init template: assemble it (and append the provision
+		// step, which creates the deploy_user when one is declared).
+		userData, ciErr := cloudinit.Assemble(spec.CloudInit, ciVars)
 		if ciErr != nil {
 			return types.ComputeOutputs{}, fmt.Errorf("assemble cloud-init for %s: %w", serverName, ciErr)
 		}
 		args.UserData = pulumi.StringPtr(userData)
+	case deployUserName != "":
+		// No project cloud_init, but a deploy_user is declared: inforge must still
+		// provision it (create the user + install the deploy public key) so it can
+		// SSH in to realize host-level resources. Hetzner injects the SSH keys into
+		// root only, so without this the deploy_user never exists and every
+		// deploy_user SSH command fails with "[none publickey]".
+		args.UserData = pulumi.StringPtr(cloudinit.ProvisionOnly(ciVars))
 	}
 
 	server, err := hcloud.NewServer(ctx, serverName, args, h.providerOpts()...)

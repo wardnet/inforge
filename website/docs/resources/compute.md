@@ -81,9 +81,15 @@ Override by placing `sizes.yaml` in `resources/<env>/`. The file is a YAML list 
 
 ## Deploy user
 
-When `deploy_user` is set, inforge provisions the named account at VM-init time by appending a
-first-boot step to the cloud-init script. The step creates a login-shell user, installs the
-authorized key from `ssh.deployPublicKey` in `variables.yaml`, and grants passwordless sudo.
+When `deploy_user` is set, inforge provisions the named account at VM-init time with a first-boot
+step. The step creates a login-shell user, installs the authorized key from `ssh.deployPublicKey`
+in `variables.yaml`, and grants passwordless sudo. This happens **whether or not** the compute spec
+declares a `cloud_init` template — with a template, the step is appended to it; without one, inforge
+emits a minimal cloud-init that runs only this step.
+
+Two conditions must hold for the deploy account to come up: `ssh.deployPublicKey` must be set (the
+deploy fails fast if a `deploy_user` host has none), and any `cloud_init` template must be a **shell
+script** (the provision step is appended as shell — a `#cloud-config` template would silently skip it).
 
 ```yaml
 deploy_user:
@@ -110,9 +116,11 @@ Cloud-init scripts support these placeholders:
 | `{{instance}}` | Instance number (integer) |
 | `{{manifest}}` | Assembled service manifest (YAML, secret-free) |
 
-inforge appends one first-boot step automatically to every cloud-init script: user provisioning
-(creates the deploy user when declared). Secrets are not a first-boot concern — each service fetches its
-own at runtime via `inforge-bootstrap`.
+inforge adds one first-boot step automatically: user provisioning (creates the deploy user when
+declared). With a `cloud_init` template it is appended to your script; without one inforge still emits
+a minimal cloud-init carrying just this step, so a `deploy_user` host is provisioned even with no
+template. Secrets are not a first-boot concern — each service fetches its own at runtime via
+`inforge-bootstrap`.
 
 ## Firewall rules
 
