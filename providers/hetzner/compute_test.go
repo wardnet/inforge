@@ -1,6 +1,7 @@
 package hetzner
 
 import (
+	"strings"
 	"sync"
 	"testing"
 
@@ -217,10 +218,7 @@ func TestComputeCreateWithCustomFirewall(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
 
-		net := types.NetworkOutputs{
-			NetworkID: pulumi.String("99").ToStringOutput(),
-			SubnetID:  pulumi.String("12345").ToStringOutput(),
-		}
+		net := computeNet()
 		spec := types.ComputeSpec{
 			Name:          "bridge",
 			Kind:          "vm",
@@ -352,10 +350,7 @@ func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
 
-		net := types.NetworkOutputs{
-			NetworkID: pulumi.String("99").ToStringOutput(),
-			SubnetID:  pulumi.String("12345").ToStringOutput(),
-		}
+		net := computeNet()
 		spec := types.ComputeSpec{
 			Name:          "bridge",
 			Kind:          "vm",
@@ -383,11 +378,14 @@ func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 // ---- realization-driven server type + image tests ---------------------------
 
 // capturingMocks records the serverType and image passed to each created server
-// so the realization can be asserted end-to-end through Create.
+// (so the realization can be asserted end-to-end through Create) plus each
+// server's raw inputs by name (so a test can assert other arguments, e.g.
+// userData).
 type capturingMocks struct {
 	mu          sync.Mutex
 	serverTypes []string
 	images      []string
+	inputs      map[string]resource.PropertyMap
 }
 
 func (m *capturingMocks) Call(pulumi.MockCallArgs) (resource.PropertyMap, error) {
@@ -409,11 +407,28 @@ func (m *capturingMocks) NewResource(args pulumi.MockResourceArgs) (string, reso
 		if img := args.Inputs["image"]; img.IsString() {
 			m.images = append(m.images, img.StringValue())
 		}
+		if m.inputs == nil {
+			m.inputs = map[string]resource.PropertyMap{}
+		}
+		m.inputs[args.Name] = args.Inputs
 		m.mu.Unlock()
 	case "hcloud:index/sshKey:SshKey":
 		props["publicKey"] = resource.NewStringProperty("ssh-ed25519 AAAA test")
 	}
 	return args.Name + "-id", props, nil
+}
+
+// serverInputs returns the captured inputs of the single server resource whose
+// name contains substr, or nil if none matched.
+func (m *capturingMocks) serverInputs(substr string) resource.PropertyMap {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name, in := range m.inputs {
+		if strings.Contains(name, substr) {
+			return in
+		}
+	}
+	return nil
 }
 
 // TestComputeCreateUsesRealization proves a SMALL spec provisions the server
@@ -422,10 +437,7 @@ func TestComputeCreateUsesRealization(t *testing.T) {
 	mocks := &capturingMocks{}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
-		net := types.NetworkOutputs{
-			NetworkID: pulumi.String("99").ToStringOutput(),
-			SubnetID:  pulumi.String("12345").ToStringOutput(),
-		}
+		net := computeNet()
 		spec := types.ComputeSpec{
 			Name: "bridge", Container: "vpc", Provider: "hetzner",
 			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 1,
@@ -441,10 +453,7 @@ func TestComputeCreateUsesRealization(t *testing.T) {
 func TestComputeCreateUnknownRegionReturnsError(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
-		net := types.NetworkOutputs{
-			NetworkID: pulumi.String("99").ToStringOutput(),
-			SubnetID:  pulumi.String("12345").ToStringOutput(),
-		}
+		net := computeNet()
 		spec := types.ComputeSpec{
 			Name: "bridge", Container: "vpc", Provider: "hetzner",
 			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 1,
@@ -464,10 +473,7 @@ func TestComputeCreateUnknownRegionReturnsError(t *testing.T) {
 func TestComputeCreateUnknownSizeReturnsError(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
-		net := types.NetworkOutputs{
-			NetworkID: pulumi.String("99").ToStringOutput(),
-			SubnetID:  pulumi.String("12345").ToStringOutput(),
-		}
+		net := computeNet()
 		spec := types.ComputeSpec{
 			Name: "bridge", Container: "vpc", Provider: "hetzner",
 			Network: "vpc", Size: "XLARGE", Image: "ubuntu-24.04", InstanceCount: 1,
@@ -487,10 +493,7 @@ func TestComputeCreateUnknownSizeReturnsError(t *testing.T) {
 func TestComputeCreateUnknownImageReturnsError(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
-		net := types.NetworkOutputs{
-			NetworkID: pulumi.String("99").ToStringOutput(),
-			SubnetID:  pulumi.String("12345").ToStringOutput(),
-		}
+		net := computeNet()
 		spec := types.ComputeSpec{
 			Name: "bridge", Container: "vpc", Provider: "hetzner",
 			Network: "vpc", Size: "SMALL", Image: "ubuntu-26.04", InstanceCount: 1,
@@ -505,4 +508,106 @@ func TestComputeCreateUnknownImageReturnsError(t *testing.T) {
 	}, pulumi.WithMocks("inforge", "test", &computeMocks{}))
 
 	require.NoError(t, err)
+}
+
+// ---- deploy-user provisioning without a project cloud_init -------------------
+
+// computeNet is the shared network output for the Create tests below.
+func computeNet() types.NetworkOutputs {
+	return types.NetworkOutputs{
+		NetworkID: pulumi.String("99").ToStringOutput(),
+		SubnetID:  pulumi.String("12345").ToStringOutput(),
+	}
+}
+
+// TestComputeCreateProvisionsDeployUserWithoutCloudInit guards the regression
+// where a compute spec declaring a deploy_user but no cloud_init produced a
+// server with no user-data: the deploy user was never created, so every
+// deploy_user SSH command failed with "[none publickey]". The server must carry
+// cloud-init user-data that creates the deploy user with the deploy public key.
+func TestComputeCreateProvisionsDeployUserWithoutCloudInit(t *testing.T) {
+	mocks := &capturingMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
+		spec := types.ComputeSpec{
+			Name:          "edge",
+			Kind:          "vm",
+			Container:     "edge",
+			Provider:      "hetzner",
+			Network:       "edge",
+			Size:          "SMALL",
+			Image:         "ubuntu-24.04",
+			InstanceCount: 1,
+			// No CloudInit template, but a deploy_user is declared.
+			DeployUser: &types.DeployUserSpec{Name: "deploy"},
+		}
+		_, err := h.Create(ctx, spec, computeNet(), "prod", "us-east-1", "edge.use1.example.com", "", types.FirewallPorts{})
+		return err
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+
+	in := mocks.serverInputs("vm-edge")
+	require.NotNil(t, in, "server resource was not created")
+	ud := in["userData"]
+	require.True(t, ud.HasValue(), "server has no userData; the deploy user would never be created")
+	udStr := ud.StringValue()
+	assert.Contains(t, udStr, "#!/bin/bash", "user-data must be a script cloud-init executes")
+	assert.Contains(t, udStr, "inforge user provisioning")
+	assert.Contains(t, udStr, "DEPLOY_USER='deploy'")
+	assert.Contains(t, udStr, "ssh-ed25519 deploy", "the deploy public key must be installed for the deploy user")
+}
+
+// TestComputeCreateNoUserDataWithoutDeployUserOrCloudInit confirms a spec with
+// neither a cloud_init template nor a deploy_user leaves user-data unset, so no
+// pointless server replacement is triggered for a host that needs no first-boot
+// provisioning.
+func TestComputeCreateNoUserDataWithoutDeployUserOrCloudInit(t *testing.T) {
+	mocks := &capturingMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
+		spec := types.ComputeSpec{
+			Name:          "plain",
+			Kind:          "vm",
+			Container:     "plain",
+			Provider:      "hetzner",
+			Network:       "plain",
+			Size:          "SMALL",
+			Image:         "ubuntu-24.04",
+			InstanceCount: 1,
+		}
+		_, err := h.Create(ctx, spec, computeNet(), "prod", "us-east-1", "plain.use1.example.com", "", types.FirewallPorts{})
+		return err
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+
+	in := mocks.serverInputs("vm-plain")
+	require.NotNil(t, in, "server resource was not created")
+	assert.False(t, in["userData"].HasValue(), "userData should be unset with no deploy_user and no cloud_init")
+}
+
+// TestComputeCreateDeployUserRequiresDeployPublicKey: a spec declaring a
+// deploy_user with no deploy public key configured must fail Create loudly,
+// rather than replace the server (user_data is ForceNew) while leaving the
+// deploy account uncreated — which would still fail every deploy_user SSH command
+// with "[none publickey]".
+func TestComputeCreateDeployUserRequiresDeployPublicKey(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		// Empty deployPublicKey.
+		h := NewCompute("ssh-ed25519 user", "", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
+		spec := types.ComputeSpec{
+			Name:          "edge",
+			Kind:          "vm",
+			Container:     "edge",
+			Provider:      "hetzner",
+			Network:       "edge",
+			Size:          "SMALL",
+			Image:         "ubuntu-24.04",
+			InstanceCount: 1,
+			DeployUser:    &types.DeployUserSpec{Name: "deploy"},
+		}
+		_, err := h.Create(ctx, spec, computeNet(), "prod", "us-east-1", "edge.use1.example.com", "", types.FirewallPorts{})
+		return err
+	}, pulumi.WithMocks("inforge", "test", &capturingMocks{}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ssh.deployPublicKey is empty")
 }

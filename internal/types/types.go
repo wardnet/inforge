@@ -443,6 +443,16 @@ type NetworkProvider interface {
 // firewall stays a pure consumer. Secret delivery is no longer a compute-creation
 // concern: secrets are fetched at runtime by inforge-bootstrap, so there is no
 // bootstrap document.
+//
+// Contract: when spec.DeployUser is set, an implementation MUST provision that
+// account at first boot — create the login user and install ssh.deployPublicKey
+// into its authorized_keys — so the host is SSH-reachable on that account. The
+// program-level realization passes (service provisioning, observability collector
+// install, app placeholder seeding, ingress install) all connect as the
+// deploy_user and depend on this; a provider that omits it produces a host that
+// passes preview/validate yet fails every host-level command with
+// "[none publickey]". This obligation holds independently of whether the spec
+// declares a cloud_init template.
 type ComputeProvider interface {
 	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest string, fw FirewallPorts) (ComputeOutputs, error)
 }
