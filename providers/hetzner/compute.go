@@ -174,9 +174,7 @@ func (h *HetznerCompute) Create(
 			sshKeyList[1].Name,
 		},
 		FirewallIds: pulumi.IntArray{
-			fw.ID().ApplyT(func(id pulumi.ID) (int, error) {
-				return strconv.Atoi(string(id))
-			}).(pulumi.IntOutput),
+			idToInt(fw.ID()),
 		},
 		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container, h.eph)),
 	}
@@ -270,12 +268,8 @@ func (h *HetznerCompute) AttachNetwork(ctx *pulumi.Context, spec types.ComputeSp
 		return pulumi.StringOutput{}, fmt.Errorf("attach network: server %q was not created by Create", key)
 	}
 
-	serverID := sh.server.ID().ApplyT(func(id pulumi.ID) (int, error) {
-		return strconv.Atoi(string(id))
-	}).(pulumi.IntOutput)
-
 	attach, err := hcloud.NewServerNetwork(ctx, sh.name+"-network", &hcloud.ServerNetworkArgs{
-		ServerId: serverID,
+		ServerId: idToInt(sh.server.ID()),
 		SubnetId: sh.subnetID.ToStringPtrOutput(),
 	}, append(h.providerOpts(), pulumi.DependsOn(dependsOn))...)
 	if err != nil {
@@ -530,4 +524,14 @@ func (h *HetznerCompute) providerOpts() []pulumi.ResourceOption {
 		return nil
 	}
 	return []pulumi.ResourceOption{pulumi.Provider(h.provider)}
+}
+
+// idToInt converts a Pulumi resource ID output to the IntOutput the hcloud SDK
+// wants for numeric ID inputs (ServerId/NetworkId/FirewallId). Hetzner resource
+// IDs are numeric strings; the conversion runs inside the apply and is skipped for
+// unknown IDs in preview.
+func idToInt(id pulumi.IDOutput) pulumi.IntOutput {
+	return id.ApplyT(func(id pulumi.ID) (int, error) {
+		return strconv.Atoi(string(id))
+	}).(pulumi.IntOutput)
 }
