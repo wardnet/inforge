@@ -328,9 +328,12 @@ type NetworkOutputs struct {
 }
 
 // ComputeOutputs are the values a ComputeProvider returns after creating a host.
-// PrivateIP is the host's address on its attached private network — empty in
-// preview, and used by the ingress tier to proxy_pass to a backend that lives on
-// a different host within the same Hetzner Network (cross-host routing).
+// PrivateIP is the host's address on its attached private network — empty from
+// Create and in preview; it is filled in by the program's post-gate attach pass from
+// ComputeProvider.AttachNetwork (the private network is attached after the cloud-init
+// gate, not inline — see ComputeProvider). It is used by the ingress tier to
+// proxy_pass to a backend that lives on a different host within the same Hetzner
+// Network (cross-host routing) — the sole consumer.
 // The four metadata fields below are provider-supplied OTel resource-identity facts,
 // known at plan time (plain strings, not Pulumi outputs). They are the host/cloud
 // ground truth a running process cannot determine for itself; renderDescriptor reads
@@ -453,8 +456,27 @@ type NetworkProvider interface {
 // passes preview/validate yet fails every host-level command with
 // "[none publickey]". This obligation holds independently of whether the spec
 // declares a cloud_init template.
+//
+// The private network is attached in TWO steps, not one: Create provisions the
+// server WITHOUT its private network, and AttachNetwork attaches it afterward. This
+// is mandatory on Hetzner + cloud-init >= 25.3 (Ubuntu 24.04.4 / 26.04), where the
+// datasource configures the private NIC itself: a NIC present at first boot races
+// init-local — the hot-added device is not yet enumerated when the network-config is
+// processed, yielding a null-named interface that fails network-config-v1 schema
+// validation and crashes cloud-init in sys_dev_path(None). That leaves a sticky
+// `cloud-init status: error`, which fails the root cloud-init readiness gate (and so
+// the whole deploy) before any host-level command runs. Deferring the attach until
+// after the gate (first boot complete) lets the image's hotplug path configure the
+// NIC cleanly; every later reboot is fine because the NIC is then a persistent device
+// enumerated before init-local. See
+// .agents/rules/attach-private-network-after-cloud-init-gate.md.
 type ComputeProvider interface {
 	Create(ctx *pulumi.Context, spec ComputeSpec, network NetworkOutputs, env, abstractRegion, domain, manifest string, fw FirewallPorts) (ComputeOutputs, error)
+	// AttachNetwork attaches the private network of the server Create built for
+	// spec's instance (1-based, matching Create's instance_count expansion), gated on
+	// dependsOn (the host's cloud-init readiness gate), and returns the assigned
+	// private IP. It MUST NOT attach the network inline in Create (see the type comment).
+	AttachNetwork(ctx *pulumi.Context, spec ComputeSpec, instance int, dependsOn []pulumi.Resource) (pulumi.StringOutput, error)
 }
 
 // DnsProvider creates a derived DNS record pointing at a compute instance, on a

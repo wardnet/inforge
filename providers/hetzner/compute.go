@@ -62,6 +62,12 @@ type HetznerCompute struct {
 	eph               tags.Ephemeral
 	mu                sync.Mutex
 	firewalls         map[string]*hcloud.Firewall
+	// servers holds each created server keyed by its instance specKey
+	// (naming.SpecKey(spec.Name, instance)) so AttachNetwork can attach its private
+	// network AFTER the host's cloud-init readiness gate. The private network is
+	// deliberately NOT attached inline in Create — see AttachNetwork and
+	// .agents/rules/attach-private-network-after-cloud-init-gate.md.
+	servers map[string]*serverHandle
 	// sshKeys is shared across every scope's HetznerCompute so env-scoped SSH
 	// keys register once across the whole program run (see SSHKeyCache).
 	sshKeys *SSHKeyCache
@@ -69,6 +75,14 @@ type HetznerCompute struct {
 	// spec name so that Create assigns each call its unique specKey suffix.
 	instanceCounters map[string]int
 	regions          map[string]RegionConfig
+}
+
+// serverHandle records a created server and the subnet its private network will be
+// attached to, so AttachNetwork can wire the attach after the cloud-init gate.
+type serverHandle struct {
+	server   *hcloud.Server
+	name     string
+	subnetID pulumi.StringOutput
 }
 
 // NewCompute creates a HetznerCompute provider. project is the inforge project
@@ -95,6 +109,7 @@ func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *h
 		slug:              slug,
 		eph:               eph,
 		firewalls:         map[string]*hcloud.Firewall{},
+		servers:           map[string]*serverHandle{},
 		sshKeys:           sshKeys,
 		instanceCounters:  map[string]int{},
 		regions:           regionOverrides,
@@ -163,11 +178,6 @@ func (h *HetznerCompute) Create(
 				return strconv.Atoi(string(id))
 			}).(pulumi.IntOutput),
 		},
-		Networks: hcloud.ServerNetworkTypeArray{
-			hcloud.ServerNetworkTypeArgs{
-				SubnetId: network.SubnetID.ToStringPtrOutput(),
-			},
-		},
 		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container, h.eph)),
 	}
 
@@ -214,14 +224,21 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, fmt.Errorf("create server %s: %w", serverName, err)
 	}
 
-	// The private IP is read back from the server's network attachment (we pin a
-	// single SubnetId, so index 0 is that attachment). Hetzner assigns it when we
-	// omit an explicit Ip; .Elem() unwraps the *string output to "" in preview.
-	privateIP := server.Networks.Index(pulumi.Int(0)).Ip().Elem()
+	// Record the server so AttachNetwork can wire its private network AFTER the
+	// cloud-init readiness gate. The network is deliberately not attached inline
+	// (see AttachNetwork and the deferred-attach rule), so PrivateIP is empty here —
+	// the program's post-gate attach pass fills it in, and it is the sole consumer.
+	h.mu.Lock()
+	h.servers[naming.SpecKey(spec.Name, instance)] = &serverHandle{
+		server:   server,
+		name:     serverName,
+		subnetID: network.SubnetID,
+	}
+	h.mu.Unlock()
 
 	return types.ComputeOutputs{
 		PublicIP:  server.Ipv4Address,
-		PrivateIP: privateIP,
+		PrivateIP: pulumi.String("").ToStringOutput(),
 		// Provider-supplied OTel resource identity (ADR-0030): all plan-time constants
 		// resolved above, so they need no Pulumi apply. network_zone ⊃ location maps
 		// onto cloud.region ⊃ cloud.availability_zone.
@@ -230,6 +247,41 @@ func (h *HetznerCompute) Create(
 		AvailabilityZone: regionCfg.Location,
 		MachineType:      serverType,
 	}, nil
+}
+
+// AttachNetwork attaches the private network of the server Create built for spec's
+// instance, gated on dependsOn (the host's cloud-init readiness gate), and returns
+// the Hetzner-assigned private IP. It MUST run after the gate: a private NIC present
+// at first boot races cloud-init >= 25.3's Hetzner init-local network path and
+// crashes it (null-named interface → network-config-v1 schema failure +
+// sys_dev_path(None) TypeError → sticky `cloud-init status: error`). Deferring the
+// attach past first boot lets the image's hotplug path configure the NIC cleanly.
+// See the ComputeProvider contract and
+// .agents/rules/attach-private-network-after-cloud-init-gate.md.
+func (h *HetznerCompute) AttachNetwork(ctx *pulumi.Context, spec types.ComputeSpec, instance int, dependsOn []pulumi.Resource) (pulumi.StringOutput, error) {
+	if spec.Provider != "hetzner" {
+		return pulumi.StringOutput{}, fmt.Errorf("hetzner provider received spec with provider=%q", spec.Provider)
+	}
+	key := naming.SpecKey(spec.Name, instance)
+	h.mu.Lock()
+	sh, ok := h.servers[key]
+	h.mu.Unlock()
+	if !ok {
+		return pulumi.StringOutput{}, fmt.Errorf("attach network: server %q was not created by Create", key)
+	}
+
+	serverID := sh.server.ID().ApplyT(func(id pulumi.ID) (int, error) {
+		return strconv.Atoi(string(id))
+	}).(pulumi.IntOutput)
+
+	attach, err := hcloud.NewServerNetwork(ctx, sh.name+"-network", &hcloud.ServerNetworkArgs{
+		ServerId: serverID,
+		SubnetId: sh.subnetID.ToStringPtrOutput(),
+	}, append(h.providerOpts(), pulumi.DependsOn(dependsOn))...)
+	if err != nil {
+		return pulumi.StringOutput{}, fmt.Errorf("attach network for %s: %w", sh.name, err)
+	}
+	return attach.Ip, nil
 }
 
 // ensureFirewall returns the hcloud.Firewall for the spec name, creating it if it
