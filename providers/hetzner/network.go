@@ -2,7 +2,6 @@ package hetzner
 
 import (
 	"fmt"
-	"strconv"
 	"sync"
 
 	hcloud "github.com/pulumi/pulumi-hcloud/sdk/go/hcloud"
@@ -69,9 +68,7 @@ func (h *HetznerNetwork) Create(ctx *pulumi.Context, spec types.NetworkSpec, env
 	}
 
 	// Convert the string Pulumi resource ID to int for NetworkSubnetArgs.
-	networkIntID := net.ID().ApplyT(func(id pulumi.ID) (int, error) {
-		return strconv.Atoi(string(id))
-	}).(pulumi.IntOutput)
+	networkIntID := idToInt(net.ID())
 
 	result := make(map[string]types.NetworkOutputs, len(spec.Subnets))
 	for _, sub := range spec.Subnets {

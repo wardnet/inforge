@@ -35,9 +35,15 @@ func (m *computeMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, err
 }
 
 func (m *computeMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
-	// Firewalls need a numeric string ID for the int conversion in Create.
+	// Firewalls and placement groups need a numeric string ID for the int
+	// conversions in Create (FirewallIds, PlacementGroupId).
 	if args.TypeToken == "hcloud:index/firewall:Firewall" {
 		return "42", resource.PropertyMap{
+			"name": resource.NewStringProperty(args.Name),
+		}, nil
+	}
+	if args.TypeToken == "hcloud:index/placementGroup:PlacementGroup" {
+		return "88", resource.PropertyMap{
 			"name": resource.NewStringProperty(args.Name),
 		}, nil
 	}
@@ -382,10 +388,12 @@ func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 // server's raw inputs by name (so a test can assert other arguments, e.g.
 // userData).
 type capturingMocks struct {
-	mu          sync.Mutex
-	serverTypes []string
-	images      []string
-	inputs      map[string]resource.PropertyMap
+	mu              sync.Mutex
+	serverTypes     []string
+	images          []string
+	inputs          map[string]resource.PropertyMap
+	serverNetworks  []resource.PropertyMap
+	placementGroups []resource.PropertyMap
 }
 
 func (m *capturingMocks) Call(pulumi.MockCallArgs) (resource.PropertyMap, error) {
@@ -396,9 +404,12 @@ func (m *capturingMocks) NewResource(args pulumi.MockResourceArgs) (string, reso
 	if args.TypeToken == "hcloud:index/firewall:Firewall" {
 		return "42", resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}, nil
 	}
+	id := args.Name + "-id"
 	props := resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}
 	switch args.TypeToken {
 	case "hcloud:index/server:Server":
+		// A numeric ID so AttachNetwork's server-ID -> int conversion succeeds.
+		id = "77"
 		props["ipv4Address"] = resource.NewStringProperty("1.2.3.4")
 		m.mu.Lock()
 		if st := args.Inputs["serverType"]; st.IsString() {
@@ -412,10 +423,21 @@ func (m *capturingMocks) NewResource(args pulumi.MockResourceArgs) (string, reso
 		}
 		m.inputs[args.Name] = args.Inputs
 		m.mu.Unlock()
+	case "hcloud:index/serverNetwork:ServerNetwork":
+		props["ip"] = resource.NewStringProperty("10.0.0.5")
+		m.mu.Lock()
+		m.serverNetworks = append(m.serverNetworks, args.Inputs)
+		m.mu.Unlock()
+	case "hcloud:index/placementGroup:PlacementGroup":
+		// A numeric ID so the server's placementGroupId conversion succeeds.
+		id = "88"
+		m.mu.Lock()
+		m.placementGroups = append(m.placementGroups, args.Inputs)
+		m.mu.Unlock()
 	case "hcloud:index/sshKey:SshKey":
 		props["publicKey"] = resource.NewStringProperty("ssh-ed25519 AAAA test")
 	}
-	return args.Name + "-id", props, nil
+	return id, props, nil
 }
 
 // serverInputs returns the captured inputs of the single server resource whose
@@ -610,4 +632,117 @@ func TestComputeCreateDeployUserRequiresDeployPublicKey(t *testing.T) {
 	}, pulumi.WithMocks("inforge", "test", &capturingMocks{}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ssh.deployPublicKey is empty")
+}
+
+// TestComputeCreateDoesNotAttachNetworkInline guards the deferred-attach invariant:
+// Create must NOT attach the private network at server-create time. A private NIC
+// present at first boot races cloud-init >= 25.3's Hetzner init-local network path
+// (the hot-added NIC is not yet enumerated when the network-config is processed →
+// a null-named interface → network-config-v1 schema failure + sys_dev_path(None)
+// TypeError → sticky `cloud-init status: error` that fails the readiness gate). The
+// attach is deferred to AttachNetwork, after the gate. See
+// .agents/rules/attach-private-network-after-cloud-init-gate.md.
+func TestComputeCreateDoesNotAttachNetworkInline(t *testing.T) {
+	mocks := &capturingMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
+		spec := types.ComputeSpec{
+			Name: "bridge", Container: "vpc", Provider: "hetzner",
+			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 1,
+		}
+		_, err := h.Create(ctx, spec, computeNet(), "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{})
+		return err
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+
+	in := mocks.serverInputs("vm-bridge")
+	require.NotNil(t, in, "server resource must have been created")
+	_, hasNetworks := in["networks"]
+	assert.False(t, hasNetworks, "Create must not attach the private network inline; it is deferred to AttachNetwork after the cloud-init gate")
+}
+
+// TestComputeAttachNetworkCreatesServerNetwork proves AttachNetwork attaches the
+// server Create built to the spec's resolved subnet as a standalone ServerNetwork
+// resource (the deferred, post-gate attach), targeting the right subnet.
+func TestComputeAttachNetworkCreatesServerNetwork(t *testing.T) {
+	mocks := &capturingMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
+		spec := types.ComputeSpec{
+			Name: "bridge", Container: "vpc", Provider: "hetzner",
+			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 1,
+		}
+		if _, err := h.Create(ctx, spec, computeNet(), "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{}); err != nil {
+			return err
+		}
+		_, err := h.AttachNetwork(ctx, spec, 1, nil)
+		return err
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+
+	require.Len(t, mocks.serverNetworks, 1, "AttachNetwork must create exactly one ServerNetwork")
+	in := mocks.serverNetworks[0]
+	require.True(t, in["subnetId"].IsString(), "attach must set subnetId")
+	assert.Equal(t, "12345", in["subnetId"].StringValue(), "attach must target the spec's resolved subnet")
+}
+
+// TestComputeAttachNetworkUnknownServerErrors proves AttachNetwork fails clearly
+// when asked to attach a server Create never built (a program-ordering bug).
+func TestComputeAttachNetworkUnknownServerErrors(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
+		spec := types.ComputeSpec{Name: "bridge", Provider: "hetzner", InstanceCount: 1}
+		_, err := h.AttachNetwork(ctx, spec, 1, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "was not created")
+		return nil
+	}, pulumi.WithMocks("inforge", "test", &capturingMocks{}))
+	require.NoError(t, err)
+}
+
+// TestComputeCreateAssignsSpreadPlacementGroup proves every server joins a Hetzner
+// spread placement group (always-on reliability), and the group is created with
+// type "spread". See .agents/rules/servers-join-spread-placement-group.md.
+func TestComputeCreateAssignsSpreadPlacementGroup(t *testing.T) {
+	mocks := &capturingMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
+		spec := types.ComputeSpec{
+			Name: "bridge", Container: "vpc", Provider: "hetzner",
+			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 1,
+		}
+		_, err := h.Create(ctx, spec, computeNet(), "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{})
+		return err
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+
+	require.Len(t, mocks.placementGroups, 1, "exactly one spread placement group must be created")
+	assert.Equal(t, "spread", mocks.placementGroups[0]["type"].StringValue(), "placement group must be type spread")
+
+	in := mocks.serverInputs("vm-bridge")
+	require.NotNil(t, in, "server resource must have been created")
+	assert.True(t, in["placementGroupId"].IsNumber(), "server must be assigned to a placement group")
+}
+
+// TestComputeCreateBinPacksPlacementGroupsAtTen proves the 10-server-per-spread-group
+// cap is respected: the 11th server in a scope lands in a second group.
+func TestComputeCreateBinPacksPlacementGroupsAtTen(t *testing.T) {
+	mocks := &capturingMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
+		spec := types.ComputeSpec{
+			Name: "node", Container: "vpc", Provider: "hetzner",
+			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 11,
+		}
+		// Create builds one server per call (the program loop calls it instance_count
+		// times); 11 servers must bin-pack into 2 groups (10 + 1).
+		for i := 0; i < 11; i++ {
+			if _, err := h.Create(ctx, spec, computeNet(), "prod", "us-east-1", "node.use1.example.com", "", types.FirewallPorts{}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+	assert.Len(t, mocks.placementGroups, 2, "11 servers must bin-pack into 2 spread groups (10-server cap)")
 }

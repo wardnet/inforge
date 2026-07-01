@@ -258,6 +258,16 @@ func Run(ctx *pulumi.Context) error {
 		// ingress realization and service provisioning SSH the same hosts, so the gate
 		// they each depend on must be the same resource — share the map (per scope).
 		gates := map[string]pulumi.Resource{}
+		// Attach each host's private network AFTER its cloud-init readiness gate, then
+		// record the resulting private IP on the host's compute outputs. The private
+		// NIC is deliberately not attached at server-create (see
+		// .agents/rules/attach-private-network-after-cloud-init-gate.md): deferring past
+		// first boot avoids the cloud-init >= 25.3 Hetzner init-local race. This runs
+		// before realizeIngress — the sole PrivateIP consumer — and memoizes each
+		// host's gate for the later provisioning passes to reuse.
+		if err := attachPrivateNetworks(ctx, sc.reg, sc.res, computeOutputs[sc.key], gates, providerDefaults, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
+			return err
+		}
 		// Seed each app's placeholder bundle on its ingress host first, so its server
 		// block and ACME cert provision before the first release (slice D delivers
 		// bundles). realizeIngress's nginx reload DependsOn these seeds (appSeeds) so a
@@ -396,6 +406,44 @@ func cloudInitGate(ctx *pulumi.Context, gates map[string]pulumi.Resource, hostKe
 	}
 	gates[hostKey] = gate
 	return gate, nil
+}
+
+// attachPrivateNetworks attaches every host's private network AFTER its cloud-init
+// readiness gate, then records the assigned private IP on the host's compute outputs.
+// The private NIC is not attached at server-create: on cloud-init >= 25.3 a NIC
+// present at first boot races the Hetzner init-local network path and crashes it,
+// leaving a sticky `cloud-init status: error` that fails the gate (see
+// .agents/rules/attach-private-network-after-cloud-init-gate.md). Attaching after the
+// gate (first boot done) lets the image's hotplug path configure the NIC cleanly.
+//
+// It runs once per scope, before any pass that consumes a backend's PrivateIP
+// (realizeIngress), and creates each host's gate through the shared, memoized `gates`
+// map so the later provisioning passes reuse the same gate resource.
+func attachPrivateNetworks(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, defaults types.ProviderDefaults, deployPrivateKey, env, slug string) error {
+	for _, spec := range res.Compute {
+		cp, err := reg.Compute(types.ResolveProvider(spec.Provider, "compute", "", defaults))
+		if err != nil {
+			return err
+		}
+		for i := 1; i <= spec.InstanceCount; i++ {
+			key := naming.SpecKey(spec.Name, i)
+			host, ok := computeOut[key]
+			if !ok {
+				return fmt.Errorf("attach network: no compute output for host %q", key)
+			}
+			gate, err := cloudInitGate(ctx, gates, key, host, deployPrivateKey, env, slug)
+			if err != nil {
+				return err
+			}
+			privateIP, err := cp.AttachNetwork(ctx, spec, i, []pulumi.Resource{gate})
+			if err != nil {
+				return err
+			}
+			host.PrivateIP = privateIP
+			computeOut[key] = host
+		}
+	}
+	return nil
 }
 
 // provisionServices writes the host-side scaffolding for each service in a

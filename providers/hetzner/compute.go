@@ -62,13 +62,39 @@ type HetznerCompute struct {
 	eph               tags.Ephemeral
 	mu                sync.Mutex
 	firewalls         map[string]*hcloud.Firewall
+	// servers holds each created server keyed by its instance specKey
+	// (naming.SpecKey(spec.Name, instance)) so AttachNetwork can attach its private
+	// network AFTER the host's cloud-init readiness gate. The private network is
+	// deliberately NOT attached inline in Create — see AttachNetwork and
+	// .agents/rules/attach-private-network-after-cloud-init-gate.md.
+	servers map[string]*serverHandle
 	// sshKeys is shared across every scope's HetznerCompute so env-scoped SSH
 	// keys register once across the whole program run (see SSHKeyCache).
 	sshKeys *SSHKeyCache
 	// instanceCounters tracks how many servers have been created for each
 	// spec name so that Create assigns each call its unique specKey suffix.
 	instanceCounters map[string]int
-	regions          map[string]RegionConfig
+	// placementGroups holds the scope's Hetzner spread placement groups, keyed by
+	// group index. Every server joins one (always-on reliability); servers bin-pack
+	// into groups of maxServersPerSpreadGroup so none exceeds Hetzner's 10-server
+	// cap. See .agents/rules/servers-join-spread-placement-group.md.
+	placementGroups map[int]*hcloud.PlacementGroup
+	// serverOrdinal counts servers created in this scope so far; it drives the
+	// deterministic placement-group bin-packing (the Nth server joins group N/cap).
+	serverOrdinal int
+	regions       map[string]RegionConfig
+}
+
+// maxServersPerSpreadGroup is Hetzner's hard cap on servers in one spread placement
+// group. Servers bin-pack across as many groups as needed to respect it.
+const maxServersPerSpreadGroup = 10
+
+// serverHandle records a created server and the subnet its private network will be
+// attached to, so AttachNetwork can wire the attach after the cloud-init gate.
+type serverHandle struct {
+	server   *hcloud.Server
+	name     string
+	subnetID pulumi.StringOutput
 }
 
 // NewCompute creates a HetznerCompute provider. project is the inforge project
@@ -95,8 +121,10 @@ func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *h
 		slug:              slug,
 		eph:               eph,
 		firewalls:         map[string]*hcloud.Firewall{},
+		servers:           map[string]*serverHandle{},
 		sshKeys:           sshKeys,
 		instanceCounters:  map[string]int{},
+		placementGroups:   map[int]*hcloud.PlacementGroup{},
 		regions:           regionOverrides,
 	}
 }
@@ -141,11 +169,20 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, fmt.Errorf("ensure ssh keys: %w", err)
 	}
 
-	// Advance this spec's instance counter under the lock.
+	// Advance this spec's instance counter and the scope-wide server ordinal under
+	// the lock. The ordinal — deterministic in server-creation order — bin-packs
+	// servers into spread placement groups of at most maxServersPerSpreadGroup.
 	h.mu.Lock()
 	h.instanceCounters[spec.Name]++
 	instance := h.instanceCounters[spec.Name]
+	h.serverOrdinal++
+	groupIndex := (h.serverOrdinal - 1) / maxServersPerSpreadGroup
 	h.mu.Unlock()
+
+	pg, err := h.ensurePlacementGroup(ctx, env, groupIndex)
+	if err != nil {
+		return types.ComputeOutputs{}, fmt.Errorf("ensure placement group: %w", err)
+	}
 
 	serverName := naming.ResourceInstance(env, h.slug, "vm", spec.Name, instance)
 
@@ -159,16 +196,10 @@ func (h *HetznerCompute) Create(
 			sshKeyList[1].Name,
 		},
 		FirewallIds: pulumi.IntArray{
-			fw.ID().ApplyT(func(id pulumi.ID) (int, error) {
-				return strconv.Atoi(string(id))
-			}).(pulumi.IntOutput),
+			idToInt(fw.ID()),
 		},
-		Networks: hcloud.ServerNetworkTypeArray{
-			hcloud.ServerNetworkTypeArgs{
-				SubnetId: network.SubnetID.ToStringPtrOutput(),
-			},
-		},
-		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container, h.eph)),
+		PlacementGroupId: idToInt(pg.ID()).ToIntPtrOutput(),
+		Labels:           toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container, h.eph)),
 	}
 
 	var deployUserName string
@@ -214,14 +245,21 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, fmt.Errorf("create server %s: %w", serverName, err)
 	}
 
-	// The private IP is read back from the server's network attachment (we pin a
-	// single SubnetId, so index 0 is that attachment). Hetzner assigns it when we
-	// omit an explicit Ip; .Elem() unwraps the *string output to "" in preview.
-	privateIP := server.Networks.Index(pulumi.Int(0)).Ip().Elem()
+	// Record the server so AttachNetwork can wire its private network AFTER the
+	// cloud-init readiness gate. The network is deliberately not attached inline
+	// (see AttachNetwork and the deferred-attach rule), so PrivateIP is empty here —
+	// the program's post-gate attach pass fills it in, and it is the sole consumer.
+	h.mu.Lock()
+	h.servers[naming.SpecKey(spec.Name, instance)] = &serverHandle{
+		server:   server,
+		name:     serverName,
+		subnetID: network.SubnetID,
+	}
+	h.mu.Unlock()
 
 	return types.ComputeOutputs{
 		PublicIP:  server.Ipv4Address,
-		PrivateIP: privateIP,
+		PrivateIP: pulumi.String("").ToStringOutput(),
 		// Provider-supplied OTel resource identity (ADR-0030): all plan-time constants
 		// resolved above, so they need no Pulumi apply. network_zone ⊃ location maps
 		// onto cloud.region ⊃ cloud.availability_zone.
@@ -230,6 +268,65 @@ func (h *HetznerCompute) Create(
 		AvailabilityZone: regionCfg.Location,
 		MachineType:      serverType,
 	}, nil
+}
+
+// AttachNetwork attaches the private network of the server Create built for spec's
+// instance, gated on dependsOn (the host's cloud-init readiness gate), and returns
+// the Hetzner-assigned private IP. It MUST run after the gate: a private NIC present
+// at first boot races cloud-init >= 25.3's Hetzner init-local network path and
+// crashes it (null-named interface → network-config-v1 schema failure +
+// sys_dev_path(None) TypeError → sticky `cloud-init status: error`). Deferring the
+// attach past first boot lets the image's hotplug path configure the NIC cleanly.
+// See the ComputeProvider contract and
+// .agents/rules/attach-private-network-after-cloud-init-gate.md.
+func (h *HetznerCompute) AttachNetwork(ctx *pulumi.Context, spec types.ComputeSpec, instance int, dependsOn []pulumi.Resource) (pulumi.StringOutput, error) {
+	if spec.Provider != "hetzner" {
+		return pulumi.StringOutput{}, fmt.Errorf("hetzner provider received spec with provider=%q", spec.Provider)
+	}
+	key := naming.SpecKey(spec.Name, instance)
+	h.mu.Lock()
+	sh, ok := h.servers[key]
+	h.mu.Unlock()
+	if !ok {
+		return pulumi.StringOutput{}, fmt.Errorf("attach network: server %q was not created by Create", key)
+	}
+
+	attach, err := hcloud.NewServerNetwork(ctx, sh.name+"-network", &hcloud.ServerNetworkArgs{
+		ServerId: idToInt(sh.server.ID()),
+		SubnetId: sh.subnetID.ToStringPtrOutput(),
+	}, append(h.providerOpts(), pulumi.DependsOn(dependsOn))...)
+	if err != nil {
+		return pulumi.StringOutput{}, fmt.Errorf("attach network for %s: %w", sh.name, err)
+	}
+	return attach.Ip, nil
+}
+
+// ensurePlacementGroup returns this scope's spread placement group for the given
+// index, creating it once and memoizing it. Every server joins one (always-on
+// reliability): the program advances a scope-wide server ordinal that bin-packs
+// servers into groups of at most maxServersPerSpreadGroup, so an index maps to one
+// spread group of up to 10 servers. A spread group keeps its members on distinct
+// physical hosts, reducing correlated failure. Safe to call concurrently. See
+// .agents/rules/servers-join-spread-placement-group.md.
+func (h *HetznerCompute) ensurePlacementGroup(ctx *pulumi.Context, env string, index int) (*hcloud.PlacementGroup, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if pg, ok := h.placementGroups[index]; ok {
+		return pg, nil
+	}
+
+	name := naming.Resource(env, h.slug, "pg", fmt.Sprintf("%02d", index+1))
+	pg, err := hcloud.NewPlacementGroup(ctx, name, &hcloud.PlacementGroupArgs{
+		Name:   pulumi.String(name),
+		Type:   pulumi.String("spread"),
+		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, "", h.eph)),
+	}, h.providerOpts()...)
+	if err != nil {
+		return nil, fmt.Errorf("create placement group %s: %w", name, err)
+	}
+	h.placementGroups[index] = pg
+	return pg, nil
 }
 
 // ensureFirewall returns the hcloud.Firewall for the spec name, creating it if it
@@ -478,4 +575,14 @@ func (h *HetznerCompute) providerOpts() []pulumi.ResourceOption {
 		return nil
 	}
 	return []pulumi.ResourceOption{pulumi.Provider(h.provider)}
+}
+
+// idToInt converts a Pulumi resource ID output to the IntOutput the hcloud SDK
+// wants for numeric ID inputs (ServerId/NetworkId/FirewallId). Hetzner resource
+// IDs are numeric strings; the conversion runs inside the apply and is skipped for
+// unknown IDs in preview.
+func idToInt(id pulumi.IDOutput) pulumi.IntOutput {
+	return id.ApplyT(func(id pulumi.ID) (int, error) {
+		return strconv.Atoi(string(id))
+	}).(pulumi.IntOutput)
 }
