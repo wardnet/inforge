@@ -159,6 +159,16 @@ firewall:
 | `proto` | string | Yes | Protocol: `tcp`, `udp`, or `icmp`. |
 | `port` | int or string | Yes | Port number (`80`) or range (`8000-9000`). Not used when `proto` is `icmp`. |
 
+## Placement groups (Hetzner)
+
+Every Hetzner VM automatically joins a **spread placement group**, which keeps servers on distinct
+physical hosts to reduce correlated failure. This is on by default with no field to configure — inforge
+creates the groups (`wardnet-<env>-<region>-pg-NN`) and assigns each server as it is provisioned.
+
+Hetzner caps a spread group at **10 servers**, so servers bin-pack across as many groups as needed
+(`-pg-01`, `-pg-02`, …). Assignment is deterministic in creation order, so re-running `inforge deploy`
+keeps a server in the same group.
+
 ## Example
 
 ```yaml title="regional/compute/bridge/manifest.yaml"
