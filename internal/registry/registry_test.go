@@ -119,6 +119,9 @@ func (m *sshKeyMocks) NewResource(args pulumi.MockResourceArgs) (string, resourc
 	case "hcloud:index/firewall:Firewall":
 		// Firewall ID is parsed as an int in compute.Create.
 		return "42", resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}, nil
+	case "hcloud:index/placementGroup:PlacementGroup":
+		// Placement group ID is parsed as an int in compute.Create (PlacementGroupId).
+		return "88", resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}, nil
 	case "hcloud:index/server:Server":
 		return args.Name + "-id", resource.PropertyMap{
 			"name":        resource.NewStringProperty(args.Name),

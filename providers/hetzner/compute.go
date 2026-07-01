@@ -74,8 +74,20 @@ type HetznerCompute struct {
 	// instanceCounters tracks how many servers have been created for each
 	// spec name so that Create assigns each call its unique specKey suffix.
 	instanceCounters map[string]int
-	regions          map[string]RegionConfig
+	// placementGroups holds the scope's Hetzner spread placement groups, keyed by
+	// group index. Every server joins one (always-on reliability); servers bin-pack
+	// into groups of maxServersPerSpreadGroup so none exceeds Hetzner's 10-server
+	// cap. See .agents/rules/servers-join-spread-placement-group.md.
+	placementGroups map[int]*hcloud.PlacementGroup
+	// serverOrdinal counts servers created in this scope so far; it drives the
+	// deterministic placement-group bin-packing (the Nth server joins group N/cap).
+	serverOrdinal int
+	regions       map[string]RegionConfig
 }
+
+// maxServersPerSpreadGroup is Hetzner's hard cap on servers in one spread placement
+// group. Servers bin-pack across as many groups as needed to respect it.
+const maxServersPerSpreadGroup = 10
 
 // serverHandle records a created server and the subnet its private network will be
 // attached to, so AttachNetwork can wire the attach after the cloud-init gate.
@@ -112,6 +124,7 @@ func NewCompute(sshAuthorizedKeys, deployPublicKey, apiToken string, provider *h
 		servers:           map[string]*serverHandle{},
 		sshKeys:           sshKeys,
 		instanceCounters:  map[string]int{},
+		placementGroups:   map[int]*hcloud.PlacementGroup{},
 		regions:           regionOverrides,
 	}
 }
@@ -156,11 +169,20 @@ func (h *HetznerCompute) Create(
 		return types.ComputeOutputs{}, fmt.Errorf("ensure ssh keys: %w", err)
 	}
 
-	// Advance this spec's instance counter under the lock.
+	// Advance this spec's instance counter and the scope-wide server ordinal under
+	// the lock. The ordinal — deterministic in server-creation order — bin-packs
+	// servers into spread placement groups of at most maxServersPerSpreadGroup.
 	h.mu.Lock()
 	h.instanceCounters[spec.Name]++
 	instance := h.instanceCounters[spec.Name]
+	h.serverOrdinal++
+	groupIndex := (h.serverOrdinal - 1) / maxServersPerSpreadGroup
 	h.mu.Unlock()
+
+	pg, err := h.ensurePlacementGroup(ctx, env, groupIndex)
+	if err != nil {
+		return types.ComputeOutputs{}, fmt.Errorf("ensure placement group: %w", err)
+	}
 
 	serverName := naming.ResourceInstance(env, h.slug, "vm", spec.Name, instance)
 
@@ -176,7 +198,8 @@ func (h *HetznerCompute) Create(
 		FirewallIds: pulumi.IntArray{
 			idToInt(fw.ID()),
 		},
-		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container, h.eph)),
+		PlacementGroupId: idToInt(pg.ID()).ToIntPtrOutput(),
+		Labels:           toStringMap(tags.HetznerLabels(h.project, env, h.slug, spec.Container, h.eph)),
 	}
 
 	var deployUserName string
@@ -276,6 +299,34 @@ func (h *HetznerCompute) AttachNetwork(ctx *pulumi.Context, spec types.ComputeSp
 		return pulumi.StringOutput{}, fmt.Errorf("attach network for %s: %w", sh.name, err)
 	}
 	return attach.Ip, nil
+}
+
+// ensurePlacementGroup returns this scope's spread placement group for the given
+// index, creating it once and memoizing it. Every server joins one (always-on
+// reliability): the program advances a scope-wide server ordinal that bin-packs
+// servers into groups of at most maxServersPerSpreadGroup, so an index maps to one
+// spread group of up to 10 servers. A spread group keeps its members on distinct
+// physical hosts, reducing correlated failure. Safe to call concurrently. See
+// .agents/rules/servers-join-spread-placement-group.md.
+func (h *HetznerCompute) ensurePlacementGroup(ctx *pulumi.Context, env string, index int) (*hcloud.PlacementGroup, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if pg, ok := h.placementGroups[index]; ok {
+		return pg, nil
+	}
+
+	name := naming.Resource(env, h.slug, "pg", fmt.Sprintf("%02d", index+1))
+	pg, err := hcloud.NewPlacementGroup(ctx, name, &hcloud.PlacementGroupArgs{
+		Name:   pulumi.String(name),
+		Type:   pulumi.String("spread"),
+		Labels: toStringMap(tags.HetznerLabels(h.project, env, h.slug, "", h.eph)),
+	}, h.providerOpts()...)
+	if err != nil {
+		return nil, fmt.Errorf("create placement group %s: %w", name, err)
+	}
+	h.placementGroups[index] = pg
+	return pg, nil
 }
 
 // ensureFirewall returns the hcloud.Firewall for the spec name, creating it if it

@@ -35,9 +35,15 @@ func (m *computeMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, err
 }
 
 func (m *computeMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
-	// Firewalls need a numeric string ID for the int conversion in Create.
+	// Firewalls and placement groups need a numeric string ID for the int
+	// conversions in Create (FirewallIds, PlacementGroupId).
 	if args.TypeToken == "hcloud:index/firewall:Firewall" {
 		return "42", resource.PropertyMap{
+			"name": resource.NewStringProperty(args.Name),
+		}, nil
+	}
+	if args.TypeToken == "hcloud:index/placementGroup:PlacementGroup" {
+		return "88", resource.PropertyMap{
 			"name": resource.NewStringProperty(args.Name),
 		}, nil
 	}
@@ -382,11 +388,12 @@ func TestComputeCreateInstanceCounterIncrement(t *testing.T) {
 // server's raw inputs by name (so a test can assert other arguments, e.g.
 // userData).
 type capturingMocks struct {
-	mu             sync.Mutex
-	serverTypes    []string
-	images         []string
-	inputs         map[string]resource.PropertyMap
-	serverNetworks []resource.PropertyMap
+	mu              sync.Mutex
+	serverTypes     []string
+	images          []string
+	inputs          map[string]resource.PropertyMap
+	serverNetworks  []resource.PropertyMap
+	placementGroups []resource.PropertyMap
 }
 
 func (m *capturingMocks) Call(pulumi.MockCallArgs) (resource.PropertyMap, error) {
@@ -420,6 +427,12 @@ func (m *capturingMocks) NewResource(args pulumi.MockResourceArgs) (string, reso
 		props["ip"] = resource.NewStringProperty("10.0.0.5")
 		m.mu.Lock()
 		m.serverNetworks = append(m.serverNetworks, args.Inputs)
+		m.mu.Unlock()
+	case "hcloud:index/placementGroup:PlacementGroup":
+		// A numeric ID so the server's placementGroupId conversion succeeds.
+		id = "88"
+		m.mu.Lock()
+		m.placementGroups = append(m.placementGroups, args.Inputs)
 		m.mu.Unlock()
 	case "hcloud:index/sshKey:SshKey":
 		props["publicKey"] = resource.NewStringProperty("ssh-ed25519 AAAA test")
@@ -685,4 +698,51 @@ func TestComputeAttachNetworkUnknownServerErrors(t *testing.T) {
 		return nil
 	}, pulumi.WithMocks("inforge", "test", &capturingMocks{}))
 	require.NoError(t, err)
+}
+
+// TestComputeCreateAssignsSpreadPlacementGroup proves every server joins a Hetzner
+// spread placement group (always-on reliability), and the group is created with
+// type "spread". See .agents/rules/servers-join-spread-placement-group.md.
+func TestComputeCreateAssignsSpreadPlacementGroup(t *testing.T) {
+	mocks := &capturingMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
+		spec := types.ComputeSpec{
+			Name: "bridge", Container: "vpc", Provider: "hetzner",
+			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 1,
+		}
+		_, err := h.Create(ctx, spec, computeNet(), "prod", "us-east-1", "bridge.use1.example.com", "", types.FirewallPorts{})
+		return err
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+
+	require.Len(t, mocks.placementGroups, 1, "exactly one spread placement group must be created")
+	assert.Equal(t, "spread", mocks.placementGroups[0]["type"].StringValue(), "placement group must be type spread")
+
+	in := mocks.serverInputs("vm-bridge")
+	require.NotNil(t, in, "server resource must have been created")
+	assert.True(t, in["placementGroupId"].IsNumber(), "server must be assigned to a placement group")
+}
+
+// TestComputeCreateBinPacksPlacementGroupsAtTen proves the 10-server-per-spread-group
+// cap is respected: the 11th server in a scope lands in a second group.
+func TestComputeCreateBinPacksPlacementGroupsAtTen(t *testing.T) {
+	mocks := &capturingMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := NewCompute("ssh-ed25519 user", "ssh-ed25519 deploy", "", nil, "test-project", "use1", tags.Ephemeral{}, useEast1(), nil)
+		spec := types.ComputeSpec{
+			Name: "node", Container: "vpc", Provider: "hetzner",
+			Network: "vpc", Size: "SMALL", Image: "ubuntu-24.04", InstanceCount: 11,
+		}
+		// Create builds one server per call (the program loop calls it instance_count
+		// times); 11 servers must bin-pack into 2 groups (10 + 1).
+		for i := 0; i < 11; i++ {
+			if _, err := h.Create(ctx, spec, computeNet(), "prod", "us-east-1", "node.use1.example.com", "", types.FirewallPorts{}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, pulumi.WithMocks("inforge", "test", mocks))
+	require.NoError(t, err)
+	assert.Len(t, mocks.placementGroups, 2, "11 servers must bin-pack into 2 spread groups (10-server cap)")
 }
