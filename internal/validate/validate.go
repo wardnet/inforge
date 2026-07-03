@@ -126,15 +126,26 @@ type globalRefs struct {
 	databaseNames map[string]bool   // bare global database name -> true
 	computeKind   map[string]string // accepted global compute FK form -> kind
 	pkiTopology   map[string]string // bare global PKI resource name -> topology
+	// meshServices holds the bare names of global services that are mesh members
+	// (declare pki:). Seeded into the regional pass so a regional service's mesh
+	// allowed_services that names a global service can be reported as the forbidden
+	// direction (a global service may only call other global services — a regional
+	// service cannot have a global caller).
+	meshServices map[string]bool
 }
 
 // buildGlobalRefs derives the cross-referenceable outputs from the loaded
 // global resource set (already default-normalised by the loader). Single-instance
 // computes are additionally keyed by their bare name, mirroring CanonicalComputeKeys.
 func buildGlobalRefs(global types.Resources) *globalRefs {
-	g := &globalRefs{databaseNames: map[string]bool{}, computeKind: map[string]string{}, pkiTopology: map[string]string{}}
+	g := &globalRefs{databaseNames: map[string]bool{}, computeKind: map[string]string{}, pkiTopology: map[string]string{}, meshServices: map[string]bool{}}
 	for _, d := range global.Database {
 		g.databaseNames[d.Name] = true
+	}
+	for _, s := range global.Service {
+		if s.Pki != "" {
+			g.meshServices[s.Name] = true
+		}
 	}
 	for _, c := range global.Compute {
 		for i := 1; i <= c.InstanceCount; i++ {
@@ -235,6 +246,33 @@ type regionContext struct {
 	// one tls-termination route across the services it fronts — so a forward on :80
 	// (which ACME needs) can be rejected.
 	tlsTermIngressByHost map[string]bool
+	// gatewayScopeCount is the number of gateway resources declared in this scope.
+	// A gateway is a scope singleton (≤1 per scope): callers dial their own scope's
+	// gateway (INFORGE_GATEWAY_URL) and its config is derived per-scope, so a second
+	// one is ambiguous. checkGateway rejects the scope when this exceeds 1, and
+	// checkService rejects a gateway route when it is 0 (no gateway to realize on).
+	gatewayScopeCount int
+	// serviceAllowsGateway records whether a service permits the north-south gateway to
+	// call it (its mesh.allowed_services contains "gateway"). checkGateway requires a
+	// route's target service to allow the gateway (the two sides must agree, ADR-0032).
+	serviceAllowsGateway map[string]bool
+	// serviceNamesInScope holds every service name declared in this scope (regardless
+	// of pki:), and meshServices the subset that are mesh members (declare pki:). A
+	// gateway route's allowed_services caller must resolve to a mesh member — these two
+	// maps separate "not a service" from "a service but not a mesh member" for a precise
+	// message.
+	serviceNamesInScope map[string]bool
+	meshServices        map[string]bool
+	// callerCandidates holds cross-scope service names that ARE valid callers of a
+	// gateway route in this scope: regional mesh services in the global pass (regional→
+	// global is allowed), empty in the regional pass. forbiddenCallerNames holds
+	// cross-scope service names that exist but are NOT valid callers here: global mesh
+	// services in the regional pass (a global service may only call other global
+	// services), empty in the global pass. Together they let a gateway route's
+	// allowed_services resolution enforce the ADR-0013 direction rule with a precise
+	// message.
+	callerCandidates     map[string]bool
+	forbiddenCallerNames map[string]bool
 	// encStore is the environment's committed encrypted secret store
 	// (resources/<env>/secrets.enc.yaml), nil when the file does not exist. A
 	// `vault:<KEY>` secret on a service must have a ciphertext under
@@ -281,6 +319,19 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	if err != nil {
 		return err
 	}
+	// The regional slice's mesh service names seed the global pass so a global
+	// service's gateway route may name a regional service in allowed_services
+	// (regional→global is the one permitted call direction, ADR-0013). Loaded
+	// leniently: a malformed regional set fails its own pass with a precise per-file
+	// error, so here an error just yields an empty caller set rather than aborting.
+	regionalMeshServices := map[string]bool{}
+	if regionalRes, rerr := loader.LoadResources(env, dir); rerr == nil {
+		for _, s := range regionalRes.Service {
+			if s.Pki != "" {
+				regionalMeshServices[s.Name] = true
+			}
+		}
+	}
 
 	r := &reporter{}
 	base := filepath.Join(dir, env)
@@ -310,7 +361,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	// graph resolves only against global resources, so a global resource
 	// referencing a regional one fails as not-found — enforcing "global → global
 	// only". A global slice with resources but no global providers block is an error.
-	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil, encStore, defaults); err != nil {
+	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil, regionalMeshServices, encStore, defaults); err != nil {
 		return err
 	}
 	if global == nil && globalRes.HasAny() {
@@ -337,7 +388,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	// graph, with the global outputs injected so a regional secrets `ref:` may
 	// resolve a global/<name> target. Provider availability is region-specific, so
 	// it is skipped here (available nil) and checked separately per region below.
-	if err := validateResourceSet(r, schemaSet, regionalBase, nil, sizeTable, buildGlobalRefs(globalRes), encStore, defaults); err != nil {
+	if err := validateResourceSet(r, schemaSet, regionalBase, nil, sizeTable, buildGlobalRefs(globalRes), nil, encStore, defaults); err != nil {
 		return err
 	}
 
@@ -363,7 +414,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	return nil
 }
 
-func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, encStore *secretstore.Store, defaults types.ProviderDefaults) error {
+func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, siblingServices map[string]bool, encStore *secretstore.Store, defaults types.ProviderDefaults) error {
 	networkFiles, _, err := readFolders[types.NetworkSpec](filepath.Join(base, "network"))
 	if err != nil {
 		return err
@@ -392,6 +443,10 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	if err != nil {
 		return err
 	}
+	gatewayFiles, _, err := readFolders[types.GatewaySpec](filepath.Join(base, "gateway"))
+	if err != nil {
+		return err
+	}
 
 	// Apply defaults so semantic checks see normalised specs.
 	for i := range networkFiles {
@@ -416,6 +471,11 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for i := range appFiles {
 		if appFiles[i].parseErr == nil {
 			loader.NormalizeApp(&appFiles[i].spec)
+		}
+	}
+	for i := range gatewayFiles {
+		if gatewayFiles[i].parseErr == nil {
+			loader.NormalizeGateway(&gatewayFiles[i].spec)
 		}
 	}
 	for i := range serviceFiles {
@@ -465,8 +525,30 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		ingressHealthPort:     map[string]int{},
 		ingressNamesByHost:    map[string][]string{},
 		pkiResources:          map[string]string{},
+		serviceAllowsGateway:  map[string]bool{},
+		serviceNamesInScope:   map[string]bool{},
+		meshServices:          map[string]bool{},
+		callerCandidates:      map[string]bool{},
+		forbiddenCallerNames:  map[string]bool{},
 		encStore:              encStore,
 		providerDefaults:      defaults,
+	}
+	// Gateway is a scope singleton; count the declarations so checkGateway can reject
+	// a scope with more than one and checkService can reject a gateway route in a
+	// scope with none.
+	ctx.gatewayScopeCount = len(gatewayFiles)
+	// Cross-scope caller resolution for gateway routes (ADR-0013 direction rule):
+	// siblingServices are the regional mesh services, non-nil only in the global pass
+	// (a global gateway route may name a regional caller — regional→global). In the
+	// regional pass globalRefs.meshServices are the global services, which are the
+	// FORBIDDEN callers of a regional route (a global service may only call global).
+	for name := range siblingServices {
+		ctx.callerCandidates[name] = true
+	}
+	if global != nil {
+		for name := range global.meshServices {
+			ctx.forbiddenCallerNames[name] = true
+		}
 	}
 	for _, f := range networkFiles {
 		ctx.networks[f.spec.Name] = f.spec
@@ -517,6 +599,41 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for _, f := range appFiles {
 		if f.parseErr == nil {
 			ctx.appSubdomainCounts[f.spec.Subdomain]++
+		}
+	}
+	// Service name sets (this scope): every service name, and the mesh-member subset,
+	// so a gateway route's allowed_services caller can be resolved and the "not a
+	// service" vs "not a mesh member" distinction reported precisely.
+	for _, f := range serviceFiles {
+		if f.parseErr != nil {
+			continue
+		}
+		ctx.serviceNamesInScope[f.spec.Name] = true
+		if f.spec.Pki != "" {
+			ctx.meshServices[f.spec.Name] = true
+		}
+	}
+	// Mesh exposure (ADR-0032): a service's mesh.port is a loopback backend bind, so it
+	// shares the int-keyed backend target space with route targets, health and tcp
+	// exposed ports (a collision means two binds on one port). serviceAllowsGateway
+	// records whether a service lets the north-south gateway call it (mesh.allowed_services
+	// contains "gateway"), so checkGateway can require a route's target service to permit
+	// the gateway.
+	for _, f := range serviceFiles {
+		if f.parseErr != nil || f.spec.Mesh == nil {
+			continue
+		}
+		for _, dep := range f.spec.Mesh.AllowedServices {
+			if dep == gatewayCallerName {
+				ctx.serviceAllowsGateway[f.spec.Name] = true
+			}
+		}
+		backendHost := canonicalHost(f.spec.Host, ctx)
+		if f.spec.Mesh.Port != 0 && backendHost != "" {
+			if ctx.targetUsersByHost[backendHost] == nil {
+				ctx.targetUsersByHost[backendHost] = map[int][]string{}
+			}
+			ctx.targetUsersByHost[backendHost][f.spec.Mesh.Port] = append(ctx.targetUsersByHost[backendHost][f.spec.Mesh.Port], f.spec.Name)
 		}
 	}
 	// Aggregate the routes so checkService can enforce the cross-service rules. The
@@ -634,6 +751,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	validateType(r, schemaSet["app"], appFiles, func(s types.AppSpec) string { return s.Name }, func(s types.AppSpec) ([]string, []string) {
 		return checkApp(s, ctx)
 	})
+	validateType(r, schemaSet["gateway"], gatewayFiles, func(s types.GatewaySpec) string { return s.Name }, func(s types.GatewaySpec) ([]string, []string) {
+		return checkGateway(s, ctx)
+	})
 	return nil
 }
 
@@ -675,7 +795,7 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 
 // compileSchemas compiles every embedded JSON Schema, keyed by resource type.
 func compileSchemas() (map[string]*jsonschema.Schema, error) {
-	names := []string{"network", "compute", "database", "service", "environment", "pkiresource", "ingress", "app"}
+	names := []string{"network", "compute", "database", "service", "environment", "pkiresource", "ingress", "app", "gateway"}
 	c := jsonschema.NewCompiler()
 	for _, n := range names {
 		b, err := schemas.FS.ReadFile(n + ".json")
@@ -1225,8 +1345,8 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	ingHost := ctx.ingressHost[s.Ingress]
 	backendHost := canonical
 	coLocated := ingHost != "" && backendHost != "" && ingHost == backendHost
-	// Cross-host reachability (a route's backend OR a health endpoint) rides the
-	// private network, so the ingress host and the backend host must share a network
+	// Cross-host reachability (an ingress route's backend OR a health endpoint) rides
+	// the private network, so the ingress host and the backend host must share a network
 	// (same Hetzner Network — subnets within it are mutually routable). Checked once
 	// for the whole ingress tier, not only for routes, so a health-only service on a
 	// different network is rejected rather than silently unreachable.
@@ -1304,6 +1424,9 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 				}
 			}
 		}
+	}
+	if s.Mesh != nil {
+		errs = append(errs, checkMesh(s, backendHost, ctx)...)
 	}
 	// Health endpoint: the service serves health on HealthProbesPort, surfaced through
 	// its ingress's public health port (Host-demuxed). A service exposing health must
@@ -1537,6 +1660,133 @@ func checkApp(s types.AppSpec, ctx regionContext) (errs, warns []string) {
 		errs = append(errs, fmt.Sprintf("ingress: %q does not resolve to an ingress resource in this scope", s.Ingress))
 	}
 	return errs, warns
+}
+
+// gatewayCallerName is the reserved allow-list token naming the north-south gateway's
+// mesh identity (<scope>/gateway). A service lists it in mesh.allowed_services to be
+// reachable by daemon traffic routed through the gateway (ADR-0032).
+const gatewayCallerName = "gateway"
+
+// checkGateway validates the north-south daemon gateway resource (ADR-0032): its host:
+// foreign key must resolve to a single-instance vm compute in the SAME scope — a
+// global/ prefix is rejected explicitly, exactly like service.host/ingress.host. A
+// scope may declare at most one gateway (a scope singleton — one public daemon edge per
+// scope). Each route's path must be a non-root prefix, unique within the gateway, and
+// its target service must resolve in this scope AND permit the gateway (list "gateway"
+// in its mesh.allowed_services — the two sides must agree). The gateway carries no
+// provider (it inherits its host's); its name uniqueness is enforced in validateType.
+func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string) {
+	if strings.HasPrefix(s.Host, "global/") {
+		errs = append(errs, fmt.Sprintf("host: %q references a global compute; a gateway on a global host is declared in the global slice itself, not referenced from a region", s.Host))
+		return errs, warns
+	}
+	if _, hostErrs := resolveComputeHost(s.Host, "a gateway", ctx); len(hostErrs) > 0 {
+		errs = append(errs, hostErrs...)
+	}
+	if ctx.gatewayScopeCount > 1 {
+		errs = append(errs, "a scope may declare at most one gateway (it is a scope singleton — one public daemon edge per scope)")
+	}
+	seenPath := map[string]bool{}
+	for _, rt := range s.Routes {
+		// Path: the loader normalized it to "/<p>/"; a "/" means the authored value was
+		// empty or slash-only. A route must claim a non-root prefix (a "/" would capture
+		// every request), be a plain prefix, and be unique within the gateway.
+		switch {
+		case rt.Path == "" || rt.Path == "/":
+			errs = append(errs, "routes: a gateway route must declare a non-root path prefix (e.g. /ddns/)")
+		case strings.Contains(rt.Path, "..") || strings.ContainsAny(rt.Path, " \t"):
+			errs = append(errs, fmt.Sprintf("routes: gateway path %q is invalid; use a plain URL prefix like /ddns/ (no spaces or \"..\")", rt.Path))
+		case seenPath[rt.Path]:
+			errs = append(errs, fmt.Sprintf("routes: gateway path %q is declared more than once on this gateway", rt.Path))
+		default:
+			seenPath[rt.Path] = true
+		}
+		// Target service: must resolve to a service in this scope, and that service must
+		// permit the gateway (mesh.allowed_services contains "gateway"). The gateway
+		// reaches it through the mesh, so a service with no mesh block / no gateway in its
+		// allow list is unreachable — reject it here so the two sides can't drift.
+		switch {
+		case rt.Service == "":
+			errs = append(errs, fmt.Sprintf("routes: gateway path %q has no service", rt.Path))
+		case !ctx.serviceNamesInScope[rt.Service]:
+			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, which does not resolve to a service in this scope", rt.Path, rt.Service))
+		case !ctx.serviceAllowsGateway[rt.Service]:
+			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, but that service does not permit the gateway — add %q to its mesh.allowed_services", rt.Path, rt.Service, gatewayCallerName))
+		}
+	}
+	return errs, warns
+}
+
+// checkMesh validates a service's mesh: block (ADR-0032): the loopback Port it serves
+// peers on (a backend bind, collision-checked like a route target against the service's
+// own binds, other services on the host, and any public listen port nginx holds there),
+// and its callee-side allowed_services (each a mesh member in a permitted direction, or
+// the reserved "gateway" token). backendHost is the service's canonical host key ("" when
+// the host FK did not resolve).
+func checkMesh(s types.ServiceSpec, backendHost string, ctx regionContext) []string {
+	var errs []string
+	m := s.Mesh
+	// A mesh member must have a pki: identity (its leaf is what peers verify).
+	if s.Pki == "" {
+		errs = append(errs, "mesh: a service with a mesh block must declare pki: (its mesh identity)")
+	}
+	if m.Port < 1 || m.Port > 65535 {
+		errs = append(errs, fmt.Sprintf("mesh.port: %d is invalid; a backend port (1..65535) is required", m.Port))
+	} else {
+		// The mesh port is a loopback backend bind: distinct from this service's route
+		// targets, health port and tcp exposed ports, and from another service's backend
+		// port or a public listen port nginx holds on this host.
+		for _, rt := range s.Routes {
+			if rt.Target == m.Port {
+				errs = append(errs, fmt.Sprintf("mesh.port: %d collides with route target %d on the same service; distinct backend binds", m.Port, rt.Target))
+				break
+			}
+		}
+		if s.HealthProbesPort == m.Port {
+			errs = append(errs, fmt.Sprintf("mesh.port: %d collides with this service's health_probes_port; distinct backend binds", m.Port))
+		}
+		for _, ep := range s.ExposedPorts {
+			if ep.Proto == "tcp" && ep.Port == m.Port {
+				errs = append(errs, fmt.Sprintf("mesh.port: %d collides with this service's tcp exposed_port; distinct backend binds", m.Port))
+				break
+			}
+		}
+		if backendHost != "" {
+			if len(ctx.portUsersByHost[backendHost][m.Port]) > 0 {
+				errs = append(errs, fmt.Sprintf("mesh.port: %d collides with a public listen port on host %q; nginx occupies that port on all interfaces", m.Port, s.Host))
+			}
+			if others := otherUsers(ctx.targetUsersByHost[backendHost][m.Port], s.Name); len(others) > 0 {
+				errs = append(errs, fmt.Sprintf("mesh.port: %d on host %q is also a backend port of service(s) %s; a backend port belongs to a single service", m.Port, s.Host, strings.Join(others, ", ")))
+			}
+		}
+	}
+	// allowed_services: each bare name must resolve to a mesh member permitted to call
+	// this service, or the reserved "gateway" token. Same-scope mesh services qualify; a
+	// cross-scope caller qualifies only regional→global (callerCandidates).
+	// forbiddenCallerNames names an existing cross-scope service in the wrong direction.
+	seenDep := map[string]bool{}
+	for _, dep := range m.AllowedServices {
+		switch {
+		case dep == "":
+			errs = append(errs, "mesh.allowed_services: has an empty entry")
+		case dep == gatewayCallerName:
+			// the north-south gateway identity — always a valid caller token
+		case dep == s.Name:
+			errs = append(errs, fmt.Sprintf("mesh.allowed_services: lists its own service %q; a service does not call itself", dep))
+		case seenDep[dep]:
+			errs = append(errs, fmt.Sprintf("mesh.allowed_services: lists service %q more than once", dep))
+		case ctx.meshServices[dep] || ctx.callerCandidates[dep]:
+			// resolves to a mesh member in a permitted direction
+		case ctx.forbiddenCallerNames[dep]:
+			errs = append(errs, fmt.Sprintf("mesh.allowed_services: allows %q, a global service — a global service may only call other global services (regional→global only), so it cannot call this service", dep))
+		case ctx.serviceNamesInScope[dep]:
+			errs = append(errs, fmt.Sprintf("mesh.allowed_services: allows %q, which is not a mesh member; a caller must declare pki: to have a mesh identity", dep))
+		default:
+			errs = append(errs, fmt.Sprintf("mesh.allowed_services: allows %q, which does not resolve to a service that may call this one in this scope", dep))
+		}
+		seenDep[dep] = true
+	}
+	return errs
 }
 
 // reservedEnvNameErrs returns errors for an env-var name that collides with a

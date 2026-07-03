@@ -362,6 +362,15 @@ func loadResourceSet(base string) (types.Resources, error) {
 	}
 	res.App = appSpecs
 
+	gatewaySpecs, _, err := loadTypeFromFolders[types.GatewaySpec](filepath.Join(base, "gateway"))
+	if err != nil {
+		return types.Resources{}, err
+	}
+	for i := range gatewaySpecs {
+		NormalizeGateway(&gatewaySpecs[i])
+	}
+	res.Gateway = gatewaySpecs
+
 	return res, nil
 }
 
@@ -403,6 +412,42 @@ func NormalizeService(s *types.ServiceSpec) {
 	s.Pki = strings.TrimSpace(s.Pki)
 	s.Reload = strings.TrimSpace(s.Reload)
 	s.Ingress = strings.TrimSpace(s.Ingress)
+	// Trim the bare service names in the mesh allow list so a stray space cannot
+	// defeat resolution (ADR-0032).
+	if s.Mesh != nil {
+		for i := range s.Mesh.AllowedServices {
+			s.Mesh.AllowedServices[i] = strings.TrimSpace(s.Mesh.AllowedServices[i])
+		}
+	}
+}
+
+// NormalizeGatewayRoutePath canonicalizes a gateway route's path to a bounded
+// "/<p>/" form (leading and trailing slash, inner segments preserved) so the
+// authored "tenants", "/tenants" and "/tenants/" all realize to the same nginx
+// location and compare equal in the gateway's path-uniqueness check. An empty or
+// slash-only path normalizes to "/" (which validation rejects — a gateway route
+// must claim a non-root prefix).
+func NormalizeGatewayRoutePath(p string) string {
+	inner := strings.Trim(strings.TrimSpace(p), "/")
+	if inner == "" {
+		return "/"
+	}
+	return "/" + inner + "/"
+}
+
+// NormalizeGateway trims the gateway spec's free-text fields and its host foreign
+// key, and normalizes each route's path + service FK, so a stray space cannot
+// defeat resolution. Like ingress it has no default provider to apply — the
+// provider comes from the compute host the gateway references, not the spec.
+func NormalizeGateway(g *types.GatewaySpec) {
+	g.Name = strings.TrimSpace(g.Name)
+	g.Container = strings.TrimSpace(g.Container)
+	g.Host = strings.TrimSpace(g.Host)
+	g.Subdomain = strings.TrimSpace(g.Subdomain)
+	for i := range g.Routes {
+		g.Routes[i].Path = NormalizeGatewayRoutePath(g.Routes[i].Path)
+		g.Routes[i].Service = strings.TrimSpace(g.Routes[i].Service)
+	}
 }
 
 // NormalizeIngress trims the ingress spec's free-text fields and its host

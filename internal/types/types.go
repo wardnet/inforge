@@ -60,6 +60,33 @@ type AppSpec struct {
 	Spa       bool   `yaml:"spa"`       // when true, any non-file path serves index.html (SPA deep-link fallback)
 }
 
+// GatewaySpec is the north-south daemon API gateway (ADR-0032): the public host
+// external daemons HTTPS into. It is NOT the east-west router (service↔service
+// runs through the derived mesh, not here). Like IngressSpec it is a sibling of
+// the workloads that references a compute Host by name in the SAME scope (an FK
+// exactly like ingress.host, resolved via resolveComputeHost) and carries no
+// provider of its own (it inherits the host's). It is a mesh client with identity
+// <scope>/gateway: a daemon request is TLS-terminated here, path-routed by Routes,
+// and handed to the target service THROUGH the mesh (so the gateway is
+// location-transparent and needs no service locations). It does NOT validate the
+// daemon JWT — it forwards it for the service to validate.
+type GatewaySpec struct {
+	Name      string             `yaml:"name"`
+	Container string             `yaml:"container"`
+	Host      string             `yaml:"host"`      // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
+	Subdomain string             `yaml:"subdomain"` // public subdomain; the FQDN is composed at realization from scope + base domain
+	Routes    []GatewayRouteSpec `yaml:"routes"`    // the external API surface: path -> backend service (resolved through the mesh)
+}
+
+// GatewayRouteSpec is one north-south path route on the gateway: daemon requests
+// matching Path are forwarded to Service (resolved through the mesh, so the target
+// may live on any host in the scope). The target service must list "gateway" in
+// its mesh.allowed_services (validated). Path is normalized to a bounded "/<p>/".
+type GatewayRouteSpec struct {
+	Path    string `yaml:"path"`    // URL path prefix (normalized to /<p>/); unique within the gateway
+	Service string `yaml:"service"` // FK -> a service (same scope) that the gateway routes this path to via the mesh
+}
+
 // Port is a firewall port or port range (e.g. "80", "8000-9000"). It unmarshals
 // from both YAML integers and strings so users can write `port: 80` without quotes.
 type Port string
@@ -180,6 +207,19 @@ const (
 	IngressTypeForward        = "forward"
 )
 
+// MeshSpec is a service's east-west mesh membership surface (ADR-0032). A service
+// is a mesh member by declaring pki:; this optional block declares what it exposes
+// to peers: the loopback Port it serves mesh traffic on (plain HTTP — the local
+// mesh proxy forwards verified peer traffic to 127.0.0.1:Port), and AllowedServices,
+// the callee-side allow list of who may call it (bare service names, enforced at
+// this service's local mesh; include "gateway" to be reachable by daemon traffic
+// through the north-south gateway). A pki: service with no mesh block can still make
+// outbound mesh calls (INFORGE_MESH_URL) but exposes nothing inbound.
+type MeshSpec struct {
+	Port            int      `yaml:"port"`             // loopback backend port this service serves mesh traffic on (plain HTTP)
+	AllowedServices []string `yaml:"allowed_services"` // bare service names permitted to call this service over the mesh
+}
+
 // DefaultHealthProbesPort is the public port an ingress exposes service health
 // checks on when its manifest omits health_probes_port.
 const DefaultHealthProbesPort = 81
@@ -229,6 +269,7 @@ type ServiceSpec struct {
 	Routes           []RouteSpec       `yaml:"routes,omitempty"`             // typed inbound routes (tls-termination / forward) realized on the referenced ingress's nginx
 	HealthProbesPort int               `yaml:"health_probes_port,omitempty"` // backend port this service serves health checks on; surfaced through the ingress's public health port, Host-demuxed by the service FQDN (requires Ingress)
 	ExposedPorts     []ExposedPort     `yaml:"exposed_ports,omitempty"`      // ports the service binds that inforge opens on the host's private network only (never the public internet), for peer/service-to-service traffic; needs no ingress (ADR-0029)
+	Mesh             *MeshSpec         `yaml:"mesh,omitempty"`               // east-west mesh exposure: the loopback port peers reach + the callee-side allow list (ADR-0032)
 	Grants           []GrantSpec       `yaml:"grants,omitempty"`             // permissioned access to Grantable resources (database/pki), materialized as env vars (ADR-0025)
 	Environment      map[string]string `yaml:"-"`                            // env-var-name → source DSL string (ref:, vault:KEY, env:VAR, or literal); loaded from the service's sibling environment.yaml, not the manifest; the secrets provider is derived from the region, not the service
 }
@@ -606,6 +647,7 @@ type Resources struct {
 	PKI      []PKIResourceSpec
 	Ingress  []IngressSpec
 	App      []AppSpec
+	Gateway  []GatewaySpec
 }
 
 // HasAny reports whether the set declares any resource of any kind. Used to decide
@@ -614,7 +656,7 @@ type Resources struct {
 // honest as new resource kinds are added.
 func (r Resources) HasAny() bool {
 	return len(r.Network)+len(r.Compute)+len(r.Database)+
-		len(r.Service)+len(r.PKI)+len(r.Ingress)+len(r.App) > 0
+		len(r.Service)+len(r.PKI)+len(r.Ingress)+len(r.App)+len(r.Gateway) > 0
 }
 
 // ProviderDefaults are project-level provider fallbacks. When a resource spec omits

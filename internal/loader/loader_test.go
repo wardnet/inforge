@@ -242,3 +242,47 @@ func TestLoadSizeTableFromFile(t *testing.T) {
 	// Replace, not merge: a default size is absent from the loaded table.
 	assert.Error(t, st.Resolve("SMALL"))
 }
+
+func TestNormalizeGatewayRoutePath(t *testing.T) {
+	cases := map[string]string{
+		"tenants":     "/tenants/",
+		"/tenants":    "/tenants/",
+		"/tenants/":   "/tenants/",
+		" /tenants/ ": "/tenants/",
+		"a/b":         "/a/b/",
+		"":            "/",
+		"/":           "/",
+	}
+	for in, want := range cases {
+		if got := NormalizeGatewayRoutePath(in); got != want {
+			t.Errorf("NormalizeGatewayRoutePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNormalizeServiceTrimsMeshAllowList(t *testing.T) {
+	s := types.ServiceSpec{Mesh: &types.MeshSpec{Port: 8080, AllowedServices: []string{" ddns ", "gateway"}}}
+	NormalizeService(&s)
+	if s.Mesh.AllowedServices[0] != "ddns" {
+		t.Errorf("mesh allow list not trimmed: %q", s.Mesh.AllowedServices[0])
+	}
+}
+
+func TestNormalizeGatewayNormalizesRoutes(t *testing.T) {
+	g := types.GatewaySpec{Name: "api", Routes: []types.GatewayRouteSpec{{Path: "ddns", Service: " ddns "}}}
+	NormalizeGateway(&g)
+	if g.Routes[0].Path != "/ddns/" {
+		t.Errorf("gateway route path not normalized: %q", g.Routes[0].Path)
+	}
+	if g.Routes[0].Service != "ddns" {
+		t.Errorf("gateway route service not trimmed: %q", g.Routes[0].Service)
+	}
+}
+
+func TestNormalizeGatewayTrims(t *testing.T) {
+	g := types.GatewaySpec{Name: " mesh ", Container: " platform ", Host: " bridge ", Subdomain: " gateway "}
+	NormalizeGateway(&g)
+	if g.Name != "mesh" || g.Container != "platform" || g.Host != "bridge" || g.Subdomain != "gateway" {
+		t.Errorf("NormalizeGateway did not trim: %+v", g)
+	}
+}

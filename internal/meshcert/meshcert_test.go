@@ -59,6 +59,9 @@ func TestMintServiceLeaf(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, leaf.URIs, 1)
 	assert.Equal(t, "spiffe://wardnet.network/prd/us-east-1/bridge", leaf.URIs[0].String())
+	// The subject CN is scope-qualified so the gateway can authorize on
+	// $ssl_client_s_dn (stock nginx exposes the CN, not the URI SAN) — ADR-0013.
+	assert.Equal(t, "us-east-1/bridge", leaf.Subject.CommonName)
 
 	// The leaf chains to the mesh's us-east-1 intermediate.
 	interCert, err := pki.ParseCertificate(store.PKIs["wardnet-mesh"].Intermediates["us-east-1"].Cert)

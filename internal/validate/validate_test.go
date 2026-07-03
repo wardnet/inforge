@@ -529,6 +529,162 @@ func baseCtx() regionContext {
 	}
 }
 
+// meshCtx seeds a baseCtx with a single-scope gateway and two mesh services (ddns,
+// tunneller) that permit the gateway, plus a non-mesh service (nopki), so gateway
+// routes and mesh allow-lists resolve (ADR-0032).
+func meshCtx() regionContext {
+	c := baseCtx()
+	c.gatewayScopeCount = 1
+	c.meshServices = map[string]bool{"ddns": true, "tunneller": true}
+	c.serviceNamesInScope = map[string]bool{"ddns": true, "tunneller": true, "nopki": true}
+	c.serviceAllowsGateway = map[string]bool{"ddns": true, "tunneller": true}
+	c.targetUsersByHost = map[string]map[int][]string{}
+	c.portUsersByHost = map[string]map[int][]string{}
+	return c
+}
+
+func meshSvc(m *types.MeshSpec) types.ServiceSpec {
+	return types.ServiceSpec{Name: "tenants", Host: "bridge", Type: "raw", User: "svc", Pki: "mesh", Mesh: m}
+}
+
+func gw(routes ...types.GatewayRouteSpec) types.GatewaySpec {
+	return types.GatewaySpec{Name: "api", Host: "bridge", Subdomain: "api", Routes: routes}
+}
+
+// TestCheckGatewayValid: a gateway on a same-scope vm, sole in scope, routing to a
+// service that permits the gateway, passes.
+func TestCheckGatewayValid(t *testing.T) {
+	errs, _ := checkGateway(gw(types.GatewayRouteSpec{Path: "/ddns/", Service: "ddns"}), meshCtx())
+	assert.Empty(t, errs)
+}
+
+// TestCheckGatewayGlobalHostRejected: a gateway referencing a global compute is
+// rejected — like service.host, it is declared in the global slice itself.
+func TestCheckGatewayGlobalHostRejected(t *testing.T) {
+	c := meshCtx()
+	errs, _ := checkGateway(types.GatewaySpec{Name: "api", Host: "global/edge", Subdomain: "api"}, c)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "global slice itself")
+}
+
+// TestCheckGatewayUnknownHostRejected: a gateway whose host: does not resolve fails.
+func TestCheckGatewayUnknownHostRejected(t *testing.T) {
+	c := meshCtx()
+	errs, _ := checkGateway(types.GatewaySpec{Name: "api", Host: "ghost", Subdomain: "api"}, c)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "does not resolve to a compute")
+}
+
+// TestCheckGatewaySingletonRejected: two gateways in one scope are rejected.
+func TestCheckGatewaySingletonRejected(t *testing.T) {
+	c := meshCtx()
+	c.gatewayScopeCount = 2
+	errs, _ := checkGateway(gw(), c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "at most one gateway")
+}
+
+// TestCheckGatewayRouteUnknownService: a route to a service not in scope is rejected.
+func TestCheckGatewayRouteUnknownService(t *testing.T) {
+	errs, _ := checkGateway(gw(types.GatewayRouteSpec{Path: "/x/", Service: "ghost"}), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "does not resolve to a service in this scope")
+}
+
+// TestCheckGatewayRouteServiceDisallows: a route to a service that does not permit
+// the gateway (no "gateway" in its mesh.allowed_services) is rejected.
+func TestCheckGatewayRouteServiceDisallows(t *testing.T) {
+	errs, _ := checkGateway(gw(types.GatewayRouteSpec{Path: "/n/", Service: "nopki"}), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "does not permit the gateway")
+}
+
+// TestCheckGatewayRootPathRejected: a "/" (root) route path is rejected.
+func TestCheckGatewayRootPathRejected(t *testing.T) {
+	errs, _ := checkGateway(gw(types.GatewayRouteSpec{Path: "/", Service: "ddns"}), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "non-root path prefix")
+}
+
+// TestCheckGatewayDuplicatePath: two routes with the same path are rejected.
+func TestCheckGatewayDuplicatePath(t *testing.T) {
+	errs, _ := checkGateway(gw(
+		types.GatewayRouteSpec{Path: "/ddns/", Service: "ddns"},
+		types.GatewayRouteSpec{Path: "/ddns/", Service: "tunneller"},
+	), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "declared more than once")
+}
+
+// TestCheckMeshValid: a service exposing a mesh port with a resolvable allow list
+// (including the reserved "gateway" token) passes.
+func TestCheckMeshValid(t *testing.T) {
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, AllowedServices: []string{"ddns", "gateway"}}), meshCtx())
+	assert.Empty(t, errs)
+}
+
+// TestCheckMeshRequiresPki: a service with a mesh block but no pki: is rejected.
+func TestCheckMeshRequiresPki(t *testing.T) {
+	s := meshSvc(&types.MeshSpec{Port: 8080, AllowedServices: []string{"ddns"}})
+	s.Pki = ""
+	errs, _ := checkService(s, meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "must declare pki:")
+}
+
+// TestCheckMeshBadPort: an out-of-range mesh.port is rejected.
+func TestCheckMeshBadPort(t *testing.T) {
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 0, AllowedServices: []string{"ddns"}}), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "mesh.port")
+}
+
+// TestCheckMeshAllowUnknown: an allow-list name that is no service is rejected.
+func TestCheckMeshAllowUnknown(t *testing.T) {
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, AllowedServices: []string{"ghost"}}), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "does not resolve to a service")
+}
+
+// TestCheckMeshAllowNonMesh: an allow-list name that is a service but not a mesh
+// member (no pki:) is rejected.
+func TestCheckMeshAllowNonMesh(t *testing.T) {
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, AllowedServices: []string{"nopki"}}), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "not a mesh member")
+}
+
+// TestCheckMeshAllowForbiddenDirection: a regional service naming a global service
+// as a caller is rejected (regional→global only).
+func TestCheckMeshAllowForbiddenDirection(t *testing.T) {
+	c := meshCtx()
+	c.forbiddenCallerNames = map[string]bool{"billing": true}
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, AllowedServices: []string{"billing"}}), c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "regional→global only")
+}
+
+// TestCheckMeshAllowCrossScopeCaller: a global service may name a regional caller
+// (regional→global), resolved via callerCandidates.
+func TestCheckMeshAllowCrossScopeCaller(t *testing.T) {
+	c := meshCtx()
+	c.meshServices = map[string]bool{}
+	c.serviceNamesInScope = map[string]bool{}
+	c.callerCandidates = map[string]bool{"ddns": true}
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, AllowedServices: []string{"ddns"}}), c)
+	assert.Empty(t, errs)
+}
+
+// TestCheckMeshPortCollision: a mesh.port equal to another service's backend port on
+// the host is rejected.
+func TestCheckMeshPortCollision(t *testing.T) {
+	c := meshCtx()
+	c.targetUsersByHost = map[string]map[int][]string{"bridge-01": {8080: {"other"}}}
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, AllowedServices: []string{"ddns"}}), c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "belongs to a single service")
+}
+
 // A service may not run on a multi-instance compute: the host DNS / "<compute>.vm"
 // record is derived from the bare compute name and can't address one instance.
 func TestCheckServiceRejectsMultiInstanceHost(t *testing.T) {
