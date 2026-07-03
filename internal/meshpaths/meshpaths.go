@@ -40,6 +40,16 @@ const (
 	ConfigPath = "/etc/wardnet/mesh-nginx.conf"
 )
 
+// DNSName is the DNS-safe name a mesh leaf carries as a DNS SAN (alongside its
+// canonical SPIFFE URI SAN), so stock nginx can select the callee's server cert by
+// SNI and hostname-verify a peer on the mTLS hop (ADR-0032). It is <service>.<scope>.mesh
+// — e.g. "tenants.us-east-1.mesh" or "tenants.global.mesh". The identity a peer
+// authorizes on remains the CN / URI SAN (<scope>/<service>); this name is purely the
+// nginx handle (proxy_ssl_name / server_name), never resolved via real DNS.
+func DNSName(scope, service string) string {
+	return service + "." + scope + ".mesh"
+}
+
 // EgressPort returns the loopback egress port for the index-th mesh service on a host
 // (0-based). It is deterministic so the deploy side and the rendered config agree on
 // which port maps to which service. Callers must keep index < MaxServices.
