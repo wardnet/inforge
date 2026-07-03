@@ -3,7 +3,10 @@ package program
 import (
 	"sort"
 
+	"github.com/wardnet/inforge/internal/meshnginx"
+	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/pki"
+	"github.com/wardnet/inforge/internal/types"
 )
 
 // meshGatewayCaller is the reserved mesh.allowed_services token naming the north-south
@@ -57,5 +60,60 @@ func expandAllowedCallers(allowed []string, calleeScope string, regions []string
 		out = append(out, id)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// meshHostInputs is a host's local (callee) and egress (caller) mesh renderer inputs,
+// fully resolved except for the routing-table addresses (which come from compute IPs and
+// are filled by the deploy pass, not here).
+type meshHostInputs struct {
+	local  []meshnginx.LocalService
+	egress []meshnginx.EgressCaller
+}
+
+// meshInputsByHost groups a scope's mesh services (those declaring pki:) by their
+// canonical host into the per-host local + egress renderer inputs. A pki service is
+// ALWAYS an egress caller (it can make outbound mesh calls); one that also declares a
+// mesh: block is additionally a local callee (it receives). Egress ports are assigned
+// deterministically per host — meshpaths.EgressPort(index) over the host's services in
+// sorted-name order — so the deploy side and the injected INFORGE_MESH_URL agree. Leaf
+// paths are the mesh proxy's on-host material paths (the custody shift). allowedFor
+// expands a callee's authored allow-list to caller identities (see expandAllowedCallers).
+func meshInputsByHost(res types.Resources, canonical map[string]string, scope string, allowedFor func(types.ServiceSpec) []string) map[string]*meshHostInputs {
+	byHost := map[string][]types.ServiceSpec{}
+	for _, svc := range res.Service {
+		if svc.Pki == "" {
+			continue
+		}
+		host, ok := canonical[svc.Host]
+		if !ok {
+			continue
+		}
+		byHost[host] = append(byHost[host], svc)
+	}
+	out := make(map[string]*meshHostInputs, len(byHost))
+	for host, svcs := range byHost {
+		sort.Slice(svcs, func(i, j int) bool { return svcs[i].Name < svcs[j].Name })
+		mh := &meshHostInputs{}
+		for i, svc := range svcs {
+			mh.egress = append(mh.egress, meshnginx.EgressCaller{
+				Name:         svc.Name,
+				EgressPort:   meshpaths.EgressPort(i),
+				LeafCertPath: meshpaths.LeafCertPath(svc.Name),
+				LeafKeyPath:  meshpaths.LeafKeyPath(svc.Name),
+			})
+			if svc.Mesh != nil {
+				mh.local = append(mh.local, meshnginx.LocalService{
+					Name:           svc.Name,
+					SNI:            meshpaths.DNSName(scope, svc.Name),
+					MeshPort:       svc.Mesh.Port,
+					LeafCertPath:   meshpaths.LeafCertPath(svc.Name),
+					LeafKeyPath:    meshpaths.LeafKeyPath(svc.Name),
+					AllowedCallers: allowedFor(svc),
+				})
+			}
+		}
+		out[host] = mh
+	}
 	return out
 }
