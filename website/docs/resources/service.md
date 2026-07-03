@@ -42,6 +42,9 @@ health_probes_port: 8081  # optional — backend port the ingress surfaces as a 
 exposed_ports:            # optional — ports opened on the host's PRIVATE network only (no ingress, no nginx)
   - { proto: tcp, port: 9444 }   #   inter-node mesh mTLS — reachable only on the host's network CIDR
   - { proto: udp, port: 51820 }  #   a peer link
+mesh:                     # optional — east-west mesh exposure (see "East-west service mesh")
+  port: 8080              #   loopback port this service binds to receive mesh traffic (plain HTTP)
+  allowed_services: [tunneller, gateway]  # callee-side allow list: who may call this service
 ```
 
 `environment.yaml` (optional sidecar — env-var name → source DSL string):
@@ -70,6 +73,7 @@ LOG_LEVEL: info                                 # a literal (non-secret config) 
 | `routes` | array | No | Typed inbound routes (`tls-termination` / `forward`) realized on the referenced ingress's nginx. Each route binds a public `listen` port and a backend `target` port. See [Ingress and routes](#ingress-and-routes) below. |
 | `health_probes_port` | int | No | Backend port the service serves health checks on. The ingress surfaces it on its public [health port](./ingress#health-probes) (default `81`), demuxed by the service's FQDN. Requires `ingress`. See [Health probes](#health-probes) below. |
 | `exposed_ports` | array | No | Ports the service binds that inforge opens on the host's **private network only** (never the public internet) — for peer / service-to-service traffic. Each entry is `{proto: tcp\|udp, port: 1..65535}`. Needs **no** ingress and uses **no** nginx (distinct from `routes`); it is the private sibling of [`compute.firewall.inbound`](./compute#firewall) (which is public). See [Exposed ports](#exposed-ports) below. |
+| `mesh` | object | No | East-west mesh exposure: `port` (the loopback port this service binds to receive mesh traffic) and `allowed_services` (the callee-side allow list of who may call it). Omit for a service that only makes outbound mesh calls. See [East-west service mesh](#east-west-service-mesh) below. |
 
 **`environment.yaml` sidecar:**
 
@@ -300,6 +304,44 @@ Scope such a vanity per region with `{REGION_SLUG}` (or a bare token, which is a
 intend the round-robin.
 :::
 
+## East-west service mesh
+
+Services call **each other** over a derived **east-west mesh** (never the public ingress). Any service
+that declares `pki:` is a mesh member; inforge materializes a per-host **mesh proxy** (a second, private
+nginx, separate from the north-south ingress) on every host running a mesh member, and generates its
+routing table from the set of mesh services and their hosts. There is **no mesh resource to author** —
+the only authoring surface is the optional per-service `mesh:` block.
+
+```yaml
+mesh:
+  port: 8080                              # loopback port this service binds to RECEIVE mesh traffic (plain HTTP)
+  allowed_services: [tunneller, gateway]  # callee-side allow list: who may call this service
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `mesh.port` | int | The `127.0.0.1:<port>` the service binds to **receive** mesh traffic (plain HTTP). Injected as `INFORGE_MESH_PORT`. Omit the whole block for a service that only makes outbound calls. |
+| `mesh.allowed_services` | list | Bare service names permitted to call this service. Enforced at **this** service's local mesh proxy — a disallowed caller is rejected before it reaches the service. Include `gateway` to be reachable by daemon traffic through the north-south gateway. Empty means no service peers may call it. |
+
+**Calling another service.** Read `INFORGE_MESH_URL` and name the target in the `X-Mesh-Target` header;
+the path is your real path, unchanged:
+
+```
+GET $INFORGE_MESH_URL/api/foo      # header: X-Mesh-Target: tunneller
+```
+
+The local mesh resolves the target's **current** location — loopback (co-located), a private IP (same
+region, other host), or the **global mesh gateway** (cross-scope) — and does the `nginx↔nginx` mTLS hop,
+presenting this caller's leaf (`CN=<scope>/<service>`). The callee's mesh verifies the client cert,
+enforces `allowed_services`, and forwards over loopback with the verified caller in `X-Service-Identity`.
+The service itself does **no TLS** for east-west traffic — plain HTTP in and out. Because the target is
+addressed by name (not location), a callee moving to another host regenerates routing only: the caller's
+URL is byte-identical.
+
+**Direction.** A regional service may call same-region services and any global service (regional→global);
+a global service may call only global services. This falls out of the topology — regional meshes are
+private-only, and only the global scope exposes a public mesh gateway.
+
 ## Example
 
 ```yaml title="regional/service/bridge/manifest.yaml"
@@ -346,5 +388,14 @@ environment from a minimal base (`PATH`, `HOME`, `USER`, `LOGNAME`), then inject
 | `INFORGE_DEPLOYMENT_ENV` | `prd` | `deployment.environment.name` | Environment name (the `resources/<env>/` directory). |
 | `INFORGE_DEPLOYMENT_BASE_DOMAIN` | `wardnet.network` | — | The environment's base domain. |
 | `INFORGE_DEPLOYMENT_FQDN` | `bridge.svc.prd.use1.wardnet.network` | — | The service's auto-derived public FQDN (`<service>.svc.<env>.<slug>.<base>`). |
+
+A **mesh member** (any service declaring `pki:`) additionally gets the east-west mesh endpoint
+contract — see [East-west service mesh](#east-west-service-mesh):
+
+| Variable | Example | Meaning |
+|----------|---------|---------|
+| `INFORGE_MESH_URL` | `http://127.0.0.1:9500` | Base URL for **outbound** mesh calls: `GET $INFORGE_MESH_URL/<path>` with an `X-Mesh-Target: <service>` header. Plain HTTP over loopback. |
+| `INFORGE_MESH_SCOPE` | `us-east-1` | The service's mesh scope — a region name, or the literal `global`. The caller identity a peer presents is `<scope>/<service>`. |
+| `INFORGE_MESH_PORT` | `8080` | The loopback port the service **binds to receive** mesh traffic (its `mesh.port`). Present only when the service declares a `mesh:` block (an inbound endpoint). |
 
 The `INFORGE_*` names are reserved — do not map a secret to one of them.

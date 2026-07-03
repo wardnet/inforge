@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"github.com/wardnet/inforge/internal/meshnginx"
 	"gopkg.in/yaml.v3"
 )
 
@@ -554,6 +555,27 @@ type DnsProvider interface {
 // deploy_user creation.
 type IngressProvider interface {
 	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, apps []IngressApp, health []IngressHealth, healthPort int, backendIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
+}
+
+// MeshProvider realizes a host's east-west mesh proxy — the SECOND nginx, private
+// (ADR-0032). It is invoked once per mesh host (a host running ≥1 pki: service)
+// with the host's fully-derived mesh config, minus the addresses that come from
+// compute outputs: cfg carries the co-located callee (Local) and caller (Egress)
+// planes, the routing table (Targets, each with its SNI; Addr left empty), and
+// the trust bundle path, but NOT ListenAddr (filled from listenAddr) or the
+// Targets' Addr (filled from targetIPs). listenAddr is the address the mTLS
+// ingress binds — the host's private IP on a regional host, the literal
+// "0.0.0.0" on the global host (which additionally accepts cross-scope peers
+// publicly). targetIPs maps each routing-table target service to the IP its Addr
+// resolves against (the target host's private IP same-scope, or a global host's
+// public IP cross-scope) — the program chooses which; the provider renders the
+// config inside an apply over these outputs and MTLSPort. hostKey names the
+// Pulumi command resources; dependsOn carries the host's cloud-init gate. Realize
+// installs the mesh nginx (a separate unit + config from the north-south nginx),
+// seeds placeholder cert material so it starts before real leaves land, writes
+// the config, and reloads — safe to re-run as the mesh topology changes.
+type MeshProvider interface {
+	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, cfg meshnginx.Config, listenAddr pulumi.StringInput, targetIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
 }
 
 // DatabaseProvider creates a managed database.

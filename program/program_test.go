@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/agent"
+	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/service"
 	"github.com/wardnet/inforge/internal/types"
@@ -281,7 +282,7 @@ func TestFirewallPlanByHost(t *testing.T) {
 		},
 	}
 
-	got := firewallPlanByHost(res)
+	got := firewallPlanByHost(res, false)
 	// :80 added once (tls-termination present), 443 de-duplicated across services,
 	// 853 + 9000 (the forward listen ports), sorted. All co-located -> no private.
 	assert.Equal(t, []int{80, 443, 853, 9000}, got["bridge-01"].Public)
@@ -302,7 +303,7 @@ func TestFirewallPlanByHostForwardOnlyNoPort80(t *testing.T) {
 			}},
 		},
 	}
-	assert.Equal(t, []int{853}, firewallPlanByHost(res)["bridge-01"].Public)
+	assert.Equal(t, []int{853}, firewallPlanByHost(res, false)["bridge-01"].Public)
 }
 
 // TestFirewallPlanByHostCrossHost: a cross-host backend opens its route target
@@ -322,7 +323,7 @@ func TestFirewallPlanByHostCrossHost(t *testing.T) {
 			}},
 		},
 	}
-	got := firewallPlanByHost(res)
+	got := firewallPlanByHost(res, false)
 	assert.Equal(t, []int{80, 443}, got["edge-01"].Public, "ingress host opens public listen + ACME")
 	assert.Empty(t, got["edge-01"].Private)
 	assert.Equal(t, []int{8080}, got["back-01"].Private, "backend opens its target port privately")
@@ -344,12 +345,42 @@ func TestFirewallPlanByHostExposedPorts(t *testing.T) {
 			}},
 		},
 	}
-	got := firewallPlanByHost(res)
+	got := firewallPlanByHost(res, false)
 	assert.Equal(t, []types.ExposedPort{{Proto: "tcp", Port: 9444}, {Proto: "udp", Port: 51820}}, got["edge-01"].PrivateExposed,
 		"exposed ports are sorted by proto then port")
 	assert.Equal(t, "10.0.0.0/16", got["edge-01"].PrivateSourceCIDR, "exposed ports scope to the host's network CIDR")
 	assert.Empty(t, got["edge-01"].Public, "a private-only service opens no public port")
 	assert.Empty(t, got["edge-01"].Private, "exposed ports are carried in PrivateExposed, not Private")
+}
+
+// TestFirewallPlanByHostMeshRegional: a regional mesh host (running a pki: service)
+// opens MTLSPort only to its private network CIDR — never the internet (ADR-0032).
+func TestFirewallPlanByHostMeshRegional(t *testing.T) {
+	res := types.Resources{
+		Network: []types.NetworkSpec{{Name: "net", CIDR: "10.0.0.0/16"}},
+		Compute: []types.ComputeSpec{{Name: "bridge", Network: "net", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "ddns", Host: "bridge", Pki: "mesh", Mesh: &types.MeshSpec{Port: 8080}},
+		},
+	}
+	got := firewallPlanByHost(res, false)
+	assert.Equal(t, []int{meshpaths.MTLSPort}, got["bridge-01"].Private, "regional mesh host opens MTLSPort privately")
+	assert.Equal(t, "10.0.0.0/16", got["bridge-01"].PrivateSourceCIDR)
+	assert.Empty(t, got["bridge-01"].Public, "a regional mesh host never opens MTLSPort publicly")
+}
+
+// TestFirewallPlanByHostMeshGlobal: the global mesh host opens MTLSPort publicly —
+// it is the cross-scope mesh gateway a regional mesh dials over the internet.
+func TestFirewallPlanByHostMeshGlobal(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "core", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "tenants", Host: "core", Pki: "mesh", Mesh: &types.MeshSpec{Port: 8080}},
+		},
+	}
+	got := firewallPlanByHost(res, true)
+	assert.Equal(t, []int{meshpaths.MTLSPort}, got["core-01"].Public, "the global mesh host opens MTLSPort publicly")
+	assert.Empty(t, got["core-01"].Private)
 }
 
 // TestDerivedRecordsApps: an app's FQDN is a grey-cloud A record at its ingress
@@ -404,7 +435,7 @@ func TestFirewallPlanByHostApps(t *testing.T) {
 			{Name: "dashboard", Ingress: "web", Subdomain: "my", Spa: true},
 		},
 	}
-	got := firewallPlanByHost(res)
+	got := firewallPlanByHost(res, false)
 	assert.Equal(t, []int{80, 443}, got["edge-01"].Public, "app ingress host opens HTTPS + ACME")
 	assert.Empty(t, got["edge-01"].Private, "apps have no backend, so no private ports")
 }
@@ -552,7 +583,7 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 		AvailabilityZone: "ash",
 		MachineType:      "cx23",
 	}
-	out, err := renderDescriptor(svc, host, bundle, "ws-123", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01")
+	out, err := renderDescriptor(svc, host, bundle, "ws-123", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))
@@ -590,7 +621,7 @@ func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
 
 	// Driven exactly as the scopes loop drives the global slice: region=globalScope,
 	// slug="".
-	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "", "prd", globalScope, "", "wardnet.network", "tenants-01")
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "", "prd", globalScope, "", "wardnet.network", "tenants-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))
@@ -607,7 +638,7 @@ func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
 func TestRenderDescriptorSecretLess(t *testing.T) {
 	svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost"}
 
-	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01")
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))

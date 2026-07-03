@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -14,7 +15,7 @@ const minimalPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bi
 // ReservedEnvPrefix is the environment-variable namespace inforge owns and
 // injects itself (the deployment/observability context: INFORGE_DEPLOYMENT_*,
 // INFORGE_SERVICE_NAMESPACE, INFORGE_INSTANCE_ID, INFORGE_HOST_ID, INFORGE_HOST_TYPE,
-// INFORGE_CLOUD_*). A service must
+// INFORGE_CLOUD_*, and the mesh contract INFORGE_MESH_*). A service must
 // not map a secret to a name under this prefix — validation rejects it up front,
 // and buildEnv rejects it as a backstop — so an injected value can never silently
 // shadow (or be shadowed by) a service secret.
@@ -72,6 +73,19 @@ func buildEnv(d Descriptor, secrets map[string]string, home, instanceID string) 
 			if kv[1] != "" {
 				env = append(env, kv[0]+"="+kv[1])
 			}
+		}
+	}
+
+	// East-west service-mesh endpoint contract (ADR-0032), present only for a mesh
+	// member. INFORGE_MESH_URL/SCOPE are always injected for a member; INFORGE_MESH_PORT
+	// only when the member exposes an inbound port (an egress-only member omits it).
+	if m := d.Mesh; m != nil {
+		env = append(env,
+			"INFORGE_MESH_URL="+m.URL,
+			"INFORGE_MESH_SCOPE="+m.Scope,
+		)
+		if m.Port > 0 {
+			env = append(env, "INFORGE_MESH_PORT="+strconv.Itoa(m.Port))
 		}
 	}
 

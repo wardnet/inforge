@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/wardnet/inforge/internal/meshpaths"
+	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -48,6 +49,71 @@ func TestMeshInputsByHost(t *testing.T) {
 	}
 	if mh.local[0].LeafCertPath != meshpaths.LeafCertPath("ddns") {
 		t.Errorf("local[0].LeafCertPath = %q", mh.local[0].LeafCertPath)
+	}
+}
+
+func TestMeshEgressPortsByService(t *testing.T) {
+	res := types.Resources{Service: []types.ServiceSpec{
+		{Name: "tunneller", Host: "bridge", Pki: "m"},
+		{Name: "ddns", Host: "bridge", Pki: "m"},
+		{Name: "probe", Host: "worker", Pki: "m"}, // different host -> its own base port
+		{Name: "nomesh", Host: "bridge"},          // no pki -> no egress port
+	}}
+	canonical := map[string]string{"bridge": "bridge-01", "worker": "worker-01"}
+	got := meshEgressPortsByService(res, canonical)
+	// bridge's services sort ddns(9500), tunneller(9501); worker's probe restarts at 9500.
+	if got["ddns"] != meshpaths.EgressBase || got["tunneller"] != meshpaths.EgressBase+1 {
+		t.Errorf("bridge ports = ddns:%d tunneller:%d", got["ddns"], got["tunneller"])
+	}
+	if got["probe"] != meshpaths.EgressBase {
+		t.Errorf("worker probe port = %d, want %d", got["probe"], meshpaths.EgressBase)
+	}
+	if _, ok := got["nomesh"]; ok {
+		t.Error("a non-pki service must get no egress port")
+	}
+}
+
+func TestMeshTargetsRegionalIncludesGlobal(t *testing.T) {
+	scopeRes := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "ddns", Host: "bridge", Pki: "m", Mesh: &types.MeshSpec{Port: 8080}},   // callee -> target
+			{Name: "caller", Host: "bridge", Pki: "m"},                                     // egress-only -> NOT a target
+		},
+	}
+	globalRes := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "core", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "tenants", Host: "core", Pki: "m", Mesh: &types.MeshSpec{Port: 9090}}, // global callee -> cross-scope target
+		},
+	}
+	sc := naming.CanonicalComputeKeys(scopeRes.Compute)
+	gc := naming.CanonicalComputeKeys(globalRes.Compute)
+
+	got := meshTargets(scopeRes, globalRes, sc, gc, "us-east-1", false)
+	// ddns (same-scope, private, SNI ddns.us-east-1.mesh) + tenants (global, public, SNI tenants.global.mesh).
+	if len(got) != 2 {
+		t.Fatalf("targets = %d, want 2 (%+v)", len(got), got)
+	}
+	if got[0].name != "ddns" || got[0].global || got[0].sni != "ddns.us-east-1.mesh" || got[0].host != "bridge-01" {
+		t.Errorf("target[0] = %+v", got[0])
+	}
+	if got[1].name != "tenants" || !got[1].global || got[1].sni != "tenants.global.mesh" || got[1].host != "core-01" {
+		t.Errorf("target[1] = %+v", got[1])
+	}
+}
+
+func TestMeshTargetsGlobalScopeHasNoCrossScope(t *testing.T) {
+	scopeRes := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "core", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "tenants", Host: "core", Pki: "m", Mesh: &types.MeshSpec{Port: 9090}},
+		},
+	}
+	// The global scope passes itself as globalRes; isGlobal=true drops the cross-scope pass.
+	got := meshTargets(scopeRes, scopeRes, naming.CanonicalComputeKeys(scopeRes.Compute), naming.CanonicalComputeKeys(scopeRes.Compute), "global", true)
+	if len(got) != 1 || got[0].name != "tenants" || got[0].global {
+		t.Fatalf("global-scope targets = %+v, want one same-scope tenants", got)
 	}
 }
 
