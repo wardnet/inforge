@@ -38,6 +38,9 @@ const (
 	UnitName = "wardnet-mesh"
 	// ConfigPath is the mesh nginx config file, separate from the north-south nginx's.
 	ConfigPath = "/etc/wardnet/mesh-nginx.conf"
+	// PIDPath is the mesh nginx master pid file — distinct from the north-south nginx's
+	// /run/nginx.pid, since two nginx instances cannot share a pid file.
+	PIDPath = "/run/wardnet-mesh-nginx.pid"
 )
 
 // DNSName is the DNS-safe name a mesh leaf carries as a DNS SAN (alongside its
