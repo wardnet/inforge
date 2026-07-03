@@ -21,6 +21,15 @@ func sampleConfig() Config {
 				AllowedCallers: []string{"us-east-1/tenants"},
 			},
 		},
+		Egress: []EgressCaller{
+			{Name: "tenants", EgressPort: 9500, LeafCertPath: "/run/wardnet/mesh/tenants/leaf.crt", LeafKeyPath: "/run/wardnet/mesh/tenants/leaf.key"},
+			{Name: "ddns", EgressPort: 9501, LeafCertPath: "/run/wardnet/mesh/ddns/leaf.crt", LeafKeyPath: "/run/wardnet/mesh/ddns/leaf.key"},
+		},
+		Targets: []Target{
+			{Name: "tenants", Addr: "10.0.0.5:8443", SNI: "tenants.us-east-1.mesh"},
+			{Name: "ddns", Addr: "10.0.0.5:8443", SNI: "ddns.us-east-1.mesh"},
+			{Name: "billing", Addr: "203.0.113.9:8443", SNI: "billing.global.mesh"},
+		},
 	}
 }
 
@@ -47,6 +56,20 @@ func TestRenderIngress(t *testing.T) {
 		"proxy_pass http://127.0.0.1:8080;",
 		"proxy_pass http://127.0.0.1:9090;",
 		"pid /run/wardnet-mesh-nginx.pid;",
+		// egress plane
+		"map $http_x_mesh_target $mesh_addr",
+		"map $http_x_mesh_target $mesh_sni",
+		"billing 203.0.113.9:8443;",
+		"tenants 10.0.0.5:8443;",
+		"billing.global.mesh;",
+		"listen 127.0.0.1:9500;",
+		"listen 127.0.0.1:9501;",
+		`if ($mesh_addr = "")`,
+		"return 502;",
+		"proxy_ssl_certificate /run/wardnet/mesh/tenants/leaf.crt;",
+		"proxy_ssl_name $mesh_sni;",
+		"proxy_ssl_verify on;",
+		"proxy_pass https://$mesh_addr;",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered config missing %q\n---\n%s", want, out)
