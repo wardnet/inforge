@@ -41,7 +41,22 @@ const (
 	// PIDPath is the mesh nginx master pid file — distinct from the north-south nginx's
 	// /run/nginx.pid, since two nginx instances cannot share a pid file.
 	PIDPath = "/run/wardnet-mesh-nginx.pid"
+
+	// RuntimeDir is the tmpfs directory the mesh proxy reads its material from. The
+	// leaf-custody shift (ADR-0032) puts each co-located service's leaf HERE — the mesh
+	// presents it (server cert on the ingress hop, client cert on egress), so the
+	// service itself no longer holds cert material. BundlePath is the shared mesh CA
+	// bundle the proxy verifies peers against.
+	RuntimeDir = "/run/wardnet/mesh"
+	// BundlePath is the shared mesh CA trust bundle (ssl_client_certificate on ingress,
+	// proxy_ssl_trusted_certificate on egress).
+	BundlePath = RuntimeDir + "/bundle.crt"
 )
+
+// LeafCertPath / LeafKeyPath are where the mesh proxy reads a co-located service's leaf
+// (keyed by the bare service name). The mesh holds these, not the service (ADR-0032).
+func LeafCertPath(service string) string { return RuntimeDir + "/" + service + "/leaf.crt" }
+func LeafKeyPath(service string) string  { return RuntimeDir + "/" + service + "/leaf.key" }
 
 // DNSName is the DNS-safe name a mesh leaf carries as a DNS SAN (alongside its
 // canonical SPIFFE URI SAN), so stock nginx can select the callee's server cert by

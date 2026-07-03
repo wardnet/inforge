@@ -11,6 +11,18 @@ func TestEgressPort(t *testing.T) {
 	}
 }
 
+func TestLeafPaths(t *testing.T) {
+	if got := LeafCertPath("ddns"); got != "/run/wardnet/mesh/ddns/leaf.crt" {
+		t.Errorf("LeafCertPath = %q", got)
+	}
+	if got := LeafKeyPath("ddns"); got != "/run/wardnet/mesh/ddns/leaf.key" {
+		t.Errorf("LeafKeyPath = %q", got)
+	}
+	if BundlePath != "/run/wardnet/mesh/bundle.crt" {
+		t.Errorf("BundlePath = %q", BundlePath)
+	}
+}
+
 func TestInReservedEgressRange(t *testing.T) {
 	cases := map[int]bool{
 		EgressBase - 1:               false,
