@@ -27,7 +27,7 @@ func SPIFFEID(trustDomain, env, scope, service string) *url.URL {
 // can authorize on the encoded scope. It never outlives the parent (NotAfter is
 // clamped). Returns the leaf as CERTIFICATE PEM and its key as PKCS#8 PRIVATE KEY
 // PEM (the caller writes the key to the secrets provider).
-func GenerateLeaf(parent *x509.Certificate, parentKey crypto.Signer, spiffeID *url.URL, commonName string) (certPEM, keyPEM string, err error) {
+func GenerateLeaf(parent *x509.Certificate, parentKey crypto.Signer, spiffeID *url.URL, commonName string, dnsNames ...string) (certPEM, keyPEM string, err error) {
 	signer, err := newCAKey()
 	if err != nil {
 		return "", "", err
@@ -51,6 +51,7 @@ func GenerateLeaf(parent *x509.Certificate, parentKey crypto.Signer, spiffeID *u
 		BasicConstraintsValid: true,
 		IsCA:                  false,
 		URIs:                  []*url.URL{spiffeID},
+		DNSNames:              dnsNames,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, signer.Public(), parentKey)
 	if err != nil {

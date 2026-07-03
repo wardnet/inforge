@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/secretstore"
 )
@@ -101,13 +102,15 @@ func IntermediateSigner(store *pki.Store, pkiName, scope, ciIdentity string) (*x
 
 // MintLeaf mints a leaf for service from an already-decrypted scope intermediate
 // (see IntermediateSigner), carrying the spiffe://<trustDomain>/<env>/<scope>/
-// <service> identity as its URI SAN and CN=<scope>/<service> as its subject. The
+// <service> identity as its URI SAN, CN=<scope>/<service> as its subject, and the
+// DNS-safe mesh handle <service>.<scope>.mesh as a DNS SAN (so stock nginx can do
+// SNI cert selection + peer hostname verification on the mesh mTLS hop, ADR-0032). The
 // scope-qualified CN is the load-bearing identity the gateway authorizes on:
 // stock nginx exposes $ssl_client_s_dn (the CN) but not the URI SAN, so the CN
 // carries the same scope/service tuple the SPIFFE URI does (ADR-0013). The URI
 // SAN remains the canonical identity read by in-app verifiers.
 func MintLeaf(interCert *x509.Certificate, interKey crypto.Signer, trustDomain, env, scope, service string) (leafPEM, keyPEM string, err error) {
-	return pki.GenerateLeaf(interCert, interKey, pki.SPIFFEID(trustDomain, env, scope, service), scope+"/"+service)
+	return pki.GenerateLeaf(interCert, interKey, pki.SPIFFEID(trustDomain, env, scope, service), scope+"/"+service, meshpaths.DNSName(scope, service))
 }
 
 // TrustSet returns the scopes a service in ownScope verifies peers against
