@@ -7,25 +7,18 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 )
 
-func TestFilterServicesByName(t *testing.T) {
+// Only an mtls_files: opted-in mesh member has a service-side leaf to mint at
+// release time — a plain mesh member's copy lives with the mesh proxy
+// (ADR-0033), so mintReleasedServiceLeaf returns before touching a provider.
+func TestAnyServiceNeedsMtlsFiles(t *testing.T) {
 	svcs := []types.ServiceSpec{
-		{Name: "bridge", Pki: "mesh"},
-		{Name: "api"},
-		{Name: "bridge-staging"},
+		{Name: "api"},                 // no pki
+		{Name: "bridge", Pki: "mesh"}, // plain mesh member
+		{Name: "tunneller", Pki: "mesh", MtlsFiles: true},      // raw-plane opt-in
+		{Name: "bridge-staging", Pki: "mesh", MtlsFiles: true}, // name must match exactly
 	}
-	got := filterServicesByName(svcs, "bridge")
-	assert.Len(t, got, 1)
-	assert.Equal(t, "bridge", got[0].Name)
-
-	assert.Empty(t, filterServicesByName(svcs, "missing"))
-}
-
-// A released service that joins no mesh has no leaf to mint — the filtered set
-// reports no pki, so mintReleasedServiceLeaf returns before touching a provider.
-func TestFilteredNonMeshHasNoPki(t *testing.T) {
-	svcs := []types.ServiceSpec{{Name: "api"}}
-	assert.False(t, anyServiceHasPki(filterServicesByName(svcs, "api")))
-
-	mesh := []types.ServiceSpec{{Name: "bridge", Pki: "mesh"}}
-	assert.True(t, anyServiceHasPki(filterServicesByName(mesh, "bridge")))
+	assert.False(t, anyServiceNeedsMtlsFiles(svcs, "api"))
+	assert.False(t, anyServiceNeedsMtlsFiles(svcs, "bridge"))
+	assert.True(t, anyServiceNeedsMtlsFiles(svcs, "tunneller"))
+	assert.False(t, anyServiceNeedsMtlsFiles(svcs, "missing"))
 }

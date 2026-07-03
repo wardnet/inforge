@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wardnet/inforge/internal/hostpaths"
 	"github.com/wardnet/inforge/internal/meshpaths"
 )
 
@@ -19,6 +20,11 @@ import (
 const (
 	// UnitPath is the systemd unit file the mesh nginx runs as.
 	UnitPath = "/etc/systemd/system/" + meshpaths.UnitName + ".service"
+	// RenewUnitName / RenewUnitPath / RenewTimerPath are the mesh material renewal
+	// oneshot + timer (the pull half of ADR-0033's leaf delivery).
+	RenewUnitName  = meshpaths.UnitName + "-renew"
+	RenewUnitPath  = "/etc/systemd/system/" + RenewUnitName + ".service"
+	RenewTimerPath = "/etc/systemd/system/" + RenewUnitName + ".timer"
 	// SeedScriptPath is the on-host placeholder-seed script the unit runs as an
 	// ExecStartPre, so a reboot (which clears the tmpfs RuntimeDir) self-heals to
 	// a valid — if placeholder — cert set rather than crash-looping.
@@ -29,10 +35,15 @@ const (
 
 // UnitFile returns the systemd unit for the mesh nginx. It is Type=forking (nginx
 // daemonizes and writes meshpaths.PIDPath, matching the config's `pid` directive).
-// The unit re-seeds placeholder material (SeedScriptPath) and validates the config
-// before starting, so a start never races an empty RuntimeDir or a bad config. It
-// declares NO systemd RuntimeDirectory= — that would let systemd wipe the tmpfs
-// cert dir when the unit stops; the seed script owns the dir's lifecycle instead.
+// Before starting, the unit (1) pulls REAL mesh material from the provider
+// (`inforge-agent mesh-project`, fail-soft and `-`-prefixed so a degraded pull
+// never blocks the proxy — ADR-0033; this is also how a reboot's cleared tmpfs
+// re-seeds real leaves), (2) re-seeds placeholder material for anything still
+// absent (SeedScriptPath — first boot, before the deploy baseline lands), and
+// (3) validates the config — so a start never races an empty RuntimeDir or a bad
+// config. It declares NO systemd RuntimeDirectory= — that would let systemd wipe
+// the tmpfs cert dir when the unit stops; the pull + seed own the dir's
+// lifecycle instead.
 func UnitFile() string {
 	return `[Unit]
 Description=wardnet east-west mesh proxy (nginx)
@@ -42,6 +53,7 @@ Wants=network-online.target
 [Service]
 Type=forking
 PIDFile=` + meshpaths.PIDPath + `
+ExecStartPre=-` + hostpaths.AgentBin + ` mesh-project ` + meshpaths.AgentDir + `
 ExecStartPre=/usr/bin/env bash ` + SeedScriptPath + `
 ExecStartPre=` + nginxBin + ` -t -c ` + meshpaths.ConfigPath + `
 ExecStart=` + nginxBin + ` -c ` + meshpaths.ConfigPath + `
@@ -51,6 +63,40 @@ Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
+`
+}
+
+// RenewUnitFile is the oneshot that re-pulls the mesh material and reloads the
+// proxy on a real change — `inforge pki renew` only writes the provider; mesh
+// hosts converge on their own through this unit (ADR-0033). It must NOT declare
+// RuntimeDirectory= (systemd would delete the running proxy's tmpfs cert dir
+// when the oneshot stops — the same trap as the per-service renew oneshot).
+func RenewUnitFile() string {
+	return `[Unit]
+Description=wardnet mesh proxy cert material renewal
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=` + hostpaths.AgentBin + ` mesh-project ` + meshpaths.AgentDir + `
+`
+}
+
+// RenewTimerFile schedules the daily mesh material pull. Daily with a jitter
+// hour is far inside the 90-day leaf TTL; Persistent=true catches up after
+// downtime.
+func RenewTimerFile() string {
+	return `[Unit]
+Description=daily wardnet mesh proxy cert renewal
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
 `
 }
 

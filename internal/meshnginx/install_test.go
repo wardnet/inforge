@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wardnet/inforge/internal/hostpaths"
 	"github.com/wardnet/inforge/internal/meshpaths"
 )
 
@@ -24,6 +25,39 @@ func TestUnitFile(t *testing.T) {
 	// tmpfs cert dir when the unit stops.
 	if strings.Contains(u, "RuntimeDirectory=") {
 		t.Error("mesh unit must not declare RuntimeDirectory=")
+	}
+	// The material pull must be fail-soft (`-` prefix: a degraded pull never
+	// blocks the proxy) and run BEFORE the placeholder seed, which runs before
+	// the config check — so real material wins and placeholders only fill gaps.
+	pull := strings.Index(u, "ExecStartPre=-"+hostpaths.AgentBin+" mesh-project "+meshpaths.AgentDir)
+	seed := strings.Index(u, "ExecStartPre=/usr/bin/env bash "+SeedScriptPath)
+	check := strings.Index(u, "ExecStartPre="+nginxBin+" -t")
+	if pull == -1 || seed == -1 || check == -1 || pull >= seed || seed >= check {
+		t.Errorf("ExecStartPre order must be pull < seed < nginx -t (got %d, %d, %d)\n%s", pull, seed, check, u)
+	}
+}
+
+func TestRenewUnitAndTimer(t *testing.T) {
+	ru := RenewUnitFile()
+	for _, want := range []string{
+		"Type=oneshot",
+		"ExecStart=" + hostpaths.AgentBin + " mesh-project " + meshpaths.AgentDir,
+	} {
+		if !strings.Contains(ru, want) {
+			t.Errorf("renew unit missing %q\n%s", want, ru)
+		}
+	}
+	// Same trap as the per-service renew oneshot: a RuntimeDirectory= here would
+	// make systemd delete the running proxy's cert dir when the oneshot stops.
+	if strings.Contains(ru, "RuntimeDirectory=") {
+		t.Error("mesh renew oneshot must not declare RuntimeDirectory=")
+	}
+
+	rt := RenewTimerFile()
+	for _, want := range []string{"OnCalendar=daily", "RandomizedDelaySec=1h", "Persistent=true", "WantedBy=timers.target"} {
+		if !strings.Contains(rt, want) {
+			t.Errorf("renew timer missing %q\n%s", want, rt)
+		}
 	}
 }
 

@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"path/filepath"
 
 	"github.com/wardnet/inforge/internal/hostpaths"
+	"github.com/wardnet/inforge/internal/meshpaths"
 )
 
 // Descriptor and credential filenames within a service's on-host directory.
@@ -23,6 +25,10 @@ const (
 //     exec the real service binary.
 //   - inforge-agent project <service-dir>: the renewal path (a per-service
 //     timer) — re-project the current leaf and reload the unit if it changed.
+//   - inforge-agent mesh-project <mesh-dir>: the mesh proxy's material pull
+//     (ADR-0033) — fetch every co-located service's leaf + the trust bundle and
+//     project them into the mesh tmpfs; runs as the mesh unit's ExecStartPre and
+//     from the wardnet-mesh-renew timer.
 //
 // Any error returns to main, which exits non-zero so systemd restarts the unit.
 func Run(args []string, version string) error {
@@ -33,10 +39,12 @@ func Run(args []string, version string) error {
 	switch {
 	case len(args) == 3 && args[1] == "project":
 		return runProject(args[2])
+	case len(args) == 3 && args[1] == "mesh-project":
+		return runMeshProject(args[2])
 	case len(args) == 2:
 		return runBoot(args[1])
 	default:
-		return fmt.Errorf("usage: inforge-agent <service-dir> | inforge-agent project <service-dir>")
+		return fmt.Errorf("usage: inforge-agent <service-dir> | inforge-agent project <service-dir> | inforge-agent mesh-project <mesh-dir>")
 	}
 }
 
@@ -52,7 +60,7 @@ func runBoot(dir string) error {
 	if err != nil {
 		return err
 	}
-	secrets, err := fetchSecrets(ctx, dir, desc)
+	secrets, err := fetchSecrets(ctx, dir, desc.Provider)
 	if err != nil {
 		return err
 	}
@@ -105,7 +113,7 @@ func runProject(dir string) error {
 	if err != nil {
 		return err
 	}
-	secrets, err := fetchSecrets(ctx, dir, desc)
+	secrets, err := fetchSecrets(ctx, dir, desc.Provider)
 	if err != nil {
 		return err
 	}
@@ -119,18 +127,70 @@ func runProject(dir string) error {
 	return nil
 }
 
-// fetchSecrets decrypts the provider credential and fetches the service's
-// secrets. A secret-less service (no provider) has nothing to fetch — there is
-// no credential.age on disk — and returns a nil map.
-func fetchSecrets(ctx context.Context, dir string, desc Descriptor) (map[string]string, error) {
-	if desc.Provider.Kind == "" {
+// meshOwner is the user the mesh proxy's material is owned by: the mesh nginx
+// reads the leaves/bundle, nothing else may.
+const meshOwner = "nginx"
+
+// runMeshProject is the mesh proxy's material pull (ADR-0033): fetch each
+// co-located service's leaf cert+key and the shared trust bundle from the
+// host's own provider path and project them atomically into the mesh tmpfs
+// (meshpaths.RuntimeDir), owned by nginx. It runs as the wardnet-mesh unit's
+// ExecStartPre (so a reboot re-seeds REAL material before nginx starts) and
+// from the daily wardnet-mesh-renew timer (renewal convergence).
+//
+// Pull failures are fail-SOFT: a missing descriptor/credential, an unreachable
+// provider, or absent material logs and exits 0, keeping whatever is on disk —
+// the seed script backstops first boot with placeholders, and a degraded pull
+// must never block the proxy from starting or fail the renew timer into
+// systemd's failed state. Only a reload failure after a successful projection
+// is a hard error.
+func runMeshProject(dir string) error {
+	ctx := context.Background()
+
+	desc, err := LoadMeshDescriptor(filepath.Join(dir, descriptorFile))
+	if err != nil {
+		return meshSoft(err)
+	}
+	user, err := lookupUser(meshOwner)
+	if err != nil {
+		return meshSoft(err)
+	}
+	secrets, err := fetchSecrets(ctx, dir, desc.Provider)
+	if err != nil {
+		return meshSoft(err)
+	}
+	files := desc.Files()
+	_, changed, err := projectFiles(files, secrets, meshpaths.RuntimeDir, user.uid, user.gid)
+	if err != nil {
+		return meshSoft(err)
+	}
+	// Reload only on a real change AND a running proxy: at ExecStartPre the unit
+	// is still starting (not active) and needs no reload; on the timer a changed
+	// leaf reloads the mesh nginx (its ExecReload — no downtime).
+	if changed && systemctl("is-active", "--quiet", meshpaths.UnitName) == nil {
+		return systemctl("reload-or-restart", meshpaths.UnitName)
+	}
+	return nil
+}
+
+// meshSoft logs a mesh-projection failure and swallows it (see runMeshProject).
+func meshSoft(err error) error {
+	log.Printf("mesh-project: %v (keeping existing on-disk material)", err)
+	return nil
+}
+
+// fetchSecrets decrypts the provider credential in dir and fetches the secrets
+// under the provider's path. A provider-less caller (a secret-less service) has
+// nothing to fetch — there is no credential.age on disk — and gets a nil map.
+func fetchSecrets(ctx context.Context, dir string, provider Provider) (map[string]string, error) {
+	if provider.Kind == "" {
 		return nil, nil
 	}
 	credential, err := DecryptCredential(filepath.Join(dir, credentialFile), defaultHostKeyPath)
 	if err != nil {
 		return nil, err
 	}
-	fetcher, err := newFetcher(desc.Provider, credential)
+	fetcher, err := newFetcher(provider, credential)
 	if err != nil {
 		return nil, err
 	}

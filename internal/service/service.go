@@ -36,7 +36,7 @@ func UnitPath(name string) string {
 
 // AgentBin is the on-host path of the inforge-agent binary, the
 // ExecStart for every service unit. inforge deploy downloads it here.
-const AgentBin = "/usr/local/bin/inforge-agent"
+const AgentBin = hostpaths.AgentBin
 
 // DescriptorDir returns the per-service directory holding the agent's
 // inputs (descriptor.yaml + credential.age). It is the single argument passed to

@@ -27,6 +27,7 @@ host: bridge             # required — name of the Compute resource that hosts 
 type: raw                # required — delivery type
 user: wardnet            # required — no-login system user the service runs as
 pki: wardnet-mesh        # required — name of the two-tier (mesh) PKI this service is a member of
+mtls_files: true          # optional — ALSO project this service's own leaf + trust bundle (raw mTLS plane only)
 reload: /bin/kill -HUP $MAINPID  # optional — ExecReload command to apply a renewed mesh leaf without a restart
 ingress: edge             # FK -> ingress resource (same scope) whose nginx fronts the routes below
 routes:                   # optional — typed inbound routes realized on the ingress's nginx
@@ -68,7 +69,8 @@ LOG_LEVEL: info                                 # a literal (non-secret config) 
 | `type` | string | Yes | Delivery type. Currently only `raw` (SSH-push) is supported. `container` is reserved. |
 | `user` | string | Yes | No-login system user the service runs as. inforge emits `User=<name>` in the systemd unit and creates the account via SSH on first deploy; the agent drops privilege to it before exec. |
 | `pki` | string | Yes | Name of the **two-tier (mesh) PKI** in `pki.enc.yaml` this service is a leaf member of. `inforge validate` checks it names an existing two-tier PKI with an intermediate for every scope the service deploys under (a global service → `global`; a regional service → every region). See [`inforge pki`](/cli/pki). |
-| `reload` | string | No | `ExecReload=` command the service uses to apply a renewed mesh leaf **without a restart** (e.g. `/bin/kill -HUP $MAINPID`, `nginx -s reload`). When set, the per-service renewal timer reloads the unit; when absent, it restarts (a brief interruption). Must be a **single line** (it becomes one `ExecReload=` directive; a newline would inject extra unit directives). The leaf/key/bundle paths are in the `MTLS_LEAF_CERT_PATH` / `MTLS_LEAF_KEY_PATH` / `MTLS_TRUST_BUNDLE_PATH` env vars — these names are **reserved**: a service's own `environment:` may not use them. |
+| `mtls_files` | bool | No | **Opt-in** (default `false`): also project this service's **own** leaf + trust bundle into its tmpfs and inject the `MTLS_*_PATH` env vars — for a service running a **raw mTLS plane outside the mesh** (e.g. a node↔node forward listener on an [exposed port](#exposed-ports)). By default the per-host **mesh proxy** is the sole custodian of a service's mesh leaf and the service holds no cert material at all. See [Leaf custody](#east-west-service-mesh). |
+| `reload` | string | No | `ExecReload=` command the service uses to apply a renewed leaf **without a restart** (e.g. `/bin/kill -HUP $MAINPID`, `nginx -s reload`). Only meaningful with `mtls_files: true` (only then does the service hold cert material and get a per-service renewal timer); when set, the timer reloads the unit, else restarts (a brief interruption). Must be a **single line** (it becomes one `ExecReload=` directive; a newline would inject extra unit directives). The leaf/key/bundle paths are in the `MTLS_LEAF_CERT_PATH` / `MTLS_LEAF_KEY_PATH` / `MTLS_TRUST_BUNDLE_PATH` env vars — these names are **reserved**: a service's own `environment:` may not use them. |
 | `ingress` | string | When `routes` is set | **Name** of the [ingress](#ingress-and-routes) resource (same scope) whose nginx fronts this service's `routes`. The ingress host and this service's host must share a network when they differ (cross-host routing). |
 | `routes` | array | No | Typed inbound routes (`tls-termination` / `forward`) realized on the referenced ingress's nginx. Each route binds a public `listen` port and a backend `target` port. See [Ingress and routes](#ingress-and-routes) below. |
 | `health_probes_port` | int | No | Backend port the service serves health checks on. The ingress surfaces it on its public [health port](./ingress#health-probes) (default `81`), demuxed by the service's FQDN. Requires `ingress`. See [Health probes](#health-probes) below. |
@@ -341,6 +343,15 @@ URL is byte-identical.
 **Direction.** A regional service may call same-region services and any global service (regional→global);
 a global service may call only global services. This falls out of the topology — regional meshes are
 private-only, and only the global scope exposes a public mesh gateway.
+
+**Leaf custody.** The mesh proxy — not the service — holds every co-located service's mesh leaf and the
+trust bundle: it pulls them from the secrets provider with a per-host identity (scoped to only that
+host's material) at proxy start and on a daily renewal timer, so a reboot self-heals with real
+certificates and [`inforge pki renew`](/cli/pki) never connects to a host. A service therefore ships
+**no TLS code and no cert files** for east-west traffic. The one exception is `mtls_files: true`: a
+service running its own raw mTLS listener outside the mesh (e.g. an inter-node forward plane on an
+exposed port) additionally gets its own leaf + bundle projected into its tmpfs with the `MTLS_*_PATH`
+env vars — a second, independent leaf; the mesh proxy's copy is unaffected.
 
 ## Example
 

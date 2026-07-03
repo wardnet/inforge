@@ -16,3 +16,8 @@ func RuntimeDir(service string) string { return "/run/" + RuntimeSubdir(service)
 
 // UnitName is the service's systemd unit name.
 func UnitName(service string) string { return "wardnet-" + service + ".service" }
+
+// AgentBin is the on-host path of the inforge-agent binary — referenced by every
+// service unit's ExecStart, the per-service renew timers, and the mesh proxy's
+// material pull (ExecStartPre + wardnet-mesh-renew).
+const AgentBin = "/usr/local/bin/inforge-agent"

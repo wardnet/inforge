@@ -398,11 +398,14 @@ func resolveDeployTargets(ctx context.Context, projCfg projectConfig, env, platf
 	return targets, nil
 }
 
-// mintReleasedServiceLeaf mints a fresh mesh leaf for the released service (when
-// it joins a mesh) and writes it to the secrets provider before delivery, so the
-// unit restarts into a provider that already holds the leaf the boot path will
-// project. A non-mesh service (no `pki:`) is a no-op. It reuses renewMeshCerts —
-// the same minting core as `inforge pki renew` — scoped to just this service.
+// mintReleasedServiceLeaf mints a fresh leaf for the released service and
+// writes it under /<svc>/mtls before delivery, so the unit restarts into a
+// provider that already holds the leaf its boot path will project. Only an
+// mtls_files: opted-in service (the raw-mTLS-plane exception) projects its own
+// leaf — every other service is a no-op here: its mesh copy lives with the
+// host's mesh proxy and is the deploy baseline's / renew cron's business
+// (ADR-0033). It reuses renewMeshCertsAs — the same minting core as
+// `inforge pki renew` — in per-service mode.
 func mintReleasedServiceLeaf(ctx context.Context, dir, env, svc string) error {
 	globalRes, err := loader.LoadGlobalResources(env, dir)
 	if err != nil {
@@ -412,12 +415,10 @@ func mintReleasedServiceLeaf(ctx context.Context, dir, env, svc string) error {
 	if err != nil {
 		return err
 	}
-	global := filterServicesByName(globalRes.Service, svc)
-	regional := filterServicesByName(regionalRes.Service, svc)
-	if !anyServiceHasPki(global) && !anyServiceHasPki(regional) {
-		return nil // not a mesh service — nothing to mint
+	if !anyServiceNeedsMtlsFiles(globalRes.Service, svc) && !anyServiceNeedsMtlsFiles(regionalRes.Service, svc) {
+		return nil // no service-side mtls files — nothing to mint
 	}
-	count, err := renewMeshCerts(ctx, dir, env, global, regional)
+	count, err := renewMeshCertsAs(ctx, dir, env, env, globalRes, regionalRes, svc)
 	if err != nil {
 		return fmt.Errorf("mint mesh leaf for %s: %w", svc, err)
 	}
@@ -425,15 +426,15 @@ func mintReleasedServiceLeaf(ctx context.Context, dir, env, svc string) error {
 	return nil
 }
 
-// filterServicesByName returns the services whose Name matches svc (0 or 1).
-func filterServicesByName(services []types.ServiceSpec, svc string) []types.ServiceSpec {
-	var out []types.ServiceSpec
+// anyServiceNeedsMtlsFiles reports whether the named service opts into
+// service-side mtls files (pki: member with mtls_files: true).
+func anyServiceNeedsMtlsFiles(services []types.ServiceSpec, name string) bool {
 	for _, s := range services {
-		if s.Name == svc {
-			out = append(out, s)
+		if s.Name == name && s.Pki != "" && s.MtlsFiles {
+			return true
 		}
 	}
-	return out
+	return false
 }
 
 // mustRequire marks flags required, panicking on the impossible misconfiguration

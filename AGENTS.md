@@ -153,24 +153,26 @@ Key internal seams introduced in slice #110:
   env var. Projection is an **atomic set**: every changed file is staged to a temp then renamed only
   after all stage cleanly, so a service never starts with a fresh leaf cert but a stale/absent key.
   It reports `changed` so the renewal path reloads only on a real rotation.
-- **A mesh service's leaf is minted at release time, not only on the timer.** A service first runs on
-  its first `inforge releases deploy`; since the boot path projects whatever the provider holds, that
-  first start (and every update) would crash-loop until the daily timer fired. So `inforge releases
-  deploy` mints the released service's leaf **before** the `systemctl restart`, reusing the shared
-  `renewMeshCerts` core scoped to that one service. It runs from the infra repo, so it holds the same
-  `INFORGE_SECRETS_KEY` as `inforge deploy`. Non-mesh services skip it.
+- **Service-side mtls projection is opt-in: `mtls_files: true` (ADR-0033).** Only a service running a
+  raw mTLS plane outside the mesh (e.g. tunneller's node↔node forward, wardnet-cloud ADR-0014)
+  declares it; it keeps `/<svc>/mtls` provider writes, descriptor `files:`, the per-service renew
+  timer, and the release-time mint (`inforge releases deploy` mints its leaf **before** the
+  `systemctl restart`, via `renewMeshCertsAs` in per-service mode, so first start never crash-loops).
+  Every other mesh member holds **no** cert material — the mesh proxy is the sole leaf custodian.
 - **The `MTLS_*_PATH` env names are reserved.** `inforge validate` rejects a service `environment:`
   key colliding with a `meshcert.DescriptorFiles()` name (projection would overwrite it), and rejects
   a multi-line `reload:` (it becomes one `ExecReload=` line).
-- **Renewal is pull-based, per service.** A `wardnet-<svc>-renew.timer` runs `inforge-agent project
-  <dir>` daily; on a changed leaf it runs `systemctl reload-or-restart` — **reload** when the service
-  declares `reload:` (emitted as `ExecReload=`, no downtime), else **restart**. `inforge pki renew` only
-  writes the provider; hosts converge on their own. The renewal oneshot must NOT declare its own
-  `RuntimeDirectory=` (systemd would delete the running service's dir when the oneshot stops).
-- **A mesh service is provisioned even with no `environment.yaml`.** Deploy gives any `pki:` service a
-  workspace + per-service identity (read scope on `/<svc>`, covering `/<svc>/mtls`) + `credential.age`,
-  so the host can fetch its leaf. The skip is `len(svc.Environment)==0 && svc.Pki==""` in both
-  `program.provisionServiceSecrets` and `infisical.ProvisionService`.
+- **Renewal is pull-based, per consumer.** An `mtls_files:` service's `wardnet-<svc>-renew.timer` runs
+  `inforge-agent project <dir>` daily; on a changed leaf it runs `systemctl reload-or-restart` —
+  **reload** when the service declares `reload:` (emitted as `ExecReload=`, no downtime), else
+  **restart**. The mesh proxy's `wardnet-mesh-renew.timer` runs `inforge-agent mesh-project` the same
+  way (ADR-0033). `inforge pki renew` only writes the provider; hosts converge on their own. Neither
+  renewal oneshot may declare its own `RuntimeDirectory=` (systemd would delete the running unit's
+  dir when the oneshot stops).
+- **A service is provisioned only when it has something to fetch.** The skip is
+  `len(svc.Environment)==0 && !svc.MtlsFiles` (+ no grants) in both `program.provisionServiceSecrets`
+  and `infisical.ProvisionService` — `pki:` alone no longer forces a workspace/identity: a plain mesh
+  member's leaf is the mesh proxy's business (ADR-0033).
 
 ## Grants (#117, ADR-0025)
 
@@ -439,9 +441,25 @@ The mesh is the **east-west** plane (service↔service), **derived** — no reso
   `meshpaths.ConfigPath`, pid `meshpaths.PIDPath`. The global slice realizes first, so a regional scope's
   cross-scope targets see the global public IPs. `internal/meshnginx.UnitFile`/`SeedScript` add the
   systemd unit + a **placeholder-cert seed** (self-signed leaf/key/bundle per SNI, only-when-absent —
-  the `provisionApps` idiom) run as the unit's `ExecStartPre`, so `nginx -t` is green and the proxy
-  starts before real leaves land. **Real leaf delivery (the custody shift — the mesh proxy holds each
-  co-located service's leaf, not the service) is a FOLLOW-UP slice**; today the mesh runs on placeholders.
+  the `provisionApps` idiom) run as an `ExecStartPre`, so `nginx -t` is green and the proxy starts
+  before real leaves land.
+- **Real leaf delivery is PULL-based (ADR-0033, the custody shift).** Per scope, deploy creates one
+  shared **mesh workspace** (container `mesh`); per mesh host, a **per-host identity** read-scoped to
+  `/<hostKey>` only, plus an on-host **mesh descriptor** (`agent.MeshDescriptor`, own
+  `MeshSupportedVersion=1`, strict fields) + host-key-encrypted `credential.age` in
+  `meshpaths.AgentDir` (`program.deliverMeshHost` → `infisical.ProvisionMeshHost`). The proxy pulls
+  with `inforge-agent mesh-project <dir>`: fetch `/<hostKey>` → atomic-project into the tmpfs
+  `RuntimeDir` (owner nginx, 0400) — run **fail-soft** as the unit's first `ExecStartPre` (a reboot
+  re-seeds REAL material; the placeholder seed runs second, filling only gaps) and from a daily
+  `wardnet-mesh-renew.timer` (reload only on change + active unit). `inforge pki renew` writes the
+  per-host aggregates (each co-located service's leaf + one concatenated trust bundle) via
+  `infisical.CertWriter.WriteMeshHost`, grouped by the shared `internal/meshplan.ServicesByHost`
+  derivation (rule `mesh-host-grouping-is-single-sourced`) — still zero Pulumi, zero SSH. The deploy
+  baseline (`cmd/inforge.meshBaseline`, post-`up` in `deploy`/`ephemeral up`) mints via the same
+  renew core, then SSH-triggers each host's renew oneshot (targets from the `meshDeployDescriptor`
+  stack output; key via `--ssh-key`/`INFORGE_DEPLOY_KEY`) — a **signal push, never material**. The
+  provider-key ↔ on-host-path scheme is single-sourced in `meshpaths`
+  (`LeafCertKey`/`LeafKeyKey`/`BundleKey`; `RuntimeDir + key == LeafCertPath`).
 - **Firewall (`firewallPlanByHost(res, meshPublic)`).** A mesh host opens `meshpaths.MTLSPort` to its
   private network CIDR (regional) or `0.0.0.0/0` (the global host — the cross-scope mesh gateway; this is
   what structurally keeps regional meshes private). `meshPublic` is `region == globalScope`, threaded

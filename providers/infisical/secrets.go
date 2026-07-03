@@ -155,11 +155,12 @@ func New(clientId, clientSecret, siteUrl, organizationId, slug string) *Infisica
 func (a *InfisicalSecretsAdapter) ProvisionService(
 	ctx *pulumi.Context, svc types.ServiceSpec, env, region string, all types.AllOutputs, grantSecrets map[string]pulumi.StringOutput,
 ) (*types.ServiceSecretsBundle, error) {
-	// A service is provisioned when it has infra secrets, grant secrets, OR is a
-	// mesh member: a `pki:`-only service still needs a workspace + identity so the
-	// host can fetch the mesh leaf `inforge pki renew` writes under /<svc>/mtls (the
-	// identity's read scope on /<svc> covers it).
-	if len(svc.Environment) == 0 && len(grantSecrets) == 0 && svc.Pki == "" {
+	// A service is provisioned when it has infra secrets, grant secrets, OR opts
+	// into service-side mtls files (mtls_files: true): only then does the host
+	// fetch the leaf `inforge pki renew` writes under /<svc>/mtls (the identity's
+	// read scope on /<svc> covers it). A plain mesh member's leaf lives with the
+	// mesh proxy instead (ADR-0033).
+	if len(svc.Environment) == 0 && len(grantSecrets) == 0 && !svc.MtlsFiles {
 		return nil, nil
 	}
 
@@ -250,6 +251,41 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 
 // ensureWorkspace returns the workspaceId output for the (container, env)
 // pair, creating the InfisicalWorkspace resource on first call for that key.
+// ProvisionMeshHost provisions a mesh host's pull access to its cert material
+// (ADR-0033): the scope's shared mesh workspace (container "mesh", created on
+// first use like any service workspace) plus a per-host machine identity scoped
+// read-only to the host's own path (/<hostKey>) — the per-host blast-radius
+// boundary: a leaked mesh credential exposes only material its host already
+// holds. `inforge pki renew` writes the leaves + bundle under the same path
+// (CertWriter.WriteMeshHost); `inforge-agent mesh-project` reads them with the
+// identity returned here.
+func (a *InfisicalSecretsAdapter) ProvisionMeshHost(ctx *pulumi.Context, hostKey, env string) (*types.ServiceSecretsBundle, error) {
+	workspaceId, err := a.ensureWorkspace(ctx, meshContainer, env)
+	if err != nil {
+		return nil, fmt.Errorf("ensure infisical mesh workspace: %w", err)
+	}
+
+	secretPath := "/" + hostKey
+	identityName := naming.Resource(env, a.slug, "identity", "mesh-"+hostKey)
+	idRes, err := newInfisicalIdentityResource(
+		ctx, identityName,
+		workspaceId, envToSlug(env), secretPath, a.clientId, a.clientSecret, a.siteUrl, a.organizationId,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("provision mesh identity for host %q: %w", hostKey, err)
+	}
+
+	return &types.ServiceSecretsBundle{
+		Project:      workspaceId,
+		ClientID:     idRes.AuthClientId,
+		ClientSecret: idRes.AuthClientSecret,
+		ProviderKind: "infisical",
+		URL:          a.siteUrl,
+		Environment:  envToSlug(env),
+		SecretPath:   secretPath,
+	}, nil
+}
+
 func (a *InfisicalSecretsAdapter) ensureWorkspace(
 	ctx *pulumi.Context, container, env string,
 ) (pulumi.StringOutput, error) {

@@ -3,8 +3,16 @@ package infisical
 import (
 	"context"
 
+	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/providers/infisical/internal/client"
 )
+
+// meshContainer is the reserved container name of the per-scope mesh workspace
+// (workspaceName("mesh", env) → wardnet-<env>-<slug>-container-mesh). The deploy
+// path creates it (ProvisionMeshHost) and the renew path writes into it
+// (WriteMeshHost); sharing the constant keeps the two addressing the same
+// workspace (ADR-0033).
+const meshContainer = "mesh"
 
 // CertWriter writes mesh leaf material to Infisical imperatively (the
 // `inforge pki renew` path, outside Pulumi). It authenticates once and caches
@@ -30,6 +38,34 @@ func NewCertWriter(ctx context.Context, env, slug, clientID, clientSecret, siteU
 		return nil, err
 	}
 	return &CertWriter{adapter: a, env: env, client: c, wsIDs: map[string]string{}}, nil
+}
+
+// WriteMeshHost upserts one mesh host's cert material under the host's own path
+// in the scope's shared mesh workspace (ADR-0033): each co-located service's
+// leaf under "/<hostKey>/<svc>" and the shared trust bundle at "/<hostKey>".
+// leaves maps a service name to its {leaf.crt, leaf.key} PEMs. Like Write, the
+// mesh workspace must already exist (deploy owns its lifecycle and the per-host
+// identity that reads it) — a missing workspace fails loudly.
+func (w *CertWriter) WriteMeshHost(ctx context.Context, hostKey string, leaves map[string]map[string]string, bundlePEM string) error {
+	wsID, ok := w.wsIDs[meshContainer]
+	if !ok {
+		id, err := w.client.WorkspaceID(ctx, w.adapter.workspaceName(meshContainer, w.env))
+		if err != nil {
+			return err
+		}
+		w.wsIDs[meshContainer] = id
+		wsID = id
+	}
+	hostPath := "/" + hostKey
+	if err := w.client.WriteSecrets(ctx, wsID, envToSlug(w.env), hostPath, map[string]string{meshpaths.BundleKey: bundlePEM}); err != nil {
+		return err
+	}
+	for svc, files := range leaves {
+		if err := w.client.WriteSecrets(ctx, wsID, envToSlug(w.env), hostPath+"/"+svc, files); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Write upserts files (secret name -> PEM) under "/<service>/<dir>" in the

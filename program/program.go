@@ -21,6 +21,7 @@ import (
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/meshcert"
+	"github.com/wardnet/inforge/internal/meshplan"
 	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/otelcol"
@@ -155,6 +156,15 @@ func Run(ctx *pulumi.Context) error {
 		return err
 	}
 	ctx.Export("appDeployDescriptor", pulumi.Any(appDesc))
+
+	// The mesh deploy descriptor is the mesh sibling: one target per mesh host
+	// (regional + global), the contract the deploy CLI's post-up baseline step
+	// uses to trigger each host's material pull (ADR-0033).
+	meshDesc, err := meshplan.BuildDeployDescriptor(env, vars.BaseDomain, res, globalRes, regionTable)
+	if err != nil {
+		return err
+	}
+	ctx.Export("meshDeployDescriptor", pulumi.Any(meshDesc))
 
 	// Env-scoped Hetzner SSH keys (wardnet-<env>-key-{user,deploy}) carry no
 	// region slug, so every scope's compute provider would register the same URN.
@@ -705,9 +715,10 @@ func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry,
 	provName := reg.SecretsProviderName()
 	for _, svc := range res.Service {
 		// A service needs provisioning when it has infra secrets, database grants, OR
-		// is a mesh member (pki:): a mesh-only service still needs a workspace +
-		// identity so the host can fetch its leaf (#109).
-		if len(svc.Environment) == 0 && svc.Pki == "" && len(svc.Grants) == 0 {
+		// opts into service-side mtls files (mtls_files: true — the raw-plane
+		// exception; the host fetches its leaf from /<svc>/mtls). A plain mesh
+		// member needs nothing here: its leaf lives with the mesh proxy (ADR-0033).
+		if len(svc.Environment) == 0 && !svc.MtlsFiles && len(svc.Grants) == 0 {
 			continue
 		}
 		if provName == "" {
@@ -977,13 +988,12 @@ func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *
 			SecretPath:  bundle.SecretPath,
 		}
 		d.Env = bundle.Env
-		// A mesh member's leaf/key/CA-bundle are written to the provider by
-		// `inforge pki renew`; advertise them in files: so the agent
-		// projects them at boot (#109). files: are only meaningful with a provider
-		// to fetch them from, so this is gated on the bundle alongside provider/env
-		// — a mesh service with no provider yet (secret-less, pending #109's
-		// per-service identity) emits no files: rather than an unsatisfiable one.
-		if svc.Pki != "" {
+		// Only an mtls_files: opted-in service (a raw mTLS plane outside the mesh,
+		// e.g. tunneller node↔node) still receives its own leaf/key/CA-bundle:
+		// `inforge pki renew` keeps writing them under /<svc>/mtls and files:
+		// advertises them for boot projection (#109). Every other mesh member holds
+		// no cert material — the mesh proxy is the sole leaf custodian (ADR-0033).
+		if svc.MtlsFiles {
 			d.Files = meshcert.DescriptorFiles()
 		}
 	}
@@ -1031,9 +1041,11 @@ func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string
 		fmt.Sprintf("sudo install -d -m 0755 %s", iremote.Quote(service.Folder(svc.Name))),
 		iremote.WriteFileScript(service.UnitPath(svc.Name), service.Unit(svc)),
 	)
-	// A mesh member gets a per-service renewal timer that re-projects its leaf and
-	// reload-or-restarts the unit when `inforge pki renew` rotates it.
-	if svc.Pki != "" {
+	// Only an mtls_files: service gets the per-service renewal timer that
+	// re-projects its own leaf and reload-or-restarts the unit when `inforge pki
+	// renew` rotates it. Other mesh members hold no cert material — the mesh
+	// proxy's own renew timer converges their leaves (ADR-0033).
+	if svc.MtlsFiles {
 		steps = append(steps,
 			iremote.WriteFileScript(service.RenewUnitPath(svc.Name), service.RenewService(svc)),
 			iremote.WriteFileScript(service.RenewTimerPath(svc.Name), service.RenewTimer(svc)),
@@ -1043,7 +1055,7 @@ func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string
 		"sudo systemctl daemon-reload",
 		fmt.Sprintf("sudo systemctl enable %s", iremote.Quote(service.UnitName(svc.Name))),
 	)
-	if svc.Pki != "" {
+	if svc.MtlsFiles {
 		steps = append(steps,
 			fmt.Sprintf("sudo systemctl enable --now %s", iremote.Quote(service.RenewTimerName(svc.Name))),
 		)

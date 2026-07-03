@@ -38,6 +38,15 @@ const (
 	UnitName = "wardnet-mesh"
 	// ConfigPath is the mesh nginx config file, separate from the north-south nginx's.
 	ConfigPath = "/etc/wardnet/mesh-nginx.conf"
+	// AgentDir is the mesh projection's on-host config directory: it holds the mesh
+	// descriptor (descriptor.yaml) and the host-key-encrypted provider credential
+	// (credential.age) `inforge-agent mesh-project` pulls the mesh material with
+	// (ADR-0033). The persistent sibling of the tmpfs RuntimeDir.
+	AgentDir = "/etc/wardnet/mesh"
+	// DescriptorPath / CredentialPath are the mesh descriptor and credential files
+	// within AgentDir — the same basenames the agent expects in any descriptor dir.
+	DescriptorPath = AgentDir + "/descriptor.yaml"
+	CredentialPath = AgentDir + "/credential.age"
 	// PIDPath is the mesh nginx master pid file — distinct from the north-south nginx's
 	// /run/nginx.pid, since two nginx instances cannot share a pid file.
 	PIDPath = "/run/wardnet-mesh-nginx.pid"
@@ -57,6 +66,25 @@ const (
 // (keyed by the bare service name). The mesh holds these, not the service (ADR-0032).
 func LeafCertPath(service string) string { return RuntimeDir + "/" + service + "/leaf.crt" }
 func LeafKeyPath(service string) string  { return RuntimeDir + "/" + service + "/leaf.key" }
+
+// LeafCertFile / LeafKeyFile are the leaf material file basenames — the provider
+// secret names within a service's per-host dir and the on-host file names.
+const (
+	LeafCertFile = "leaf.crt"
+	LeafKeyFile  = "leaf.key"
+)
+
+// LeafCertKey / LeafKeyKey / BundleKey are the provider secret keys of a mesh host's
+// material, relative to the host's provider path (/<hostKey>). They are the single
+// source both sides of the pull agree on: `inforge pki renew` (and the deploy
+// baseline) writes them, and the mesh projection (`inforge-agent mesh-project`)
+// fetches each and writes it under RuntimeDir at the SAME relative path — so
+// RuntimeDir+"/"+LeafCertKey(svc) == LeafCertPath(svc) by construction (ADR-0033).
+func LeafCertKey(service string) string { return service + "/" + LeafCertFile }
+func LeafKeyKey(service string) string  { return service + "/" + LeafKeyFile }
+
+// BundleKey is the provider secret key of the host's shared trust bundle.
+const BundleKey = "bundle.crt"
 
 // DNSName is the DNS-safe name a mesh leaf carries as a DNS SAN (alongside its
 // canonical SPIFFE URI SAN), so stock nginx can select the callee's server cert by

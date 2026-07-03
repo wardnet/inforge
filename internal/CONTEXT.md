@@ -267,7 +267,16 @@ Mesh on a host. A service reaches it over **plain HTTP on loopback** at a stable
 presenting the caller's leaf. It holds the co-located services' leaf keys and enforces the callee's
 `allowed_services`. On regional hosts it never binds the public IP.
 
-**Mesh gateway**:
+**Mesh identity**:
+The per-host machine identity a mesh proxy pulls its cert material with (ADR-0033). Its read scope
+covers **only** the host's own path (`/<hostKey>`) in the scope's shared **mesh workspace** — exactly
+the material that host's proxy already holds in memory, so it broadens no blast radius. Deploy mints
+it and leaves a mesh descriptor + host-key-encrypted credential on the host; `inforge-agent
+mesh-project` uses it at proxy start (reboot self-heal) and on the daily renew timer. Distinct from a
+per-service identity (which reads `/<svc>` — kept only by `mtls_files:` services).
+_Avoid_: a per-host identity that reads every service's `/<svc>/mtls` (the rejected "omniscient"
+layout); SSH-pushing cert material to mesh hosts (renewal never SSHes — only the deploy baseline
+pushes a start **signal**).
 The **global-scope-only** public mesh entry (SNI L4 passthrough, ADR-0027) for cross-scope
 (regional→global) calls. Regional scopes have no public mesh listener — which structurally enforces the
 **regional→global-only** direction rule.

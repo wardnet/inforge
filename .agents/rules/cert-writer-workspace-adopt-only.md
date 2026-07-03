@@ -4,7 +4,11 @@
 via `client.WorkspaceID`, which errors if the workspace does not exist. Using
 `AdoptOrCreateWorkspace` from the renew path would silently create workspaces that
 have no per-service identity or secret policy — they would be inaccessible to the host.
-Workspace lifecycle belongs exclusively to `inforge deploy`.
+Workspace lifecycle belongs exclusively to `inforge deploy`. This covers both write
+paths: the per-service `/<svc>/mtls` copy (`Write`) and the per-host mesh aggregates
+in the mesh workspace (`WriteMeshHost`, ADR-0033) — the mesh workspace and the
+per-host identities that read it are likewise created only by deploy
+(`ProvisionMeshHost`).
 
 ## Applies to
 

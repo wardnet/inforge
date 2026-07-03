@@ -16,8 +16,8 @@ import (
 	"github.com/wardnet/inforge/internal/output"
 )
 
-func newDeployCmd(configPath *string) *cobra.Command {
-	var stackConfig, format, report string
+func newDeployCmd(configPath, dir *string) *cobra.Command {
+	var stackConfig, format, report, sshKeyPath string
 	var yes, allowMultiple bool
 
 	cmd := &cobra.Command{
@@ -27,19 +27,20 @@ func newDeployCmd(configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeploy(cmd.Context(), args[0], stackConfig, *configPath, format, report, yes, allowMultiple)
+			return runDeploy(cmd.Context(), args[0], stackConfig, *configPath, *dir, format, report, sshKeyPath, yes, allowMultiple)
 		},
 	}
 
 	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to stack config (default: inforge.<env>.yaml)")
 	cmd.Flags().StringVarP(&format, "output", "o", "", "output format: '' (default human) or 'json'")
 	cmd.Flags().StringVar(&report, "report", "", "write a markdown run report to this path (default: a temp file)")
+	cmd.Flags().StringVar(&sshKeyPath, "ssh-key", "", "path to the SSH deploy key for the mesh baseline trigger (overrides INFORGE_DEPLOY_KEY)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "auto-approve without prompt")
 	cmd.Flags().BoolVar(&allowMultiple, "allow-multiple", false, "allow running when multiple environments have changes")
 	return cmd
 }
 
-func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, format, reportPath string, yes, allowMultiple bool) error {
+func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir, format, reportPath, sshKeyPath string, yes, allowMultiple bool) error {
 	if !yes {
 		fmt.Printf("Deploy stack %q? Type 'yes' to confirm: ", stackName)
 		scanner := bufio.NewScanner(os.Stdin)
@@ -123,6 +124,14 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, form
 	if pushErr := pushState(); pushErr != nil {
 		return fmt.Errorf("push state: %w", pushErr)
 	}
+
+	// The mesh leaf baseline (ADR-0033): mint real mesh material into the
+	// provider and trigger each mesh host's pull, so the proxies the up just
+	// (re)configured leave their placeholders now rather than on the daily timer.
+	if err := meshBaseline(ctx, s, dir, stackName, stackName, sshKeyPath); err != nil {
+		return err
+	}
+
 	if jsonMode {
 		return printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
 	}
