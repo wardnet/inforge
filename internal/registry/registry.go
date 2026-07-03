@@ -26,6 +26,7 @@ type ProviderRegistry interface {
 	Network(name string) (types.NetworkProvider, error)
 	Compute(name string) (types.ComputeProvider, error)
 	Ingress(name string) (types.IngressProvider, error)
+	Mesh(name string) (types.MeshProvider, error)
 	DNS(name string) (types.DnsProvider, error)
 	Database(name string) (types.DatabaseProvider, error)
 	ServiceSecretsProvisioner(name string) (types.ServiceSecretsProvisioner, error)
@@ -60,6 +61,9 @@ type registry struct {
 
 	hetznerTLSOnce sync.Once
 	hetznerTLS     *hetzner.HetznerTLS
+
+	hetznerMeshOnce sync.Once
+	hetznerMesh     *hetzner.HetznerMesh
 
 	cfProviderOnce sync.Once
 	cfProvider     *cf.Provider
@@ -174,6 +178,21 @@ func (r *registry) Ingress(name string) (types.IngressProvider, error) {
 			r.hetznerTLS = hetzner.NewTLS(r.ssh.DeployPrivateKey, r.slug)
 		})
 		return r.hetznerTLS, nil
+	default:
+		return nil, unknownProvider(name)
+	}
+}
+
+// Mesh resolves the provider that realizes a host's east-west mesh proxy (the
+// second, private nginx; ADR-0032). Like Ingress it inherits the host's compute
+// provider and installs nginx over SSH using the env's deploy private key.
+func (r *registry) Mesh(name string) (types.MeshProvider, error) {
+	switch name {
+	case "hetzner":
+		r.hetznerMeshOnce.Do(func() {
+			r.hetznerMesh = hetzner.NewMesh(r.ssh.DeployPrivateKey, r.slug)
+		})
+		return r.hetznerMesh, nil
 	default:
 		return nil, unknownProvider(name)
 	}

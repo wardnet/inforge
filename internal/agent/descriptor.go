@@ -30,9 +30,11 @@ import (
 // reader, so it bumps this major: v2 added the Deployment block, v3 added the
 // Files map, and v4 swapped Deployment.Namespace for Deployment.HostID; v5 added the
 // cloud/host resource-identity fields (CloudProvider/CloudRegion/AvailabilityZone/
-// MachineType, ADR-0030). An older agent meeting a newer descriptor fails
-// cleanly on the version rather than on an unknown field.
-const SupportedVersion = 5
+// MachineType, ADR-0030); v6 added the Mesh block (the east-west service-mesh
+// endpoint contract — INFORGE_MESH_URL/PORT/SCOPE, ADR-0032). An older agent
+// meeting a newer descriptor fails cleanly on the version rather than on an
+// unknown field.
+const SupportedVersion = 6
 
 // Descriptor is the versioned, secret-free on-host contract inforge writes to
 // /etc/wardnet/services/<svc>/descriptor.yaml (0644 root). It names the service,
@@ -53,6 +55,26 @@ type Descriptor struct {
 	// Empty for services with no mesh PKI material.
 	Files      map[string]string `yaml:"files,omitempty"`
 	Deployment Deployment        `yaml:"deployment"`
+	// Mesh is the east-west service-mesh endpoint contract (ADR-0032), present
+	// only for a mesh member (a pki: service). The agent injects it as the
+	// INFORGE_MESH_* env vars a service reads to make and receive mesh calls; nil
+	// for a non-mesh service, which emits none of them.
+	Mesh *Mesh `yaml:"mesh,omitempty"`
+}
+
+// Mesh is a mesh member's endpoint contract, injected as INFORGE_MESH_* env vars
+// (ADR-0032). URL is the loopback base the service dials for ALL outbound mesh
+// calls (its own egress endpoint on the local mesh proxy); the target service is
+// named per-request in the X-Mesh-Target header, never in the URL. Port is the
+// loopback port the service binds to RECEIVE mesh traffic (its mesh.port); it is
+// omitted for an egress-only member (a pki: service with no mesh: block, which
+// makes outbound calls but exposes nothing inbound). Scope is the member's mesh
+// scope — a region name (e.g. "us-east-1") or the literal "global" — used to form
+// the caller identity the service demuxes on (INFORGE_MESH_SCOPE).
+type Mesh struct {
+	URL   string `yaml:"url"`            // INFORGE_MESH_URL — http://127.0.0.1:<egress port>
+	Port  int    `yaml:"port,omitempty"` // INFORGE_MESH_PORT — the service's mesh.port (0 => omitted, egress-only)
+	Scope string `yaml:"scope"`          // INFORGE_MESH_SCOPE — region name or "global"
 }
 
 // Deployment is the secret-free deployment context inforge derives for a service

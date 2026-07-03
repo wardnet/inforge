@@ -414,6 +414,44 @@ resource-attribute set so VM metrics and app telemetry correlate on `host.id`.
   written `0600` owned by the collector user, and referenced from the config via the collector's
   `${file:…}` provider (never inlined). The config stamps the ADR-0030 attribute set + `host.id`.
 
+## East-west service mesh (ADR-0032)
+
+The mesh is the **east-west** plane (service↔service), **derived** — no resource. It materializes a
+**second per-host nginx** (the mesh proxy, separate from the north-south ingress) on every host running
+≥1 `pki:` service. Authoring surface is only the per-service `mesh:` block (`port` + callee-side
+`allowed_services`); everything else is generated, exactly like the ingress nginx.
+
+- **Pure derivation (`program/mesh.go`, tested).** `expandAllowedCallers` projects a callee's authored
+  `allowed_services` onto the concrete caller identities (`<scope>/<service>`) its local mesh admits —
+  the **security-critical** step (regional callee → same-region + own gateway; global callee → a
+  regional caller from every region, a global caller global-scoped). `meshInputsByHost` groups a scope's
+  pki services per host into the renderer's `Local` (callees, one per `mesh:` block) + `Egress` (callers,
+  every pki service) planes, assigning each a deterministic loopback egress port
+  (`meshpaths.EgressPort(idx)` over the host's sorted services). `meshEgressPortsByService` recomputes
+  that same assignment for the descriptor URL (they MUST agree — same group+sort). `meshTargets` builds
+  the scope-wide routing table (host-global): every callee reached at its host's **private** IP, plus —
+  for a regional scope only — every global callee reached at its global host's **public** IP (the
+  cross-scope hop). A name in both scopes resolves same-scope.
+- **Realization (`realizeMesh`, mirrors `realizeIngress`).** Per mesh host it resolves the listen
+  address (host private IP regional / `0.0.0.0` global) and each target's `Addr` (`<ip>:MTLSPort`) inside
+  a `pulumi` apply over compute IPs, renders `meshnginx.Config`, and installs the second nginx via
+  `providers/hetzner.HetznerMesh` (`registry.Mesh`): unit `meshpaths.UnitName`, config
+  `meshpaths.ConfigPath`, pid `meshpaths.PIDPath`. The global slice realizes first, so a regional scope's
+  cross-scope targets see the global public IPs. `internal/meshnginx.UnitFile`/`SeedScript` add the
+  systemd unit + a **placeholder-cert seed** (self-signed leaf/key/bundle per SNI, only-when-absent —
+  the `provisionApps` idiom) run as the unit's `ExecStartPre`, so `nginx -t` is green and the proxy
+  starts before real leaves land. **Real leaf delivery (the custody shift — the mesh proxy holds each
+  co-located service's leaf, not the service) is a FOLLOW-UP slice**; today the mesh runs on placeholders.
+- **Firewall (`firewallPlanByHost(res, meshPublic)`).** A mesh host opens `meshpaths.MTLSPort` to its
+  private network CIDR (regional) or `0.0.0.0/0` (the global host — the cross-scope mesh gateway; this is
+  what structurally keeps regional meshes private). `meshPublic` is `region == globalScope`, threaded
+  from `createInfra`.
+- **Descriptor v6 (`internal/agent`).** `SupportedVersion` bumped 5→6 for the new `Descriptor.Mesh`
+  block. `renderDescriptor` sets it for every `pki:` service; `buildEnv` injects `INFORGE_MESH_URL`
+  (`http://127.0.0.1:<egress port>`), `INFORGE_MESH_SCOPE` (region name / `global`), and
+  `INFORGE_MESH_PORT` (a callee's `mesh.port`, omitted for an egress-only member). These are the env
+  vars wardnet-cloud reads (plain-HTTP in/out, `X-Mesh-Target` addressing, `X-Service-Identity` demux).
+
 ## Conventions
 
 - **Provider binary names are load-bearing.** Pulumi locates plugins by the exact filename

@@ -120,6 +120,40 @@ func TestBuildEnvOmitsEmptyCloudAttrs(t *testing.T) {
 	}
 }
 
+// TestBuildEnvMesh: a mesh member's endpoint contract (ADR-0032) is injected as
+// INFORGE_MESH_URL/SCOPE always, and INFORGE_MESH_PORT only when it exposes an
+// inbound port; an egress-only member (Port == 0) omits INFORGE_MESH_PORT.
+func TestBuildEnvMesh(t *testing.T) {
+	d := Descriptor{
+		Service: "ddns",
+		User:    "ddns",
+		Mesh:    &Mesh{URL: "http://127.0.0.1:9500", Port: 8080, Scope: "us-east-1"},
+	}
+	env, err := buildEnv(d, nil, "/home/ddns", "i")
+	require.NoError(t, err)
+	assert.Contains(t, env, "INFORGE_MESH_URL=http://127.0.0.1:9500")
+	assert.Contains(t, env, "INFORGE_MESH_SCOPE=us-east-1")
+	assert.Contains(t, env, "INFORGE_MESH_PORT=8080")
+
+	// Egress-only member (no inbound mesh.port) omits INFORGE_MESH_PORT.
+	d.Mesh = &Mesh{URL: "http://127.0.0.1:9501", Scope: "global"}
+	env, err = buildEnv(d, nil, "/home/ddns", "i")
+	require.NoError(t, err)
+	assert.Contains(t, env, "INFORGE_MESH_URL=http://127.0.0.1:9501")
+	assert.Contains(t, env, "INFORGE_MESH_SCOPE=global")
+	for _, e := range env {
+		assert.False(t, strings.HasPrefix(e, "INFORGE_MESH_PORT="), "egress-only member must omit INFORGE_MESH_PORT")
+	}
+
+	// A non-mesh service emits no INFORGE_MESH_* at all.
+	d.Mesh = nil
+	env, err = buildEnv(d, nil, "/home/ddns", "i")
+	require.NoError(t, err)
+	for _, e := range env {
+		assert.False(t, strings.HasPrefix(e, "INFORGE_MESH_"), "non-mesh service must emit no INFORGE_MESH_*")
+	}
+}
+
 // TestBuildEnvRejectsReservedName: a secret mapped to a reserved INFORGE_* name
 // must fail the start rather than emit a duplicate that collides with the injected
 // deployment context.

@@ -21,6 +21,7 @@ import (
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/meshcert"
+	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/otelcol"
 	"github.com/wardnet/inforge/internal/regions"
@@ -279,6 +280,13 @@ func Run(ctx *pulumi.Context) error {
 		if err := realizeIngress(ctx, sc.reg, sc.res, computeOutputs[sc.key], gates, appSeeds, vars.SSH.DeployPrivateKey, env, sc.slug, vars.BaseDomain, ephemeralSlug, providerDefaults); err != nil {
 			return err
 		}
+		// The east-west mesh proxy (ADR-0032) materializes on every host running a
+		// pki: service. It needs the scope's private IPs (attached above) and the
+		// global slice's outputs (realized first, so its public IPs are ready for a
+		// regional scope's cross-scope targets).
+		if err := realizeMesh(ctx, sc.reg, sc.res, globalRes, computeOutputs, sc.key, sc.slug, regionNames, gates, vars.SSH.DeployPrivateKey, env, providerDefaults); err != nil {
+			return err
+		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
 		bundles, err := provisionServiceSecrets(ctx, sc.reg, sc.res, all, env, sc.key, sc.slug)
 		if err != nil {
@@ -318,7 +326,7 @@ func createInfra(
 	// realization, so the derivation cannot wait for the routes. It is computed
 	// from static spec data (which ingress fronts which service, co-located or not),
 	// so no outputs are involved.
-	fwPlan := firewallPlanByHost(res)
+	fwPlan := firewallPlanByHost(res, region == globalScope)
 
 	for _, spec := range res.Network {
 		np, err := reg.Network(types.ResolveProvider(spec.Provider, "network", "", defaults))
@@ -469,6 +477,9 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 	}
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
+	// Each pki: service's loopback egress port (its INFORGE_MESH_URL, ADR-0032),
+	// matching the listener the mesh proxy binds for it.
+	meshEgressPorts := meshEgressPortsByService(res, canonical)
 
 	for _, svc := range res.Service {
 		hostKey, ok := canonical[svc.Host]
@@ -502,11 +513,11 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		// host-key-encrypted credential.age; a secret-less one (no bundle) gets a
 		// static descriptor with an empty provider and no env.
 		if bundle := bundles[svc.Name]; bundle != nil {
-			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, gate); err != nil {
+			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], gate); err != nil {
 				return err
 			}
 		} else {
-			if err := deliverServiceDescriptor(ctx, svc, host, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, gate); err != nil {
+			if err := deliverServiceDescriptor(ctx, svc, host, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], gate); err != nil {
 				return err
 			}
 		}
@@ -811,7 +822,7 @@ func interpolateGrantOutput(tmpl string, values map[string]pulumi.StringOutput) 
 // second command writes both files. The descriptor's provider.project is the
 // workspace ID, so it too is rendered inside an ApplyT on that output. Connection
 // details and the preview/up guards mirror provisionService.
-func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, gate pulumi.Resource) error {
+func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, meshEgressPort int, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
@@ -832,7 +843,7 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 	// descriptor.yaml depends on the workspace ID (provider.project), so render it
 	// inside an ApplyT on that output.
 	descriptor := bundle.Project.ApplyT(func(project string) (string, error) {
-		return renderDescriptor(svc, host, bundle, project, env, region, slug, baseDomain, computeKey)
+		return renderDescriptor(svc, host, bundle, project, env, region, slug, baseDomain, computeKey, meshEgressPort)
 	}).(pulumi.StringOutput)
 
 	// Encrypt {client_id, client_secret} to the host key inside an ApplyT over the
@@ -890,11 +901,11 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 // read, and no credential. The descriptor is fully known at plan time (no
 // workspace ID to resolve), so it needs no ApplyT. Connection details and the
 // preview/up guards mirror provisionService.
-func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, gate pulumi.Resource) error {
+func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, meshEgressPort int, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
-	descriptor, err := renderDescriptor(svc, host, nil, "", env, region, slug, baseDomain, computeKey)
+	descriptor, err := renderDescriptor(svc, host, nil, "", env, region, slug, baseDomain, computeKey, meshEgressPort)
 	if err != nil {
 		return err
 	}
@@ -922,7 +933,11 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 // fqdn/host) is derived from the deployment context and is present for every
 // service, secret-bearing or not. hostKey is the service's resolved compute key
 // ("<name>-<NN>", e.g. "bridge-01"); the host id is its full VM resource name.
-func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, project, env, region, slug, baseDomain, hostKey string) (string, error) {
+func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, project, env, region, slug, baseDomain, hostKey string, meshEgressPort int) (string, error) {
+	// The mesh scope (ADR-0032) is the region name, or the literal ScopeGlobal for
+	// the global slice — captured BEFORE region is blanked below, since the mesh
+	// identity/SNI segment is "global", not empty.
+	meshScope := region
 	// The global scope is region-less: globalScope is an internal output-map key, not
 	// an abstract region, so it must not leak into the on-host descriptor. Surface an
 	// empty INFORGE_DEPLOYMENT_REGION (matching the already-empty RegionSlug) rather
@@ -971,6 +986,22 @@ func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *
 		if svc.Pki != "" {
 			d.Files = meshcert.DescriptorFiles()
 		}
+	}
+	// A mesh member (any pki: service) gets the east-west endpoint contract
+	// (ADR-0032), independent of whether it has a secrets provider: INFORGE_MESH_URL
+	// points at its loopback egress endpoint, INFORGE_MESH_SCOPE carries its mesh
+	// scope, and INFORGE_MESH_PORT (a callee's inbound port) is set only when the
+	// service declares a mesh: block. The egress port is the same one the mesh proxy
+	// binds for this service (meshEgressPortsByService).
+	if svc.Pki != "" {
+		m := &agent.Mesh{
+			URL:   fmt.Sprintf("http://127.0.0.1:%d", meshEgressPort),
+			Scope: meshScope,
+		}
+		if svc.Mesh != nil {
+			m.Port = svc.Mesh.Port
+		}
+		d.Mesh = m
 	}
 	b, err := yaml.Marshal(d)
 	if err != nil {
@@ -1426,7 +1457,11 @@ func checkAppSNICollisions(routesByHost map[string][]types.IngressRoute, appsByH
 // A co-located route needs no rule: nginx reaches the backend over loopback, which
 // the firewall never filters. SSH (22) is not included — the firewall always
 // permits it. Lists are sorted and de-duplicated so the rendered firewall is stable.
-func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
+// meshPublic selects how a mesh host's MTLSPort is scoped in firewallPlanByHost:
+// false (a regional scope) opens it only to the host's private network CIDR;
+// true (the global scope) opens it to the public internet — the global host IS
+// the cross-scope mesh gateway a regional mesh dials over the internet (ADR-0032).
+func firewallPlanByHost(res types.Resources, meshPublic bool) map[string]types.FirewallPorts {
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	netCIDR := networkCIDRByCompute(res, canonical)
 
@@ -1494,6 +1529,25 @@ func firewallPlanByHost(res types.Resources) map[string]types.FirewallPorts {
 		}
 		for _, ep := range svc.ExposedPorts {
 			addExposed(svcHost, ep)
+		}
+	}
+	// The east-west mesh materializes on every host running ≥1 pki: service (ADR-0032);
+	// that host's mesh proxy accepts peer mTLS on meshpaths.MTLSPort. A regional mesh
+	// host opens it only to its private network (peers reach it over the private net);
+	// the global host opens it publicly — it is the cross-scope mesh gateway a regional
+	// mesh dials over the internet, which structurally keeps regional meshes private.
+	for _, svc := range res.Service {
+		if svc.Pki == "" {
+			continue
+		}
+		host, ok := canonical[svc.Host]
+		if !ok {
+			continue
+		}
+		if meshPublic {
+			addPublic(host, meshpaths.MTLSPort)
+		} else {
+			addPrivate(host, meshpaths.MTLSPort)
 		}
 	}
 
