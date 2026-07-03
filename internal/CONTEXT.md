@@ -237,6 +237,47 @@ read/write **plus** `CREATE` on schema `public` so the service owns its own migr
 the `{USER,PASSWORD,HOST,PORT,DBNAME}` value fields plus `{URL}` (the role's full, already-URL-encoded
 connection URI — compose a DSN with `{URL}`, not a hand-assembled `{USER}:{PASSWORD}@…`).
 
+### East-west mesh and north-south edges (ADR-0032)
+
+**North-south** / **East-west**:
+The two traffic planes. **North-south** = traffic entering/leaving the perimeter (external **daemons**
+dialing in), handled by public edges (**Ingress**, **Gateway**). **East-west** = service↔service traffic
+inside the perimeter, handled by the **Mesh**. Different callers, different auth: daemons carry an
+app-level JWT; services carry mesh identity (`<scope>/<service>` leaf).
+
+**Gateway**:
+The north-south public edge **daemons HTTPS into** (an authored resource: `host`, `subdomain`, and
+`routes: [{path, service}]`). It is a **mesh client** (identity `<scope>/gateway`): it TLS-terminates the
+daemon, path-routes, and reaches the target service **through the Mesh** (so it is location-transparent
+and holds no service locations). It does **not** validate the daemon JWT — it forwards it for the service
+to validate. Distinct from **Ingress** (apps/web) and from the **Mesh** (east-west).
+_Avoid_: "API gateway" as the east-west router (removed); a single `INFORGE_GATEWAY_URL` / scope-singleton
+gateway (removed); a `type: gateway` service route (removed).
+
+**Mesh**:
+The east-west plane. **Derived, not authored** — it materializes wherever `pki:` services run. A service
+opts in by declaring `pki:` (mesh membership, ADR-0024) and a `mesh:` block (`port` + `allowed_services`).
+_Avoid_: a "mesh resource" (there is none); "sidecar" (we run one shared proxy per host, not one per
+service).
+
+**Mesh proxy**:
+The per-host nginx (a **second**, private nginx, separate from the north-south one) that realizes the
+Mesh on a host. A service reaches it over **plain HTTP on loopback** at a stable per-service endpoint
+(`INFORGE_MESH_URL`); the proxy owns the routing table and does the **mTLS** hop to peer proxies,
+presenting the caller's leaf. It holds the co-located services' leaf keys and enforces the callee's
+`allowed_services`. On regional hosts it never binds the public IP.
+
+**Mesh gateway**:
+The **global-scope-only** public mesh entry (SNI L4 passthrough, ADR-0027) for cross-scope
+(regional→global) calls. Regional scopes have no public mesh listener — which structurally enforces the
+**regional→global-only** direction rule.
+
+**Location transparency**:
+The invariant that a caller never addresses a callee's *location* — it names the target service
+(`$INFORGE_MESH_URL/<target>/…`) and the local Mesh proxy resolves the current location (loopback /
+private IP / mesh gateway). Scaling a service onto its own host regenerates the mesh routing tables only;
+no caller code, manifest, or URL changes.
+
 ### Providers
 
 **Provider**:
