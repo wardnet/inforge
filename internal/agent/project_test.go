@@ -1,4 +1,4 @@
-package bootstrapper
+package agent
 
 import (
 	"os"

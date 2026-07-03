@@ -5,7 +5,7 @@ package nginx
 // is a no-op beyond apt's own bookkeeping.
 //
 // It installs no secret tooling. Secrets are fetched at runtime by the Go
-// inforge-bootstrap, which decrypts the host-key credential in-process — the host
+// inforge-agent, which decrypts the host-key credential in-process — the host
 // needs no jq/yq/sops/age. Only the packages nginx's apt repository requires
 // (curl, gnupg, ca-certificates, the distro keyring) are installed.
 //

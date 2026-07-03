@@ -16,7 +16,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 	"github.com/wardnet/inforge/internal/agehost"
 	"github.com/wardnet/inforge/internal/app"
-	"github.com/wardnet/inforge/internal/bootstrapper"
+	"github.com/wardnet/inforge/internal/agent"
 	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
@@ -89,7 +89,7 @@ func Run(ctx *pulumi.Context) error {
 	}
 	vars.SSH.DeployPrivateKey = deployPrivateKey
 
-	// inforgeVersion pins the inforge-bootstrap release asset each host downloads
+	// inforgeVersion pins the inforge-agent release asset each host downloads
 	// during service provisioning. It is injected by the CLI (which knows its own
 	// build version) via stack config / INFORGE_VERSION — the same pattern as
 	// deploy_private_key — and defaults to "dev", which has no release asset and so
@@ -460,12 +460,12 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 	if len(res.Service) == 0 {
 		return nil
 	}
-	// The unit's ExecStart is inforge-bootstrap, downloaded per host pinned to
+	// The unit's ExecStart is inforge-agent, downloaded per host pinned to
 	// this inforge version. A "dev" build publishes no release asset, so fail
 	// the deploy with a clear message rather than emitting a doomed download.
 	// Enforced only at up time; preview never runs the command.
 	if !ctx.DryRun() && inforgeVersion == "dev" {
-		return fmt.Errorf("cannot provision services: inforge build is 'dev' — no inforge-bootstrap release asset to download; deploy with a released inforge binary")
+		return fmt.Errorf("cannot provision services: inforge build is 'dev' — no inforge-agent release asset to download; deploy with a released inforge binary")
 	}
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
@@ -802,7 +802,7 @@ func interpolateGrantOutput(tmpl string, values map[string]pulumi.StringOutput) 
 	}).(pulumi.StringOutput), nil
 }
 
-// deliverServiceSecrets writes a service's bootstrapper inputs onto its host: the
+// deliverServiceSecrets writes a service's agent inputs onto its host: the
 // secret-free descriptor.yaml (0644) and the host-key-encrypted credential.age
 // (0600). It is a two-phase output dependency: a command reads the host SSH
 // public key (Stdout), the program age-encrypts the identity credentials to that
@@ -913,11 +913,11 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 	return nil
 }
 
-// renderDescriptor marshals the on-host bootstrapper descriptor for a service.
-// It builds the bootstrapper's own Descriptor struct (imported, not duplicated)
+// renderDescriptor marshals the on-host agent descriptor for a service.
+// It builds the agent's own Descriptor struct (imported, not duplicated)
 // so the producer can never drift from the consumer's schema. A nil bundle is a
 // secret-less service: the provider is left zero-valued and env nil, which the
-// bootstrapper reads as "no secrets to fetch". For a secret-bearing service,
+// agent reads as "no secrets to fetch". For a secret-bearing service,
 // project is the resolved workspace ID. The deployment block (region/env/domain/
 // fqdn/host) is derived from the deployment context and is present for every
 // service, secret-bearing or not. hostKey is the service's resolved compute key
@@ -930,12 +930,12 @@ func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *
 	if region == globalScope {
 		region = ""
 	}
-	d := bootstrapper.Descriptor{
-		Version: bootstrapper.SupportedVersion,
+	d := agent.Descriptor{
+		Version: agent.SupportedVersion,
 		Service: svc.Name,
 		Exec:    service.ExecPath(svc.Name),
 		User:    svc.User,
-		Deployment: bootstrapper.Deployment{
+		Deployment: agent.Deployment{
 			Region:      region,
 			RegionSlug:  slug,
 			Environment: env,
@@ -954,7 +954,7 @@ func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *
 		},
 	}
 	if bundle != nil {
-		d.Provider = bootstrapper.Provider{
+		d.Provider = agent.Provider{
 			Kind:        bundle.ProviderKind,
 			URL:         bundle.URL,
 			Project:     project,
@@ -963,7 +963,7 @@ func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *
 		}
 		d.Env = bundle.Env
 		// A mesh member's leaf/key/CA-bundle are written to the provider by
-		// `inforge pki renew`; advertise them in files: so the bootstrapper
+		// `inforge pki renew`; advertise them in files: so the agent
 		// projects them at boot (#109). files: are only meaningful with a provider
 		// to fetch them from, so this is gated on the bundle alongside provider/env
 		// — a mesh service with no provider yet (secret-less, pending #109's
@@ -979,16 +979,16 @@ func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *
 	return string(b), nil
 }
 
-// serviceProvisionScript renders the host shell that downloads inforge-bootstrap,
+// serviceProvisionScript renders the host shell that downloads inforge-agent,
 // writes a service's unit + folder (+ no-login user), reloads systemd, and
-// ENABLES the unit. It must never emit a start/restart: the bootstrapper's target
+// ENABLES the unit. It must never emit a start/restart: the agent's target
 // binary (<folder>/run) does not exist until release delivers code, so a start
 // would fail the deploy. All caller-supplied values interpolated into the shell
 // are quoted.
 func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string {
 	steps := []string{
 		"set -euo pipefail",
-		bootstrapDownloadStep(inforgeVersion),
+		agentDownloadStep(inforgeVersion),
 	}
 	if svc.User != "" {
 		steps = append(steps, fmt.Sprintf(
@@ -1020,18 +1020,18 @@ func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string
 	return strings.Join(steps, "\n")
 }
 
-// bootstrapDownloadStep renders the idempotent shell that downloads the
-// inforge-bootstrap raw release binary onto the host, verifies its checksum, and
-// installs it at service.BootstrapBin. The host arch is detected on the host
+// agentDownloadStep renders the idempotent shell that downloads the
+// inforge-agent raw release binary onto the host, verifies its checksum, and
+// installs it at service.AgentBin. The host arch is detected on the host
 // (uname -m → Go arch), the version is pinned to the deploying inforge build, and
-// the goreleaser raw-asset name scheme is mirrored (inforge-bootstrap_<ver>_linux_<arch>,
+// the goreleaser raw-asset name scheme is mirrored (inforge-agent_<ver>_linux_<arch>,
 // under the v<ver> release tag). The binary's sha256 is verified against the
 // release checksums.txt before it is installed as the root ExecStart for every
 // service — a tampered or truncated download must never run. curl -fsSL fails the
 // deploy clearly on a missing asset; a trap removes the temp files on any exit.
 // The version is single-quoted into a shell var so it is injection-safe while
 // still composing with the shell-side ${arch} expansion.
-func bootstrapDownloadStep(inforgeVersion string) string {
+func agentDownloadStep(inforgeVersion string) string {
 	return strings.Join([]string{
 		"ver=" + iremote.Quote(inforgeVersion),
 		"arch=$(uname -m)",
@@ -1040,7 +1040,7 @@ func bootstrapDownloadStep(inforgeVersion string) string {
 		"  aarch64) arch=arm64 ;;",
 		"  *) echo \"unsupported host arch: $arch\" >&2; exit 1 ;;",
 		"esac",
-		"asset=\"inforge-bootstrap_${ver}_linux_${arch}\"",
+		"asset=\"inforge-agent_${ver}_linux_${arch}\"",
 		"base=\"https://github.com/wardnet/inforge/releases/download/v${ver}\"",
 		"tmp=$(mktemp)",
 		"sums=$(mktemp)",
@@ -1053,7 +1053,7 @@ func bootstrapDownloadStep(inforgeVersion string) string {
 		"[ -n \"$want\" ] || { echo \"no checksum for $asset in release\" >&2; exit 1; }",
 		"got=$(sha256sum \"$tmp\" | awk '{print $1}')",
 		"[ \"$want\" = \"$got\" ] || { echo \"checksum mismatch for $asset\" >&2; exit 1; }",
-		fmt.Sprintf("sudo install -m 0755 \"$tmp\" %s", iremote.Quote(service.BootstrapBin)),
+		fmt.Sprintf("sudo install -m 0755 \"$tmp\" %s", iremote.Quote(service.AgentBin)),
 	}, "\n")
 }
 
@@ -1677,7 +1677,7 @@ func resolveNetworkOutput(spec types.ComputeSpec, networks []types.NetworkSpec, 
 
 // assembleManifest builds a compute instance's plain (secret-free) manifest.
 // Secrets are no longer baked here — they are delivered to services at runtime by
-// inforge-bootstrap — so the manifest carries only the base coordinates.
+// inforge-agent — so the manifest carries only the base coordinates.
 func assembleManifest(spec types.ComputeSpec, env, region, slug string) (string, error) {
 	base := manifest.Base{
 		Version:   1,

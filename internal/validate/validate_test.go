@@ -930,7 +930,7 @@ func TestCheckServiceDeployUser(t *testing.T) {
 }
 
 func TestCheckServiceUser(t *testing.T) {
-	// A service that declares no user has no account for the bootstrapper to drop
+	// A service that declares no user has no account for the agent to drop
 	// privilege to before exec.
 	ctx := baseCtx()
 	errs, _ := checkService(types.ServiceSpec{Host: "bridge", Type: "raw"}, ctx)

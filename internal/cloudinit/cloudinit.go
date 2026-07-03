@@ -1,7 +1,7 @@
 // Package cloudinit assembles a compute instance's cloud-init script: it
 // substitutes the per-instance placeholders in a project's template and appends
 // the inforge first-boot user-provisioning step. Secret delivery is no longer a
-// first-boot concern — secrets are fetched at runtime by inforge-bootstrap — so
+// first-boot concern — secrets are fetched at runtime by inforge-agent — so
 // the former SOPS/age re-key bootstrap step has been retired.
 package cloudinit
 

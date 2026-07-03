@@ -172,9 +172,9 @@ committed to `variables.yaml`.
 _Avoid_: "TLS termination resource" / Caddy (removed); "load balancer"; calling it a resource.
 
 **Deployment context (`INFORGE_DEPLOYMENT_*`)**:
-The secret-free `deployment` block of a service's bootstrapper descriptor — region, region slug,
+The secret-free `deployment` block of a service's agent descriptor — region, region slug,
 environment, base domain, `namespace` (`<env>.<slug>.<service>`), and `fqdn` (the `<svc>.svc` FQDN).
-`inforge-bootstrap` injects each as an `INFORGE_DEPLOYMENT_*` env var alongside the service's secrets,
+`inforge-agent` injects each as an `INFORGE_DEPLOYMENT_*` env var alongside the service's secrets,
 for every service (secret-bearing or not). Derived, never authored.
 
 **Source DSL**:
@@ -268,15 +268,15 @@ _Avoid_: "region override" (it is not an override of anything), "region config".
 **Manifest**:
 The per-instance, **secret-free** document materialised onto a VM via cloud-init, carrying only base
 coordinates (version, region, namespace). Secrets are no longer baked into it — they are fetched at
-runtime by `inforge-bootstrap`.
+runtime by `inforge-agent`.
 
 **Secret value**:
 A secret a service consumes, declared in the service's `environment.yaml` sidecar via a `vault:KEY` or
 `ref:` source. inforge never bakes secret values into the manifest or any other artifact; it writes them
 to the secrets provider under the service's scoped path, and the service fetches them at runtime.
 
-**Runtime secret fetch** (`inforge-bootstrap`):
-Every inforge-managed service's systemd `ExecStart` is `inforge-bootstrap`, a small statically-linked
+**Runtime secret fetch** (`inforge-agent`):
+Every inforge-managed service's systemd `ExecStart` is `inforge-agent`, a small statically-linked
 Go binary. At start it reads the service's on-host `descriptor.yaml` (secret-free: provider
 coordinates + env-var → vault-key mapping), decrypts the service's `credential.age` with the host SSH
 key, logs in to the provider with that machine identity, fetches the secrets, injects them as env
@@ -363,7 +363,7 @@ The number of *unpinned* (historical, rollback) artifacts a service retains. Pru
 > credential), composes the `DATABASE_URL` from the role's connection fields, and writes it to the
 > secrets provider under the service's path alongside a per-service identity — then drops a secret-free
 > `descriptor.yaml` and a host-key-encrypted `credential.age` on the host. At service start,
-> `inforge-bootstrap` decrypts the credential, fetches the secret, and execs the service with it in the
+> `inforge-agent` decrypts the credential, fetches the secret, and execs the service with it in the
 > environment. No secret value is ever baked into the manifest, and there is no `ref:database` — a
 > database exposes no referenceable output. Provision set all that up — shipping the binary is a
 > separate deployment.

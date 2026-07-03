@@ -1,4 +1,4 @@
-// Command inforge-bootstrap is the systemd ExecStart for every inforge-managed
+// Command inforge-agent is the systemd ExecStart for every inforge-managed
 // service. It runs as root, fetches the service's secrets from the configured
 // provider at start time, injects them as environment variables, drops privilege
 // to the service user, and execs the real service binary — so secrets are
@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/wardnet/inforge/internal/bootstrapper"
+	"github.com/wardnet/inforge/internal/agent"
 )
 
 // version is the build version, overridden at release time via -ldflags
@@ -20,8 +20,8 @@ import (
 var version = "dev"
 
 func main() {
-	if err := bootstrapper.Run(os.Args, version); err != nil {
-		fmt.Fprintf(os.Stderr, "inforge-bootstrap: %v\n", err)
+	if err := agent.Run(os.Args, version); err != nil {
+		fmt.Fprintf(os.Stderr, "inforge-agent: %v\n", err)
 		os.Exit(1)
 	}
 }

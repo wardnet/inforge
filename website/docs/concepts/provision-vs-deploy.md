@@ -11,7 +11,7 @@ inforge separates two distinct lifecycles: **provisioning** and **deployment**.
 **Provisioning** creates a VM's host-side scaffolding:
 
 - The on-host folder `/srv/wardnet/<service>`
-- An inforge-managed systemd unit `wardnet-<service>.service` whose `ExecStart` is `inforge-bootstrap`
+- An inforge-managed systemd unit `wardnet-<service>.service` whose `ExecStart` is `inforge-agent`
 - The service's secret-free `descriptor.yaml` and, for a secret-bearing service, its host-key-encrypted
   `credential.age` under `/etc/wardnet/services/<service>/` (the service fetches its secrets at runtime)
 

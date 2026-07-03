@@ -1,7 +1,7 @@
 # Context Map
 
 This repository builds four statically-linked binaries across three bounded contexts: the
-`inforge` toolkit/CLI (which also ships the `inforge-bootstrap` runtime secret bootstrapper) and two
+`inforge` toolkit/CLI (which also ships the `inforge-agent` on-host runtime agent) and two
 Pulumi provider plugins. Only the **Toolkit** context has a resolved
 domain language today; the provider contexts are stubs and gain their own `CONTEXT.md` when
 implemented.
@@ -23,7 +23,7 @@ implemented.
   `ComputeProvider`, `DnsProvider`, `DatabaseProvider`, `IngressProvider`,
   `ServiceSecretsProvisioner`) and a `ProviderRegistry`. Each provider context satisfies one or more
   of these.
-- **Toolkit ↔ secrets**: services fetch their own secrets at runtime via `inforge-bootstrap`. inforge
+- **Toolkit ↔ secrets**: services fetch their own secrets at runtime via `inforge-agent`. inforge
   writes each service's provider coordinates and a host-key-encrypted machine-identity credential to
   the host; it bakes no secret values and uses no key broker. See
   [ADR-0010](./docs/adr/0010-runtime-secret-fetch.md).

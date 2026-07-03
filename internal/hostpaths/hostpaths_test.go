@@ -13,7 +13,7 @@ func TestHostPaths(t *testing.T) {
 		t.Errorf("UnitName = %q, want wardnet-bridge.service", got)
 	}
 	// RuntimeDir is RuntimeSubdir under /run — the unit's RuntimeDirectory= and
-	// the bootstrapper's projection target must stay byte-for-byte identical.
+	// the agent's projection target must stay byte-for-byte identical.
 	if RuntimeDir("svc") != "/run/"+RuntimeSubdir("svc") {
 		t.Error("RuntimeDir must be /run/ + RuntimeSubdir")
 	}

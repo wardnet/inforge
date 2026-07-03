@@ -1,4 +1,4 @@
-package bootstrapper
+package agent
 
 import (
 	"bytes"
@@ -21,7 +21,7 @@ var systemctl = func(args ...string) error {
 }
 
 // projectFiles writes each of the descriptor's files: entries (env-var → provider
-// key) as a PEM file under dir, mode 0400 owned by uid:gid. The bootstrapper runs
+// key) as a PEM file under dir, mode 0400 owned by uid:gid. The agent runs
 // as root and chowns to the service user before dropping privilege. The provider
 // key (e.g. "mtls/leaf.crt") is preserved as the relative on-disk path so distinct
 // keys never collide. The whole set lands atomically: every file is staged to a

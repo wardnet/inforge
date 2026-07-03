@@ -21,7 +21,7 @@ import (
 
 // Mesh cert delivery contract — shared by `inforge pki renew` (which writes the
 // values to the provider) and the on-host descriptor's `files:` map (which
-// references them so the bootstrapper projects them at boot, #109). The renew
+// references them so the agent projects them at boot, #109). The renew
 // command writes CertFiles' keys as secrets under "<service path>/<MtlsDir>";
 // DescriptorFiles points each *_PATH env var at the matching provider key.
 const (
@@ -44,7 +44,7 @@ func CertFiles(leafPEM, keyPEM, bundlePEM string) map[string]string {
 
 // DescriptorFiles is the descriptor `files:` map for a mesh service: each *_PATH
 // env var → its provider key relative to the service secret path. The host
-// bootstrapper fetches the key, writes the PEM to a tmpfs file, and sets the env
+// agent fetches the key, writes the PEM to a tmpfs file, and sets the env
 // var to that path (#109).
 func DescriptorFiles() map[string]string {
 	return map[string]string{

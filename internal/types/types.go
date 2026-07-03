@@ -444,7 +444,7 @@ type NetworkProvider interface {
 // Listen ports plus :80 for ACME) and private ports (a backend's route Target
 // ports, scoped to the private network CIDR) — the program derives them so the
 // firewall stays a pure consumer. Secret delivery is no longer a compute-creation
-// concern: secrets are fetched at runtime by inforge-bootstrap, so there is no
+// concern: secrets are fetched at runtime by inforge-agent, so there is no
 // bootstrap document.
 //
 // Contract: when spec.DeployUser is set, an implementation MUST provision that
@@ -523,7 +523,7 @@ type DatabaseProvider interface {
 // ServiceSecretsBundle is everything inforge needs to deliver one service's
 // runtime secrets contract to its host: the provider coordinates and env-var ->
 // vault-key mapping for the descriptor, plus the per-service machine identity's
-// universal-auth credentials (Outputs, ClientSecret sensitive) the bootstrapper
+// universal-auth credentials (Outputs, ClientSecret sensitive) the agent
 // logs in with. Project is the workspace ID (what the on-host fetcher sends as
 // the workspaceId query param), so it is an Output resolved at deploy time. The
 // program age-encrypts {ClientId, ClientSecret} to the host key and writes the

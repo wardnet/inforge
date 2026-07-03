@@ -88,7 +88,7 @@ already exist — run `inforge deploy` for the environment first; renew adopts i
 ## How a renewed leaf reaches a running service
 
 Each mesh service gets a **per-service systemd timer** (`wardnet-<svc>-renew.timer`) installed at deploy.
-It runs `inforge-bootstrap project` daily, which re-fetches the current leaf from the provider into the
+It runs `inforge-agent project` daily, which re-fetches the current leaf from the provider into the
 service's tmpfs `RuntimeDirectory` and, **only if the leaf changed**, applies it:
 
 - If the service declares a [`reload:`](/resources/service) command, the timer **reloads** the unit
@@ -98,7 +98,7 @@ service's tmpfs `RuntimeDirectory` and, **only if the leaf changed**, applies it
 
 So renewal is hands-off: `inforge pki renew` writes the new leaf to the provider, and each host converges
 on its own within the timer interval (well inside the 90-day TTL), with no CLI→host connection required.
-At boot, the bootstrapper projects the leaf the same way before starting the service. Leaf private keys
+At boot, the agent projects the leaf the same way before starting the service. Leaf private keys
 live only in tmpfs (RAM) for the life of a boot — never written to persistent disk.
 
 ### The leaf is minted at release time, not just on the timer

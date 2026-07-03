@@ -23,7 +23,7 @@ func Folder(name string) string {
 }
 
 // UnitName returns the systemd unit name inforge manages for a service. The
-// scheme lives in internal/hostpaths so inforge-bootstrap (which reloads the
+// scheme lives in internal/hostpaths so inforge-agent (which reloads the
 // unit at renewal) shares one definition.
 func UnitName(name string) string {
 	return hostpaths.UnitName(name)
@@ -34,18 +34,18 @@ func UnitPath(name string) string {
 	return "/etc/systemd/system/" + UnitName(name)
 }
 
-// BootstrapBin is the on-host path of the inforge-bootstrap binary, the
+// AgentBin is the on-host path of the inforge-agent binary, the
 // ExecStart for every service unit. inforge deploy downloads it here.
-const BootstrapBin = "/usr/local/bin/inforge-bootstrap"
+const AgentBin = "/usr/local/bin/inforge-agent"
 
-// DescriptorDir returns the per-service directory holding the bootstrapper's
+// DescriptorDir returns the per-service directory holding the agent's
 // inputs (descriptor.yaml + credential.age). It is the single argument passed to
-// inforge-bootstrap in the unit's ExecStart.
+// inforge-agent in the unit's ExecStart.
 func DescriptorDir(name string) string {
 	return "/etc/wardnet/services/" + name
 }
 
-// ExecPath returns the real service binary the bootstrapper execs after dropping
+// ExecPath returns the real service binary the agent execs after dropping
 // privilege — the payload `inforge release` delivers into the service folder. It
 // is what the descriptor's `exec` field is set to, kept in sync with the unit's
 // WorkingDirectory here.
@@ -54,9 +54,9 @@ func ExecPath(name string) string {
 }
 
 // DescriptorPath / CredentialPath are the two files inforge writes into a
-// service's DescriptorDir for the bootstrapper to read: the versioned, secret-free
+// service's DescriptorDir for the agent to read: the versioned, secret-free
 // descriptor (0644) and the host-key-encrypted provider credential (0600). The
-// filenames must match the bootstrapper's descriptorFile/credentialFile constants.
+// filenames must match the agent's descriptorFile/credentialFile constants.
 func DescriptorPath(name string) string {
 	return DescriptorDir(name) + "/descriptor.yaml"
 }
@@ -66,11 +66,11 @@ func CredentialPath(name string) string {
 	return DescriptorDir(name) + "/credential.age"
 }
 
-// unitTemplate renders the unit. The service runs as root under inforge-bootstrap
-// (no User=): the bootstrapper fetches secrets, then drops privilege to the
+// unitTemplate renders the unit. The service runs as root under inforge-agent
+// (no User=): the agent fetches secrets, then drops privilege to the
 // service user itself and execs ExecPath, so systemd supervises the real service
 // PID. StartLimitIntervalSec=0 disables systemd's start-rate limit so a service
-// always recovers once the vault returns (the bootstrapper bounds its own retry
+// always recovers once the vault returns (the agent bounds its own retry
 // backoff per start, then exits non-zero to let Restart=on-failure loop).
 const unitTemplate = `[Unit]
 Description=wardnet %s
@@ -91,9 +91,9 @@ WantedBy=multi-user.target
 `
 
 // Unit renders the systemd unit file for a service. The unit's ExecStart is the
-// inforge-bootstrap binary pointed at the service's descriptor directory; the
-// unit runs as root (no User=) because the bootstrapper drops privilege itself.
-// RuntimeDirectory= gives the bootstrapper a tmpfs dir (RuntimeDir) to project
+// inforge-agent binary pointed at the service's descriptor directory; the
+// unit runs as root (no User=) because the agent drops privilege itself.
+// RuntimeDirectory= gives the agent a tmpfs dir (RuntimeDir) to project
 // mesh PEMs into, created and cleaned with the unit. ExecReload= is emitted when
 // the service declares reload:, so the renewal timer can apply a renewed leaf
 // without a restart.
@@ -102,12 +102,12 @@ func Unit(spec types.ServiceSpec) string {
 	if spec.Reload != "" {
 		reloadLine = "ExecReload=" + spec.Reload + "\n"
 	}
-	return fmt.Sprintf(unitTemplate, spec.Name, Folder(spec.Name), hostpaths.RuntimeSubdir(spec.Name), BootstrapBin, DescriptorDir(spec.Name), reloadLine)
+	return fmt.Sprintf(unitTemplate, spec.Name, Folder(spec.Name), hostpaths.RuntimeSubdir(spec.Name), AgentBin, DescriptorDir(spec.Name), reloadLine)
 }
 
-// RuntimeDir is the tmpfs directory the bootstrapper projects a service's mesh
+// RuntimeDir is the tmpfs directory the agent projects a service's mesh
 // PEMs into. It matches the unit's RuntimeDirectory= (RuntimeSubdir) and is
-// shared with inforge-bootstrap via internal/hostpaths.
+// shared with inforge-agent via internal/hostpaths.
 func RuntimeDir(name string) string {
 	return hostpaths.RuntimeDir(name)
 }
@@ -129,11 +129,11 @@ Type=oneshot
 ExecStart=%s project %s
 `
 
-// RenewService renders the oneshot that runs `inforge-bootstrap project` for a
+// RenewService renders the oneshot that runs `inforge-agent project` for a
 // service: re-fetch the current leaf, re-project it into the RuntimeDir, and
 // reload-or-restart the unit if it changed.
 func RenewService(spec types.ServiceSpec) string {
-	return fmt.Sprintf(renewServiceTemplate, spec.Name, BootstrapBin, DescriptorDir(spec.Name))
+	return fmt.Sprintf(renewServiceTemplate, spec.Name, AgentBin, DescriptorDir(spec.Name))
 }
 
 const renewTimerTemplate = `[Unit]

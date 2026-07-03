@@ -2,7 +2,7 @@
 // InfisicalSecretsAdapter creates one InfisicalWorkspace per (container, region)
 // pair — mirroring the NeonDatabaseAdapter container-dedup pattern — and, per
 // service, writes the service's infra secrets under its scoped path and mints a
-// per-service machine identity (ProvisionService) so inforge-bootstrap fetches
+// per-service machine identity (ProvisionService) so inforge-agent fetches
 // those secrets at runtime via the Infisical Universal Auth flow.
 package infisical
 
@@ -82,7 +82,7 @@ func newInfisicalSecretsBatchResource(
 
 // infisicalIdentityResource is the output state returned by the Pulumi engine
 // after an InfisicalIdentity is created: the minted universal-auth credentials
-// the on-host bootstrapper logs in with.
+// the on-host agent logs in with.
 type infisicalIdentityResource struct {
 	pulumi.CustomResourceState
 	AuthClientId     pulumi.StringOutput `pulumi:"authClientId"`

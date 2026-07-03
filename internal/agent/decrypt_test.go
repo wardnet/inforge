@@ -1,4 +1,4 @@
-package bootstrapper
+package agent
 
 import (
 	"bytes"
@@ -18,7 +18,7 @@ import (
 
 // TestDecryptCredentialRoundTrip encrypts a credential to a host SSH key the way
 // inforge will, then decrypts it through DecryptCredential — proving the
-// host-key age path the bootstrapper relies on (and, by construction, the format
+// host-key age path the agent relies on (and, by construction, the format
 // PR 2b must produce).
 func TestDecryptCredentialRoundTrip(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)

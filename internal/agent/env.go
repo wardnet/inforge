@@ -1,4 +1,4 @@
-package bootstrapper
+package agent
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// minimalPATH is the explicit PATH given to the service. The bootstrapper does
+// minimalPATH is the explicit PATH given to the service. The agent does
 // not inherit its own environment — the child gets only this base plus the
 // service's secrets, so nothing from the root context leaks in.
 const minimalPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

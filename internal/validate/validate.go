@@ -17,7 +17,7 @@ import (
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
-	"github.com/wardnet/inforge/internal/bootstrapper"
+	"github.com/wardnet/inforge/internal/agent"
 	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/meshcert"
@@ -1200,7 +1200,7 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	if s.Type == "container" {
 		warns = append(warns, "type: \"container\" is reserved and not implemented this phase")
 	}
-	// Every service must declare the no-login user it runs as: the bootstrapper
+	// Every service must declare the no-login user it runs as: the agent
 	// drops privilege to this account before exec, so without it there is no
 	// account to drop to. Required for secret-less and secret-bearing alike.
 	if s.User == "" {
@@ -1548,8 +1548,8 @@ func checkApp(s types.AppSpec, ctx regionContext) (errs, warns []string) {
 // or "grants[0].outputs.FOO").
 func reservedEnvNameErrs(envName, label string) []string {
 	var errs []string
-	if strings.HasPrefix(envName, bootstrapper.ReservedEnvPrefix) {
-		errs = append(errs, fmt.Sprintf("%s: env var name uses the reserved %s* namespace owned by inforge", label, bootstrapper.ReservedEnvPrefix))
+	if strings.HasPrefix(envName, agent.ReservedEnvPrefix) {
+		errs = append(errs, fmt.Sprintf("%s: env var name uses the reserved %s* namespace owned by inforge", label, agent.ReservedEnvPrefix))
 	}
 	if _, reserved := meshcert.DescriptorFiles()[envName]; reserved {
 		errs = append(errs, fmt.Sprintf("%s: env var name is reserved by inforge for mesh certificate paths", label))

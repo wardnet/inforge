@@ -63,7 +63,7 @@ LOG_LEVEL: info                                 # a literal (non-secret config) 
 | `container` | string | Yes | Grouping label. Environment variables are scoped to the container, so services sharing one receive the same values. |
 | `host` | string | Yes | **Name** of the Compute resource that hosts this service (e.g. `bridge`). The host must have `instance_count: 1`; a multi-instance host is a validation error. |
 | `type` | string | Yes | Delivery type. Currently only `raw` (SSH-push) is supported. `container` is reserved. |
-| `user` | string | Yes | No-login system user the service runs as. inforge emits `User=<name>` in the systemd unit and creates the account via SSH on first deploy; the bootstrapper drops privilege to it before exec. |
+| `user` | string | Yes | No-login system user the service runs as. inforge emits `User=<name>` in the systemd unit and creates the account via SSH on first deploy; the agent drops privilege to it before exec. |
 | `pki` | string | Yes | Name of the **two-tier (mesh) PKI** in `pki.enc.yaml` this service is a leaf member of. `inforge validate` checks it names an existing two-tier PKI with an intermediate for every scope the service deploys under (a global service → `global`; a regional service → every region). See [`inforge pki`](/cli/pki). |
 | `reload` | string | No | `ExecReload=` command the service uses to apply a renewed mesh leaf **without a restart** (e.g. `/bin/kill -HUP $MAINPID`, `nginx -s reload`). When set, the per-service renewal timer reloads the unit; when absent, it restarts (a brief interruption). Must be a **single line** (it becomes one `ExecReload=` directive; a newline would inject extra unit directives). The leaf/key/bundle paths are in the `MTLS_LEAF_CERT_PATH` / `MTLS_LEAF_KEY_PATH` / `MTLS_TRUST_BUNDLE_PATH` env vars — these names are **reserved**: a service's own `environment:` may not use them. |
 | `ingress` | string | When `routes` is set | **Name** of the [ingress](#ingress-and-routes) resource (same scope) whose nginx fronts this service's `routes`. The ingress host and this service's host must share a network when they differ (cross-host routing). |
@@ -138,7 +138,7 @@ Every service must declare a `user`. `inforge deploy`:
    unit (idempotent).
 
 The user is a no-login system account, **distinct from the host's `deploy_user`** (the account inforge
-connects as over SSH). It is the account `inforge-bootstrap` drops privilege to before exec, so it is
+connects as over SSH). It is the account `inforge-agent` drops privilege to before exec, so it is
 required for every service — with or without secrets.
 
 ## Environment
@@ -166,7 +166,7 @@ The source kinds are:
 
 Environment variables are **container-scoped**: every service sharing a `container` receives the
 same set. At deploy, inforge resolves every entry (regardless of source kind), writes the value to
-the secrets provider under the service's scoped path, and `inforge-bootstrap` injects it as an env
+the secrets provider under the service's scoped path, and `inforge-agent` injects it as an env
 var at start. The [`vault:`](/cli/secret) and full delivery mechanics are covered in
 [Secrets](./secrets).
 
@@ -328,7 +328,7 @@ SESSION_KEY: vault:SESSION_KEY
 
 ## Runtime environment
 
-Every service is started by `inforge-bootstrap` (the systemd `ExecStart`), which builds the process
+Every service is started by `inforge-agent` (the systemd `ExecStart`), which builds the process
 environment from a minimal base (`PATH`, `HOME`, `USER`, `LOGNAME`), then injects:
 
 - the service's **environment variables** (from `environment.yaml`; see [Secrets](./secrets)), and

@@ -1,13 +1,13 @@
 // Package agehost is the single host-key age implementation shared by both sides
 // of the credential delivery contract: inforge (the program) encrypts a
-// per-service credential to a host's SSH host key with Encrypt; inforge-bootstrap
+// per-service credential to a host's SSH host key with Encrypt; inforge-agent
 // decrypts it on that host with Decrypt. Keeping one implementation here — and
 // having both callers and the interop test exercise these exact functions —
 // guarantees the producer and consumer can never drift.
 //
 // It is plain age (not SOPS): the credential blob is opaque, so there is nothing
 // to selectively encrypt. The package is deliberately age-only and Pulumi-free so
-// the dependency-light bootstrapper can import it.
+// the dependency-light agent can import it.
 package agehost
 
 import (

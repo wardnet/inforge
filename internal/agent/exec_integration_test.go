@@ -4,8 +4,8 @@
 // root and a throwaway user. It is gated behind the `integration` build tag and a
 // root check so it never runs in CI's `go test -race ./...`. Run it manually:
 //
-//	sudo go test -tags integration -run TestPrivilegeDropExec ./internal/bootstrapper
-package bootstrapper
+//	sudo go test -tags integration -run TestPrivilegeDropExec ./internal/agent
+package agent
 
 import (
 	"bytes"
