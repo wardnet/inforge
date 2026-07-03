@@ -2,7 +2,7 @@
 
 Inforge is a Go toolchain that turns declarative infrastructure definitions into real deployments
 via Pulumi and GitHub Actions. This repository builds four statically-linked binaries: the `inforge`
-CLI, the `inforge-bootstrap` runtime secret bootstrapper (every service's systemd ExecStart), and two
+CLI, the `inforge-agent` on-host runtime agent (every service's systemd ExecStart), and two
 Pulumi provider plugins (`pulumi-resource-neon`, `pulumi-resource-infisical`).
 
 ## Commands
@@ -21,8 +21,8 @@ go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 
 ```
 cmd/inforge/                                       # the inforge CLI (user-facing)
-cmd/inforge-bootstrap/                             # runtime secret bootstrapper (service ExecStart)
-internal/bootstrapper/                             # bootstrapper core (descriptor, fetch, decrypt, exec)
+cmd/inforge-agent/                             # on-host runtime agent (service ExecStart)
+internal/agent/                             # agent core (descriptor, fetch, decrypt, exec)
 internal/pki/                                      # PKI store (pki.enc.yaml read/write), x509 helpers, leaf minting, ScopeGlobal const
 internal/meshcert/                                 # deploy/renew orchestration: decrypt intermediate, mint leaf, compute trust set
 internal/validate/                                 # inforge validate — structural checks incl. credential-free PKI pass
@@ -103,10 +103,10 @@ Deploy-time and renewal leaf minting is live. Key packages:
 - **`providers/infisical.CertWriter`** — imperative (non-Pulumi) write path for `inforge pki renew`;
   authenticates once, caches workspace IDs; uses `workspaceName` / `servicePath` helpers shared with
   the Pulumi deploy path so renewed certs land at the same provider address deploy provisioned.
-- **`internal/bootstrapper.Descriptor`** — `SupportedVersion` is now **4**; the `Files` map
+- **`internal/agent.Descriptor`** — `SupportedVersion` is now **4**; the `Files` map
   (`env-var → provider secret key`) carries mesh material paths. A descriptor with `files:` but no
   `provider.kind` is rejected.
-- **Observability env-var contract (#134).** `bootstrapper.buildEnv` injects a non-secret OTel
+- **Observability env-var contract (#134).** `agent.buildEnv` injects a non-secret OTel
   resource-identity set into every service (under the reserved `INFORGE_*` prefix):
   `INFORGE_SERVICE_NAMESPACE` (= service name, `service.namespace`), `INFORGE_INSTANCE_ID`
   (random per-(re)start, generated in `runBoot` via `newInstanceID`, `service.instance.id`),
@@ -142,10 +142,10 @@ Key internal seams introduced in slice #110:
 ### Host projection (slice #109)
 
 - **`internal/hostpaths`** is the dependency-free (stdlib-only) source of truth for the on-host names
-  both `inforge` and `inforge-bootstrap` must agree on byte-for-byte: `RuntimeSubdir`/`RuntimeDir`
-  (the tmpfs PEM dir) and `UnitName`. It exists so the minimal static bootstrap binary can import it
+  both `inforge` and `inforge-agent` must agree on byte-for-byte: `RuntimeSubdir`/`RuntimeDir`
+  (the tmpfs PEM dir) and `UnitName`. It exists so the minimal static agent binary can import it
   without pulling in the deploy-side packages (`internal/service` → `naming`/`types` → the Pulumi SDK).
-- **`internal/bootstrapper.projectFiles`** is the single projection path, used by both the ExecStart
+- **`internal/agent.projectFiles`** is the single projection path, used by both the ExecStart
   boot path (`runBoot`) and the renewal timer (`runProject`): for each descriptor `files:` entry it
   fetches the provider key, writes the PEM into the service's tmpfs `RuntimeDir`
   (`/run/wardnet/<svc>`, dir mode `0700`, from the unit's `RuntimeDirectory=`), mode `0400` owned by
@@ -162,7 +162,7 @@ Key internal seams introduced in slice #110:
 - **The `MTLS_*_PATH` env names are reserved.** `inforge validate` rejects a service `environment:`
   key colliding with a `meshcert.DescriptorFiles()` name (projection would overwrite it), and rejects
   a multi-line `reload:` (it becomes one `ExecReload=` line).
-- **Renewal is pull-based, per service.** A `wardnet-<svc>-renew.timer` runs `inforge-bootstrap project
+- **Renewal is pull-based, per service.** A `wardnet-<svc>-renew.timer` runs `inforge-agent project
   <dir>` daily; on a changed leaf it runs `systemctl reload-or-restart` — **reload** when the service
   declares `reload:` (emitted as `ExecReload=`, no downtime), else **restart**. `inforge pki renew` only
   writes the provider; hosts converge on their own. The renewal oneshot must NOT declare its own
@@ -194,7 +194,7 @@ is now rejected — DB credentials flow only through grants). slice C = the PKI 
   `database/global/<name>` resolves the same way `ref:` does); the per-service role is named for the
   **consuming** service instance (`naming.Resource(env, consumerSlug, "dbrole", svc-db)`). The deploy
   wiring is `program.resolveDatabaseGrants` → `infisical.ProvisionService(…, grantSecrets)`, merging
-  grant value secrets into the same `/<svc>/infra` batch. Bootstrapper untouched.
+  grant value secrets into the same `/<svc>/infra` batch. Agent untouched.
 
 - **`internal/grant`** is the abstraction. `Grantable.FieldNames(perm) (values, files)` is
   **credential- and instance-independent** (keyed by resource *type* + permission) — the validator calls
@@ -205,7 +205,7 @@ is now rejected — DB credentials flow only through grants). slice C = the PKI 
   `ParseTemplate`/`Template.{Fields,HasLiteral,Interpolate}` are the shared `{FIELD}` machinery.
 - **A value field** composes a string secret (the ADR-0010 env-secret path); **a file field** resolves
   to a projected PEM's on-host path (the descriptor `files:` path, slice #109). The two never mix in one
-  template — a file field must stand alone. So the bootstrapper needs no new mechanism.
+  template — a file field must stand alone. So the agent needs no new mechanism.
 - **The PKI resource is its own declarative type** (`types.PKIResourceSpec`, `schemas/pkiresource.json`,
   `regional|global/pki/<name>/manifest.yaml`): **root-only**, scope derived from its folder. It is
   distinct from the mesh-auth `pki.enc.yaml` store (two-tier, `pki:` membership). The two never cross — a
@@ -395,7 +395,7 @@ resource-attribute set so VM metrics and app telemetry correlate on `host.id`.
   `host.type` (`INFORGE_HOST_TYPE` = server-type SKU). They are **provider-supplied** plain-string
   fields on `types.ComputeOutputs` (`CloudProvider/CloudRegion/AvailabilityZone/MachineType`),
   populated by `hetzner.Create()` (plan-time constants, no apply), read off the host in
-  `renderDescriptor`, carried in `bootstrapper.Deployment`, and emitted by `buildEnv`
+  `renderDescriptor`, carried in `agent.Deployment`, and emitted by `buildEnv`
   **omit-if-empty** (a provider that doesn't supply one emits nothing). `host.name`/`os.type`
   were deliberately dropped (self-detectable by the process). This bumped the descriptor to
   **v5** (the strict `KnownFields` decoder makes any field addition a major bump). The consumer

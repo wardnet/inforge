@@ -1,6 +1,6 @@
 //go:build linux
 
-package bootstrapper
+package agent
 
 import (
 	"fmt"

@@ -40,7 +40,7 @@ Use `--yes` in CI or scripted contexts.
 For each service whose container declares secrets, `deploy` writes the secrets to the provider under
 the service's scoped path, mints a per-service machine identity, and writes a secret-free
 `descriptor.yaml` plus a host-key-encrypted `credential.age` onto the host over SSH. The service fetches
-its own secrets at runtime via `inforge-bootstrap`; no secret value is baked into any artifact. See
+its own secrets at runtime via `inforge-agent`; no secret value is baked into any artifact. See
 [Secrets → How secrets reach a service](../resources/secrets#how-secrets-reach-a-service).
 
 ## State management

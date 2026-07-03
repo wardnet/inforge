@@ -1,4 +1,4 @@
-package bootstrapper
+package agent
 
 import (
 	"testing"
@@ -39,7 +39,7 @@ func TestParseDescriptorValid(t *testing.T) {
 // TestParseDescriptorRejectsUnknownVersion is the fleet-skew safety: a descriptor
 // from a newer major must fail the start, never be misread.
 func TestParseDescriptorRejectsUnknownVersion(t *testing.T) {
-	// version: 3 is the pre-HostID schema — a v4 bootstrapper must reject it
+	// version: 3 is the pre-HostID schema — a v4 agent must reject it
 	// cleanly on the version, not misread it.
 	for _, v := range []string{"version: 1", "version: 0", "version: 2", "version: 3", "version: 99"} {
 		doc := v + "\nservice: ghost\nexec: /x\nuser: ghost\nprovider:\n  kind: infisical\n"

@@ -27,7 +27,7 @@ type IdentityParams struct {
 }
 
 // IdentityCredentials is the result of provisioning: the identity's id plus the
-// minted universal-auth credentials the bootstrapper authenticates with.
+// minted universal-auth credentials the agent authenticates with.
 type IdentityCredentials struct {
 	IdentityID       string
 	AuthClientID     string

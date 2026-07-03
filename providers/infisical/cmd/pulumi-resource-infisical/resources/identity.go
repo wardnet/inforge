@@ -11,7 +11,7 @@ import (
 // InfisicalIdentityArgs are the inputs for a per-service Infisical machine
 // identity. ClientId/ClientSecret are the deploy (org-admin) credentials used to
 // provision the identity; the identity it mints is scoped read-only to
-// SecretPath and is what the on-host bootstrapper logs in with.
+// SecretPath and is what the on-host agent logs in with.
 type InfisicalIdentityArgs struct {
 	// Name is the identity's display name; adoption is by this name so re-runs
 	// reuse the same identity rather than creating duplicates.
@@ -34,7 +34,7 @@ type InfisicalIdentityArgs struct {
 }
 
 // InfisicalIdentityState is the state after the identity is provisioned. It
-// carries the minted universal-auth credentials the bootstrapper authenticates
+// carries the minted universal-auth credentials the agent authenticates
 // with; AuthClientSecret is sensitive and is minted exactly once (on Create) and
 // thereafter returned unchanged from Read, so a refresh never rotates it.
 type InfisicalIdentityState struct {

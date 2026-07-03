@@ -120,7 +120,7 @@ inforge adds one first-boot step automatically: user provisioning (creates the d
 declared). With a `cloud_init` template it is appended to your script; without one inforge still emits
 a minimal cloud-init carrying just this step, so a `deploy_user` host is provisioned even with no
 template. Secrets are not a first-boot concern — each service fetches its own at runtime via
-`inforge-bootstrap`.
+`inforge-agent`.
 
 ## Firewall rules
 
@@ -196,7 +196,7 @@ EOF
 
 inforge appends the deploy-user provisioning step automatically — no need to write `useradd` or
 key-installation logic in your cloud-init template. Secrets are not a first-boot concern; each service
-fetches its own at runtime via `inforge-bootstrap`.
+fetches its own at runtime via `inforge-agent`.
 
 ## Outputs
 

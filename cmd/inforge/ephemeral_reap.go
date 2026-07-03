@@ -53,7 +53,7 @@ func runEphemeralReap(ctx context.Context, configPath string, dryRun bool) error
 	if err := requireObjectBackend(projCfg); err != nil {
 		return err
 	}
-	// A non-dry-run destroy re-runs the inline program; pin the bootstrap version
+	// A non-dry-run destroy re-runs the inline program; pin the agent version
 	// exactly as `up`/`down` do.
 	if err := os.Setenv("INFORGE_VERSION", version); err != nil {
 		return fmt.Errorf("set INFORGE_VERSION: %w", err)

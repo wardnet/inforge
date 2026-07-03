@@ -1,7 +1,7 @@
 // Package otelcol renders the host VM-metrics collector's config and the
 // idempotent shell that installs the off-the-shelf OpenTelemetry Collector Contrib
 // .deb on a VM (ADR-0031). It is deploy-side only (never imported by
-// inforge-bootstrap) and holds no provider/Pulumi dependencies — the program wires
+// inforge-agent) and holds no provider/Pulumi dependencies — the program wires
 // it to hosts, exactly as internal/nginx is wired to ingress hosts.
 package otelcol
 

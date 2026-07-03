@@ -31,11 +31,11 @@ This repository builds four statically-linked, fully self-contained binaries:
 | Binary | Purpose | Platforms |
 |--------|---------|-----------|
 | `inforge` | The CLI you invoke directly | linux amd64/arm64, darwin arm64 |
-| `inforge-bootstrap` | Runtime secret bootstrapper — the systemd ExecStart for every service; fetches secrets at start, drops privilege, execs the service | linux amd64/arm64 |
+| `inforge-agent` | On-host runtime agent — the systemd ExecStart for every service; fetches secrets at start, drops privilege, execs the service | linux amd64/arm64 |
 | `pulumi-resource-neon` | Pulumi provider plugin for Neon PostgreSQL | linux amd64/arm64 |
 | `pulumi-resource-infisical` | Pulumi provider plugin for Infisical secrets | linux amd64/arm64 |
 
-The provider plugins are installed automatically by `inforge plugins install`, and `inforge-bootstrap` is downloaded onto each host by `inforge deploy` (pinned to the deploying inforge version) — you never invoke either directly.
+The provider plugins are installed automatically by `inforge plugins install`, and `inforge-agent` is downloaded onto each host by `inforge deploy` (pinned to the deploying inforge version) — you never invoke either directly.
 
 ## In GitHub Actions
 

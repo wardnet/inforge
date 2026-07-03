@@ -83,7 +83,7 @@ func runEphemeralUp(ctx context.Context, configPath, dir, from, slugFlag, ttlFla
 	}
 	expiresAt := expiresAtEpoch(time.Now(), ttl)
 
-	// Pin the bootstrap download to this CLI build, exactly as `inforge deploy`.
+	// Pin the agent download to this CLI build, exactly as `inforge deploy`.
 	if err := os.Setenv("INFORGE_VERSION", version); err != nil {
 		return fmt.Errorf("set INFORGE_VERSION: %w", err)
 	}

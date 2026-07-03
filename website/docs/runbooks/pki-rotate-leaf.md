@@ -35,7 +35,7 @@ it is safe to cron even with un-shipped infra changes. Each host re-projects the
    systemctl start wardnet-<svc>-renew.service
    ```
 
-   The bootstrapper re-fetches and atomically projects the new leaf, then `reload`s the unit if it
+   The agent re-fetches and atomically projects the new leaf, then `reload`s the unit if it
    declares a `reload:` command, else `restart`s it.
 
 ## Notes

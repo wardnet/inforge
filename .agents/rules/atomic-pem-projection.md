@@ -8,7 +8,7 @@ next to a stale or absent key — will crash-loop the service.
 
 ## Applies to
 
-`internal/bootstrapper/project.go` (`projectFiles`) and any future write path
+`internal/agent/project.go` (`projectFiles`) and any future write path
 that places PEM files under a service's `RuntimeDir`. Also applies if projection
 is extended to non-tmpfs paths.
 
@@ -19,7 +19,7 @@ is extended to non-tmpfs paths.
 os.WriteFile(certPath, certPEM, 0o400)
 os.WriteFile(keyPath, keyPEM, 0o400)   // crash if this fails
 
-// RIGHT — stage all, then rename all (see projectFiles in internal/bootstrapper/project.go)
+// RIGHT — stage all, then rename all (see projectFiles in internal/agent/project.go)
 tmpCert, _ := stageFile(certPath, certPEM, uid, gid)
 tmpKey, _  := stageFile(keyPath, keyPEM, uid, gid)
 os.Rename(tmpCert, certPath)  // both succeed or the service keeps the old set

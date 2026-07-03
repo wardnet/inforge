@@ -1,4 +1,4 @@
-package bootstrapper
+package agent
 
 import (
 	"testing"
@@ -12,6 +12,6 @@ import (
 // syscall; off Linux the stub returns unsupported. Either way it must error and
 // must not exec (the bogus path below would fail loudly if it tried).
 func TestDropAndExecRefusesPrivilegedID(t *testing.T) {
-	err := dropAndExec("/nonexistent/inforge-bootstrap-test", 0, 0, []string{"PATH=/bin"})
+	err := dropAndExec("/nonexistent/inforge-agent-test", 0, 0, []string{"PATH=/bin"})
 	assert.Error(t, err)
 }

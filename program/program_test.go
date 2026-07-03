@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/wardnet/inforge/internal/bootstrapper"
+	"github.com/wardnet/inforge/internal/agent"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/service"
 	"github.com/wardnet/inforge/internal/types"
@@ -507,10 +507,10 @@ func TestServiceProvisionScriptNoUser(t *testing.T) {
 	assert.NotContains(t, script, "useradd", "no user declared -> no useradd")
 }
 
-// TestServiceProvisionScriptDownloadsBootstrapper guards that provisioning
-// downloads the inforge-bootstrap binary, pinned to the inforge version, with
+// TestServiceProvisionScriptDownloadsAgent guards that provisioning
+// downloads the inforge-agent binary, pinned to the inforge version, with
 // host-side arch detection and the version quoted (injection-safe).
-func TestServiceProvisionScriptDownloadsBootstrapper(t *testing.T) {
+func TestServiceProvisionScriptDownloadsAgent(t *testing.T) {
 	script := serviceProvisionScript(types.ServiceSpec{Name: "api", User: "svc"}, "1.2.3")
 
 	// Version is single-quoted into a shell var, then composed with ${arch}.
@@ -518,7 +518,7 @@ func TestServiceProvisionScriptDownloadsBootstrapper(t *testing.T) {
 	assert.Contains(t, script, "arch=$(uname -m)")
 	assert.Contains(t, script, "x86_64) arch=amd64")
 	assert.Contains(t, script, "aarch64) arch=arm64")
-	assert.Contains(t, script, "asset=\"inforge-bootstrap_${ver}_linux_${arch}\"")
+	assert.Contains(t, script, "asset=\"inforge-agent_${ver}_linux_${arch}\"")
 	assert.Contains(t, script, "releases/download/v${ver}")
 	assert.Contains(t, script, "curl -fsSL")
 	// The download must be checksum-verified before it is installed as root.
@@ -526,14 +526,14 @@ func TestServiceProvisionScriptDownloadsBootstrapper(t *testing.T) {
 	assert.Contains(t, script, "sha256sum")
 	assert.Contains(t, script, "checksum mismatch")
 	assert.Contains(t, script, "trap 'rm -f \"$tmp\" \"$sums\"' EXIT", "temp files cleaned on any exit")
-	assert.Contains(t, script, "install -m 0755 \"$tmp\" '/usr/local/bin/inforge-bootstrap'")
+	assert.Contains(t, script, "install -m 0755 \"$tmp\" '/usr/local/bin/inforge-agent'")
 	// The raw inforge version must never be interpolated unquoted into the shell.
-	assert.NotContains(t, script, "inforge-bootstrap_1.2.3_linux")
+	assert.NotContains(t, script, "inforge-agent_1.2.3_linux")
 }
 
 // TestRenderDescriptorRoundTrips proves the descriptor inforge writes parses
-// back through the bootstrapper's own validator — the producer (this program)
-// and consumer (inforge-bootstrap) cannot drift because both use the same
+// back through the agent's own validator — the producer (this program)
+// and consumer (inforge-agent) cannot drift because both use the same
 // Descriptor struct and SupportedVersion constant.
 func TestRenderDescriptorRoundTrips(t *testing.T) {
 	svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost"}
@@ -555,9 +555,9 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 	out, err := renderDescriptor(svc, host, bundle, "ws-123", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01")
 	require.NoError(t, err)
 
-	d, err := bootstrapper.ParseDescriptor([]byte(out))
+	d, err := agent.ParseDescriptor([]byte(out))
 	require.NoError(t, err)
-	assert.Equal(t, bootstrapper.SupportedVersion, d.Version)
+	assert.Equal(t, agent.SupportedVersion, d.Version)
 	assert.Equal(t, "ghost", d.Service)
 	assert.Equal(t, service.ExecPath("ghost"), d.Exec)
 	assert.Equal(t, "ghost", d.User)
@@ -593,7 +593,7 @@ func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
 	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "", "prd", globalScope, "", "wardnet.network", "tenants-01")
 	require.NoError(t, err)
 
-	d, err := bootstrapper.ParseDescriptor([]byte(out))
+	d, err := agent.ParseDescriptor([]byte(out))
 	require.NoError(t, err)
 	assert.Equal(t, "", d.Deployment.Region, "global service must carry an empty region, not the literal \"global\"")
 	assert.Equal(t, "", d.Deployment.RegionSlug)
@@ -602,7 +602,7 @@ func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
 }
 
 // TestRenderDescriptorSecretLess: a nil bundle renders a secret-less descriptor —
-// empty provider, no env — that round-trips through the bootstrapper's parser
+// empty provider, no env — that round-trips through the agent's parser
 // (which accepts a provider-less descriptor with no env).
 func TestRenderDescriptorSecretLess(t *testing.T) {
 	svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost"}
@@ -610,9 +610,9 @@ func TestRenderDescriptorSecretLess(t *testing.T) {
 	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01")
 	require.NoError(t, err)
 
-	d, err := bootstrapper.ParseDescriptor([]byte(out))
+	d, err := agent.ParseDescriptor([]byte(out))
 	require.NoError(t, err)
-	assert.Equal(t, bootstrapper.SupportedVersion, d.Version)
+	assert.Equal(t, agent.SupportedVersion, d.Version)
 	assert.Equal(t, "ghost", d.Service)
 	assert.Equal(t, service.ExecPath("ghost"), d.Exec)
 	assert.Equal(t, "ghost", d.User)

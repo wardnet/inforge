@@ -13,7 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/wardnet/inforge/internal/agehost"
-	"github.com/wardnet/inforge/internal/bootstrapper"
+	"github.com/wardnet/inforge/internal/agent"
 )
 
 // hostKeyPair returns an SSH host key pair as the two on-disk artifacts inforge
@@ -61,13 +61,13 @@ func TestEncryptTrimsPublicKeyNewline(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
-// TestInteropProgramEncryptBootstrapperDecrypt is the critical 2a<->2b interop
+// TestInteropProgramEncryptAgentDecrypt is the critical 2a<->2b interop
 // test: the program-side encrypt (agehost.Encrypt to a host public key) must be
-// readable by the bootstrapper-side decrypt (bootstrapper.DecryptCredential
+// readable by the agent-side decrypt (agent.DecryptCredential
 // reading credential.age with the host private key). Both run the real
 // production code paths — no re-implementation — so a drift in either half fails
 // here.
-func TestInteropProgramEncryptBootstrapperDecrypt(t *testing.T) {
+func TestInteropProgramEncryptAgentDecrypt(t *testing.T) {
 	pubLine, privPEM := hostKeyPair(t)
 	plaintext := []byte(`{"client_id":"svc-id","client_secret":"svc-secret"}`)
 
@@ -82,8 +82,8 @@ func TestInteropProgramEncryptBootstrapperDecrypt(t *testing.T) {
 	require.NoError(t, os.WriteFile(credPath, ct, 0o600))
 	require.NoError(t, os.WriteFile(keyPath, privPEM, 0o600))
 
-	// Consumer (inforge-bootstrap): decrypt with the host private key.
-	got, err := bootstrapper.DecryptCredential(credPath, keyPath)
+	// Consumer (inforge-agent): decrypt with the host private key.
+	got, err := agent.DecryptCredential(credPath, keyPath)
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, got)
 }

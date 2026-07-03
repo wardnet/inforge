@@ -1,4 +1,4 @@
-// Package bootstrapper is the runtime core of the inforge-bootstrap binary: the
+// Package agent is the runtime core of the inforge-agent binary: the
 // systemd ExecStart for every inforge-managed service. It runs as root, reads a
 // per-service on-host descriptor (no secrets), decrypts the service's secrets
 // provider credential with the host SSH key, logs in to the provider, fetches
@@ -11,7 +11,7 @@
 // and everything else — descriptor parsing, fetch + backoff, decrypt, env
 // building, passwd resolution — stays cross-platform and unit-testable without
 // root.
-package bootstrapper
+package agent
 
 import (
 	"bytes"
@@ -21,16 +21,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SupportedVersion is the descriptor schema major this bootstrapper understands.
+// SupportedVersion is the descriptor schema major this agent understands.
 // A descriptor declaring any other version fails the start, so a fleet running
-// mixed bootstrapper builds never silently misreads a newer descriptor. inforge
+// mixed agent builds never silently misreads a newer descriptor. inforge
 // (the producer) stamps this same constant into every descriptor it writes, so
 // producer and consumer can never disagree on the schema version. Because parsing
 // is strict (KnownFields), any field addition is a breaking change for an older
 // reader, so it bumps this major: v2 added the Deployment block, v3 added the
 // Files map, and v4 swapped Deployment.Namespace for Deployment.HostID; v5 added the
 // cloud/host resource-identity fields (CloudProvider/CloudRegion/AvailabilityZone/
-// MachineType, ADR-0030). An older bootstrapper meeting a newer descriptor fails
+// MachineType, ADR-0030). An older agent meeting a newer descriptor fails
 // cleanly on the version rather than on an unknown field.
 const SupportedVersion = 5
 
@@ -48,7 +48,7 @@ type Descriptor struct {
 	Env      map[string]string `yaml:"env"`
 	// Files maps an env-var name → a provider secret key (relative to the
 	// provider secret_path). For a mesh service, inforge writes the leaf/key/CA
-	// bundle to the provider and lists them here; the bootstrapper fetches each,
+	// bundle to the provider and lists them here; the agent fetches each,
 	// writes the PEM to a tmpfs file, and sets the env var to that path (#109).
 	// Empty for services with no mesh PKI material.
 	Files      map[string]string `yaml:"files,omitempty"`
@@ -56,7 +56,7 @@ type Descriptor struct {
 }
 
 // Deployment is the secret-free deployment context inforge derives for a service
-// and the bootstrapper injects as INFORGE_* environment variables (alongside, and
+// and the agent injects as INFORGE_* environment variables (alongside, and
 // independent of, the service's secrets). Every value is derived from the
 // environment, region, service and host — none is a secret — so it is delivered in
 // the plain descriptor and is present for secret-less services too.
@@ -103,7 +103,7 @@ func ParseDescriptor(b []byte) (Descriptor, error) {
 		return Descriptor{}, fmt.Errorf("parse descriptor: %w", err)
 	}
 	if d.Version != SupportedVersion {
-		return Descriptor{}, fmt.Errorf("unsupported descriptor version %d (this bootstrapper supports version %d)", d.Version, SupportedVersion)
+		return Descriptor{}, fmt.Errorf("unsupported descriptor version %d (this agent supports version %d)", d.Version, SupportedVersion)
 	}
 	if d.Service == "" {
 		return Descriptor{}, fmt.Errorf("descriptor: service is required")

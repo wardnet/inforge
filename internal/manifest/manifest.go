@@ -1,7 +1,7 @@
 // Package manifest assembles a compute instance's manifest from a base plus any
 // contributor fields and renders it as plain YAML. Secrets are NOT baked into
-// the manifest: they are fetched at runtime by inforge-bootstrap (see
-// internal/bootstrapper) using a per-service machine identity, so the manifest
+// the manifest: they are fetched at runtime by inforge-agent (see
+// internal/agent) using a per-service machine identity, so the manifest
 // carries only non-secret configuration. The former SOPS/age value-baking and
 // first-boot key-broker bootstrap (ADR 0005/0006) have been retired.
 package manifest

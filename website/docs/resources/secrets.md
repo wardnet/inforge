@@ -174,7 +174,7 @@ secrets, inforge:
    - `credential.age` — the machine-identity credential, age-encrypted to the host's own SSH host key
      (encrypted in memory to the key read over SSH; the plaintext never lands on disk).
 
-At service start, `inforge-bootstrap` (the systemd `ExecStart` for every service) decrypts the
+At service start, `inforge-agent` (the systemd `ExecStart` for every service) decrypts the
 credential with the host key, logs in to the provider, fetches the secrets, injects them as environment
 variables, drops privilege to the service's `user`, and execs the real binary. Secret *values* live
 only in the service process's environment — never on disk, in the journal, or in argv. A service that

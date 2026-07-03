@@ -15,7 +15,7 @@ import (
 
 // TestCertWriter asserts the imperative cert write resolves the deterministic
 // per-(container, region) workspace by name and upserts the leaf/key/bundle under
-// "/<service>/mtls" in the env's slug — the same location the bootstrapper reads.
+// "/<service>/mtls" in the env's slug — the same location the agent reads.
 func TestCertWriter(t *testing.T) {
 	var secretWrites []map[string]any
 	var projectLists int

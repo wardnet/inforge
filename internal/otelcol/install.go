@@ -7,7 +7,7 @@ import (
 
 // InstallScript renders the idempotent shell that installs the off-the-shelf
 // otelcol-contrib .deb at the given version onto a host (ADR-0031). It mirrors the
-// inforge-bootstrap download step: detect the host arch, pin the version, download
+// inforge-agent download step: detect the host arch, pin the version, download
 // the .deb + release checksums, verify the sha256, then apt-install the local .deb
 // (apt runs the package's postinstall, creating the otelcol-contrib user and the
 // systemd unit). It is a no-op when the pinned version is already installed.

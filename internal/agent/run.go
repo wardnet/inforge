@@ -1,4 +1,4 @@
-package bootstrapper
+package agent
 
 import (
 	"context"
@@ -16,12 +16,12 @@ const (
 	credentialFile = "credential.age"
 )
 
-// Run is the inforge-bootstrap entry point. Invoked by systemd two ways:
-//   - ExecStart=/usr/local/bin/inforge-bootstrap <service-dir>: the boot path —
+// Run is the inforge-agent entry point. Invoked by systemd two ways:
+//   - ExecStart=/usr/local/bin/inforge-agent <service-dir>: the boot path —
 //     load the descriptor, resolve the run-as user, fetch the service's secrets,
 //     project any mesh PEMs into tmpfs, build the env, then drop privilege and
 //     exec the real service binary.
-//   - inforge-bootstrap project <service-dir>: the renewal path (a per-service
+//   - inforge-agent project <service-dir>: the renewal path (a per-service
 //     timer) — re-project the current leaf and reload the unit if it changed.
 //
 // Any error returns to main, which exits non-zero so systemd restarts the unit.
@@ -36,7 +36,7 @@ func Run(args []string, version string) error {
 	case len(args) == 2:
 		return runBoot(args[1])
 	default:
-		return fmt.Errorf("usage: inforge-bootstrap <service-dir> | inforge-bootstrap project <service-dir>")
+		return fmt.Errorf("usage: inforge-agent <service-dir> | inforge-agent project <service-dir>")
 	}
 }
 

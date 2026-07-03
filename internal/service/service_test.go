@@ -13,20 +13,20 @@ func TestUnit(t *testing.T) {
 	unit := Unit(types.ServiceSpec{Name: "api"})
 	assert.Contains(t, unit, "Description=wardnet api")
 	assert.Contains(t, unit, "WorkingDirectory=/srv/wardnet/api")
-	// ExecStart is the bootstrapper pointed at the service's descriptor dir, not
-	// the service binary directly — the bootstrapper execs that after dropping
+	// ExecStart is the agent pointed at the service's descriptor dir, not
+	// the service binary directly — the agent execs that after dropping
 	// privilege.
-	assert.Contains(t, unit, "ExecStart=/usr/local/bin/inforge-bootstrap /etc/wardnet/services/api")
+	assert.Contains(t, unit, "ExecStart=/usr/local/bin/inforge-agent /etc/wardnet/services/api")
 	assert.Contains(t, unit, "StartLimitIntervalSec=0", "unlimited restarts so a service recovers when the vault returns")
 	assert.Contains(t, unit, "Restart=on-failure")
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
 }
 
 // TestUnitRunsAsRoot guards that the unit never sets User=: the unit runs as
-// root and the bootstrapper drops privilege to the service user itself.
+// root and the agent drops privilege to the service user itself.
 func TestUnitRunsAsRoot(t *testing.T) {
 	unit := Unit(types.ServiceSpec{Name: "api", User: "wardnet"})
-	assert.NotContains(t, unit, "User=", "the unit runs as root; the bootstrapper drops privilege itself")
+	assert.NotContains(t, unit, "User=", "the unit runs as root; the agent drops privilege itself")
 }
 
 func TestFolderAndUnitName(t *testing.T) {
@@ -35,7 +35,7 @@ func TestFolderAndUnitName(t *testing.T) {
 }
 
 func TestUnitRuntimeDirectoryAndReload(t *testing.T) {
-	// RuntimeDirectory is always present (the bootstrapper projects mesh PEMs into
+	// RuntimeDirectory is always present (the agent projects mesh PEMs into
 	// it); ExecReload only when the service declares reload:.
 	withReload := Unit(types.ServiceSpec{Name: "api", User: "api", Reload: "/bin/kill -HUP $MAINPID"})
 	assert.Contains(t, withReload, "RuntimeDirectory=wardnet/api")
@@ -52,7 +52,7 @@ func TestRenewUnits(t *testing.T) {
 	svc := types.ServiceSpec{Name: "api"}
 	s := RenewService(svc)
 	assert.Contains(t, s, "Type=oneshot")
-	assert.Contains(t, s, "ExecStart="+BootstrapBin+" project "+DescriptorDir("api"))
+	assert.Contains(t, s, "ExecStart="+AgentBin+" project "+DescriptorDir("api"))
 
 	tmr := RenewTimer(svc)
 	assert.Contains(t, tmr, "OnCalendar=daily")

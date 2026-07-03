@@ -1,4 +1,4 @@
-package bootstrapper
+package agent
 
 import (
 	"bytes"
@@ -30,7 +30,7 @@ type Provider struct {
 
 // infisicalCredential is the decrypted client credential for a per-service
 // Infisical machine identity. inforge delivers it host-key-encrypted; the
-// bootstrapper logs in with it to obtain a fresh short-lived access token at each
+// agent logs in with it to obtain a fresh short-lived access token at each
 // start. The standing on-host secret is this rotatable identity secret, never a
 // secret value.
 type infisicalCredential struct {
@@ -179,7 +179,7 @@ func (f *infisicalFetcher) fetchSecrets(ctx context.Context, token string) (map[
 // infisicalDo executes an Infisical REST call and returns the response body and
 // status. Copied (deliberately, not imported) from the Infisical provider's
 // client.go: the provider package pulls the Pulumi SDK, which the dependency-light
-// bootstrapper must not link. Keep the two in sync if the REST contract changes.
+// agent must not link. Keep the two in sync if the REST contract changes.
 func infisicalDo(ctx context.Context, client *http.Client, method, reqURL, token string, body any) ([]byte, int, error) {
 	var reqBody io.Reader
 	if body != nil {
