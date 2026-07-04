@@ -58,8 +58,8 @@ github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.6 h1:yLr03zQE/5Eu5l3QU0Si+xMb
 github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.6/go.mod h1:Q5N6icH+KJZDLh+ESNwzdv6cZ6vLFF/egy3IOxWhmz4=
 github.com/aws/aws-sdk-go-v2/service/sts v1.43.3 h1:VrIhKRCSK1umelSgB9RghvA9RTUYeQffyAS5ApXehNI=
 github.com/aws/aws-sdk-go-v2/service/sts v1.43.3/go.mod h1:r8wkDOuLaaMFqFiYAb8dGY2A3gJCOujMc6CFOVC4Zhc=
-github.com/aws/smithy-go v1.27.2 h1:y9NPmSE6am6LjEFPfqHqG/jJk7AauQvhCJONKh7kpzk=
-github.com/aws/smithy-go v1.27.2/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
+github.com/aws/smithy-go v1.27.3 h1:F3Zb497UhhskkfpJmfkXswyo+t0sh9OTBnIHjogWbVY=
+github.com/aws/smithy-go v1.27.3/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ2ASbcXHWsFqH8hp8=
 github.com/bazelbuild/buildtools v0.0.0-20260211083412-859bfffeef82 h1:PmoVmwzAnGb0iCjulb7Mgsaqw2Wj36LQJ8VyYaFe/ak=
@@ -258,8 +258,8 @@ github.com/pulumi/pulumi-command/sdk v1.2.1 h1:mAziZ91a/9U+5IjZH5Skcar80OSmpBSYl
 github.com/pulumi/pulumi-command/sdk v1.2.1/go.mod h1:hQxv9DXg6bFjcd9BEiNdMImQ/V1rnC9D115q5VXYNps=
 github.com/pulumi/pulumi-go-provider v1.3.2 h1:G02Jzt1a5D8QwcdHTJIcdJ+IG6RUYTVDL1hg5yh4JaU=
 github.com/pulumi/pulumi-go-provider v1.3.2/go.mod h1:L99PGubfMAQ3nZcPIg2a6kQ5QA8dvF4bUmDgiXzRSc8=
-github.com/pulumi/pulumi-hcloud/sdk v1.38.0 h1:scBIJRJph/kzo++iycvP7caIzMujhOagn+T3Mk9W2eI=
-github.com/pulumi/pulumi-hcloud/sdk v1.38.0/go.mod h1:rfOSimT+VT5KOiEO62R+wibR+Y3zDGHigOvzPecJ56g=
+github.com/pulumi/pulumi-hcloud/sdk v1.39.0 h1:Rm2Xh/EnPs53v1CEWxJzAasxTT8Exycz+biKDTe+y5w=
+github.com/pulumi/pulumi-hcloud/sdk v1.39.0/go.mod h1:rfOSimT+VT5KOiEO62R+wibR+Y3zDGHigOvzPecJ56g=
 github.com/pulumi/pulumi/pkg/v3 v3.245.0 h1:ssZ0nHf6IuKMMnO4pxiC7E4R8OIVltXAf9V3ZN1cLYg=
 github.com/pulumi/pulumi/pkg/v3 v3.245.0/go.mod h1:YpN+v3zDFDtchlBOF7mHK3B+afSnKX/rHSUMhygomCs=
 github.com/pulumi/pulumi/sdk/v3 v3.248.0 h1:TwY9uuToQO8xIey4a7awRzNX7iJ/doDmZkl1MzxULCE=
