@@ -722,6 +722,12 @@ func renewMeshCerts(ctx context.Context, dir, env string, global, regional types
 // aggregates — release delivery doesn't change mesh identity; the mesh material
 // is the deploy baseline's and the renew cron's business.
 func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, global, regional types.Resources, only string) (int, error) {
+	// Nothing to write anywhere → no-op before touching the store or the CI
+	// identity, so e.g. releasing a service with no service-side mtls files
+	// needs no INFORGE_SECRETS_KEY.
+	if !renewScopeHasWork(global.Service, only) && !renewScopeHasWork(regional.Service, only) {
+		return 0, nil
+	}
 	store, err := pki.Load(pki.Path(dir, configEnv))
 	if err != nil {
 		if errors.Is(err, pki.ErrNotFound) {
@@ -783,16 +789,27 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 		return leafPEM, keyPEM, nil
 	}
 
+	// Failures accumulate instead of aborting: one host's missing workspace (or
+	// one service's bad write) must not kill the renewal of every OTHER
+	// already-provisioned host and mtls_files service — a scheduled renew that
+	// aborts on the first error silently starves the rest of the env of fresh
+	// leaves until the 90-day expiry. Everything that could be written is
+	// written; the joined error reports everything that couldn't.
+	var errs []error
+
 	// renewSet writes one scope's material, reusing one authenticated writer:
 	// (1) the per-host mesh aggregates — every co-located pki: service's leaf +
 	// the host's trust bundle under /<hostKey> in the mesh workspace, grouped by
 	// the SAME meshplan derivation the deploy program realizes the proxies from
 	// (rule mesh-host-grouping-is-single-sourced) — skipped in per-service mode;
 	// (2) the /<svc>/mtls copy for each mtls_files: service (its own raw-plane
-	// leaf, minted independently of the mesh's copy).
-	renewSet := func(writer *infisical.CertWriter, res types.Resources, scope string) error {
+	// leaf, minted independently of the mesh's copy). A host whose material
+	// can't be fully assembled is skipped whole — the projection on the host is
+	// an atomic set, so a partial aggregate would stall its pull entirely.
+	renewSet := func(writer *infisical.CertWriter, res types.Resources, scope string) {
 		if only == "" {
 			byHost := meshplan.ServicesByHost(res, naming.CanonicalComputeKeys(res.Compute))
+		hosts:
 			for _, hostKey := range meshplan.HostKeys(byHost) {
 				leaves := map[string]map[string]string{}
 				pkiSeen := map[string]bool{}
@@ -800,7 +817,8 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 				for _, svc := range byHost[hostKey] {
 					leafPEM, keyPEM, err := mint(svc, scope)
 					if err != nil {
-						return err
+						errs = append(errs, err)
+						continue hosts
 					}
 					leaves[svc.Name] = map[string]string{
 						meshpaths.LeafCertFile: leafPEM,
@@ -819,12 +837,13 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 				for _, pkiName := range pkiNames {
 					b, err := store.TrustBundle(pkiName, meshcert.TrustSet(scope, allRegions))
 					if err != nil {
-						return fmt.Errorf("host %q scope %q: %w", hostKey, scope, err)
+						errs = append(errs, fmt.Errorf("host %q scope %q: %w", hostKey, scope, err))
+						continue hosts
 					}
 					bundle.WriteString(b)
 				}
 				if err := writer.WriteMeshHost(ctx, hostKey, leaves, bundle.String()); err != nil {
-					return fmt.Errorf("host %q scope %q: write mesh material: %w", hostKey, scope, err)
+					errs = append(errs, fmt.Errorf("host %q scope %q: write mesh material: %w", hostKey, scope, err))
 				}
 			}
 		}
@@ -837,41 +856,23 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 			}
 			leafPEM, keyPEM, err := mint(svc, scope)
 			if err != nil {
-				return err
+				errs = append(errs, err)
+				continue
 			}
 			bundle, err := store.TrustBundle(svc.Pki, meshcert.TrustSet(scope, allRegions))
 			if err != nil {
-				return fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
+				errs = append(errs, fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err))
+				continue
 			}
 			files := meshcert.CertFiles(leafPEM, keyPEM, bundle)
 			if err := writer.Write(ctx, svc.Container, svc.Name, meshcert.MtlsDir, files); err != nil {
-				return fmt.Errorf("service %q scope %q: write certs: %w", svc.Name, scope, err)
+				errs = append(errs, fmt.Errorf("service %q scope %q: write certs: %w", svc.Name, scope, err))
 			}
 		}
-		return nil
-	}
-
-	// scopeHasWork reports whether a scope would write anything — gating the
-	// provider-credential requirement so an env/scope with no mesh members (or,
-	// in per-service mode, no matching mtls_files service) needs no creds.
-	scopeHasWork := func(services []types.ServiceSpec) bool {
-		for _, s := range services {
-			if s.Pki == "" {
-				continue
-			}
-			if only != "" {
-				if s.Name == only && s.MtlsFiles {
-					return true
-				}
-				continue
-			}
-			return true
-		}
-		return false
 	}
 
 	// Global services: scope "global", region-less slug, creds from the global block.
-	if scopeHasWork(global.Service) {
+	if renewScopeHasWork(global.Service, only) {
 		if globalBlock == nil {
 			return 0, fmt.Errorf("a global service declares pki but the env has no global providers block")
 		}
@@ -881,14 +882,13 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 		}
 		writer, err := infisical.NewCertWriter(ctx, identityEnv, "", cID, cSecret, site, org)
 		if err != nil {
-			return 0, err
-		}
-		if err := renewSet(writer, global, pki.ScopeGlobal); err != nil {
-			return 0, err
+			errs = append(errs, fmt.Errorf("scope global: %w", err))
+		} else {
+			renewSet(writer, global, pki.ScopeGlobal)
 		}
 	}
 	// Regional services: one leaf per region, scope = region, per-region slug + creds.
-	if scopeHasWork(regional.Service) {
+	if renewScopeHasWork(regional.Service, only) {
 		for _, region := range allRegions {
 			ar := regionTable[region]
 			cID, cSecret, site, org, err := requireInfisicalCreds(ar.Providers, region)
@@ -897,14 +897,35 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 			}
 			writer, err := infisical.NewCertWriter(ctx, identityEnv, ar.Slug, cID, cSecret, site, org)
 			if err != nil {
-				return 0, err
+				errs = append(errs, fmt.Errorf("region %q: %w", region, err))
+				continue
 			}
-			if err := renewSet(writer, regional, region); err != nil {
-				return 0, err
-			}
+			renewSet(writer, regional, region)
 		}
 	}
-	return count, nil
+	return count, errors.Join(errs...)
+}
+
+// renewScopeHasWork reports whether a scope has anything to write — gating both
+// the whole-run no-op fast path (before the store or CI identity are touched)
+// and each scope's provider-credential requirement. In per-service mode (only
+// != "") the sole possible write is the named service's /<svc>/mtls copy, so
+// only an mtls_files: match counts; in full mode any pki: member does (the
+// per-host mesh aggregates cover every mesh member).
+func renewScopeHasWork(services []types.ServiceSpec, only string) bool {
+	for _, s := range services {
+		if s.Pki == "" {
+			continue
+		}
+		if only != "" {
+			if s.Name == only && s.MtlsFiles {
+				return true
+			}
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // requireInfisicalCreds extracts the Infisical admin universal-auth credentials

@@ -74,10 +74,12 @@ func TestMeshFilesLandAtMeshPaths(t *testing.T) {
 	}
 }
 
-// A missing mesh descriptor is fail-soft: the pull must never block the mesh
-// proxy from starting on whatever material is already on disk.
-func TestRunMeshProjectFailSoft(t *testing.T) {
-	if err := runMeshProject(t.TempDir()); err != nil {
-		t.Fatalf("runMeshProject on empty dir: %v, want nil (fail-soft)", err)
+// A pull failure (here: a missing mesh descriptor) must exit non-zero so the
+// renew timer's oneshot lands in systemd's failed state — the monitorable
+// signal for persistent breakage. The proxy's own start is protected by the
+// `-` ExecStartPre prefix instead, never by swallowing the error.
+func TestRunMeshProjectFailsHard(t *testing.T) {
+	if err := runMeshProject(t.TempDir()); err == nil {
+		t.Fatal("runMeshProject on empty dir: want an error (missing descriptor), got nil")
 	}
 }

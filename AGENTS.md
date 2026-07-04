@@ -449,15 +449,20 @@ The mesh is the **east-west** plane (service↔service), **derived** — no reso
   `MeshSupportedVersion=1`, strict fields) + host-key-encrypted `credential.age` in
   `meshpaths.AgentDir` (`program.deliverMeshHost` → `infisical.ProvisionMeshHost`). The proxy pulls
   with `inforge-agent mesh-project <dir>`: fetch `/<hostKey>` → atomic-project into the tmpfs
-  `RuntimeDir` (owner nginx, 0400) — run **fail-soft** as the unit's first `ExecStartPre` (a reboot
-  re-seeds REAL material; the placeholder seed runs second, filling only gaps) and from a daily
-  `wardnet-mesh-renew.timer` (reload only on change + active unit). `inforge pki renew` writes the
-  per-host aggregates (each co-located service's leaf + one concatenated trust bundle) via
+  `RuntimeDir` (owner nginx, 0400) — run as the unit's first `ExecStartPre`, `-`-prefixed so a
+  degraded pull never blocks the proxy start (a reboot re-seeds REAL material; the placeholder seed
+  runs second, filling only gaps), and from a daily `wardnet-mesh-renew.timer` (reload only on
+  change + active unit). The binary itself fails HARD, so the un-prefixed renew oneshot surfaces
+  persistent pull breakage as a failed unit. `inforge pki renew` writes the per-host aggregates
+  (each co-located service's leaf + one concatenated trust bundle) via
   `infisical.CertWriter.WriteMeshHost`, grouped by the shared `internal/meshplan.ServicesByHost`
-  derivation (rule `mesh-host-grouping-is-single-sourced`) — still zero Pulumi, zero SSH. The deploy
-  baseline (`cmd/inforge.meshBaseline`, post-`up` in `deploy`/`ephemeral up`) mints via the same
-  renew core, then SSH-triggers each host's renew oneshot (targets from the `meshDeployDescriptor`
-  stack output; key via `--ssh-key`/`INFORGE_DEPLOY_KEY`) — a **signal push, never material**. The
+  derivation (rule `mesh-host-grouping-is-single-sourced`) — still zero Pulumi, zero SSH, and
+  per-host/per-service failures accumulate rather than aborting the run. The deploy baseline
+  (`cmd/inforge.meshBaseline`, post-`up` in `deploy`/`ephemeral up`) resolves the SSH key up front,
+  mints via the same renew core, then SSH-triggers each host's renew oneshot (targets from the
+  `meshDeployDescriptor` stack output; key via `--ssh-key`/`INFORGE_DEPLOY_KEY`; configEnv honors
+  the stack's `source_environment`) — a **signal push, never material**; trigger failures are
+  warnings, only the mint phase fails the command, and `-o json` still gets its summary. The
   provider-key ↔ on-host-path scheme is single-sourced in `meshpaths`
   (`LeafCertKey`/`LeafKeyKey`/`BundleKey`; `RuntimeDir + key == LeafCertPath`).
 - **Firewall (`firewallPlanByHost(res, meshPublic)`).** A mesh host opens `meshpaths.MTLSPort` to its

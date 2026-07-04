@@ -26,8 +26,8 @@ func TestUnitFile(t *testing.T) {
 	if strings.Contains(u, "RuntimeDirectory=") {
 		t.Error("mesh unit must not declare RuntimeDirectory=")
 	}
-	// The material pull must be fail-soft (`-` prefix: a degraded pull never
-	// blocks the proxy) and run BEFORE the placeholder seed, which runs before
+	// The material pull must be `-`-prefixed (a degraded pull never blocks the
+	// proxy from starting) and run BEFORE the placeholder seed, which runs before
 	// the config check — so real material wins and placeholders only fill gaps.
 	pull := strings.Index(u, "ExecStartPre=-"+hostpaths.AgentBin+" mesh-project "+meshpaths.AgentDir)
 	seed := strings.Index(u, "ExecStartPre=/usr/bin/env bash "+SeedScriptPath)

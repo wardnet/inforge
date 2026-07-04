@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"path/filepath"
 
 	"github.com/wardnet/inforge/internal/hostpaths"
@@ -138,31 +137,34 @@ const meshOwner = "nginx"
 // ExecStartPre (so a reboot re-seeds REAL material before nginx starts) and
 // from the daily wardnet-mesh-renew timer (renewal convergence).
 //
-// Pull failures are fail-SOFT: a missing descriptor/credential, an unreachable
-// provider, or absent material logs and exits 0, keeping whatever is on disk —
-// the seed script backstops first boot with placeholders, and a degraded pull
-// must never block the proxy from starting or fail the renew timer into
-// systemd's failed state. Only a reload failure after a successful projection
-// is a hard error.
+// Pull failures return an ERROR (non-zero exit). A failure never touches the
+// existing on-disk set (the projection is an atomic all-or-nothing), and the
+// two invocation paths handle it differently by design: the unit's
+// ExecStartPre line is `-`-prefixed, so a degraded pull never blocks the
+// proxy from starting on whatever is on disk (the seed script backstops first
+// boot with placeholders); the renew oneshot has no such prefix, so a
+// persistently broken pull (stale credential, missing material) lands the
+// timer unit in systemd's failed state — the monitorable signal that keeps a
+// silent 90-day drift to leaf expiry from happening.
 func runMeshProject(dir string) error {
 	ctx := context.Background()
 
 	desc, err := LoadMeshDescriptor(filepath.Join(dir, descriptorFile))
 	if err != nil {
-		return meshSoft(err)
+		return err
 	}
 	user, err := lookupUser(meshOwner)
 	if err != nil {
-		return meshSoft(err)
+		return err
 	}
 	secrets, err := fetchSecrets(ctx, dir, desc.Provider)
 	if err != nil {
-		return meshSoft(err)
+		return err
 	}
 	files := desc.Files()
 	_, changed, err := projectFiles(files, secrets, meshpaths.RuntimeDir, user.uid, user.gid)
 	if err != nil {
-		return meshSoft(err)
+		return err
 	}
 	// Reload only on a real change AND a running proxy: at ExecStartPre the unit
 	// is still starting (not active) and needs no reload; on the timer a changed
@@ -170,12 +172,6 @@ func runMeshProject(dir string) error {
 	if changed && systemctl("is-active", "--quiet", meshpaths.UnitName) == nil {
 		return systemctl("reload-or-restart", meshpaths.UnitName)
 	}
-	return nil
-}
-
-// meshSoft logs a mesh-projection failure and swallows it (see runMeshProject).
-func meshSoft(err error) error {
-	log.Printf("mesh-project: %v (keeping existing on-disk material)", err)
 	return nil
 }
 

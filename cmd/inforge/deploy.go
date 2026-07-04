@@ -127,15 +127,25 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 
 	// The mesh leaf baseline (ADR-0033): mint real mesh material into the
 	// provider and trigger each mesh host's pull, so the proxies the up just
-	// (re)configured leave their placeholders now rather than on the daily timer.
-	if err := meshBaseline(ctx, s, dir, stackName, stackName, sshKeyPath); err != nil {
-		return err
+	// (re)configured leave their placeholders now rather than on the daily
+	// timer. The config source honors the stack's source_environment (an
+	// ephemeral stack reads its SOURCE env's tree — same split program.Run
+	// applies; see rule ephemeral-identity-vs-config-source); its identity is
+	// the stack name. Progress goes to humanW (stderr in JSON mode), and the
+	// JSON change summary is emitted even when the baseline fails — the up
+	// itself succeeded, and a consumer parsing stdout must still get the counts.
+	configEnv := stackName
+	if v, cfgErr := s.GetConfig(ctx, cfgKeySourceEnvironment); cfgErr == nil && v.Value != "" {
+		configEnv = v.Value
 	}
+	baseErr := meshBaseline(ctx, s, dir, configEnv, stackName, sshKeyPath, humanW)
 
 	if jsonMode {
-		return printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
+		if err := printChangeSummaryJSON(stackName, p.Changes(), p.Failures()); err != nil {
+			return err
+		}
 	}
-	return nil
+	return baseErr
 }
 
 // streamEngineRun renders a Pulumi engine event stream through the shared Printer

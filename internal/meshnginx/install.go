@@ -36,9 +36,11 @@ const (
 // UnitFile returns the systemd unit for the mesh nginx. It is Type=forking (nginx
 // daemonizes and writes meshpaths.PIDPath, matching the config's `pid` directive).
 // Before starting, the unit (1) pulls REAL mesh material from the provider
-// (`inforge-agent mesh-project`, fail-soft and `-`-prefixed so a degraded pull
-// never blocks the proxy — ADR-0033; this is also how a reboot's cleared tmpfs
-// re-seeds real leaves), (2) re-seeds placeholder material for anything still
+// (`inforge-agent mesh-project`, `-`-prefixed so a degraded pull never blocks
+// the proxy — ADR-0033; this is also how a reboot's cleared tmpfs re-seeds
+// real leaves. The binary itself fails HARD, so the un-prefixed renew oneshot
+// surfaces persistent pull breakage as a failed unit),
+// (2) re-seeds placeholder material for anything still
 // absent (SeedScriptPath — first boot, before the deploy baseline lands), and
 // (3) validates the config — so a start never races an empty RuntimeDir or a bad
 // config. It declares NO systemd RuntimeDirectory= — that would let systemd wipe

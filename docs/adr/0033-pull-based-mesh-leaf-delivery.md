@@ -51,20 +51,27 @@ a service:
   tmpfs custody keeps keys off disk, and the placeholder seed (which stays, and
   runs second) only ever fills first-boot gaps — and (b) from a daily
   `wardnet-mesh-renew.timer`, reloading the proxy only on a real change. The pull
-  is **fail-soft**: a missing descriptor/credential or unreachable provider logs
-  and keeps whatever is on disk; it never blocks the proxy from starting.
+  never partially applies (atomic set) and fails HARD on any error — the proxy's
+  start is protected by the `-` ExecStartPre prefix instead (a degraded pull
+  keeps whatever is on disk and nginx still starts), while the un-prefixed renew
+  oneshot surfaces persistent pull breakage as a failed systemd unit, the
+  monitorable signal that prevents a silent 90-day drift to leaf expiry.
 - **Renewal stays a pure provider write.** `inforge pki renew` mints per
   (service, scope) and writes the per-host aggregates (grouped by the same
   `internal/meshplan` derivation the deploy realizes proxies from) — no SSH, no
   Pulumi, no deploy-key custody in the cron. Hosts converge on their own timer,
-  the same contract services already had.
+  the same contract services already had. Failures accumulate per host/service
+  rather than aborting the run: one missing workspace must not starve every
+  other consumer of fresh leaves.
 - **Deploy baseline.** `inforge deploy` (and `ephemeral up`) runs an imperative
   **post-up** step (`meshBaseline`): mint + provider-write via the renew core,
   then SSH each mesh host (targets from the new `meshDeployDescriptor` stack
   output) and `systemctl start wardnet-mesh-renew.service`. The trigger pushes a
   **signal, never material** — it just makes proxies converge now instead of on
-  the next timer tick. Never inside `program.Run` (no PKI store or leaf keys in
-  Pulumi state).
+  the next timer tick, so a failed trigger is a WARNING, never a deploy failure
+  (only the mint phase, and the up-front SSH-key resolution before it, can fail
+  the command). Never inside `program.Run` (no PKI store or leaf keys in Pulumi
+  state).
 - **The subtractive half is opt-in-gated, not unconditional.** wardnet-cloud
   ADR-0014 keeps `MTLS_*_PATH` for **tunneller only** (its raw node↔node forward
   plane is direct mTLS outside the mesh). A new service manifest boolean

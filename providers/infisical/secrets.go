@@ -249,8 +249,6 @@ func (a *InfisicalSecretsAdapter) ProvisionService(
 	}, nil
 }
 
-// ensureWorkspace returns the workspaceId output for the (container, env)
-// pair, creating the InfisicalWorkspace resource on first call for that key.
 // ProvisionMeshHost provisions a mesh host's pull access to its cert material
 // (ADR-0033): the scope's shared mesh workspace (container "mesh", created on
 // first use like any service workspace) plus a per-host machine identity scoped
@@ -286,6 +284,8 @@ func (a *InfisicalSecretsAdapter) ProvisionMeshHost(ctx *pulumi.Context, hostKey
 	}, nil
 }
 
+// ensureWorkspace returns the workspaceId output for the (container, env)
+// pair, creating the InfisicalWorkspace resource on first call for that key.
 func (a *InfisicalSecretsAdapter) ensureWorkspace(
 	ctx *pulumi.Context, container, env string,
 ) (pulumi.StringOutput, error) {
@@ -425,7 +425,6 @@ func resolveRef(source, container, region string, all types.AllOutputs) (pulumi.
 		return pulumi.StringOutput{}, fmt.Errorf("resolveRef %q: unhandled source kind", source)
 	}
 }
-
 
 func sortedStringKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))

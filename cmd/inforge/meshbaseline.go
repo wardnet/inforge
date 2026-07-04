@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
 	"strings"
 
@@ -26,12 +26,17 @@ import (
 // configEnv/identityEnv mirror renewMeshCertsAs (a static deploy passes the
 // env twice; `ephemeral up` passes source + slug). Targets come from the
 // stack's meshDeployDescriptor output; an env with no mesh hosts is a no-op
-// needing neither the secrets key nor an SSH key.
+// needing neither the secrets key nor an SSH key. The SSH key is resolved
+// BEFORE any minting, so a misconfigured deploy fails in microseconds, not
+// after a full provider write pass.
 //
-// A failed trigger is collected, not fatal per host: the aggregate error names
-// the hosts, which otherwise converge on their daily timer (or a manual
-// `systemctl start wardnet-mesh-renew.service`).
-func meshBaseline(ctx context.Context, s auto.Stack, dir, configEnv, identityEnv, sshKeyPath string) error {
+// A failed trigger — any number of them — is a WARNING, not an error: by then
+// the material is already in the provider, so the affected hosts converge on
+// their daily wardnet-mesh-renew timer (or a manual `systemctl start`). Only
+// the mint phase (and the up-front key/targets resolution) can fail the
+// deploy. All progress goes to w, never straight to stdout — in `-o json`
+// mode the machine summary owns stdout.
+func meshBaseline(ctx context.Context, s auto.Stack, dir, configEnv, identityEnv, sshKeyPath string, w io.Writer) error {
 	outputs, err := s.Outputs(ctx)
 	if err != nil {
 		return fmt.Errorf("mesh baseline: read stack outputs: %w", err)
@@ -42,6 +47,11 @@ func meshBaseline(ctx context.Context, s auto.Stack, dir, configEnv, identityEnv
 	}
 	if len(targets) == 0 {
 		return nil
+	}
+
+	key, err := resolveSSHKey(sshKeyPath)
+	if err != nil {
+		return fmt.Errorf("mesh baseline: %w", err)
 	}
 
 	globalRes, err := loader.LoadGlobalResources(configEnv, dir)
@@ -57,25 +67,21 @@ func meshBaseline(ctx context.Context, s auto.Stack, dir, configEnv, identityEnv
 		return fmt.Errorf("mesh baseline: %w", err)
 	}
 
-	key, err := resolveSSHKey(sshKeyPath)
-	if err != nil {
-		return fmt.Errorf("mesh baseline: %w", err)
-	}
-	fmt.Printf("\nmesh baseline: minted %d leaf certificate(s); triggering %d host pull(s)\n", count, len(targets))
+	_, _ = fmt.Fprintf(w, "\nmesh baseline: minted %d leaf certificate(s); triggering %d host pull(s)\n", count, len(targets))
 	sshArgs := []string{"-i", key, "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"}
 	var failures []string
 	for _, t := range targets {
 		account := fmt.Sprintf("%s@%s", t.SSHUser, t.HostDNS)
-		fmt.Printf("  mesh host %s (%s): pull\n", t.Host, account)
+		_, _ = fmt.Fprintf(w, "  mesh host %s (%s): pull\n", t.Host, account)
 		cmd := exec.CommandContext(ctx, "ssh", append(append([]string{}, sshArgs...), account,
 			"sudo systemctl start "+meshnginx.RenewUnitName+".service")...)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		cmd.Stdout, cmd.Stderr = w, w
 		if err := cmd.Run(); err != nil {
 			failures = append(failures, fmt.Sprintf("%s (%s): %v", t.Host, t.Scope, err))
 		}
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("mesh baseline: %d host trigger(s) failed — the material is in the provider, so the hosts converge on their daily wardnet-mesh-renew timer, or start it manually:\n  - %s",
+		_, _ = fmt.Fprintf(w, "warning: mesh baseline: %d host trigger(s) failed — the material is in the provider, so these hosts converge on their daily wardnet-mesh-renew timer, or start it manually:\n  - %s\n",
 			len(failures), strings.Join(failures, "\n  - "))
 	}
 	return nil

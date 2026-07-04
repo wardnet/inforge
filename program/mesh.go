@@ -1,13 +1,11 @@
 package program
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 
 	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
-	"github.com/wardnet/inforge/internal/agehost"
 	"github.com/wardnet/inforge/internal/agent"
 	"github.com/wardnet/inforge/internal/meshnginx"
 	"github.com/wardnet/inforge/internal/meshpaths"
@@ -330,41 +328,16 @@ func deliverMeshHost(ctx *pulumi.Context, reg registry.ProviderRegistry, hostKey
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "mesh", hostKey)
 
-	const readHostKey = "cat /etc/ssh/ssh_host_ed25519_key.pub"
-	hostPub, err := remote.NewCommand(ctx, name+"-hostkey", &remote.CommandArgs{
-		Connection: conn,
-		Create:     pulumi.String(readHostKey),
-		Update:     pulumi.String(readHostKey),
-	}, pulumi.DependsOn([]pulumi.Resource{gate}))
+	hostPub, err := readHostPubKey(ctx, conn, name+"-hostkey", gate)
 	if err != nil {
 		return fmt.Errorf("mesh host %q: read host key: %w", hostKey, err)
 	}
 
 	descriptor := bundle.Project.ApplyT(func(project string) (string, error) {
-		return renderMeshDescriptor(bundle, project, services, hostKey)
+		return renderMeshDescriptor(bundle, project, services)
 	}).(pulumi.StringOutput)
 
-	credAge := pulumi.All(hostPub.Stdout, bundle.ClientID, bundle.ClientSecret).ApplyT(
-		func(args []interface{}) (string, error) {
-			pub, _ := args[0].(string)
-			clientID, _ := args[1].(string)
-			clientSecret, _ := args[2].(string)
-			if pub == "" || clientID == "" || clientSecret == "" {
-				return "", fmt.Errorf("mesh host %q: empty host public key or identity credential while building credential.age", hostKey)
-			}
-			plaintext, err := json.Marshal(map[string]string{
-				"client_id":     clientID,
-				"client_secret": clientSecret,
-			})
-			if err != nil {
-				return "", fmt.Errorf("marshal mesh credential: %w", err)
-			}
-			ct, err := agehost.Encrypt(plaintext, pub)
-			if err != nil {
-				return "", fmt.Errorf("encrypt mesh credential: %w", err)
-			}
-			return string(ct), nil
-		}).(pulumi.StringOutput)
+	credAge := encryptCredentialAge(hostPub, bundle.ClientID, bundle.ClientSecret, "mesh host "+hostKey)
 
 	writeScript := pulumi.All(descriptor, credAge).ApplyT(func(args []interface{}) string {
 		desc, _ := args[0].(string)
@@ -382,7 +355,11 @@ func deliverMeshHost(ctx *pulumi.Context, reg registry.ProviderRegistry, hostKey
 		Update:     writeScript,
 		Delete:     pulumi.String(deleteScript),
 		Triggers:   pulumi.Array{writeScript},
-	}, pulumi.DependsOn([]pulumi.Resource{hostPub})); err != nil {
+		// A Triggers change (any mesh descriptor change — e.g. the service list)
+		// replaces this resource; delete-before-replace keeps the old Delete
+		// script from removing the freshly written files after the new Create
+		// (see deliverServiceSecrets).
+	}, pulumi.DependsOn([]pulumi.Resource{hostPub}), pulumi.DeleteBeforeReplace(true)); err != nil {
 		return fmt.Errorf("mesh host %q: write mesh descriptor/credential: %w", hostKey, err)
 	}
 	return nil
@@ -391,7 +368,7 @@ func deliverMeshHost(ctx *pulumi.Context, reg registry.ProviderRegistry, hostKey
 // renderMeshDescriptor marshals the on-host mesh descriptor, building the
 // agent's own MeshDescriptor struct (imported, not duplicated) so the producer
 // can never drift from the consumer's schema.
-func renderMeshDescriptor(bundle *types.ServiceSecretsBundle, project string, services []string, hostKey string) (string, error) {
+func renderMeshDescriptor(bundle *types.ServiceSecretsBundle, project string, services []string) (string, error) {
 	d := agent.MeshDescriptor{
 		Version: agent.MeshSupportedVersion,
 		Provider: agent.Provider{
@@ -405,7 +382,7 @@ func renderMeshDescriptor(bundle *types.ServiceSecretsBundle, project string, se
 	}
 	b, err := yaml.Marshal(d)
 	if err != nil {
-		return "", fmt.Errorf("marshal mesh descriptor for host %q: %w", hostKey, err)
+		return "", fmt.Errorf("marshal mesh descriptor: %w", err)
 	}
 	return string(b), nil
 }

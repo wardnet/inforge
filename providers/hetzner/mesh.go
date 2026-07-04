@@ -74,7 +74,7 @@ func (h *HetznerMesh) Realize(
 
 	// 2. Write the seed script + the systemd units (proxy + renewal oneshot/timer),
 	//    then daemon-reload. The unit's ExecStartPre chain pulls real material
-	//    (inforge-agent mesh-project, fail-soft) then seeds placeholders for
+	//    (inforge-agent mesh-project, `-`-prefixed) then seeds placeholders for
 	//    anything still absent — so a reboot self-heals the tmpfs cert dir to real
 	//    (or at worst placeholder) material rather than crash-looping (ADR-0033).
 	//    The renewal timer converges the host after `inforge pki renew` rotates

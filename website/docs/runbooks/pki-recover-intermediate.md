@@ -37,11 +37,15 @@ re-project on every host at once.
    inforge pki renew <env>
    ```
 
-4. **Force re-projection on every host in the scope** — do not wait for the daily timer:
+4. **Force re-projection on every host in the scope** — do not wait for the daily timers:
 
    ```bash
-   systemctl start wardnet-<svc>-renew.service   # on each host running an affected service
+   systemctl start wardnet-mesh-renew.service    # on each mesh host in the scope (the proxy's leaves + bundle)
+   systemctl start wardnet-<svc>-renew.service   # additionally, on each host of an mtls_files: service
    ```
+
+   The first converges the mesh proxy (which holds every co-located service's mesh leaf); the second
+   exists only for `mtls_files: true` services, which also hold their own raw-plane copy.
 
 5. **Confirm** no service still presents a leaf signed by the old key (check the leaf's issuer /
    served chain on each host).

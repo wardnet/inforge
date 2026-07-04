@@ -15,14 +15,14 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 	"github.com/wardnet/inforge/internal/agehost"
-	"github.com/wardnet/inforge/internal/app"
 	"github.com/wardnet/inforge/internal/agent"
+	"github.com/wardnet/inforge/internal/app"
 	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/meshcert"
-	"github.com/wardnet/inforge/internal/meshplan"
 	"github.com/wardnet/inforge/internal/meshpaths"
+	"github.com/wardnet/inforge/internal/meshplan"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/otelcol"
 	"github.com/wardnet/inforge/internal/regions"
@@ -837,16 +837,7 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
-	// Read the host SSH public key. It is world-readable, so no sudo is needed;
-	// its Stdout (with a trailing newline agehost.Encrypt trims) is the recipient.
-	// This is the first per-host SSH command in this path, so it waits on the
-	// cloud-init gate; the credential write chains off it transitively.
-	const readHostKey = "cat /etc/ssh/ssh_host_ed25519_key.pub"
-	hostKey, err := remote.NewCommand(ctx, name+"-hostkey", &remote.CommandArgs{
-		Connection: conn,
-		Create:     pulumi.String(readHostKey),
-		Update:     pulumi.String(readHostKey),
-	}, pulumi.DependsOn([]pulumi.Resource{gate}))
+	hostKey, err := readHostPubKey(ctx, conn, name+"-hostkey", gate)
 	if err != nil {
 		return fmt.Errorf("service %q: read host key: %w", svc.Name, err)
 	}
@@ -857,33 +848,7 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 		return renderDescriptor(svc, host, bundle, project, env, region, slug, baseDomain, computeKey, meshEgressPort)
 	}).(pulumi.StringOutput)
 
-	// Encrypt {client_id, client_secret} to the host key inside an ApplyT over the
-	// pubkey read AND both identity outputs, so the dependency is automatic and the
-	// ciphertext is never built against a stale/empty key. In preview the pubkey
-	// Stdout is unknown, so Pulumi skips this ApplyT entirely; if it runs at up
-	// with any input empty, that is a real failure (e.g. the host key wasn't
-	// readable) and must abort the deploy rather than write an empty credential.
-	credAge := pulumi.All(hostKey.Stdout, bundle.ClientID, bundle.ClientSecret).ApplyT(
-		func(args []interface{}) (string, error) {
-			pub, _ := args[0].(string)
-			clientID, _ := args[1].(string)
-			clientSecret, _ := args[2].(string)
-			if pub == "" || clientID == "" || clientSecret == "" {
-				return "", fmt.Errorf("service %q: empty host public key or identity credential while building credential.age", svc.Name)
-			}
-			plaintext, err := json.Marshal(map[string]string{
-				"client_id":     clientID,
-				"client_secret": clientSecret,
-			})
-			if err != nil {
-				return "", fmt.Errorf("marshal credential: %w", err)
-			}
-			ct, err := agehost.Encrypt(plaintext, pub)
-			if err != nil {
-				return "", fmt.Errorf("encrypt credential: %w", err)
-			}
-			return string(ct), nil
-		}).(pulumi.StringOutput)
+	credAge := encryptCredentialAge(hostKey, bundle.ClientID, bundle.ClientSecret, "service "+svc.Name)
 
 	writeScript := pulumi.All(descriptor, credAge).ApplyT(func(args []interface{}) string {
 		desc, _ := args[0].(string)
@@ -901,10 +866,63 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 		Update:     writeScript,
 		Delete:     pulumi.String(deleteScript),
 		Triggers:   pulumi.Array{writeScript},
-	}, pulumi.DependsOn([]pulumi.Resource{hostKey})); err != nil {
+		// A Triggers change replaces the resource; with the engine's default
+		// create-before-delete the OLD resource's Delete script (recorded in
+		// state) would run AFTER the new Create and remove the freshly written
+		// files — including across the secrets↔descriptor shape flip, which
+		// reuses this URN. Delete-before-replace makes the old files go first
+		// and the new write land last.
+	}, pulumi.DependsOn([]pulumi.Resource{hostKey}), pulumi.DeleteBeforeReplace(true)); err != nil {
 		return fmt.Errorf("service %q: write descriptor/credential: %w", svc.Name, err)
 	}
 	return nil
+}
+
+// readHostPubKey registers the remote command that reads a host's SSH public
+// key. It is world-readable, so no sudo is needed; its Stdout (with a trailing
+// newline agehost.Encrypt trims) is the age recipient a credential is
+// encrypted to. It is the first per-host SSH command in a delivery path, so it
+// waits on the cloud-init gate; the credential write chains off it transitively.
+func readHostPubKey(ctx *pulumi.Context, conn remote.ConnectionArgs, name string, gate pulumi.Resource) (*remote.Command, error) {
+	const readHostKey = "cat /etc/ssh/ssh_host_ed25519_key.pub"
+	return remote.NewCommand(ctx, name, &remote.CommandArgs{
+		Connection: conn,
+		Create:     pulumi.String(readHostKey),
+		Update:     pulumi.String(readHostKey),
+	}, pulumi.DependsOn([]pulumi.Resource{gate}))
+}
+
+// encryptCredentialAge encrypts {client_id, client_secret} to the host key
+// inside an ApplyT over the pubkey read AND both identity outputs, so the
+// dependency is automatic and the ciphertext is never built against a
+// stale/empty key. In preview the pubkey Stdout is unknown, so Pulumi skips
+// the ApplyT entirely; if it runs at up with any input empty, that is a real
+// failure (e.g. the host key wasn't readable) and must abort the deploy rather
+// than write an empty credential. subject names the consumer in errors. This
+// is the single credential-encryption path — the JSON shape is the
+// credential.age contract agent.DecryptCredential reads.
+func encryptCredentialAge(hostKey *remote.Command, clientID, clientSecret pulumi.StringOutput, subject string) pulumi.StringOutput {
+	return pulumi.All(hostKey.Stdout, clientID, clientSecret).ApplyT(
+		func(args []interface{}) (string, error) {
+			pub, _ := args[0].(string)
+			id, _ := args[1].(string)
+			secret, _ := args[2].(string)
+			if pub == "" || id == "" || secret == "" {
+				return "", fmt.Errorf("%s: empty host public key or identity credential while building credential.age", subject)
+			}
+			plaintext, err := json.Marshal(map[string]string{
+				"client_id":     id,
+				"client_secret": secret,
+			})
+			if err != nil {
+				return "", fmt.Errorf("marshal credential: %w", err)
+			}
+			ct, err := agehost.Encrypt(plaintext, pub)
+			if err != nil {
+				return "", fmt.Errorf("encrypt credential: %w", err)
+			}
+			return string(ct), nil
+		}).(pulumi.StringOutput)
 }
 
 // deliverServiceDescriptor writes a secret-less service's descriptor.yaml (0644)
@@ -929,7 +947,11 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 		Update:     pulumi.String(writeScript),
 		Delete:     pulumi.String(deleteScript),
 		Triggers:   pulumi.Array{pulumi.String(writeScript)},
-	}, pulumi.DependsOn([]pulumi.Resource{gate})); err != nil {
+		// Same URN as deliverServiceSecrets' command (the two are the same
+		// logical resource in different shapes); delete-before-replace keeps a
+		// shape flip or trigger change from letting the old Delete script remove
+		// the freshly written descriptor (see deliverServiceSecrets).
+	}, pulumi.DependsOn([]pulumi.Resource{gate}), pulumi.DeleteBeforeReplace(true)); err != nil {
 		return fmt.Errorf("service %q: write descriptor: %w", svc.Name, err)
 	}
 	return nil

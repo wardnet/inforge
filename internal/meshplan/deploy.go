@@ -3,7 +3,6 @@ package meshplan
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/pki"
@@ -61,7 +60,7 @@ func BuildDeployDescriptor(env, baseDomain string, regional, global types.Resour
 			}
 			desc.Targets = append(desc.Targets, DeployTarget{
 				Host:    hostKey,
-				HostDNS: naming.HostFQDN(env, slug, bareComputeName(hostKey), baseDomain),
+				HostDNS: naming.HostFQDN(env, slug, naming.BareComputeName(hostKey), baseDomain),
 				SSHUser: sshUser,
 				Scope:   scope,
 			})
@@ -80,14 +79,4 @@ func BuildDeployDescriptor(env, baseDomain string, regional, global types.Resour
 	appendScope(global, pki.ScopeGlobal, "")
 
 	return desc, nil
-}
-
-// bareComputeName strips the "-NN" instance suffix from a canonical compute
-// specKey ("bridge-01" → "bridge") — the bare name the host DNS record is
-// derived from, mirroring internal/service's computeName.
-func bareComputeName(specKey string) string {
-	if i := strings.LastIndex(specKey, "-"); i > 0 {
-		return specKey[:i]
-	}
-	return specKey
 }

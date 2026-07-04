@@ -16,7 +16,6 @@ import (
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/release"
 	"github.com/wardnet/inforge/internal/service"
-	"github.com/wardnet/inforge/internal/types"
 )
 
 // newReleasesCmd is the `inforge releases` group: push builds + uploads an
@@ -415,26 +414,16 @@ func mintReleasedServiceLeaf(ctx context.Context, dir, env, svc string) error {
 	if err != nil {
 		return err
 	}
-	if !anyServiceNeedsMtlsFiles(globalRes.Service, svc) && !anyServiceNeedsMtlsFiles(regionalRes.Service, svc) {
-		return nil // no service-side mtls files — nothing to mint
-	}
+	// renewMeshCertsAs no-ops (before touching the store or INFORGE_SECRETS_KEY)
+	// when the named service has no service-side mtls files to mint.
 	count, err := renewMeshCertsAs(ctx, dir, env, env, globalRes, regionalRes, svc)
 	if err != nil {
 		return fmt.Errorf("mint mesh leaf for %s: %w", svc, err)
 	}
-	fmt.Printf("minted %d mesh leaf certificate(s) for %s\n", count, svc)
-	return nil
-}
-
-// anyServiceNeedsMtlsFiles reports whether the named service opts into
-// service-side mtls files (pki: member with mtls_files: true).
-func anyServiceNeedsMtlsFiles(services []types.ServiceSpec, name string) bool {
-	for _, s := range services {
-		if s.Name == name && s.Pki != "" && s.MtlsFiles {
-			return true
-		}
+	if count > 0 {
+		fmt.Printf("minted %d mesh leaf certificate(s) for %s\n", count, svc)
 	}
-	return false
+	return nil
 }
 
 // mustRequire marks flags required, panicking on the impossible misconfiguration

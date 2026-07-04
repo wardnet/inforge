@@ -139,7 +139,9 @@ func runEphemeralUp(ctx context.Context, configPath, dir, from, slugFlag, ttlFla
 	// clone's mesh material (source config, slug identity) into the slug-scoped
 	// mesh workspace and trigger each ephemeral mesh host's pull, so the
 	// replicated services below start against proxies holding real leaves.
-	if err := meshBaseline(ctx, s, dir, from, slug, sshKeyPath); err != nil {
+	// Trigger failures inside are warnings (hosts converge on their timer);
+	// only a mint failure aborts before replication.
+	if err := meshBaseline(ctx, s, dir, from, slug, sshKeyPath, os.Stdout); err != nil {
 		return err
 	}
 
@@ -341,16 +343,17 @@ func replicateApp(ctx context.Context, store *release.Store, srcEnv, slug, sshKe
 // baseline, not per replicated service (ADR-0033). The source resource set is
 // taken from the already-loaded sourceWorkloads (no re-read).
 func mintReplicatedServiceLeaf(ctx context.Context, dir, srcEnv, slug, svc string, sw sourceWorkloads) error {
-	if !anyServiceNeedsMtlsFiles(sw.globalSvcs, svc) && !anyServiceNeedsMtlsFiles(sw.regionalSvcs, svc) {
-		return nil // no service-side mtls files — nothing to mint
-	}
+	// renewMeshCertsAs no-ops (before touching the store or INFORGE_SECRETS_KEY)
+	// when the named service has no service-side mtls files to mint.
 	global := types.Resources{Service: sw.globalSvcs}
 	regional := types.Resources{Service: sw.regionalSvcs}
 	count, err := renewMeshCertsAs(ctx, dir, srcEnv, slug, global, regional, svc)
 	if err != nil {
 		return fmt.Errorf("mint mesh leaf for %s under %s: %w", svc, slug, err)
 	}
-	fmt.Printf("  service %s: minted %d mesh leaf certificate(s) under %s\n", svc, count, slug)
+	if count > 0 {
+		fmt.Printf("  service %s: minted %d mesh leaf certificate(s) under %s\n", svc, count, slug)
+	}
 	return nil
 }
 
@@ -472,4 +475,3 @@ func dedupByName[T any](items []T, name func(T) string) []T {
 	}
 	return out
 }
-

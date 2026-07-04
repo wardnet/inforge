@@ -8,7 +8,6 @@ package service
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/wardnet/inforge/internal/hostpaths"
 	"github.com/wardnet/inforge/internal/naming"
@@ -235,12 +234,10 @@ func hostDNS(hostKey, env, baseDomain, slug string) string {
 	return naming.HostFQDN(env, slug, computeName(hostKey), baseDomain)
 }
 
-// computeName strips the "-NN" instance suffix from an expanded compute specKey.
+// computeName strips the "-NN" instance suffix from an expanded compute
+// specKey — naming.BareComputeName, the single home for the strip rule.
 func computeName(specKey string) string {
-	if i := strings.LastIndex(specKey, "-"); i > 0 {
-		return specKey[:i]
-	}
-	return specKey
+	return naming.BareComputeName(specKey)
 }
 
 // Marshal renders the deploy descriptor as YAML for the deployment workflow.
