@@ -14,11 +14,13 @@ func sampleConfig() Config {
 				Name: "tenants", SNI: "tenants.us-east-1.mesh", MeshPort: 8080,
 				LeafCertPath: "/run/wardnet/mesh/tenants/leaf.crt", LeafKeyPath: "/run/wardnet/mesh/tenants/leaf.key",
 				AllowedCallers: []string{"us-east-1/ddns", "us-east-1/gateway"},
+				Paths:          []string{"/v*/account/**", "/internal/reconcile"},
 			},
 			{
 				Name: "ddns", SNI: "ddns.us-east-1.mesh", MeshPort: 9090,
 				LeafCertPath: "/run/wardnet/mesh/ddns/leaf.crt", LeafKeyPath: "/run/wardnet/mesh/ddns/leaf.key",
 				AllowedCallers: []string{"us-east-1/tenants"},
+				Paths:          []string{"/dns/**"},
 			},
 		},
 		Egress: []EgressCaller{
@@ -74,6 +76,54 @@ func TestRenderIngress(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered config missing %q\n---\n%s", want, out)
 		}
+	}
+}
+
+// TestRenderIngressPathAllowlist: a callee with declared path globs gets one
+// regex location per compiled glob (each carrying the allow-list guard) plus a
+// JSON 404 catch-all — an undeclared path is unreachable even for an allowed
+// peer (ADR-0034).
+func TestRenderIngressPathAllowlist(t *testing.T) {
+	c := sampleConfig()
+	c.Local[0].Paths = []string{"/v*/account/**", "/internal/reconcile"}
+	out, err := Render(c)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		`location ~ "^/v[^/]+/account(/.*)?$" {`,
+		`location ~ "^/internal/reconcile$" {`,
+		`default_type application/json;`,
+		`return 404 '{"error":"not_found"}';`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered config missing %q\n---\n%s", want, out)
+		}
+	}
+	// The JSON-404 catch-all carries the allow-guard too: a valid-cert peer NOT in
+	// allowed_services must get a uniform 403 on every path — 403-on-declared vs
+	// 404-on-undeclared would let it enumerate the callee's declared surface.
+	if !strings.Contains(out, "location / {\n            if ($mesh_allow_tenants = 0)") {
+		t.Errorf("catch-all lost the allow-guard (403 before 404)\n---\n%s", out)
+	}
+}
+
+// TestRenderIngressNoPathsErrors: a path-less callee fails the render loud — the
+// callee surface is allowlist-only, never full-open (ADR-0034).
+func TestRenderIngressNoPathsErrors(t *testing.T) {
+	c := sampleConfig()
+	c.Local[0].Paths = nil
+	if _, err := Render(c); err == nil || !strings.Contains(err.Error(), "allowlist-only") {
+		t.Errorf("expected allowlist-only error for a path-less callee, got %v", err)
+	}
+}
+
+// TestRenderIngressBadGlobErrors: a malformed glob fails the render loud.
+func TestRenderIngressBadGlobErrors(t *testing.T) {
+	c := sampleConfig()
+	c.Local[0].Paths = []string{"/a/**/b"}
+	if _, err := Render(c); err == nil || !strings.Contains(err.Error(), "invalid path glob") {
+		t.Errorf("expected invalid path glob error, got %v", err)
 	}
 }
 

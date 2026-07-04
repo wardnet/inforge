@@ -73,3 +73,12 @@ A probe is `GET http://<ingress-host>:81/healthz` with `Host: <svc>.svc.<env>.<s
 missing `Host` returns `404` (each backend is matched strictly, with no catch-all). The port must not be
 `80` (ACME owns it), a route `listen` port on the host, or fall in nginx's internal `ssl_preread` loopback
 range.
+
+The health listener is **allowlist-only**: it proxies only the service's declared
+[`health_probe_paths`](./service#health-probes) (exact match) and returns `404` for any other path —
+the backend's health port is never exposed wholesale.
+
+A health-declaring service gets its `<svc>.svc` DNS A record derived **even when it has no
+`routes:`** (a health-only service), pointing at the ingress host — so probes always address it by
+FQDN. A gateway-listed service *without* an ingress gets the same treatment on the
+[gateway's host](./gateway#health) instead.

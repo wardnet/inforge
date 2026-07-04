@@ -24,6 +24,7 @@ import (
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/nginx"
+	"github.com/wardnet/inforge/internal/pathglob"
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/secretstore"
@@ -254,8 +255,24 @@ type regionContext struct {
 	gatewayScopeCount int
 	// serviceAllowsGateway records whether a service permits the north-south gateway to
 	// call it (its mesh.allowed_services contains "gateway"). checkGateway requires a
-	// route's target service to allow the gateway (the two sides must agree, ADR-0032).
+	// listed service to allow the gateway (the two sides must agree, ADR-0032).
 	serviceAllowsGateway map[string]bool
+	// servicePublicPathsByName maps each service name to its mesh.public_paths (raw
+	// globs). checkGateway derives the gateway's routing table from it (ADR-0034):
+	// a listed service must publish >=1 public path, and patterns must be pairwise
+	// non-overlapping across the gateway's services (or emission order would pick
+	// the winning route silently).
+	servicePublicPathsByName map[string][]string
+	// gatewayServiceTargets holds the service names listed in a gateway's services:
+	// — the set whose health endpoints the gateway host may surface (ADR-0034).
+	// checkService accepts health_probes_port on an ingress-less service only when
+	// the service is a gateway target.
+	gatewayServiceTargets map[string]bool
+	// gatewayHostKey/gatewayHealthPort are the scope singleton gateway's canonical
+	// host and effective public health port ("" / 0 when the scope has no gateway),
+	// for the gateway-tier co-location checks in checkService.
+	gatewayHostKey    string
+	gatewayHealthPort int
 	// servicePkiByName maps each service name in this scope to its pki: mesh membership.
 	// checkGateway requires every route target to join the SAME mesh as the gateway —
 	// a callee's trust bundle only admits callers chaining to its own mesh's
@@ -537,13 +554,15 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		pkiResources:          map[string]string{},
 		serviceAllowsGateway:  map[string]bool{},
 		servicePkiByName:      map[string]string{},
-		serviceHostByName:     map[string]string{},
-		serviceNamesInScope:   map[string]bool{},
-		meshServices:          map[string]bool{},
-		callerCandidates:      map[string]bool{},
-		forbiddenCallerNames:  map[string]bool{},
-		encStore:              encStore,
-		providerDefaults:      defaults,
+		serviceHostByName:        map[string]string{},
+		serviceNamesInScope:      map[string]bool{},
+		meshServices:             map[string]bool{},
+		callerCandidates:         map[string]bool{},
+		forbiddenCallerNames:     map[string]bool{},
+		servicePublicPathsByName: map[string][]string{},
+		gatewayServiceTargets:    map[string]bool{},
+		encStore:                 encStore,
+		providerDefaults:         defaults,
 	}
 	// Gateway is a scope singleton; count the declarations so checkGateway can reject
 	// a scope with more than one and checkService can reject a gateway route in a
@@ -613,6 +632,21 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			ctx.appSubdomainCounts[f.spec.Subdomain]++
 		}
 	}
+	// Gateway targets + host/health-port (ADR-0034): the services a gateway lists
+	// may surface health on the gateway's host, so checkService needs the target
+	// set and the gateway's co-location facts. The gateway is a scope singleton;
+	// with several declared (rejected by checkGateway) the last host/port wins
+	// here, which only affects secondary messages.
+	for _, f := range gatewayFiles {
+		if f.parseErr != nil {
+			continue
+		}
+		for _, name := range f.spec.Services {
+			ctx.gatewayServiceTargets[name] = true
+		}
+		ctx.gatewayHostKey = canonicalHost(f.spec.Host, ctx)
+		ctx.gatewayHealthPort = f.spec.EffectiveHealthProbesPort()
+	}
 	// Service name sets (this scope): every service name, and the mesh-member subset,
 	// so a gateway route's allowed_services caller can be resolved and the "not a
 	// service" vs "not a mesh member" distinction reported precisely.
@@ -625,6 +659,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		ctx.serviceHostByName[f.spec.Name] = f.spec.Host
 		if f.spec.Pki != "" {
 			ctx.meshServices[f.spec.Name] = true
+		}
+		if f.spec.Mesh != nil {
+			ctx.servicePublicPathsByName[f.spec.Name] = f.spec.Mesh.PublicPaths
 		}
 	}
 	// Mesh exposure (ADR-0032): a service's mesh.port is a loopback backend bind, so it
@@ -659,23 +696,24 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		if f.parseErr != nil {
 			continue
 		}
+		// The backend health port is a backend bind, so it shares the target space of
+		// the service's host — register it alongside route targets so a collision with
+		// another service's target (or this service's own routes) is detectable.
+		// UNGATED on the ingress FK: an ingress-less gateway-listed service binds its
+		// health port on its host all the same (ADR-0034).
+		if hb := canonicalHost(f.spec.Host, ctx); f.spec.HealthProbesPort != 0 && hb != "" {
+			if ctx.targetUsersByHost[hb] == nil {
+				ctx.targetUsersByHost[hb] = map[int][]string{}
+			}
+			ctx.targetUsersByHost[hb][f.spec.HealthProbesPort] = append(ctx.targetUsersByHost[hb][f.spec.HealthProbesPort], f.spec.Name)
+		}
 		// A service is in the ingress tier when it exposes routes OR a health endpoint
-		// (a health-only service still binds a backend health port that must be
-		// collision-checked like a route target).
+		// through an ingress.
 		if f.spec.Ingress == "" || (len(f.spec.Routes) == 0 && f.spec.HealthProbesPort == 0) {
 			continue
 		}
 		ingHost, ingOK := ctx.ingressHost[f.spec.Ingress]
 		backendHost := canonicalHost(f.spec.Host, ctx)
-		// The backend health port is a backend bind, so it shares the target space of
-		// the service's host — register it alongside route targets so a collision with
-		// another service's target (or this service's own routes) is detectable.
-		if f.spec.HealthProbesPort != 0 && backendHost != "" {
-			if ctx.targetUsersByHost[backendHost] == nil {
-				ctx.targetUsersByHost[backendHost] = map[int][]string{}
-			}
-			ctx.targetUsersByHost[backendHost][f.spec.HealthProbesPort] = append(ctx.targetUsersByHost[backendHost][f.spec.HealthProbesPort], f.spec.Name)
-		}
 		for _, rt := range f.spec.Routes {
 			if ingOK {
 				if ctx.portUsersByHost[ingHost] == nil {
@@ -1478,15 +1516,22 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	if s.Mesh != nil {
 		errs = append(errs, checkMesh(s, backendHost, ctx)...)
 	}
-	// Health endpoint: the service serves health on HealthProbesPort, surfaced through
-	// its ingress's public health port (Host-demuxed). A service exposing health must
-	// name a resolvable ingress; the per-port collision checks only make sense once it
-	// does, so they are gated behind a resolved ingress to avoid piling cascading
-	// errors on top of the FK failure. (When the ingress FK is unresolved, ingHost is
-	// "" and coLocated is false — the FK error already fails validation.)
+	// Health endpoint: the service serves health on HealthProbesPort, surfaced
+	// through its ingress's — or, for an ingress-less gateway-listed service, the
+	// gateway's — public health port (Host-demuxed, ADR-0034). A service exposing
+	// health must have one of the two surfaces; the per-port collision checks only
+	// make sense once it does, so they are gated behind it to avoid piling
+	// cascading errors on top of the FK failure. (When the ingress FK is
+	// unresolved, ingHost is "" and coLocated is false — the FK error already
+	// fails validation.)
 	if s.HealthProbesPort != 0 {
-		if s.Ingress == "" {
-			errs = append(errs, "health_probes_port: a service exposing health must name the ingress resource that surfaces it")
+		// The health listener is allowlist-only (ADR-0034): a port with no declared
+		// probe paths would render a listener that 404s everything.
+		if len(s.HealthProbePaths) == 0 {
+			errs = append(errs, "health_probes_port: declared without health_probe_paths; the health listener serves only declared probe paths — declare at least one (e.g. /healthz)")
+		}
+		if s.Ingress == "" && !ctx.gatewayServiceTargets[s.Name] {
+			errs = append(errs, "health_probes_port: a service exposing health must name the ingress resource that surfaces it, or be listed in the scope gateway's services")
 		} else {
 			// The backend health port is a distinct bind, so it must differ from every
 			// one of the service's own route targets.
@@ -1508,22 +1553,44 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 					errs = append(errs, fmt.Sprintf("health_probes_port: %d on host %q is also a backend port of service(s) %s; a backend port belongs to a single service", s.HealthProbesPort, s.Host, strings.Join(others, ", ")))
 				}
 			}
-			// Co-located only: nginx binds the public health port (and any ssl_preread
-			// loopback terminator) on the host where the service also binds its backend
-			// health port, so those must not clash. Cross-host backends bind on another
-			// host, so no clash is possible there.
+			// Co-located with the ingress: nginx binds the public health port on the
+			// host where the service also binds its backend health port.
 			if coLocated {
 				if healthIngressPort := ctx.ingressHealthPort[s.Ingress]; healthIngressPort != 0 && s.HealthProbesPort == healthIngressPort {
 					errs = append(errs, fmt.Sprintf("health_probes_port: %d equals ingress %q's public health port; when co-located the backend health port must differ (nginx binds the public port on all interfaces)", s.HealthProbesPort, s.Ingress))
 				}
-				if inReservedLoopbackRange(s.HealthProbesPort) {
-					errs = append(errs, fmt.Sprintf("health_probes_port: %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a port outside it", s.HealthProbesPort, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
+			}
+			// The gateway-tier analogues (ADR-0034): an ingress-less gateway-listed
+			// service co-located with the gateway host binds its backend health port on
+			// the same host where the gateway's nginx binds the public health listener,
+			// its daemon-TLS :443, and the ACME :80 — none of which live in
+			// portUsersByHost (that map carries only route listen ports).
+			if s.Ingress == "" && ctx.gatewayServiceTargets[s.Name] && backendHost != "" && backendHost == ctx.gatewayHostKey {
+				if ctx.gatewayHealthPort != 0 && s.HealthProbesPort == ctx.gatewayHealthPort {
+					errs = append(errs, fmt.Sprintf("health_probes_port: %d equals the gateway's public health port; when co-located with the gateway host the backend health port must differ (nginx binds the public port on all interfaces)", s.HealthProbesPort))
 				}
+				if s.HealthProbesPort == 443 || s.HealthProbesPort == 80 {
+					errs = append(errs, fmt.Sprintf("health_probes_port: %d is held by the gateway's nginx on this host (:443 daemon TLS, :80 ACME); the co-located backend health port must differ", s.HealthProbesPort))
+				}
+			}
+			// The reserved ssl_preread loopback range is bound wherever an EDGE nginx
+			// (an ingress or the gateway) runs — which may be the service's own host
+			// even when the surfacing tier lives elsewhere — so this is gated on the
+			// backend host running one, not on co-location with the consuming surface
+			// (the exposed_ports idiom).
+			if hostRunsEdgeNginx(backendHost, ctx) && inReservedLoopbackRange(s.HealthProbesPort) {
+				errs = append(errs, fmt.Sprintf("health_probes_port: %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a port outside it", s.HealthProbesPort, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
 			}
 			if msg := meshEgressRangeErr("health_probes_port", s.HealthProbesPort); msg != "" {
 				errs = append(errs, msg)
 			}
 		}
+	}
+	// Probe paths are exact-match locations; validate the syntax whenever declared,
+	// and reject the orphaned form (paths without the port that creates the listener).
+	errs = append(errs, checkExactPaths("health_probe_paths", s.HealthProbePaths)...)
+	if len(s.HealthProbePaths) > 0 && s.HealthProbesPort == 0 {
+		errs = append(errs, "health_probe_paths: declared without health_probes_port; the paths allowlist filters the health listener that port creates")
 	}
 	// exposed_ports (ADR-0029): each is a private-network backend bind inforge opens
 	// only to the host's private CIDR. Unlike health, a service MAY declare them with
@@ -1532,7 +1599,7 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	// with route targets and health ports; a udp exposed port collides only with
 	// another udp exposed port.
 	if len(s.ExposedPorts) > 0 {
-		hostRunsIngress := backendHost != "" && len(ctx.ingressNamesByHost[backendHost]) > 0
+		hostRunsIngress := hostRunsEdgeNginx(backendHost, ctx)
 		seen := map[types.ExposedPort]bool{}
 		for _, ep := range s.ExposedPorts {
 			if ep.Proto != "tcp" && ep.Proto != "udp" {
@@ -1758,48 +1825,107 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 	if ctx.gatewayScopeCount > 1 {
 		errs = append(errs, "a scope may declare at most one gateway (it is a scope singleton — one public daemon edge per scope)")
 	}
-	seenPath := map[string]bool{}
-	for _, rt := range s.Routes {
-		// Path: the loader normalized it to "/<p>/"; a "/" means the authored value was
-		// empty or slash-only. A route must claim a non-root prefix (a "/" would capture
-		// every request), be a plain prefix, and be unique within the gateway.
+	// Listed services (ADR-0034): the gateway's routing table is DERIVED from each
+	// listed service's mesh.public_paths, so each name must resolve to a service in
+	// this scope that permits the gateway (mesh.allowed_services contains
+	// "gateway"), joins the gateway's mesh, and publishes >=1 public path — the
+	// edge is allowlist-only, so a path-less service would 404 every request.
+	type publicPattern struct {
+		service string
+		pattern pathglob.Pattern
+	}
+	var patterns []publicPattern
+	seenSvc := map[string]bool{}
+	for _, name := range s.Services {
 		switch {
-		case rt.Path == "" || rt.Path == "/":
-			errs = append(errs, "routes: a gateway route must declare a non-root path prefix (e.g. /ddns/)")
-		case strings.Contains(rt.Path, "..") || strings.ContainsAny(rt.Path, " \t"):
-			errs = append(errs, fmt.Sprintf("routes: gateway path %q is invalid; use a plain URL prefix like /ddns/ (no spaces or \"..\")", rt.Path))
-		case seenPath[rt.Path]:
-			errs = append(errs, fmt.Sprintf("routes: gateway path %q is declared more than once on this gateway", rt.Path))
-		default:
-			seenPath[rt.Path] = true
-		}
-		// Target service: must resolve to a service in this scope, and that service must
-		// permit the gateway (mesh.allowed_services contains "gateway"). The gateway
-		// reaches it through the mesh, so a service with no mesh block / no gateway in its
-		// allow list is unreachable — reject it here so the two sides can't drift.
-		switch {
-		case rt.Service == "":
-			errs = append(errs, fmt.Sprintf("routes: gateway path %q has no service", rt.Path))
-		case !ctx.serviceNamesInScope[rt.Service]:
-			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, which does not resolve to a service in this scope", rt.Path, rt.Service))
-		case !ctx.serviceAllowsGateway[rt.Service]:
-			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, but that service does not permit the gateway — add %q to its mesh.allowed_services", rt.Path, rt.Service, gatewayCallerName))
-		case s.Pki != "" && ctx.servicePkiByName[rt.Service] != s.Pki:
+		case name == "":
+			errs = append(errs, "services: has an empty entry")
+			continue
+		case seenSvc[name]:
+			errs = append(errs, fmt.Sprintf("services: %q is listed more than once on this gateway", name))
+			continue
+		case !ctx.serviceNamesInScope[name]:
+			errs = append(errs, fmt.Sprintf("services: %q does not resolve to a service in this scope", name))
+			continue
+		case !ctx.serviceAllowsGateway[name]:
+			errs = append(errs, fmt.Sprintf("services: %q does not permit the gateway — add %q to its mesh.allowed_services", name, gatewayCallerName))
+		case s.Pki != "" && ctx.servicePkiByName[name] != s.Pki:
 			// The gateway's client leaf chains to ITS pki's intermediates; a callee
 			// verifies callers against its OWN mesh's trust set. Different meshes can
 			// never complete the handshake, so reject the drift at authoring time.
-			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, which joins mesh %q while the gateway joins %q — a gateway and its route targets must share one pki", rt.Path, rt.Service, ctx.servicePkiByName[rt.Service], s.Pki))
+			errs = append(errs, fmt.Sprintf("services: %q joins mesh %q while the gateway joins %q — a gateway and its listed services must share one pki", name, ctx.servicePkiByName[name], s.Pki))
 		}
-		// The gateway's mesh egress dials a route target's mesh proxy at its host's
-		// PRIVATE IP (and the target's MTLSPort firewall admits only its own network
-		// CIDR), so a cross-host target must share a network with the gateway host —
-		// the mesh sibling of cross-host-route-requires-same-network. Cross-scope
-		// never occurs here (routes are same-scope by construction).
-		if gwHost != "" && ctx.serviceNamesInScope[rt.Service] {
-			if tHost := canonicalHost(ctx.serviceHostByName[rt.Service], ctx); tHost != "" && tHost != gwHost {
+		seenSvc[name] = true
+		publics := ctx.servicePublicPathsByName[name]
+		if len(publics) == 0 {
+			errs = append(errs, fmt.Sprintf("services: %q declares no mesh.public_paths — the gateway would expose nothing for it; declare the service's public endpoints or remove it from the gateway", name))
+		}
+		for _, raw := range publics {
+			// A malformed glob is checkMesh's error (reported on the service); skip
+			// it here so the overlap pass below sees only parseable patterns.
+			if p, err := pathglob.Parse(raw); err == nil {
+				patterns = append(patterns, publicPattern{service: name, pattern: p})
+			}
+		}
+		// The gateway's mesh egress dials a listed service's mesh proxy at its
+		// host's PRIVATE IP (and the target's MTLSPort firewall admits only its own
+		// network CIDR), so a cross-host target must share a network with the
+		// gateway host — the mesh sibling of cross-host-route-requires-same-network.
+		// Cross-scope never occurs here (listed services are same-scope by
+		// construction).
+		if gwHost != "" && ctx.serviceNamesInScope[name] {
+			if tHost := canonicalHost(ctx.serviceHostByName[name], ctx); tHost != "" && tHost != gwHost {
 				if gn, tn := ctx.computeNetwork[gwHost], ctx.computeNetwork[tHost]; gn != tn {
-					errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q on network %q, but the gateway host is on network %q — the mesh dials the target's private IP, so the two hosts must share a network", rt.Path, rt.Service, tn, gn))
+					errs = append(errs, fmt.Sprintf("services: %q is on network %q, but the gateway host is on network %q — the mesh dials the target's private IP, so the two hosts must share a network", name, tn, gn))
 				}
+			}
+		}
+	}
+	// Cross-service overlap is the load-bearing routing invariant (ADR-0034): with
+	// a derived table, two services claiming overlapping public globs would leave
+	// emission order to pick the winner silently. Overlap within one service's own
+	// list is harmless (same target) and not rejected.
+	for i := 0; i < len(patterns); i++ {
+		for j := i + 1; j < len(patterns); j++ {
+			if patterns[i].service != patterns[j].service && patterns[i].pattern.Overlaps(patterns[j].pattern) {
+				errs = append(errs, fmt.Sprintf("services: public path %q of service %q overlaps %q of service %q — a request path must have exactly one owning service on the gateway", patterns[i].pattern, patterns[i].service, patterns[j].pattern, patterns[j].service))
+			}
+		}
+	}
+	// The gateway's own health probe paths render as exact 200-"ok" locations on
+	// the 443 server (edge liveness, ADR-0034). Exact paths only, unique, and none
+	// may be claimed by a listed service's public glob — the exact-match location
+	// would silently shadow the service's endpoint.
+	errs = append(errs, checkExactPaths("health_probe_paths", s.HealthProbePaths)...)
+	for _, hp := range s.HealthProbePaths {
+		for _, pp := range patterns {
+			if pp.pattern.Matches(hp) {
+				errs = append(errs, fmt.Sprintf("health_probe_paths: %q is claimed by service %q's public path %q — the gateway's exact-match liveness location would shadow the service's endpoint; pick a path outside every listed service's public_paths", hp, pp.service, pp.pattern))
+			}
+		}
+	}
+	// The public health port the gateway host exposes its listed services' health
+	// on (plain HTTP, Host-demuxed) — same rules as the ingress twin, plus 443
+	// (the gateway terminates daemon TLS there).
+	healthPort := s.EffectiveHealthProbesPort()
+	if healthPort == 80 {
+		errs = append(errs, "health_probes_port: must not be 80 (ACME HTTP-01 owns :80 on the gateway host)")
+	}
+	if healthPort == 443 {
+		errs = append(errs, "health_probes_port: must not be 443 (the gateway terminates daemon TLS there)")
+	}
+	if inReservedLoopbackRange(healthPort) {
+		errs = append(errs, fmt.Sprintf("health_probes_port: %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a health port outside it", healthPort, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
+	}
+	if gwHost != "" {
+		if users := ctx.portUsersByHost[gwHost][healthPort]; len(users) > 0 {
+			errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with a route listen port on the gateway host (used by service(s) %s); pick a distinct health port", healthPort, strings.Join(users, ", ")))
+		}
+		// One host renders ONE health listener (Render takes a single healthPort per
+		// host), so a gateway sharing its host with an ingress must agree on the port.
+		for _, ingName := range ctx.ingressNamesByHost[gwHost] {
+			if ip := ctx.ingressHealthPort[ingName]; ip != 0 && ip != healthPort {
+				errs = append(errs, fmt.Sprintf("health_probes_port: %d differs from ingress %q's public health port %d on the shared host %q; one host renders one health listener, so the two must match", healthPort, ingName, ip, s.Host))
 			}
 		}
 	}
@@ -1810,6 +1936,32 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 		errs = append(errs, fmt.Sprintf("subdomain: %q is already used by an app in this scope; the gateway needs its own public FQDN", s.Subdomain))
 	}
 	return errs, warns
+}
+
+// checkExactPaths validates a declared health-probe path list (service or
+// gateway): each entry must be an exact absolute path in the shared pathglob
+// charset — nginx matches locations against the decoded, query-stripped URI,
+// so a "?"/"#"/"{" in a declared path would render a location that never
+// fires (probes 404 forever with a green nginx -t) — and unique.
+func checkExactPaths(field string, paths []string) []string {
+	var errs []string
+	seen := map[string]bool{}
+	for _, p := range paths {
+		if seen[p] {
+			errs = append(errs, fmt.Sprintf("%s: %q is declared more than once", field, p))
+		} else if err := pathglob.CheckExact(p); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %q is invalid: %v", field, p, err))
+		}
+		seen[p] = true
+	}
+	return errs
+}
+
+// hostRunsEdgeNginx reports whether a backend host runs an edge nginx — an
+// ingress or the scope's gateway — whose ssl_preread loopback terminators (and
+// public binds) share the host's port space with backend binds.
+func hostRunsEdgeNginx(backendHost string, ctx regionContext) bool {
+	return backendHost != "" && (len(ctx.ingressNamesByHost[backendHost]) > 0 || backendHost == ctx.gatewayHostKey)
 }
 
 // checkMesh validates a service's mesh: block (ADR-0032): the loopback Port it serves
@@ -1824,6 +1976,41 @@ func checkMesh(s types.ServiceSpec, backendHost string, ctx regionContext) []str
 	// A mesh member must have a pki: identity (its leaf is what peers verify).
 	if s.Pki == "" {
 		errs = append(errs, "mesh: a service with a mesh block must declare pki: (its mesh identity)")
+	}
+	// Declared endpoint surface (ADR-0034): the callee's mesh proxy admits only
+	// declared paths (public ∪ internal), so a mesh block must declare at least one
+	// across both lists — allowlist-only, closed by default. Each glob must parse;
+	// duplicates within a list are rejected, and a public/internal overlap is
+	// rejected too (the path's edge visibility would be ambiguous).
+	parsePathList := func(field string, raw []string) []pathglob.Pattern {
+		var pats []pathglob.Pattern
+		seen := map[string]bool{}
+		for _, g := range raw {
+			if seen[g] {
+				errs = append(errs, fmt.Sprintf("mesh.%s: %q is declared more than once", field, g))
+				continue
+			}
+			seen[g] = true
+			p, err := pathglob.Parse(g)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("mesh.%s: %q is invalid: %v", field, g, err))
+				continue
+			}
+			pats = append(pats, p)
+		}
+		return pats
+	}
+	publicPats := parsePathList("public_paths", m.PublicPaths)
+	internalPats := parsePathList("internal_paths", m.InternalPaths)
+	if len(m.PublicPaths)+len(m.InternalPaths) == 0 {
+		errs = append(errs, "mesh: declare at least one public_paths or internal_paths entry — a mesh callee's endpoint surface is allowlist-only (ADR-0034)")
+	}
+	for _, pp := range publicPats {
+		for _, ip := range internalPats {
+			if pp.Overlaps(ip) {
+				errs = append(errs, fmt.Sprintf("mesh: public path %q overlaps internal path %q — a path's edge visibility must be unambiguous; split the globs so no request matches both", pp, ip))
+			}
+		}
 	}
 	if m.Port < 1 || m.Port > 65535 {
 		errs = append(errs, fmt.Sprintf("mesh.port: %d is invalid; a backend port (1..65535) is required", m.Port))

@@ -243,39 +243,34 @@ func TestLoadSizeTableFromFile(t *testing.T) {
 	assert.Error(t, st.Resolve("SMALL"))
 }
 
-func TestNormalizeGatewayRoutePath(t *testing.T) {
-	cases := map[string]string{
-		"tenants":     "/tenants/",
-		"/tenants":    "/tenants/",
-		"/tenants/":   "/tenants/",
-		" /tenants/ ": "/tenants/",
-		"a/b":         "/a/b/",
-		"":            "/",
-		"/":           "/",
-	}
-	for in, want := range cases {
-		if got := NormalizeGatewayRoutePath(in); got != want {
-			t.Errorf("NormalizeGatewayRoutePath(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestNormalizeServiceTrimsMeshAllowList(t *testing.T) {
-	s := types.ServiceSpec{Mesh: &types.MeshSpec{Port: 8080, AllowedServices: []string{" ddns ", "gateway"}}}
+	s := types.ServiceSpec{Mesh: &types.MeshSpec{Port: 8080, AllowedServices: []string{" ddns ", "gateway"}, PublicPaths: []string{" /v1/** "}, InternalPaths: []string{" /internal/** "}}, HealthProbePaths: []string{" /healthz "}}
 	NormalizeService(&s)
 	if s.Mesh.AllowedServices[0] != "ddns" {
 		t.Errorf("mesh allow list not trimmed: %q", s.Mesh.AllowedServices[0])
 	}
+	if s.Mesh.PublicPaths[0] != "/v1/**" {
+		t.Errorf("mesh public paths not trimmed: %q", s.Mesh.PublicPaths[0])
+	}
+	if s.Mesh.InternalPaths[0] != "/internal/**" {
+		t.Errorf("mesh internal paths not trimmed: %q", s.Mesh.InternalPaths[0])
+	}
+	if s.HealthProbePaths[0] != "/healthz" {
+		t.Errorf("health probe paths not trimmed: %q", s.HealthProbePaths[0])
+	}
 }
 
-func TestNormalizeGatewayNormalizesRoutes(t *testing.T) {
-	g := types.GatewaySpec{Name: "api", Routes: []types.GatewayRouteSpec{{Path: "ddns", Service: " ddns "}}}
+func TestNormalizeGatewayNormalizesServices(t *testing.T) {
+	g := types.GatewaySpec{Name: "api", Services: []string{" ddns "}, HealthProbePaths: []string{" /healthz "}}
 	NormalizeGateway(&g)
-	if g.Routes[0].Path != "/ddns/" {
-		t.Errorf("gateway route path not normalized: %q", g.Routes[0].Path)
+	if g.Services[0] != "ddns" {
+		t.Errorf("gateway services not trimmed: %q", g.Services[0])
 	}
-	if g.Routes[0].Service != "ddns" {
-		t.Errorf("gateway route service not trimmed: %q", g.Routes[0].Service)
+	if g.HealthProbePaths[0] != "/healthz" {
+		t.Errorf("gateway health probe paths not trimmed: %q", g.HealthProbePaths[0])
+	}
+	if g.HealthProbesPort != types.DefaultHealthProbesPort {
+		t.Errorf("gateway health port not defaulted: %d", g.HealthProbesPort)
 	}
 }
 

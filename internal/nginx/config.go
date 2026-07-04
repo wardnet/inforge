@@ -8,6 +8,7 @@ import (
 
 	crossplane "github.com/nginxinc/nginx-go-crossplane"
 	"github.com/wardnet/inforge/internal/meshpaths"
+	"github.com/wardnet/inforge/internal/pathglob"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -99,6 +100,14 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 		if h.Backend == "" {
 			return "", fmt.Errorf("nginx: ingress health for service %q has no backend address (unresolved upstream)", h.Service)
 		}
+		// The health listener is allowlist-only (ADR-0034). Failing loud — not
+		// falling back to a full-open location — keeps the property at the
+		// enforcement layer: a pathless entry reaching the render (a deploy that
+		// skipped validation, e.g. a pre-ADR-0034 manifest) must never silently
+		// proxy the whole backend port to the internet.
+		if len(h.Paths) == 0 {
+			return "", fmt.Errorf("nginx: ingress health for service %q declares no probe paths; the health listener is allowlist-only (declare health_probe_paths)", h.Service)
+		}
 	}
 	if len(sortedHealth) > 0 && healthPort <= 0 {
 		return "", fmt.Errorf("nginx: ingress has health endpoints but no public health port")
@@ -106,11 +115,22 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 	sort.Slice(sortedHealth, func(i, j int) bool { return sortedHealth[i].FQDN < sortedHealth[j].FQDN })
 
 	// Gateways render in a stable order. Each must carry its resolved FQDN — the
-	// server_name and ACME cert SNI; empty means the program wiring failed.
+	// server_name and ACME cert SNI; empty means the program wiring failed. Every
+	// route pattern is compiled up front (validation guarantees parseability; a
+	// bad glob reaching this far fails the render loud rather than emitting a
+	// broken location).
 	sortedGateways := append([]types.IngressGateway(nil), gateways...)
+	gatewayRegexOf := map[string]string{}
 	for _, g := range sortedGateways {
 		if g.FQDN == "" {
 			return "", fmt.Errorf("nginx: gateway %q has no FQDN", g.Name)
+		}
+		for _, rt := range g.Routes {
+			p, err := pathglob.Parse(rt.Pattern)
+			if err != nil {
+				return "", fmt.Errorf("nginx: gateway %q route for service %q: invalid path glob %q: %w", g.Name, rt.Service, rt.Pattern, err)
+			}
+			gatewayRegexOf[rt.Pattern] = p.Regex()
 		}
 	}
 	sort.Slice(sortedGateways, func(i, j int) bool { return sortedGateways[i].FQDN < sortedGateways[j].FQDN })
@@ -194,7 +214,7 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 	)
 
 	if len(terminate) > 0 || len(sortedApps) > 0 || len(sortedHealth) > 0 || len(sortedGateways) > 0 {
-		top = append(top, httpBlock(terminate, sortedApps, sortedHealth, healthPort, sortedGateways, listenDir, len(mixedPorts) > 0))
+		top = append(top, httpBlock(terminate, sortedApps, sortedHealth, healthPort, sortedGateways, gatewayRegexOf, listenDir, len(mixedPorts) > 0))
 	}
 	if len(forwardOnly) > 0 || len(mixedPorts) > 0 {
 		top = append(top, streamBlock(forwardOnly, mixedPorts))
@@ -216,7 +236,7 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 // and the :80 ACME-challenge/redirect server (only when something terminates TLS).
 // listenDir places a terminating server on its public port or, when that port is
 // mixed, on its internal loopback port.
-func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway, listenDir func(int) *crossplane.Directive, anyMixed bool) *crossplane.Directive {
+func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway, gatewayRegexOf map[string]string, listenDir func(int) *crossplane.Directive, anyMixed bool) *crossplane.Directive {
 	terminatesTLS := len(terminate) > 0 || len(apps) > 0 || len(gateways) > 0
 
 	var children crossplane.Directives
@@ -257,7 +277,7 @@ func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health [
 		children = append(children, appServer(a, listenDir(443)))
 	}
 	for _, g := range gateways {
-		children = append(children, gatewayServer(g, listenDir(443)))
+		children = append(children, gatewayServer(g, listenDir(443), gatewayRegexOf))
 	}
 	for _, h := range health {
 		children = append(children, healthServer(h, healthPort))
@@ -323,9 +343,10 @@ func appServer(a types.IngressApp, listen *crossplane.Directive) *crossplane.Dir
 	)
 }
 
-// gatewayServer renders the north-south daemon gateway server (ADR-0032): ACME-
-// managed TLS on the gateway's single FQDN, with one path-prefix location per
-// route handing the request to the LOCAL mesh proxy's gateway egress listener.
+// gatewayServer renders the north-south daemon gateway server (ADR-0032/0034):
+// ACME-managed TLS on the gateway's single FQDN, with one regex location per
+// derived route (a listed service's public path glob, compiled by pathglob)
+// handing the request to the LOCAL mesh proxy's gateway egress listener.
 // The location proxies plain HTTP to loopback; the mesh does the mTLS hop
 // presenting the gateway's <scope>/gateway leaf, and the callee's mesh stamps
 // X-Service-Identity from that cert. Invariants realized here:
@@ -336,10 +357,23 @@ func appServer(a types.IngressApp, listen *crossplane.Directive) *crossplane.Dir
 //   - every location is WebSocket-capable ($connection_upgrade map, 1h read
 //     timeout) — a daemon WS crosses three proxy hops;
 //   - the real daemon IP is stamped into X-Forwarded-For at this, the TLS edge;
-//   - a path matching no route is 404, never proxied.
-func gatewayServer(g types.IngressGateway, listen *crossplane.Directive) *crossplane.Directive {
+//   - the gateway's own health probe paths are answered 200 "ok" by nginx
+//     itself, over the same TLS path daemons use (edge liveness);
+//   - a path matching no route is a JSON 404 at the edge, never proxied.
+//
+// Regex locations are evaluated in emitted order for every request on this
+// server, but validation guarantees the patterns are pairwise non-overlapping
+// across the gateway's services (pathglob.Overlaps), so order cannot change
+// which route wins. regexOf maps each route's raw pattern to its compiled,
+// Render-verified regex.
+func gatewayServer(g types.IngressGateway, listen *crossplane.Directive, regexOf map[string]string) *crossplane.Directive {
 	routes := append([]types.IngressGatewayRoute(nil), g.Routes...)
-	sort.Slice(routes, func(i, j int) bool { return routes[i].Path < routes[j].Path })
+	sort.Slice(routes, func(i, j int) bool {
+		if routes[i].Pattern != routes[j].Pattern {
+			return routes[i].Pattern < routes[j].Pattern
+		}
+		return routes[i].Service < routes[j].Service
+	})
 
 	children := crossplane.Directives{
 		listen,
@@ -349,9 +383,17 @@ func gatewayServer(g types.IngressGateway, listen *crossplane.Directive) *crossp
 		dir("ssl_certificate_key", "$acme_certificate_key"),
 		dir("ssl_certificate_cache", "max=2"),
 	}
+	probes := append([]string(nil), g.HealthProbePaths...)
+	sort.Strings(probes)
+	for _, p := range probes {
+		children = append(children, block("location", []string{"=", p},
+			dir("default_type", "text/plain"),
+			dir("return", "200", "ok"),
+		))
+	}
 	for _, rt := range routes {
 		children = append(children,
-			block("location", []string{rt.Path},
+			block("location", []string{"~", regexOf[rt.Pattern]},
 				dir("proxy_http_version", "1.1"),
 				dir("proxy_set_header", "Upgrade", "$http_upgrade"),
 				dir("proxy_set_header", "Connection", "$connection_upgrade"),
@@ -366,34 +408,48 @@ func gatewayServer(g types.IngressGateway, listen *crossplane.Directive) *crossp
 				dir("proxy_read_timeout", "3600s"),
 				dir("proxy_pass", fmt.Sprintf("http://127.0.0.1:%d", meshpaths.GatewayEgressPort)),
 			),
-			// The slashless exact prefix would otherwise hit nginx's implicit 301
-			// (a "/"-terminated prefix location with proxy_pass redirects "/p" to
-			// "/p/"), silently dropping POST bodies and breaking the PoP-signed
-			// path. An exact-match location pre-empts the auto-redirect: unmatched
-			// means 404, never a redirect.
-			block("location", []string{"=", strings.TrimSuffix(rt.Path, "/")},
-				dir("return", "404"),
-			),
 		)
 	}
-	children = append(children, block("location", []string{"/"}, dir("return", "404")))
+	children = append(children, jsonNotFoundLocation())
 	return block("server", nil, children...)
+}
+
+// jsonNotFoundLocation is the gateway's catch-all: the gateway fronts REST
+// APIs, so an undeclared path is answered with a small JSON error at the edge
+// instead of a bare 404 page (ADR-0034).
+func jsonNotFoundLocation() *crossplane.Directive {
+	return block("location", []string{"/"},
+		dir("default_type", "application/json"),
+		dir("return", "404", `{"error":"not_found"}`),
+	)
 }
 
 // healthServer renders one plain-HTTP health server on the ingress's public health
 // port, matched strictly by server_name (the service FQDN / request Host) and
 // reverse-proxied to the service's backend health port. Every service's health
 // shares the one public port, so the Host header is what selects the backend — a
-// missing/wrong Host returns 404 (no default_server).
+// missing/wrong Host returns 404 (no default_server). Only the service's declared
+// probe paths are proxied (exact match); anything else 404s at the listener
+// (ADR-0034). Render has already rejected an entry with no paths (allowlist-only,
+// never full-open).
 func healthServer(h types.IngressHealth, healthPort int) *crossplane.Directive {
-	return block("server", nil,
-		dir("listen", strconv.Itoa(healthPort)),
-		dir("server_name", h.FQDN),
-		block("location", []string{"/"},
+	proxy := func() crossplane.Directives {
+		return crossplane.Directives{
 			dir("proxy_pass", fmt.Sprintf("http://%s:%d", h.Backend, h.Target)),
 			dir("proxy_set_header", "Host", "$host"),
-		),
-	)
+		}
+	}
+	children := crossplane.Directives{
+		dir("listen", strconv.Itoa(healthPort)),
+		dir("server_name", h.FQDN),
+	}
+	paths := append([]string(nil), h.Paths...)
+	sort.Strings(paths)
+	for _, p := range paths {
+		children = append(children, block("location", []string{"=", p}, proxy()...))
+	}
+	children = append(children, block("location", []string{"/"}, dir("return", "404")))
+	return block("server", nil, children...)
 }
 
 // streamBlock renders the stream{} context. For each mixed port it emits a

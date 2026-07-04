@@ -39,13 +39,19 @@ routes:                   # optional — typed inbound routes realized on the in
   - type: forward         #   a second route — raw L4 forward (PROXY protocol)
     listen: 853           #   required — public port
     target: 5353          #   required — backend port to forward to
-health_probes_port: 8081  # optional — backend port the ingress surfaces as a health check
+health_probes_port: 8081  # optional — backend port the ingress/gateway surfaces as a health check
+health_probe_paths:       # required (>=1) when health_probes_port is set — exact paths the health
+  - /healthz              #   listener proxies; anything else 404s
 exposed_ports:            # optional — ports opened on the host's PRIVATE network only (no ingress, no nginx)
   - { proto: tcp, port: 9444 }   #   inter-node mesh mTLS — reachable only on the host's network CIDR
   - { proto: udp, port: 51820 }  #   a peer link
 mesh:                     # optional — east-west mesh exposure (see "East-west service mesh")
   port: 8080              #   loopback port this service binds to receive mesh traffic (plain HTTP)
   allowed_services: [tunneller, gateway]  # callee-side allow list: who may call this service
+  public_paths:           #   path globs exposed at the internet edge (via a gateway listing this service)
+    - /api/v*/tenants/**  #   ...and admitted from mesh peers
+  internal_paths:         #   path globs for mesh peers ONLY — never served by a gateway
+    - /admin/**
 ```
 
 `environment.yaml` (optional sidecar — env-var name → source DSL string):
@@ -75,9 +81,10 @@ Database credentials are **not** declared here — they flow through a [grant](#
 | `reload` | string | No | `ExecReload=` command the service uses to apply a renewed leaf **without a restart** (e.g. `/bin/kill -HUP $MAINPID`, `nginx -s reload`). Only meaningful with `mtls_files: true` (only then does the service hold cert material and get a per-service renewal timer); when set, the timer reloads the unit, else restarts (a brief interruption). Must be a **single line** (it becomes one `ExecReload=` directive; a newline would inject extra unit directives). The leaf/key/bundle paths are in the `MTLS_LEAF_CERT_PATH` / `MTLS_LEAF_KEY_PATH` / `MTLS_TRUST_BUNDLE_PATH` env vars — these names are **reserved**: a service's own `environment:` may not use them. |
 | `ingress` | string | When `routes` is set | **Name** of the [ingress](#ingress-and-routes) resource (same scope) whose nginx fronts this service's `routes`. The ingress host and this service's host must share a network when they differ (cross-host routing). |
 | `routes` | array | No | Typed inbound routes (`tls-termination` / `forward`) realized on the referenced ingress's nginx. Each route binds a public `listen` port and a backend `target` port. See [Ingress and routes](#ingress-and-routes) below. |
-| `health_probes_port` | int | No | Backend port the service serves health checks on. The ingress surfaces it on its public [health port](./ingress#health-probes) (default `81`), demuxed by the service's FQDN. Requires `ingress`. See [Health probes](#health-probes) below. |
+| `health_probes_port` | int | No | Backend port the service serves health checks on, surfaced on a public [health port](./ingress#health-probes) (default `81`) demuxed by the service's FQDN. The health server renders on the service's `ingress:` host — or, for a service **without** an ingress that is listed in the scope [gateway](./gateway)'s `services:`, on the **gateway's** host. Requires ≥1 `health_probe_paths`. See [Health probes](#health-probes) below. |
+| `health_probe_paths` | array | When `health_probes_port` is set | Exact request paths (e.g. `/healthz`) the health listener proxies to `health_probes_port` — **only** these paths; anything else is `404` (allowlist-only). Required (≥1) whenever `health_probes_port` is set. Same segment charset as path globs (`[A-Za-z0-9._-]`, no globs) — characters like `?` or `{` can never appear in a matched nginx path and are rejected. |
 | `exposed_ports` | array | No | Ports the service binds that inforge opens on the host's **private network only** (never the public internet) — for peer / service-to-service traffic. Each entry is `{proto: tcp\|udp, port: 1..65535}`. Needs **no** ingress and uses **no** nginx (distinct from `routes`); it is the private sibling of [`compute.firewall.inbound`](./compute#firewall) (which is public). See [Exposed ports](#exposed-ports) below. |
-| `mesh` | object | No | East-west mesh exposure: `port` (the loopback port this service binds to receive mesh traffic) and `allowed_services` (the callee-side allow list of who may call it). Omit for a service that only makes outbound mesh calls. See [East-west service mesh](#east-west-service-mesh) below. |
+| `mesh` | object | No | East-west mesh exposure: `port` (the loopback port this service binds to receive mesh traffic), `allowed_services` (the callee-side allow list of who may call it), and the declared endpoint surface `public_paths` / `internal_paths` (a mesh callee must declare ≥1 path across the two lists — see [Path-level exposure](#path-level-exposure)). Omit the whole block for a service that only makes outbound mesh calls. See [East-west service mesh](#east-west-service-mesh) below. |
 
 **`environment.yaml` sidecar:**
 
@@ -291,20 +298,36 @@ as a route.
 
 ### Health probes
 
-A service may expose a health endpoint through its ingress with `health_probes_port` — the **backend**
-port it serves health checks on. The ingress publishes a single [public health port](./ingress#health-probes)
-(default `81`) and reverse-proxies each probe to the right backend, demuxed **by request `Host`** (the
-service's `<svc>.svc` FQDN). The health endpoint is **plain HTTP** (no TLS), and the public port is opened
-to the internet only when at least one service on the ingress declares a `health_probes_port`.
+A service may expose a health endpoint with `health_probes_port` — the **backend** port it serves
+health checks on — plus `health_probe_paths`, the **exact** request paths the health listener
+proxies (required, ≥1, whenever the port is set). The fronting host publishes a single
+[public health port](./ingress#health-probes) (default `81`) and reverse-proxies each probe to the
+right backend, demuxed **by request `Host`** (the service's `<svc>.svc` FQDN). The health endpoint
+is **plain HTTP** (no TLS), and the public port is opened to the internet only when at least one
+fronted service declares a `health_probes_port`.
 
 ```yaml
 ingress: edge
 health_probes_port: 8081   # the ingress exposes this on its public health port (:81)
+health_probe_paths:        # allowlist — ONLY these exact paths are proxied
+  - /healthz
 ```
 
 A probe reaches it as `GET http://<ingress-host>:81/healthz` with `Host: <svc>.svc.<env>.<slug>.<base>`;
-a missing or wrong `Host` returns `404` (each backend is matched strictly). `health_probes_port` must
-differ from the service's own route `target`s and, when co-located, from the ingress's public health port.
+a missing or wrong `Host` returns `404` (each backend is matched strictly), and so does any path
+outside `health_probe_paths` (the listener is **allowlist-only** — it never exposes the backend's
+whole port). `health_probes_port` must differ from the service's own route `target`s and, when
+co-located, from the public health port.
+
+**Where the health server renders** depends on what fronts the service:
+
+- a service with an `ingress:` — on the **ingress host**, as before;
+- a service with **no** `ingress:` that is listed in the scope [gateway](./gateway#health)'s
+  `services:` — on the **gateway's host** (the gateway's own `health_probes_port`, default `81`),
+  and the service's `<svc>.svc` DNS A record points at the **gateway host**, so probes address it by
+  the same FQDN scheme;
+- a service with **both** an ingress and a gateway listing keeps its health at the **ingress** (one
+  canonical health address — the A record can only derive at one host).
 
 ### Exposed ports
 
@@ -375,12 +398,18 @@ the only authoring surface is the optional per-service `mesh:` block.
 mesh:
   port: 8080                              # loopback port this service binds to RECEIVE mesh traffic (plain HTTP)
   allowed_services: [tunneller, gateway]  # callee-side allow list: who may call this service
+  public_paths:                           # exposed at the internet edge (via a gateway) AND to mesh peers
+    - /api/v*/tenants/**
+  internal_paths:                         # mesh peers ONLY — never served by a gateway
+    - /admin/**
 ```
 
 | Field | Type | Meaning |
 |-------|------|---------|
 | `mesh.port` | int | The `127.0.0.1:<port>` the service binds to **receive** mesh traffic (plain HTTP). Injected as `INFORGE_MESH_PORT`. Omit the whole block for a service that only makes outbound calls. |
 | `mesh.allowed_services` | list | Bare service names permitted to call this service. Enforced at **this** service's local mesh proxy — a disallowed caller is rejected before it reaches the service. Include `gateway` to be reachable by daemon traffic through the [north-south gateway](./gateway). Empty means no service peers may call it. |
+| `mesh.public_paths` | list | Absolute path globs exposed **at the internet edge** through a [gateway](./gateway) that lists this service, **and** admitted from mesh peers. See [Path-level exposure](#path-level-exposure). |
+| `mesh.internal_paths` | list | Absolute path globs admitted from **mesh peers only** — never served by a gateway, internet-invisible even on a gateway-listed service. |
 
 **Calling another service.** Read `INFORGE_MESH_URL` and name the target in the `X-Mesh-Target` header;
 the path is your real path, unchanged:
@@ -392,7 +421,10 @@ GET $INFORGE_MESH_URL/api/foo      # header: X-Mesh-Target: tunneller
 The local mesh resolves the target's **current** location — loopback (co-located), a private IP (same
 region, other host), or the **global mesh gateway** (cross-scope) — and does the `nginx↔nginx` mTLS hop,
 presenting this caller's leaf (`CN=<scope>/<service>`). The callee's mesh verifies the client cert,
-enforces `allowed_services`, and forwards over loopback with the verified caller in `X-Service-Identity`.
+enforces `allowed_services`, checks the request path against the callee's
+[declared paths](#path-level-exposure) (`public_paths ∪ internal_paths` — an undeclared path is a
+JSON `404`, even for an allowed peer), and forwards over loopback with the verified caller in
+`X-Service-Identity`.
 The service itself does **no TLS** for east-west traffic — plain HTTP in and out. Because the target is
 addressed by name (not location), a callee moving to another host regenerates routing only: the caller's
 URL is byte-identical.
@@ -400,6 +432,44 @@ URL is byte-identical.
 **Direction.** A regional service may call same-region services and any global service (regional→global);
 a global service may call only global services. This falls out of the topology — regional meshes are
 private-only, and only the global scope exposes a public mesh gateway.
+
+### Path-level exposure
+
+A mesh callee declares its **entire endpoint surface** as absolute path globs in the `mesh:` block —
+two lists with different reach:
+
+| List | Reachable from |
+|------|----------------|
+| `mesh.public_paths` | The **internet edge**, through a [gateway](./gateway) that lists this service in its `services:` — **and** mesh peers. |
+| `mesh.internal_paths` | **Mesh peers only.** Never served by a gateway — internet-invisible even when the service is gateway-listed. |
+
+**Closed by default.** A service with a `mesh:` block must declare **at least one path** across the
+two lists — the callee's mesh proxy proxies **only** declared paths and answers a JSON `404` for
+anything else, *even for an allowed, authenticated peer*. An undeclared handler is unreachable from
+everywhere: shipping a new endpoint deliberately touches the manifest. A gateway-listed service must
+additionally declare ≥1 **public** path.
+
+**Glob syntax.** Paths are absolute (`/…`); segment charset is `[A-Za-z0-9._-]`:
+
+- `*` matches **exactly one** path segment of one-or-more characters, and combines with literals:
+  `/v*/` matches `/v1/`, `/v2beta/`, …;
+- a **trailing** `/**` segment matches the parent node itself **plus any deeper tail**:
+  `/api/tenants/**` matches `/api/tenants`, `/api/tenants/42`, `/api/tenants/42/keys`;
+- `..` is forbidden, and `**` may only appear as the final segment (no mid-pattern `**`);
+- the bare root glob `/**` is rejected — it matches **every** request path, defeating the allowlist;
+  declare concrete globs (e.g. `/v1/**`).
+
+**Overlap is a validation error.** Because the gateway's routing table is derived, the globs are the
+only thing preventing two services claiming one path: public globs of **different services listed on
+one gateway** must not overlap, and a single service's own **public and internal globs** must not
+overlap (a path cannot be both). `inforge validate` rejects both.
+
+:::danger `public_paths` means internet-reachable
+On a gateway-listed service, **everything in `public_paths` is reachable from the public internet**
+— the gateway forwards any matching path, and the daemon's JWT is validated only *after* the request
+reaches your handler. Peer-only endpoints — admin surfaces, reconciliation hooks, internal RPC —
+belong in `internal_paths`, where no gateway will ever serve them.
+:::
 
 **Leaf custody.** The mesh proxy — not the service — holds every co-located service's mesh leaf and the
 trust bundle: it pulls them from the secrets provider with a per-host identity (scoped to only that

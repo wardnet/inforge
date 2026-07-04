@@ -304,7 +304,9 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
   through the ingress's own `health_probes_port` (public listener, **default 81**, same field name on
   both specs — see rule `.agents/rules/health-probes-port-semantics.md`). `nginx.Render` adds a plain-HTTP `http{}` server per health endpoint on that port,
   matched **strictly** by `server_name` (the service's `naming.ServiceFQDN`) and reverse-proxied to
-  `backend:<health_probes_port>` — no `default_server`, so a wrong Host is 404. `IngressHealth` is the
+  `backend:<health_probes_port>` — no `default_server`, so a wrong Host is 404; within a matched
+  server only the service's declared `health_probe_paths` proxy (exact-match locations + 404
+  catch-all — required ≥1 with the port, ADR-0034). `IngressHealth` is the
   derived per-host entry (`program.ingressHealthByHost`), backend-resolved like a route (cross-host
   substituted in the provider apply). Firewall (`firewallPlanByHost`): the ingress host opens the
   public health port (`0.0.0.0/0`) when ≥1 referencing service declares one; a cross-host backend opens
@@ -421,7 +423,12 @@ resource-attribute set so VM metrics and app telemetry correlate on `host.id`.
 The mesh is the **east-west** plane (service↔service), **derived** — no resource. It materializes a
 **second per-host nginx** (the mesh proxy, separate from the north-south ingress) on every host running
 ≥1 `pki:` service. Authoring surface is only the per-service `mesh:` block (`port` + callee-side
-`allowed_services`); everything else is generated, exactly like the ingress nginx.
+`allowed_services` + the ADR-0034 endpoint surface `public_paths`/`internal_paths` — absolute path
+globs, ≥1 required across both lists, `pathglob`-validated, public↔internal overlap rejected);
+everything else is generated, exactly like the ingress nginx. The callee's mesh proxy admits ONLY
+declared paths (`public ∪ internal`, threaded into `meshnginx.LocalService.Paths` as regex
+locations); an undeclared path is a JSON 404 even for an allowed peer. `public_paths` additionally
+feed the gateway's derived routing table (rule `gateway-routes-are-derived-from-public-paths`).
 
 - **Pure derivation (`program/mesh.go`, tested).** `expandAllowedCallers` projects a callee's authored
   `allowed_services` onto the concrete caller identities (`<scope>/<service>`) its local mesh admits —
@@ -475,21 +482,33 @@ The mesh is the **east-west** plane (service↔service), **derived** — no reso
   `INFORGE_MESH_PORT` (a callee's `mesh.port`, omitted for an egress-only member). These are the env
   vars wardnet-cloud reads (plain-HTTP in/out, `X-Mesh-Target` addressing, `X-Service-Identity` demux).
 
-## North-south gateway realization (ADR-0032, daemon edge)
+## North-south gateway realization (ADR-0032 daemon edge, ADR-0034 derived routes)
 
-The `gateway` resource (authored: `host` + **`pki`** + `subdomain` + `routes:[{path,service}]`; scope
-singleton; validated in `checkGateway` incl. route-target `allowed_services` + **same-`pki:`** match)
-is realized in two halves:
+The `gateway` resource (authored: `host` + **`pki`** + `subdomain` + **`services:[names]`** +
+optional `health_probes_port`/`health_probe_paths`; scope singleton; validated in `checkGateway`
+incl. listed-service `allowed_services` + **same-`pki:`** match) is realized in two halves:
 
-- **Edge half (north-south nginx).** `program.gatewaysByHost` derives `types.IngressGateway`
-  (FQDN = `naming.AppFQDN(subdomain,…)` — the same call feeding the DNS A record and the SNI-collision
-  guard, so cert/record/demux can't drift); `realizeIngress`'s host union includes gateway hosts (a
-  gateway-only host still installs nginx); `nginx.Render(routes, apps, health, healthPort, gateways)`
-  emits one ACME server block per gateway with a `location /<p>/` per route: WS-capable
-  (`$connection_upgrade` map), path-preserving (target named out-of-band in `X-Mesh-Target`),
-  Authorization forwarded untouched, XFF stamped, `proxy_pass http://127.0.0.1:<GatewayEgressPort>`,
-  unmatched → 404. A gateway on `:443` joins ssl_preread mixed ports exactly like an app. Firewall:
-  gateway host opens public `443`+`80`.
+- **Edge half (north-south nginx).** The routing table is **derived, never authored** (ADR-0034):
+  `toGatewayNginxRoutes` emits one `IngressGatewayRoute{Pattern, Service}` per (listed service,
+  `mesh.public_paths` glob); `internal/pathglob` is the single glob syntax/compile/overlap source
+  (`*` = one segment, trailing `/**` = node + tail). `program.gatewaysByHost` derives
+  `types.IngressGateway` (FQDN = `naming.AppFQDN(subdomain,…)` — the same call feeding the DNS A
+  record and the SNI-collision guard, so cert/record/demux can't drift); `realizeIngress`'s host
+  union includes gateway hosts (a gateway-only host still installs nginx);
+  `nginx.Render(routes, apps, health, healthPort, gateways)` emits one ACME server block per gateway
+  with a `location ~ <compiled regex>` per derived route: WS-capable (`$connection_upgrade` map),
+  path-preserving (target named out-of-band in `X-Mesh-Target`), Authorization forwarded untouched,
+  XFF stamped, `proxy_pass http://127.0.0.1:<GatewayEgressPort>`, plus `location =` self-health
+  blocks (`health_probe_paths` → `200 "ok"` on 443, edge liveness over the real daemon TLS path);
+  unmatched → **JSON 404** at the edge. Cross-service glob overlap is rejected at validation — the
+  load-bearing routing invariant (rule `gateway-routes-are-derived-from-public-paths`). A gateway on
+  `:443` joins ssl_preread mixed ports exactly like an app. Firewall: gateway host opens public
+  `443`+`80` (+ its health port when a listed service declares health). **Gateway health tier:** an
+  ingress-less listed service's `health_probes_port` is surfaced on the gateway host (Host-demuxed,
+  `GatewaySpec.EffectiveHealthProbesPort()`, default 81) with its ServiceFQDN A record at the
+  gateway host — single-sourced in `resolveGatewayHealthServices` (nginx + firewall + DNS); a
+  service with an ingress keeps its health there (D12). Health listeners everywhere serve only the
+  service's declared `health_probe_paths` (exact match; required with the port — closed by default).
 - **Mesh-client half.** The gateway is the synthetic mesh member `meshpaths.GatewayMember`
   ("gateway", reserved — `checkService` rejects the service name) with the FIXED
   `meshpaths.GatewayEgressPort` (= `EgressBase+MaxServices`; `InReservedEgressRange` covers it) —

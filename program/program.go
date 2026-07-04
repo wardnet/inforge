@@ -1164,6 +1164,33 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 	// is cross-host, so resolve cross-host backends once over the whole ingress tier
 	// (routes and health-only services alike) rather than from routes only.
 	crossHost := ingressCrossHostBackends(ingressSvcs)
+	// The gateway health tier (ADR-0034): a gateway-listed service without an
+	// ingress FK surfaces its health on the GATEWAY's host — same shared listener,
+	// same Host demux, same cross-host private-IP substitution. Merged into the
+	// per-host maps so the provider renders one health set per host. Validation
+	// (D13) requires a host shared by a gateway and an ingress to declare ONE
+	// effective health port; deploy can run unvalidated, so a mismatch here is a
+	// hard error — silently keeping the ingress's port would render the listener
+	// on one port while the firewall opens the gateway's (dead health, no signal).
+	gwHealthSvcs := resolveGatewayHealthServices(res, canonical)
+	for gwHost, hs := range gatewayHealthByHost(gwHealthSvcs, env, slug, baseDomain) {
+		healthByHostKey[gwHost] = append(healthByHostKey[gwHost], hs...)
+		sort.Slice(healthByHostKey[gwHost], func(i, j int) bool {
+			return healthByHostKey[gwHost][i].FQDN < healthByHostKey[gwHost][j].FQDN
+		})
+	}
+	for _, gs := range gwHealthSvcs {
+		if existing, ok := healthPortByHostKey[gs.gwHost]; ok && existing != gs.gwHealthPort {
+			return fmt.Errorf("ingress: host %q renders one health listener but the co-hosted ingress declares health port %d while the gateway declares %d; the two must match", gs.gwHost, existing, gs.gwHealthPort)
+		}
+		healthPortByHostKey[gs.gwHost] = gs.gwHealthPort
+		if !gs.coLocated {
+			if crossHost[gs.gwHost] == nil {
+				crossHost[gs.gwHost] = map[string]string{}
+			}
+			crossHost[gs.gwHost][gs.svc.Name] = gs.svcHost
+		}
+	}
 	// An app always serves on :443, so its FQDN must not collide with a :443
 	// tls-termination route's SNI (or another app) on the same host — nginx cannot
 	// demux two server blocks with one (listen, server_name) and would race two ACME
@@ -1390,28 +1417,39 @@ func resolveGateways(res types.Resources, canonical map[string]string, slug, bas
 
 // gatewaysByHost groups the scope's north-south gateway (a scope singleton) under
 // its canonical host as the derived types.IngressGateway the public nginx renders
-// (ADR-0032), via the shared resolveGateways derivation. Routes carry the
-// loader-normalized "/<p>/" path and the target service name (the X-Mesh-Target
+// (ADR-0032/0034), via the shared resolveGateways derivation. The routing table
+// is DERIVED, not authored: one route per (listed service, public path glob),
+// carrying the raw pattern and the owning service name (the X-Mesh-Target
 // value); the mesh resolves the target's location, so no backend is resolved here.
 func gatewaysByHost(res types.Resources, canonical map[string]string, slug, baseDomain, ephemeralSlug string) map[string][]types.IngressGateway {
 	byHost := map[string][]types.IngressGateway{}
 	for _, rg := range resolveGateways(res, canonical, slug, baseDomain, ephemeralSlug) {
 		byHost[rg.host] = append(byHost[rg.host], types.IngressGateway{
-			Name:   rg.gw.Name,
-			FQDN:   rg.fqdn,
-			Routes: append([]types.IngressGatewayRoute(nil), toGatewayNginxRoutes(rg.gw.Routes)...),
+			Name:             rg.gw.Name,
+			FQDN:             rg.fqdn,
+			Routes:           toGatewayNginxRoutes(rg.gw.Services, res.Service),
+			HealthProbePaths: append([]string(nil), rg.gw.HealthProbePaths...),
 		})
 	}
 	return byHost
 }
 
-// toGatewayNginxRoutes converts authored gateway routes to the provider-facing
-// nginx route shape (a value-identical copy — the mesh carries the target
-// out-of-band, so no backend is resolved).
-func toGatewayNginxRoutes(routes []types.GatewayRouteSpec) []types.IngressGatewayRoute {
-	out := make([]types.IngressGatewayRoute, len(routes))
-	for i, rt := range routes {
-		out[i] = types.IngressGatewayRoute(rt)
+// toGatewayNginxRoutes derives the gateway's provider-facing nginx routes from
+// its listed services' mesh.public_paths (ADR-0034): one route per (service,
+// glob). Validation guarantees every listed service resolves, declares >=1
+// public path, and that patterns are pairwise non-overlapping across services —
+// so the derived table has exactly one owner per request path.
+func toGatewayNginxRoutes(serviceNames []string, svcs []types.ServiceSpec) []types.IngressGatewayRoute {
+	byName := servicesByName(svcs)
+	var out []types.IngressGatewayRoute
+	for _, name := range serviceNames {
+		svc, ok := byName[name]
+		if !ok || svc.Mesh == nil {
+			continue // validation rejects this long before deploy
+		}
+		for _, pattern := range svc.Mesh.PublicPaths {
+			out = append(out, types.IngressGatewayRoute{Pattern: pattern, Service: name})
+		}
 	}
 	return out
 }
@@ -1428,15 +1466,98 @@ func ingressHealthByHost(svcs []ingressService, env, slug, baseDomain string) ma
 		if is.svc.HealthProbesPort == 0 {
 			continue
 		}
-		h := types.IngressHealth{
-			Service: is.svc.Name,
-			FQDN:    naming.ServiceFQDN(env, slug, is.svc.Name, baseDomain),
-			Target:  is.svc.HealthProbesPort,
+		byHost[is.ingHost] = append(byHost[is.ingHost], healthEntry(is.svc, is.coLocated, env, slug, baseDomain))
+	}
+	for _, hs := range byHost {
+		sort.Slice(hs, func(i, j int) bool { return hs[i].FQDN < hs[j].FQDN })
+	}
+	return byHost
+}
+
+// gatewayHealthService is one service whose health endpoint is surfaced through
+// the north-south gateway's public health port (ADR-0034): a gateway-listed
+// service with a backend health port and NO ingress FK (a service that also
+// names an ingress keeps its health at the ingress — one canonical health
+// address per service, or the ServiceFQDN A record would derive at two hosts).
+type gatewayHealthService struct {
+	svc          types.ServiceSpec
+	gwHost       string // canonical specKey of the gateway's host (where the health server renders)
+	svcHost      string // canonical specKey of the service's own host
+	coLocated    bool
+	gwHealthPort int // the gateway's effective public health port — carried here so nginx, firewall, and DNS read ONE derivation
+}
+
+// resolveGatewayHealthServices derives, once, the gateway health tier: the
+// single source the nginx health entries, the firewall plan, and the derived
+// DNS records all consume (the derivedRecords discipline — three consumers, one
+// resolver, no drift). Deduped per service across gateways (the gateway is a
+// scope singleton, so duplicates only arise from a malformed spec validation
+// already rejects).
+func resolveGatewayHealthServices(res types.Resources, canonical map[string]string) []gatewayHealthService {
+	svcByName := servicesByName(res.Service)
+	seen := map[string]bool{}
+	var out []gatewayHealthService
+	for _, rg := range resolveGateways(res, canonical, "", "", "") {
+		for _, name := range rg.gw.Services {
+			svc, ok := svcByName[name]
+			if !ok || svc.HealthProbesPort == 0 || svc.Ingress != "" || seen[name] {
+				continue
+			}
+			svcHost, ok := canonical[svc.Host]
+			if !ok {
+				continue
+			}
+			seen[name] = true
+			out = append(out, gatewayHealthService{
+				svc:          svc,
+				gwHost:       rg.host,
+				svcHost:      svcHost,
+				coLocated:    svcHost == rg.host,
+				gwHealthPort: rg.gw.EffectiveHealthProbesPort(),
+			})
 		}
-		if is.coLocated {
-			h.Backend = "127.0.0.1"
-		}
-		byHost[is.ingHost] = append(byHost[is.ingHost], h)
+	}
+	return out
+}
+
+// servicesByName indexes a service slice by name — the shared lookup both the
+// gateway route derivation and the gateway health resolver build from.
+func servicesByName(svcs []types.ServiceSpec) map[string]types.ServiceSpec {
+	byName := make(map[string]types.ServiceSpec, len(svcs))
+	for _, s := range svcs {
+		byName[s.Name] = s
+	}
+	return byName
+}
+
+// healthEntry builds the one types.IngressHealth shape BOTH health tiers render
+// (ingress-fronted and gateway-listed): service FQDN demux, backend health
+// port, declared probe paths, and the co-located loopback backend (left empty
+// cross-host for the provider to substitute the private IP). Single-sourced so
+// a new IngressHealth field cannot be threaded into one tier and forgotten in
+// the other.
+func healthEntry(svc types.ServiceSpec, coLocated bool, env, slug, baseDomain string) types.IngressHealth {
+	h := types.IngressHealth{
+		Service: svc.Name,
+		FQDN:    naming.ServiceFQDN(env, slug, svc.Name, baseDomain),
+		Target:  svc.HealthProbesPort,
+		Paths:   append([]string(nil), svc.HealthProbePaths...),
+	}
+	if coLocated {
+		h.Backend = "127.0.0.1"
+	}
+	return h
+}
+
+// gatewayHealthByHost groups the gateway health tier under the gateway's host as
+// the same types.IngressHealth entries the ingress tier renders (one shared
+// health listener per host, Host-demuxed by service FQDN; Backend left empty
+// cross-host for the provider to substitute the private IP, exactly like
+// ingressHealthByHost).
+func gatewayHealthByHost(gsvcs []gatewayHealthService, env, slug, baseDomain string) map[string][]types.IngressHealth {
+	byHost := map[string][]types.IngressHealth{}
+	for _, gs := range gsvcs {
+		byHost[gs.gwHost] = append(byHost[gs.gwHost], healthEntry(gs.svc, gs.coLocated, env, slug, baseDomain))
 	}
 	for _, hs := range byHost {
 		sort.Slice(hs, func(i, j int) bool { return hs[i].FQDN < hs[j].FQDN })
@@ -1633,6 +1754,18 @@ func firewallPlanByHost(res types.Resources, meshPublic bool) map[string]types.F
 	for _, rg := range resolveGateways(res, canonical, "", "", "") {
 		addPublic(rg.host, 443)
 		addPublic(rg.host, 80)
+	}
+	// The gateway health tier (ADR-0034): the gateway host opens its public health
+	// port when >=1 listed (ingress-less) service declares a backend health port,
+	// and a cross-host backend opens that port privately to the network CIDR —
+	// mirroring the ingress health rules. The port rides on the shared resolver
+	// (gs.gwHealthPort) so this rule, the nginx listener, and the DNS record all
+	// read one derivation.
+	for _, gs := range resolveGatewayHealthServices(res, canonical) {
+		addPublic(gs.gwHost, gs.gwHealthPort)
+		if !gs.coLocated {
+			addPrivate(gs.svcHost, gs.svc.HealthProbesPort)
+		}
 	}
 	// exposed_ports are private binds on the service's own host, with no ingress
 	// involvement — so they are read from every service directly (not via
@@ -1917,6 +2050,20 @@ func derivedRecords(res types.Resources, env, slug, baseDomain, ephemeralSlug st
 				dedupAdd(fqdn, is.svc.Container, is.ingHost)
 			}
 		}
+		// A health endpoint is addressed by the service FQDN too (the Host the
+		// shared health listener demuxes on), so a health-only service — no routes,
+		// hence no route-derived record — still gets its A record at the ingress
+		// host. For a routed service dedupAdd collapses this with the route record.
+		if is.svc.HealthProbesPort > 0 {
+			dedupAdd(naming.ServiceFQDN(env, slug, is.svc.Name, baseDomain), is.svc.Container, is.ingHost)
+		}
+	}
+	// A gateway-listed service without an ingress surfaces its health at the
+	// GATEWAY's host (ADR-0034) — same shared resolver as the nginx health entries
+	// and the firewall, so record, listener, and rules cannot drift. D12 keeps
+	// this exclusive with the ingress record above (no two-host derivation).
+	for _, gs := range resolveGatewayHealthServices(res, canonical) {
+		dedupAdd(naming.ServiceFQDN(env, slug, gs.svc.Name, baseDomain), gs.svc.Container, gs.gwHost)
 	}
 	// An app's FQDN (the clean dotted form) is a grey-cloud A record at its ingress
 	// host — the same host nginx serves it from, sharing resolveIngressApps with the

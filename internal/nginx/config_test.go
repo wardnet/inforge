@@ -299,23 +299,23 @@ func TestRenderHealthGolden(t *testing.T) {
 			FQDNs: []string{"api.svc.prd.use1.wardnet.network"}},
 	}
 	health := []types.IngressHealth{
-		{Service: "web", FQDN: "web.svc.prd.use1.wardnet.network", Target: 3001, Backend: "127.0.0.1"},
-		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1"},
+		{Service: "web", FQDN: "web.svc.prd.use1.wardnet.network", Target: 3001, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
+		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
 	}
 	got, err := Render(routes, nil, health, 81, nil)
 	require.NoError(t, err)
-	assert.Contains(t, got, "    server {\n        listen 81;\n        server_name api.svc.prd.use1.wardnet.network;\n        location / {\n            proxy_pass http://127.0.0.1:8081;\n            proxy_set_header Host $host;\n        }\n    }")
-	assert.Contains(t, got, "    server {\n        listen 81;\n        server_name web.svc.prd.use1.wardnet.network;\n        location / {\n            proxy_pass http://127.0.0.1:3001;\n            proxy_set_header Host $host;\n        }\n    }")
+	assert.Contains(t, got, "    server {\n        listen 81;\n        server_name api.svc.prd.use1.wardnet.network;\n        location = /healthz {\n            proxy_pass http://127.0.0.1:8081;\n            proxy_set_header Host $host;\n        }\n        location / {\n            return 404;\n        }\n    }")
+	assert.Contains(t, got, "    server {\n        listen 81;\n        server_name web.svc.prd.use1.wardnet.network;\n        location = /healthz {\n            proxy_pass http://127.0.0.1:3001;\n            proxy_set_header Host $host;\n        }\n        location / {\n            return 404;\n        }\n    }")
 	// Health servers are sorted by FQDN (api before web).
-	assert.Less(t, strings.Index(got, "server_name api.svc.prd.use1.wardnet.network;\n        location"),
-		strings.Index(got, "server_name web.svc.prd.use1.wardnet.network;\n        location"))
+	assert.Less(t, strings.Index(got, "server_name api.svc.prd.use1.wardnet.network;\n        location ="),
+		strings.Index(got, "server_name web.svc.prd.use1.wardnet.network;\n        location ="))
 }
 
 // TestRenderHealthOnly: an ingress with only health endpoints (no TLS, no apps)
 // renders a minimal http block — no ACME issuer, no :80 redirect server, no stream.
 func TestRenderHealthOnly(t *testing.T) {
 	got, err := Render(nil, nil, []types.IngressHealth{
-		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1"},
+		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
 	}, 81, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "http {")
@@ -324,6 +324,34 @@ func TestRenderHealthOnly(t *testing.T) {
 	assert.NotContains(t, got, "acme_issuer")
 	assert.NotContains(t, got, "listen 80;")
 	assert.NotContains(t, got, "stream {")
+}
+
+// TestRenderHealthPaths: a health entry with declared probe paths renders one
+// exact-match location per path plus a 404 catch-all — the listener is
+// allowlist-only (ADR-0034). Paths render sorted.
+func TestRenderHealthPaths(t *testing.T) {
+	got, err := Render(nil, nil, []types.IngressHealth{
+		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1",
+			Paths: []string{"/readyz", "/healthz"}},
+	}, 81, nil)
+	require.NoError(t, err)
+	assert.Contains(t, got, "        location = /healthz {\n            proxy_pass http://127.0.0.1:8081;\n            proxy_set_header Host $host;\n        }")
+	assert.Contains(t, got, "        location = /readyz {\n            proxy_pass http://127.0.0.1:8081;\n            proxy_set_header Host $host;\n        }")
+	assert.Contains(t, got, "        location / {\n            return 404;\n        }")
+	assert.Less(t, strings.Index(got, "location = /healthz"), strings.Index(got, "location = /readyz"))
+	assert.NotContains(t, got, "location / {\n            proxy_pass", "no full-open location when paths are declared")
+}
+
+// TestRenderHealthNoPathsErrors: a health entry with no declared probe paths
+// fails the render loud — the listener is allowlist-only, never full-open
+// (ADR-0034); a pre-allowlist manifest deployed without validation must not
+// silently proxy the whole backend port.
+func TestRenderHealthNoPathsErrors(t *testing.T) {
+	_, err := Render(nil, nil, []types.IngressHealth{
+		{Service: "api", FQDN: "api.svc", Target: 8081, Backend: "127.0.0.1"},
+	}, 81, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "allowlist-only")
 }
 
 // TestRenderHealthNoBackendErrors: a health entry with no resolved backend fails
@@ -337,7 +365,7 @@ func TestRenderHealthNoBackendErrors(t *testing.T) {
 // TestRenderHealthNoPortErrors: health entries with no public health port fail loud
 // (the program must resolve the ingress's health port, default 81).
 func TestRenderHealthNoPortErrors(t *testing.T) {
-	_, err := Render(nil, nil, []types.IngressHealth{{Service: "api", FQDN: "api.svc", Target: 8081, Backend: "127.0.0.1"}}, 0, nil)
+	_, err := Render(nil, nil, []types.IngressHealth{{Service: "api", FQDN: "api.svc", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}}}, 0, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no public health port")
 }
@@ -420,17 +448,19 @@ func TestRenderEmptyBackendErrors(t *testing.T) {
 }
 
 // TestRenderGateway: the north-south gateway server block — ACME on its single
-// FQDN, one path-prefix location per route handing the request to the LOCAL mesh
-// egress at the fixed gateway port (target named out-of-band in X-Mesh-Target so
-// the path is preserved byte-for-byte), WebSocket-capable, XFF stamped at the
-// edge, and a 404 default for unmatched paths.
+// FQDN, one regex location per derived route (a listed service's public path
+// glob) handing the request to the LOCAL mesh egress at the fixed gateway port
+// (target named out-of-band in X-Mesh-Target so the path is preserved
+// byte-for-byte), WebSocket-capable, XFF stamped at the edge, and a JSON 404
+// default for undeclared paths (ADR-0034).
 func TestRenderGateway(t *testing.T) {
 	got, err := Render(nil, nil, nil, 0, []types.IngressGateway{{
 		Name: "api",
 		FQDN: "api.use1.wardnet.network",
 		Routes: []types.IngressGatewayRoute{
-			{Path: "/tunnel/", Service: "tunneller"},
-			{Path: "/ddns/", Service: "ddns"},
+			{Pattern: "/tunnel/**", Service: "tunneller"},
+			{Pattern: "/v*/dns/**", Service: "ddns"},
+			{Pattern: "/dns-status", Service: "ddns"},
 		},
 	}})
 	require.NoError(t, err)
@@ -438,7 +468,9 @@ func TestRenderGateway(t *testing.T) {
 	assert.Contains(t, got, "acme_certificate letsencrypt;")
 	assert.Contains(t, got, "listen 80;", "gateway alone still needs the ACME :80 server")
 	assert.Contains(t, got, "map $http_upgrade $connection_upgrade", "WS upgrade map present")
-	assert.Contains(t, got, "location /ddns/ {")
+	assert.Contains(t, got, `location ~ "^/v[^/]+/dns(/.*)?$" {`, "glob compiled to an anchored regex location")
+	assert.Contains(t, got, `location ~ "^/dns-status$" {`, "exact glob compiled to an anchored regex location")
+	assert.Contains(t, got, `location ~ "^/tunnel(/.*)?$" {`)
 	assert.Contains(t, got, "proxy_set_header X-Mesh-Target ddns;")
 	assert.Contains(t, got, "proxy_set_header X-Mesh-Target tunneller;")
 	assert.Contains(t, got, fmt.Sprintf("proxy_pass http://127.0.0.1:%d;", meshpaths.GatewayEgressPort))
@@ -447,14 +479,42 @@ func TestRenderGateway(t *testing.T) {
 	assert.Contains(t, got, "proxy_set_header X-Forwarded-For $remote_addr;")
 	assert.NotContains(t, got, "$proxy_add_x_forwarded_for", "the edge must not append a client-supplied XFF")
 	assert.Contains(t, got, "proxy_set_header Upgrade $http_upgrade;")
-	assert.Contains(t, got, "return 404;", "unmatched paths must 404, never proxy")
-	// The slashless exact prefix is an explicit 404, pre-empting nginx's implicit
-	// 301 (which would drop POST bodies / break the PoP-signed path).
-	assert.Contains(t, got, "location = /ddns {")
-	assert.Contains(t, got, "location = /tunnel {")
-	// Routes render in sorted-path order (ddns before tunnel).
-	assert.Less(t, strings.Index(got, "location /ddns/"), strings.Index(got, "location /tunnel/"))
+	// Undeclared paths are answered with a JSON 404 at the edge, never proxied.
+	assert.Contains(t, got, "default_type application/json;")
+	assert.Contains(t, got, `return 404 '{"error":"not_found"}';`)
+	// Routes render in sorted-pattern order (/dns-status before /tunnel/** before /v*/dns/**).
+	assert.Less(t, strings.Index(got, `location ~ "^/dns-status$"`), strings.Index(got, `location ~ "^/tunnel(/.*)?$"`))
+	assert.Less(t, strings.Index(got, `location ~ "^/tunnel(/.*)?$"`), strings.Index(got, `location ~ "^/v[^/]+/dns(/.*)?$"`))
 	assert.NotContains(t, got, "stream {")
+}
+
+// TestRenderGatewaySelfHealth: the gateway's declared health probe paths are
+// answered 200 "ok" by nginx itself on the 443 server — edge liveness over the
+// real daemon TLS path — and render before the route locations.
+func TestRenderGatewaySelfHealth(t *testing.T) {
+	got, err := Render(nil, nil, nil, 0, []types.IngressGateway{{
+		Name:             "api",
+		FQDN:             "api.use1.wardnet.network",
+		Routes:           []types.IngressGatewayRoute{{Pattern: "/tenants/**", Service: "tenants"}},
+		HealthProbePaths: []string{"/healthz"},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, got, "location = /healthz {")
+	assert.Contains(t, got, "default_type text/plain;")
+	assert.Contains(t, got, "return 200 ok;")
+	assert.Less(t, strings.Index(got, "location = /healthz"), strings.Index(got, `location ~ "^/tenants(/.*)?$"`))
+}
+
+// TestRenderGatewayBadGlobErrors: a route pattern that fails pathglob.Parse
+// fails the render loud (validation guarantees it never happens; the renderer
+// must not emit a broken location if it does).
+func TestRenderGatewayBadGlobErrors(t *testing.T) {
+	_, err := Render(nil, nil, nil, 0, []types.IngressGateway{{
+		Name: "api", FQDN: "api.use1.wardnet.network",
+		Routes: []types.IngressGatewayRoute{{Pattern: "/a/**/b", Service: "tenants"}},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid path glob")
 }
 
 // TestRenderGatewayMixedPort: a forward on :443 coexists with the gateway via
@@ -465,7 +525,7 @@ func TestRenderGatewayMixedPort(t *testing.T) {
 		{Service: "tunneller", Type: types.IngressTypeForward, Listen: 443, Target: 9443, Backend: "127.0.0.1"},
 	}, nil, nil, 0, []types.IngressGateway{{
 		Name: "api", FQDN: "api.use1.wardnet.network",
-		Routes: []types.IngressGatewayRoute{{Path: "/ddns/", Service: "ddns"}},
+		Routes: []types.IngressGatewayRoute{{Pattern: "/ddns/**", Service: "ddns"}},
 	}})
 	require.NoError(t, err)
 	assert.Contains(t, got, "ssl_preread on;")
