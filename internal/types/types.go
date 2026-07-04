@@ -67,26 +67,32 @@ type AppSpec struct {
 // the workloads that references a compute Host by name in the SAME scope (an FK
 // exactly like ingress.host, resolved via resolveComputeHost) and carries no
 // provider of its own (it inherits the host's). It is a mesh client with identity
-// <scope>/gateway: a daemon request is TLS-terminated here, path-routed by Routes,
-// and handed to the target service THROUGH the mesh (so the gateway is
-// location-transparent and needs no service locations). It does NOT validate the
-// daemon JWT — it forwards it for the service to validate.
+// <scope>/gateway: a daemon request is TLS-terminated here, matched against the
+// public path globs of the listed Services (the routing table is DERIVED from
+// their mesh.public_paths — ADR-0034: the gateway names WHICH services are
+// public, the service names WHAT endpoints exist), and handed to the owning
+// service THROUGH the mesh (so the gateway is location-transparent and needs no
+// service locations). A path matching no public glob is answered 404 (JSON) at
+// the edge and never traverses. It does NOT validate the daemon JWT — it
+// forwards it for the service to validate.
 type GatewaySpec struct {
-	Name      string             `yaml:"name"`
-	Container string             `yaml:"container"`
-	Host      string             `yaml:"host"`      // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
-	Pki       string             `yaml:"pki"`       // FK -> two-tier (mesh) PKI in pki.enc.yaml the gateway's client leaf (<scope>/gateway) mints from (required); every route target must join the same mesh
-	Subdomain string             `yaml:"subdomain"` // public subdomain; the FQDN is composed at realization from scope + base domain
-	Routes    []GatewayRouteSpec `yaml:"routes"`    // the external API surface: path -> backend service (resolved through the mesh)
+	Name             string   `yaml:"name"`
+	Container        string   `yaml:"container"`
+	Host             string   `yaml:"host"`                         // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
+	Pki              string   `yaml:"pki"`                          // FK -> two-tier (mesh) PKI in pki.enc.yaml the gateway's client leaf (<scope>/gateway) mints from (required); every listed service must join the same mesh
+	Subdomain        string   `yaml:"subdomain"`                    // public subdomain; the FQDN is composed at realization from scope + base domain
+	Services         []string `yaml:"services"`                     // FKs -> services (same scope) exposed at the edge; the routing table is derived from their mesh.public_paths
+	HealthProbesPort int      `yaml:"health_probes_port,omitempty"` // public port the gateway host exposes its listed services' health checks on (plain HTTP, Host-demuxed by service FQDN; defaults to 81)
+	HealthProbePaths []string `yaml:"health_probe_paths,omitempty"` // exact paths on the gateway's own 443 server that nginx answers 200 "ok" directly (edge liveness over the real TLS path); optional
 }
 
-// GatewayRouteSpec is one north-south path route on the gateway: daemon requests
-// matching Path are forwarded to Service (resolved through the mesh, so the target
-// may live on any host in the scope). The target service must list "gateway" in
-// its mesh.allowed_services (validated). Path is normalized to a bounded "/<p>/".
-type GatewayRouteSpec struct {
-	Path    string `yaml:"path"`    // URL path prefix (normalized to /<p>/); unique within the gateway
-	Service string `yaml:"service"` // FK -> a service (same scope) that the gateway routes this path to via the mesh
+// EffectiveHealthProbesPort is the gateway twin of the ingress method: the
+// declared public health port, or DefaultHealthProbesPort when omitted.
+func (s GatewaySpec) EffectiveHealthProbesPort() int {
+	if s.HealthProbesPort == 0 {
+		return DefaultHealthProbesPort
+	}
+	return s.HealthProbesPort
 }
 
 // Port is a firewall port or port range (e.g. "80", "8000-9000"). It unmarshals
@@ -218,8 +224,10 @@ const (
 // through the north-south gateway). A pki: service with no mesh block can still make
 // outbound mesh calls (INFORGE_MESH_URL) but exposes nothing inbound.
 type MeshSpec struct {
-	Port            int      `yaml:"port"`             // loopback backend port this service serves mesh traffic on (plain HTTP)
-	AllowedServices []string `yaml:"allowed_services"` // bare service names permitted to call this service over the mesh
+	Port            int      `yaml:"port"`                     // loopback backend port this service serves mesh traffic on (plain HTTP)
+	AllowedServices []string `yaml:"allowed_services"`         // bare service names permitted to call this service over the mesh
+	PublicPaths     []string `yaml:"public_paths,omitempty"`   // absolute path globs (ADR-0034: * = one segment, trailing /** = any tail) exposed at the internet edge through a gateway that lists this service; also admitted from mesh peers
+	InternalPaths   []string `yaml:"internal_paths,omitempty"` // absolute path globs admitted from mesh peers only — never served by a gateway; a callee must declare >=1 path across both lists (its endpoint surface is allowlist-only)
 }
 
 // DefaultHealthProbesPort is the public port an ingress exposes service health
@@ -270,7 +278,8 @@ type ServiceSpec struct {
 	Reload           string            `yaml:"reload,omitempty"`             // optional ExecReload command to apply a renewed mesh leaf without downtime (e.g. "/bin/kill -HUP $MAINPID"); absent -> renewal restarts the unit
 	Ingress          string            `yaml:"ingress,omitempty"`            // FK -> ingress resource name (same scope) whose nginx fronts this service's Routes; required when Routes is non-empty
 	Routes           []RouteSpec       `yaml:"routes,omitempty"`             // typed inbound routes (tls-termination / forward) realized on the referenced ingress's nginx
-	HealthProbesPort int               `yaml:"health_probes_port,omitempty"` // backend port this service serves health checks on; surfaced through the ingress's public health port, Host-demuxed by the service FQDN (requires Ingress)
+	HealthProbesPort int               `yaml:"health_probes_port,omitempty"` // backend port this service serves health checks on; surfaced through the ingress's (or, for a gateway-listed service without ingress, the gateway's) public health port, Host-demuxed by the service FQDN
+	HealthProbePaths []string          `yaml:"health_probe_paths,omitempty"` // exact request paths the health server proxies to HealthProbesPort — anything else 404s; required (>=1) when HealthProbesPort is set (allowlist-only, ADR-0034)
 	ExposedPorts     []ExposedPort     `yaml:"exposed_ports,omitempty"`      // ports the service binds that inforge opens on the host's private network only (never the public internet), for peer/service-to-service traffic; needs no ingress (ADR-0029)
 	Mesh             *MeshSpec         `yaml:"mesh,omitempty"`               // east-west mesh exposure: the loopback port peers reach + the callee-side allow list (ADR-0032)
 	Grants           []GrantSpec       `yaml:"grants,omitempty"`             // permissioned access to Grantable resources (database/pki), materialized as env vars (ADR-0025)
@@ -359,29 +368,34 @@ type IngressApp struct {
 // reaches the provider; Target is the backend health port.
 type IngressHealth struct {
 	Service string
-	FQDN    string // canonical service FQDN matched as server_name / Host
-	Target  int    // backend port the service serves health checks on
-	Backend string // backend address nginx proxies to ("127.0.0.1" co-located; private IP cross-host)
+	FQDN    string   // canonical service FQDN matched as server_name / Host
+	Target  int      // backend port the service serves health checks on
+	Backend string   // backend address nginx proxies to ("127.0.0.1" co-located; private IP cross-host)
+	Paths   []string // exact request paths proxied to the backend; anything else 404s (ADR-0034)
 }
 
 // IngressGateway is the north-south daemon gateway server the public nginx
-// realizes on a host (ADR-0032): one TLS server on the gateway's FQDN whose
-// path-prefix locations hand daemon requests to the LOCAL mesh proxy's gateway
-// egress listener (meshpaths.GatewayEgressPort), naming the target service in
-// X-Mesh-Target. The path is preserved byte-for-byte (daemon PoP signs it) and
-// the daemon's Authorization header is forwarded untouched — the service, not
-// the gateway, validates the JWT. Like an IngressApp it has one FQDN and no
-// resolved backend address: location is the mesh's business.
+// realizes on a host (ADR-0032/0034): one TLS server on the gateway's FQDN whose
+// regex locations (compiled from the listed services' public path globs) hand
+// daemon requests to the LOCAL mesh proxy's gateway egress listener
+// (meshpaths.GatewayEgressPort), naming the owning service in X-Mesh-Target.
+// The path is preserved byte-for-byte (daemon PoP signs it) and the daemon's
+// Authorization header is forwarded untouched — the service, not the gateway,
+// validates the JWT. A path matching no route is answered 404 (JSON) at the
+// edge. Like an IngressApp it has one FQDN and no resolved backend address:
+// location is the mesh's business.
 type IngressGateway struct {
-	Name   string // gateway resource name (used to name Pulumi command resources)
-	FQDN   string // fully-qualified gateway domain (single SNI / ACME cert)
-	Routes []IngressGatewayRoute
+	Name             string // gateway resource name (used to name Pulumi command resources)
+	FQDN             string // fully-qualified gateway domain (single SNI / ACME cert)
+	Routes           []IngressGatewayRoute
+	HealthProbePaths []string // exact paths on the 443 server nginx answers 200 "ok" directly (edge liveness)
 }
 
-// IngressGatewayRoute is one path-prefix route on the gateway server: daemon
-// requests under Path are handed to Service through the mesh.
+// IngressGatewayRoute is one derived path route on the gateway server: daemon
+// requests matching Pattern (a raw pathglob the renderer compiles to a regex
+// location) are handed to Service through the mesh.
 type IngressGatewayRoute struct {
-	Path    string // normalized "/<p>/" prefix (the nginx location)
+	Pattern string // raw path glob from the owning service's mesh.public_paths
 	Service string // target service name (the X-Mesh-Target value)
 }
 

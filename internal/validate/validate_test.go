@@ -540,23 +540,29 @@ func meshCtx() regionContext {
 	c.serviceNamesInScope = map[string]bool{"ddns": true, "tunneller": true, "nopki": true}
 	c.serviceAllowsGateway = map[string]bool{"ddns": true, "tunneller": true}
 	c.servicePkiByName = map[string]string{"ddns": "mesh", "tunneller": "mesh"}
+	c.servicePublicPathsByName = map[string][]string{"ddns": {"/dns/**"}, "tunneller": {"/tunnel/**"}}
 	c.targetUsersByHost = map[string]map[int][]string{}
 	c.portUsersByHost = map[string]map[int][]string{}
 	return c
 }
 
 func meshSvc(m *types.MeshSpec) types.ServiceSpec {
+	// The endpoint surface is allowlist-only (ADR-0034); default a path so tests
+	// exercising other mesh rules don't trip the closed-by-default error.
+	if m != nil && len(m.PublicPaths)+len(m.InternalPaths) == 0 {
+		m.InternalPaths = []string{"/internal/**"}
+	}
 	return types.ServiceSpec{Name: "tenants", Host: "bridge", Type: "raw", User: "svc", Pki: "mesh", Mesh: m}
 }
 
-func gw(routes ...types.GatewayRouteSpec) types.GatewaySpec {
-	return types.GatewaySpec{Name: "api", Host: "bridge", Pki: "mesh", Subdomain: "api", Routes: routes}
+func gw(services ...string) types.GatewaySpec {
+	return types.GatewaySpec{Name: "api", Host: "bridge", Pki: "mesh", Subdomain: "api", Services: services}
 }
 
-// TestCheckGatewayValid: a gateway on a same-scope vm, sole in scope, routing to a
-// service that permits the gateway, passes.
+// TestCheckGatewayValid: a gateway on a same-scope vm, sole in scope, listing a
+// service that permits the gateway and publishes public paths, passes.
 func TestCheckGatewayValid(t *testing.T) {
-	errs, _ := checkGateway(gw(types.GatewayRouteSpec{Path: "/ddns/", Service: "ddns"}), meshCtx())
+	errs, _ := checkGateway(gw("ddns"), meshCtx())
 	assert.Empty(t, errs)
 }
 
@@ -586,44 +592,94 @@ func TestCheckGatewaySingletonRejected(t *testing.T) {
 	assert.Contains(t, strings.Join(errs, "\n"), "at most one gateway")
 }
 
-// TestCheckGatewayRouteUnknownService: a route to a service not in scope is rejected.
-func TestCheckGatewayRouteUnknownService(t *testing.T) {
-	errs, _ := checkGateway(gw(types.GatewayRouteSpec{Path: "/x/", Service: "ghost"}), meshCtx())
+// TestCheckGatewayUnknownService: a listed service not in scope is rejected.
+func TestCheckGatewayUnknownService(t *testing.T) {
+	errs, _ := checkGateway(gw("ghost"), meshCtx())
 	require.NotEmpty(t, errs)
 	assert.Contains(t, strings.Join(errs, "\n"), "does not resolve to a service in this scope")
 }
 
-// TestCheckGatewayRouteServiceDisallows: a route to a service that does not permit
-// the gateway (no "gateway" in its mesh.allowed_services) is rejected.
-func TestCheckGatewayRouteServiceDisallows(t *testing.T) {
-	errs, _ := checkGateway(gw(types.GatewayRouteSpec{Path: "/n/", Service: "nopki"}), meshCtx())
+// TestCheckGatewayServiceDisallows: a listed service that does not permit the
+// gateway (no "gateway" in its mesh.allowed_services) is rejected.
+func TestCheckGatewayServiceDisallows(t *testing.T) {
+	errs, _ := checkGateway(gw("nopki"), meshCtx())
 	require.NotEmpty(t, errs)
 	assert.Contains(t, strings.Join(errs, "\n"), "does not permit the gateway")
 }
 
-// TestCheckGatewayRootPathRejected: a "/" (root) route path is rejected.
-func TestCheckGatewayRootPathRejected(t *testing.T) {
-	errs, _ := checkGateway(gw(types.GatewayRouteSpec{Path: "/", Service: "ddns"}), meshCtx())
+// TestCheckGatewayDuplicateService: a service listed twice is rejected.
+func TestCheckGatewayDuplicateService(t *testing.T) {
+	errs, _ := checkGateway(gw("ddns", "ddns"), meshCtx())
 	require.NotEmpty(t, errs)
-	assert.Contains(t, strings.Join(errs, "\n"), "non-root path prefix")
+	assert.Contains(t, strings.Join(errs, "\n"), "listed more than once")
 }
 
-// TestCheckGatewayDuplicatePath: two routes with the same path are rejected.
-func TestCheckGatewayDuplicatePath(t *testing.T) {
-	errs, _ := checkGateway(gw(
-		types.GatewayRouteSpec{Path: "/ddns/", Service: "ddns"},
-		types.GatewayRouteSpec{Path: "/ddns/", Service: "tunneller"},
-	), meshCtx())
+// TestCheckGatewayNoPublicPaths: a listed service with no mesh.public_paths would
+// give the edge nothing to route — closed by default (ADR-0034).
+func TestCheckGatewayNoPublicPaths(t *testing.T) {
+	c := meshCtx()
+	delete(c.servicePublicPathsByName, "ddns")
+	errs, _ := checkGateway(gw("ddns"), c)
 	require.NotEmpty(t, errs)
-	assert.Contains(t, strings.Join(errs, "\n"), "declared more than once")
+	assert.Contains(t, strings.Join(errs, "\n"), "declares no mesh.public_paths")
 }
 
-// TestCheckGatewayPkiMismatch: a route target in a DIFFERENT mesh than the gateway
-// is rejected — the callee would never trust the gateway's client leaf.
+// TestCheckGatewayOverlappingPublicPaths: two listed services claiming overlapping
+// public globs are rejected — a request path must have exactly one owner.
+func TestCheckGatewayOverlappingPublicPaths(t *testing.T) {
+	c := meshCtx()
+	c.servicePublicPathsByName["ddns"] = []string{"/v*/dns/**"}
+	c.servicePublicPathsByName["tunneller"] = []string{"/v1/**"}
+	errs, _ := checkGateway(gw("ddns", "tunneller"), c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "overlaps")
+}
+
+// TestCheckGatewayHealthPathShadowed: a gateway health probe path claimed by a
+// listed service's public glob is rejected (the exact-match liveness location
+// would shadow the service's endpoint).
+func TestCheckGatewayHealthPathShadowed(t *testing.T) {
+	g := gw("ddns")
+	g.HealthProbePaths = []string{"/dns/healthz"}
+	errs, _ := checkGateway(g, meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "would shadow")
+}
+
+// TestCheckGatewayHealthPathOK: a health path outside every public glob passes.
+func TestCheckGatewayHealthPathOK(t *testing.T) {
+	g := gw("ddns")
+	g.HealthProbePaths = []string{"/healthz"}
+	errs, _ := checkGateway(g, meshCtx())
+	assert.Empty(t, errs)
+}
+
+// TestCheckGatewayHealthPortRules: the gateway's public health port must not be
+// 80 (ACME), 443 (daemon TLS), and must match a co-hosted ingress's health port.
+func TestCheckGatewayHealthPortRules(t *testing.T) {
+	g := gw("ddns")
+	g.HealthProbesPort = 80
+	errs, _ := checkGateway(g, meshCtx())
+	assert.Contains(t, strings.Join(errs, "\n"), "must not be 80")
+
+	g.HealthProbesPort = 443
+	errs, _ = checkGateway(g, meshCtx())
+	assert.Contains(t, strings.Join(errs, "\n"), "must not be 443")
+
+	c := meshCtx()
+	c.ingressNamesByHost = map[string][]string{"bridge-01": {"web"}}
+	c.ingressHealthPort = map[string]int{"web": 82}
+	g.HealthProbesPort = 81
+	errs, _ = checkGateway(g, c)
+	assert.Contains(t, strings.Join(errs, "\n"), "one host renders one health listener")
+}
+
+// TestCheckGatewayPkiMismatch: a listed service in a DIFFERENT mesh than the
+// gateway is rejected — the callee would never trust the gateway's client leaf.
 func TestCheckGatewayPkiMismatch(t *testing.T) {
 	c := meshCtx()
 	c.servicePkiByName["ddns"] = "other-mesh"
-	errs, _ := checkGateway(gw(types.GatewayRouteSpec{Path: "/ddns/", Service: "ddns"}), c)
+	errs, _ := checkGateway(gw("ddns"), c)
 	require.NotEmpty(t, errs)
 	assert.Contains(t, strings.Join(errs, "\n"), "must share one pki")
 }
@@ -673,7 +729,7 @@ func twoNetworkMeshCtx() regionContext {
 func TestCheckGatewayCrossNetworkTargetRejected(t *testing.T) {
 	c := twoNetworkMeshCtx()
 	g := types.GatewaySpec{Name: "api", Host: "edge", Pki: "mesh", Subdomain: "api",
-		Routes: []types.GatewayRouteSpec{{Path: "/ddns/", Service: "ddns"}}}
+		Services: []string{"ddns"}}
 	errs, _ := checkGateway(g, c)
 	require.NotEmpty(t, errs)
 	assert.Contains(t, strings.Join(errs, "\n"), "must share a network")
@@ -685,7 +741,7 @@ func TestCheckGatewaySameNetworkTargetOK(t *testing.T) {
 	c.computeNetwork["edge-01"] = "net-a"
 	c.computeNetwork["edge"] = "net-a"
 	g := types.GatewaySpec{Name: "api", Host: "edge", Pki: "mesh", Subdomain: "api",
-		Routes: []types.GatewayRouteSpec{{Path: "/ddns/", Service: "ddns"}}}
+		Services: []string{"ddns"}}
 	errs, _ := checkGateway(g, c)
 	assert.Empty(t, errs)
 }
@@ -720,6 +776,117 @@ func TestCheckMeshEgressRangeRejected(t *testing.T) {
 func TestCheckMeshValid(t *testing.T) {
 	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, AllowedServices: []string{"ddns", "gateway"}}), meshCtx())
 	assert.Empty(t, errs)
+}
+
+// TestCheckMeshNoPathsRejected: a mesh block with neither public_paths nor
+// internal_paths is rejected — the endpoint surface is allowlist-only (ADR-0034).
+func TestCheckMeshNoPathsRejected(t *testing.T) {
+	s := types.ServiceSpec{Name: "tenants", Host: "bridge", Type: "raw", User: "svc", Pki: "mesh",
+		Mesh: &types.MeshSpec{Port: 8080, AllowedServices: []string{"ddns"}}}
+	errs, _ := checkService(s, meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "allowlist-only")
+}
+
+// TestCheckMeshBadGlobRejected: a malformed path glob is rejected with the
+// pathglob parse error.
+func TestCheckMeshBadGlobRejected(t *testing.T) {
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, PublicPaths: []string{"/a/**/b"}}), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "must be the final path segment")
+}
+
+// TestCheckMeshDuplicateGlobRejected: the same glob twice in one list is rejected.
+func TestCheckMeshDuplicateGlobRejected(t *testing.T) {
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, PublicPaths: []string{"/v1/**", "/v1/**"}}), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "declared more than once")
+}
+
+// TestCheckMeshPublicInternalOverlapRejected: a path matching both a public and
+// an internal glob has ambiguous edge visibility — rejected (D7).
+func TestCheckMeshPublicInternalOverlapRejected(t *testing.T) {
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080,
+		PublicPaths: []string{"/v*/account/**"}, InternalPaths: []string{"/v1/**"}}), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "edge visibility must be unambiguous")
+}
+
+// TestCheckServiceHealthPathsRules: the health listener is allowlist-only —
+// a port without paths, paths without a port, and glob syntax are all rejected;
+// a gateway-listed ingress-less service with both passes.
+func TestCheckServiceHealthPathsRules(t *testing.T) {
+	c := meshCtx()
+	c.gatewayServiceTargets = map[string]bool{"tenants": true}
+	c.gatewayHostKey = "bridge-01"
+	c.gatewayHealthPort = 81
+
+	// Gateway-listed, ingress-less, port + paths -> OK.
+	s := meshSvc(&types.MeshSpec{Port: 8080})
+	s.HealthProbesPort = 8081
+	s.HealthProbePaths = []string{"/healthz"}
+	errs, _ := checkService(s, c)
+	assert.Empty(t, errs)
+
+	// Port without paths -> FAIL (closed by default).
+	s.HealthProbePaths = nil
+	errs, _ = checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "declared without health_probe_paths")
+
+	// Paths without the port -> FAIL.
+	s.HealthProbesPort = 0
+	s.HealthProbePaths = []string{"/healthz"}
+	errs, _ = checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "declared without health_probes_port")
+
+	// A glob in health_probe_paths -> FAIL (exact paths only).
+	s.HealthProbesPort = 8081
+	s.HealthProbePaths = []string{"/health/**"}
+	errs, _ = checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "globs are not allowed")
+
+	// Co-located with the gateway host, backend port == gateway public port -> FAIL.
+	s.HealthProbePaths = []string{"/healthz"}
+	s.HealthProbesPort = 81
+	errs, _ = checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "equals the gateway's public health port")
+
+	// Co-located with the gateway host, backend port on the gateway's own public
+	// binds (:443 daemon TLS / :80 ACME) -> FAIL (they never live in portUsersByHost).
+	s.HealthProbesPort = 443
+	errs, _ = checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "held by the gateway's nginx")
+	s.HealthProbesPort = 80
+	errs, _ = checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "held by the gateway's nginx")
+
+	// A probe path with a character nginx can never match (query separator) -> FAIL.
+	s.HealthProbesPort = 8081
+	s.HealthProbePaths = []string{"/healthz?probe=1"}
+	errs, _ = checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), `contains "?"`)
+	s.HealthProbePaths = []string{"/healthz"}
+
+	// Backend health port in the preread loopback range on a host that runs an
+	// EDGE nginx (here: the gateway host) -> FAIL, even though the surfacing tier
+	// may be elsewhere; the terminators bind where the edge nginx runs.
+	s.HealthProbesPort = nginx.LoopbackBase
+	errs, _ = checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "reserved internal range")
+
+	// Neither ingress nor gateway listing -> FAIL.
+	c2 := meshCtx()
+	s.HealthProbesPort = 8081
+	errs, _ = checkService(s, c2)
+	assert.Contains(t, strings.Join(errs, "|"), "listed in the scope gateway's services")
+}
+
+// TestCheckMeshRootGlobRejected: the root-equivalent "/**" is rejected — it
+// matches every request path and would silently defeat the allowlist.
+func TestCheckMeshRootGlobRejected(t *testing.T) {
+	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, PublicPaths: []string{"/**"}}), meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "matches every request path")
 }
 
 // TestCheckMeshRequiresPki: a service with a mesh block but no pki: is rejected.
@@ -808,6 +975,7 @@ func ingressFKCtx() regionContext {
 	c := baseCtx()
 	c.ingressNames = map[string]bool{"web": true}
 	c.ingressHost = map[string]string{"web": "bridge-01"}
+	c.ingressNamesByHost = map[string][]string{"bridge-01": {"web"}}
 	c.computeNetwork = map[string]string{"bridge-01": "net", "bridge": "net"}
 	return c
 }
@@ -998,7 +1166,7 @@ func TestCheckServiceHealthRules(t *testing.T) {
 		return c
 	}
 	svc := func(hp int, routes ...types.RouteSpec) types.ServiceSpec {
-		return types.ServiceSpec{Name: "svc", Host: "bridge", Type: "raw", User: "svc", Ingress: "web", HealthProbesPort: hp, Routes: routes}
+		return types.ServiceSpec{Name: "svc", Host: "bridge", Type: "raw", User: "svc", Ingress: "web", HealthProbesPort: hp, HealthProbePaths: []string{"/healthz"}, Routes: routes}
 	}
 
 	// A backend health port distinct from everything -> OK.

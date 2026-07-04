@@ -105,6 +105,10 @@ func meshInputsByHost(res types.Resources, canonical map[string]string, scope st
 				LeafKeyPath:  meshpaths.LeafKeyPath(svc.Name),
 			})
 			if svc.Mesh != nil {
+				// The callee's declared endpoint surface (ADR-0034): peers may reach
+				// public AND internal paths — visibility only splits at the gateway.
+				paths := append([]string(nil), svc.Mesh.PublicPaths...)
+				paths = append(paths, svc.Mesh.InternalPaths...)
 				mh.local = append(mh.local, meshnginx.LocalService{
 					Name:           svc.Name,
 					SNI:            meshpaths.DNSName(scope, svc.Name),
@@ -112,6 +116,7 @@ func meshInputsByHost(res types.Resources, canonical map[string]string, scope st
 					LeafCertPath:   meshpaths.LeafCertPath(svc.Name),
 					LeafKeyPath:    meshpaths.LeafKeyPath(svc.Name),
 					AllowedCallers: allowedFor(svc),
+					Paths:          paths,
 				})
 			}
 		}
