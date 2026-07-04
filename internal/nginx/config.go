@@ -350,17 +350,31 @@ func gatewayServer(g types.IngressGateway, listen *crossplane.Directive) *crossp
 		dir("ssl_certificate_cache", "max=2"),
 	}
 	for _, rt := range routes {
-		children = append(children, block("location", []string{rt.Path},
-			dir("proxy_http_version", "1.1"),
-			dir("proxy_set_header", "Upgrade", "$http_upgrade"),
-			dir("proxy_set_header", "Connection", "$connection_upgrade"),
-			dir("proxy_set_header", "Host", "$host"),
-			dir("proxy_set_header", "X-Forwarded-For", "$proxy_add_x_forwarded_for"),
-			dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
-			dir("proxy_set_header", "X-Mesh-Target", rt.Service),
-			dir("proxy_read_timeout", "3600s"),
-			dir("proxy_pass", fmt.Sprintf("http://127.0.0.1:%d", meshpaths.GatewayEgressPort)),
-		))
+		children = append(children,
+			block("location", []string{rt.Path},
+				dir("proxy_http_version", "1.1"),
+				dir("proxy_set_header", "Upgrade", "$http_upgrade"),
+				dir("proxy_set_header", "Connection", "$connection_upgrade"),
+				dir("proxy_set_header", "Host", "$host"),
+				// SET, never append: this is the internet-facing first hop, so a
+				// daemon-supplied X-Forwarded-For is untrusted input — appending
+				// ($proxy_add_x_forwarded_for) would forward a forged first entry
+				// through the mesh and defeat per-IP audit/rate-limit logic.
+				dir("proxy_set_header", "X-Forwarded-For", "$remote_addr"),
+				dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
+				dir("proxy_set_header", "X-Mesh-Target", rt.Service),
+				dir("proxy_read_timeout", "3600s"),
+				dir("proxy_pass", fmt.Sprintf("http://127.0.0.1:%d", meshpaths.GatewayEgressPort)),
+			),
+			// The slashless exact prefix would otherwise hit nginx's implicit 301
+			// (a "/"-terminated prefix location with proxy_pass redirects "/p" to
+			// "/p/"), silently dropping POST bodies and breaking the PoP-signed
+			// path. An exact-match location pre-empts the auto-redirect: unmatched
+			// means 404, never a redirect.
+			block("location", []string{"=", strings.TrimSuffix(rt.Path, "/")},
+				dir("return", "404"),
+			),
+		)
 	}
 	children = append(children, block("location", []string{"/"}, dir("return", "404")))
 	return block("server", nil, children...)

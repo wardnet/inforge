@@ -28,8 +28,15 @@ func TestRenewScopeHasWork(t *testing.T) {
 	assert.True(t, renewScopeHasWork(res, ""))
 	assert.False(t, renewScopeHasWork(types.Resources{Service: []types.ServiceSpec{{Name: "api"}}}, ""))
 	// A gateway is a mesh member too (client leaf in its host's aggregate) —
-	// but only in full mode; releases never target the gateway.
-	gwOnly := types.Resources{Gateway: []types.GatewaySpec{{Name: "api", Pki: "mesh"}}}
+	// but only in full mode (releases never target the gateway) and only when
+	// its host FK resolves (an unresolvable host produces no writes and must
+	// not force provider credentials).
+	gwOnly := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "edge", InstanceCount: 1}},
+		Gateway: []types.GatewaySpec{{Name: "api", Host: "edge", Pki: "mesh"}},
+	}
 	assert.True(t, renewScopeHasWork(gwOnly, ""))
 	assert.False(t, renewScopeHasWork(gwOnly, "api"))
+	gwBadHost := types.Resources{Gateway: []types.GatewaySpec{{Name: "api", Host: "ghost", Pki: "mesh"}}}
+	assert.False(t, renewScopeHasWork(gwBadHost, ""))
 }

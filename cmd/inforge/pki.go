@@ -881,7 +881,7 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 	// Global services: scope "global", region-less slug, creds from the global block.
 	if renewScopeHasWork(global, only) {
 		if globalBlock == nil {
-			return 0, fmt.Errorf("a global service declares pki but the env has no global providers block")
+			return 0, fmt.Errorf("a global service or gateway declares pki but the env has no global providers block")
 		}
 		cID, cSecret, site, org, err := requireInfisicalCreds(globalBlock.Providers, "global")
 		if err != nil {
@@ -920,6 +920,9 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 // only an mtls_files: match counts; in full mode any pki: member does (the
 // per-host mesh aggregates cover every mesh member), and so does a north-south
 // gateway — its client leaf (<scope>/gateway) is part of its host's aggregate.
+// The gateway counts only when its host FK resolves: an unresolvable host is
+// skipped by the shared grouping (GatewayMemberByHost), so it would never
+// produce a write and must not force provider credentials for nothing.
 func renewScopeHasWork(res types.Resources, only string) bool {
 	for _, s := range res.Service {
 		if s.Pki == "" {
@@ -933,7 +936,7 @@ func renewScopeHasWork(res types.Resources, only string) bool {
 		}
 		return true
 	}
-	return only == "" && len(res.Gateway) > 0
+	return only == "" && len(meshplan.GatewayMemberByHost(res, naming.CanonicalComputeKeys(res.Compute))) > 0
 }
 
 // requireInfisicalCreds extracts the Infisical admin universal-auth credentials

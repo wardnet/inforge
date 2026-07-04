@@ -442,9 +442,16 @@ func TestRenderGateway(t *testing.T) {
 	assert.Contains(t, got, "proxy_set_header X-Mesh-Target ddns;")
 	assert.Contains(t, got, "proxy_set_header X-Mesh-Target tunneller;")
 	assert.Contains(t, got, fmt.Sprintf("proxy_pass http://127.0.0.1:%d;", meshpaths.GatewayEgressPort))
-	assert.Contains(t, got, "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;")
+	// XFF is SET to the real client at the internet edge, not appended — a
+	// daemon-supplied X-Forwarded-For must not survive into the mesh.
+	assert.Contains(t, got, "proxy_set_header X-Forwarded-For $remote_addr;")
+	assert.NotContains(t, got, "$proxy_add_x_forwarded_for", "the edge must not append a client-supplied XFF")
 	assert.Contains(t, got, "proxy_set_header Upgrade $http_upgrade;")
 	assert.Contains(t, got, "return 404;", "unmatched paths must 404, never proxy")
+	// The slashless exact prefix is an explicit 404, pre-empting nginx's implicit
+	// 301 (which would drop POST bodies / break the PoP-signed path).
+	assert.Contains(t, got, "location = /ddns {")
+	assert.Contains(t, got, "location = /tunnel {")
 	// Routes render in sorted-path order (ddns before tunnel).
 	assert.Less(t, strings.Index(got, "location /ddns/"), strings.Index(got, "location /tunnel/"))
 	assert.NotContains(t, got, "stream {")

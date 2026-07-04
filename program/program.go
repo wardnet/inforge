@@ -1359,31 +1359,61 @@ func ingressAppsByHost(res types.Resources, canonical map[string]string, slug, b
 	return byHost
 }
 
+// resolvedGateway is one gateway with its canonical host and fully-resolved
+// public FQDN — the single derivation the nginx, DNS, and firewall passes all
+// consume so the three can never drift (the gateway analogue of resolveIngressApps;
+// rule mesh-host-grouping-is-single-sourced names gateway realization a consumer).
+type resolvedGateway struct {
+	gw   types.GatewaySpec
+	host string // canonical compute specKey
+	fqdn string // naming.AppFQDN(subdomain, …) — server_name, ACME cert, and DNS record
+}
+
+// resolveGateways resolves each authored gateway to its canonical host and public
+// FQDN once. An unresolved host FK is skipped (validation rejects it long before
+// this), so every consumer sees the same host/FQDN pair.
+func resolveGateways(res types.Resources, canonical map[string]string, slug, baseDomain, ephemeralSlug string) []resolvedGateway {
+	out := make([]resolvedGateway, 0, len(res.Gateway))
+	for _, gw := range res.Gateway {
+		host, ok := canonical[gw.Host]
+		if !ok {
+			continue
+		}
+		out = append(out, resolvedGateway{
+			gw:   gw,
+			host: host,
+			fqdn: naming.AppFQDN(gw.Subdomain, slug, baseDomain, ephemeralSlug),
+		})
+	}
+	return out
+}
+
 // gatewaysByHost groups the scope's north-south gateway (a scope singleton) under
 // its canonical host as the derived types.IngressGateway the public nginx renders
-// (ADR-0032). The FQDN is the flat app-style form (naming.AppFQDN — the ADR's
-// `api.<slug>.<base>`, ephemeral slug inserted like an app's), the single source
-// the server_name, ACME cert, and DNS record all derive from. Routes carry the
+// (ADR-0032), via the shared resolveGateways derivation. Routes carry the
 // loader-normalized "/<p>/" path and the target service name (the X-Mesh-Target
 // value); the mesh resolves the target's location, so no backend is resolved here.
 func gatewaysByHost(res types.Resources, canonical map[string]string, slug, baseDomain, ephemeralSlug string) map[string][]types.IngressGateway {
 	byHost := map[string][]types.IngressGateway{}
-	for _, gw := range res.Gateway {
-		host, ok := canonical[gw.Host]
-		if !ok {
-			continue // validation rejects an unresolved host FK long before this
-		}
-		routes := make([]types.IngressGatewayRoute, 0, len(gw.Routes))
-		for _, rt := range gw.Routes {
-			routes = append(routes, types.IngressGatewayRoute(rt))
-		}
-		byHost[host] = append(byHost[host], types.IngressGateway{
-			Name:   gw.Name,
-			FQDN:   naming.AppFQDN(gw.Subdomain, slug, baseDomain, ephemeralSlug),
-			Routes: routes,
+	for _, rg := range resolveGateways(res, canonical, slug, baseDomain, ephemeralSlug) {
+		byHost[rg.host] = append(byHost[rg.host], types.IngressGateway{
+			Name:   rg.gw.Name,
+			FQDN:   rg.fqdn,
+			Routes: append([]types.IngressGatewayRoute(nil), toGatewayNginxRoutes(rg.gw.Routes)...),
 		})
 	}
 	return byHost
+}
+
+// toGatewayNginxRoutes converts authored gateway routes to the provider-facing
+// nginx route shape (a value-identical copy — the mesh carries the target
+// out-of-band, so no backend is resolved).
+func toGatewayNginxRoutes(routes []types.GatewayRouteSpec) []types.IngressGatewayRoute {
+	out := make([]types.IngressGatewayRoute, len(routes))
+	for i, rt := range routes {
+		out[i] = types.IngressGatewayRoute(rt)
+	}
+	return out
 }
 
 // ingressHealthByHost groups service health endpoints by the canonical specKey of
@@ -1598,13 +1628,11 @@ func firewallPlanByHost(res types.Resources, meshPublic bool) map[string]types.F
 	// on 443, and :80 serves ACME HTTP-01 for the gateway cert. The gateway's
 	// backends are reached THROUGH the mesh (its own loopback egress → the
 	// callee's MTLSPort, already covered by the mesh rules) — no private rule.
-	for _, gw := range res.Gateway {
-		gwHost, ok := canonical[gw.Host]
-		if !ok {
-			continue
-		}
-		addPublic(gwHost, 443)
-		addPublic(gwHost, 80)
+	// Slug/baseDomain don't affect the host resolution the firewall needs, so the
+	// empty-args resolveGateways call shares the FK resolution with nginx + DNS.
+	for _, rg := range resolveGateways(res, canonical, "", "", "") {
+		addPublic(rg.host, 443)
+		addPublic(rg.host, 80)
 	}
 	// exposed_ports are private binds on the service's own host, with no ingress
 	// involvement — so they are read from every service directly (not via
@@ -1899,12 +1927,10 @@ func derivedRecords(res types.Resources, env, slug, baseDomain, ephemeralSlug st
 		dedupAdd(fqdn, ia.app.Container, ia.ingHost)
 	}
 	// The gateway's FQDN is a grey-cloud A record at its own host (where its nginx
-	// terminates daemon TLS) — the same naming.AppFQDN call gatewaysByHost feeds
-	// the server_name/ACME cert from, so record and cert can never drift.
-	for _, gw := range res.Gateway {
-		if gwHost, ok := canonical[gw.Host]; ok {
-			dedupAdd(naming.AppFQDN(gw.Subdomain, slug, baseDomain, ephemeralSlug), gw.Container, gwHost)
-		}
+	// terminates daemon TLS) — the SAME resolveGateways derivation gatewaysByHost
+	// feeds the server_name/ACME cert from, so record and cert can never drift.
+	for _, rg := range resolveGateways(res, canonical, slug, baseDomain, ephemeralSlug) {
+		dedupAdd(rg.fqdn, rg.gw.Container, rg.host)
 	}
 	return out
 }

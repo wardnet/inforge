@@ -13,6 +13,7 @@ import (
 	"github.com/wardnet/inforge/internal/nginx"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/sizes"
+	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -646,6 +647,72 @@ func TestCheckServiceGatewayNameReserved(t *testing.T) {
 	errs, _ := checkService(s, c)
 	require.NotEmpty(t, errs)
 	assert.Contains(t, strings.Join(errs, "\n"), "reserved for the north-south gateway")
+}
+
+// twoNetworkMeshCtx adds a second host "edge" on a DIFFERENT network to meshCtx,
+// with the gateway on "edge" and its target ddns on "bridge", so the mesh dial
+// edge would cross networks.
+func twoNetworkMeshCtx() regionContext {
+	c := meshCtx()
+	c.computeNames["edge"] = true
+	c.computeKind["edge-01"] = "vm"
+	c.computeCanonical["edge-01"] = "edge-01"
+	c.computeCanonical["edge"] = "edge-01"
+	c.computeDeployer["edge-01"] = true
+	c.computeNetwork = map[string]string{
+		"bridge-01": "net-a", "bridge": "net-a",
+		"edge-01": "net-b", "edge": "net-b",
+	}
+	c.serviceHostByName = map[string]string{"ddns": "bridge", "tunneller": "bridge"}
+	return c
+}
+
+// TestCheckGatewayCrossNetworkTargetRejected: a gateway whose route target lives
+// on a host in a different network is rejected — the mesh dials the target's
+// private IP, unroutable across networks.
+func TestCheckGatewayCrossNetworkTargetRejected(t *testing.T) {
+	c := twoNetworkMeshCtx()
+	g := types.GatewaySpec{Name: "api", Host: "edge", Pki: "mesh", Subdomain: "api",
+		Routes: []types.GatewayRouteSpec{{Path: "/ddns/", Service: "ddns"}}}
+	errs, _ := checkGateway(g, c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "must share a network")
+}
+
+// TestCheckGatewaySameNetworkTargetOK: same route with both hosts on one network passes.
+func TestCheckGatewaySameNetworkTargetOK(t *testing.T) {
+	c := twoNetworkMeshCtx()
+	c.computeNetwork["edge-01"] = "net-a"
+	c.computeNetwork["edge"] = "net-a"
+	g := types.GatewaySpec{Name: "api", Host: "edge", Pki: "mesh", Subdomain: "api",
+		Routes: []types.GatewayRouteSpec{{Path: "/ddns/", Service: "ddns"}}}
+	errs, _ := checkGateway(g, c)
+	assert.Empty(t, errs)
+}
+
+// TestCheckMeshCrossNetworkCallerRejected: a same-scope caller on a different
+// network than this callee is rejected — the mesh dials the callee's private IP.
+func TestCheckMeshCrossNetworkCallerRejected(t *testing.T) {
+	c := twoNetworkMeshCtx()
+	// tunneller (the callee) is on bridge/net-a; ddns (a permitted caller) is
+	// also on bridge — move ddns to edge/net-b to cross networks.
+	c.serviceHostByName["ddns"] = "edge"
+	s := types.ServiceSpec{Name: "tunneller", Host: "bridge", Type: "raw", User: "svc", Pki: "mesh",
+		Mesh: &types.MeshSpec{Port: 9090, AllowedServices: []string{"ddns"}}}
+	errs := checkMesh(s, "bridge-01", c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "must share a network")
+}
+
+// TestCheckMeshEgressRangeRejected: a mesh.port in the reserved mesh egress
+// range would race the mesh proxy's loopback egress listeners.
+func TestCheckMeshEgressRangeRejected(t *testing.T) {
+	c := meshCtx()
+	s := types.ServiceSpec{Name: "tunneller", Host: "bridge", Type: "raw", User: "svc", Pki: "mesh",
+		Mesh: &types.MeshSpec{Port: meshpaths.GatewayEgressPort, AllowedServices: nil}}
+	errs := checkMesh(s, "bridge-01", c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "reserved mesh egress range")
 }
 
 // TestCheckMeshValid: a service exposing a mesh port with a resolvable allow list
