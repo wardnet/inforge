@@ -45,18 +45,23 @@ owner: app               # required — PostgreSQL role that owns the database
 | `database` | string | Yes | PostgreSQL database name. |
 | `owner` | string | Yes | PostgreSQL role that owns the database. |
 
-## Outputs
+## Access
 
-| Output | Description |
-|--------|-------------|
-| `connectionUrl` | PostgreSQL connection string |
+A database is a **Grantable**: a service reaches it only through a [grant](./service#grants), never a
+`ref:` (`ref:database/*` is rejected so an owner credential is never handed to a consumer). A grant
+mints a **scoped per-service role** with only the privileges the permission level allows — `ro`
+(`CONNECT`/`USAGE`/`SELECT`) or `rw` (read/write plus `CREATE ON SCHEMA public`) — and materializes the
+connection fields as env vars:
 
-This output can be referenced from a service's `environment.yaml`:
-
-```yaml
-# in regional/service/api/environment.yaml
-DATABASE_URL: ref:database/main.connectionUrl
+```yaml title="in regional/service/api/manifest.yaml"
+grants:
+  - resource: database/main
+    permission: rw
+    outputs:
+      DATABASE_URL: "{URL}"     # {USER} {PASSWORD} {HOST} {PORT} {DBNAME} {URL} are published
 ```
+
+See [Service — Grants](./service#grants) for the full field set and mechanics.
 
 ## Example
 

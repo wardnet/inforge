@@ -51,11 +51,13 @@ mesh:                     # optional — east-west mesh exposure (see "East-west
 `environment.yaml` (optional sidecar — env-var name → source DSL string):
 
 ```yaml
-DATABASE_URL: ref:database/main.connectionUrl   # an output from another resource
+SERVER_IP: ref:compute/bridge.publicIp          # an output from another resource
 CF_TOKEN: env:CLOUDFLARE_API_TOKEN              # a deploy-environment variable
 API_KEY: vault:API_KEY                          # a value from the git-encrypted store
 LOG_LEVEL: info                                 # a literal (non-secret config) value
 ```
+
+Database credentials are **not** declared here — they flow through a [grant](#grants), never a `ref:`.
 
 ## Fields
 
@@ -154,8 +156,7 @@ map of `ENV_VAR_NAME: <source>` entries. Each source is a small DSL string that 
 value comes from*, not the value itself:
 
 ```yaml title="regional/service/api/environment.yaml"
-DATABASE_URL: ref:database/main.connectionUrl   # an output from another resource
-SERVER_IP: ref:compute/bridge.publicIp
+SERVER_IP: ref:compute/bridge.publicIp          # an output from another resource
 CF_TOKEN: env:CLOUDFLARE_API_TOKEN              # a deploy-environment variable
 API_KEY: vault:API_KEY                          # a value from the git-encrypted store
 LOG_LEVEL: info                                 # a literal (non-secret config) value
@@ -165,7 +166,7 @@ The source kinds are:
 
 | Source | Form | Where the value comes from |
 |--------|------|----------------------------|
-| **ref** | `ref:<database\|compute>/<name>.<output>` | A runtime output of another resource (e.g. a DB connection URL). |
+| **ref** | `ref:<database\|compute>/<name>.<output>` | A runtime output of another resource (e.g. a compute private IP). A **database credential is never a `ref:`** — it flows through a [grant](#grants). |
 | **env** | `env:<VAR>` | A variable in the **deploy process environment** — e.g. a CI secret mapped to an env var in your workflow. Unset/empty fails the deploy loudly. |
 | **vault** | `vault:<KEY>` | A value held **age-encrypted in git** in the env's committed store, keyed by `(container, KEY)`. Managed with the [`inforge secret`](/cli/secret) CLI. |
 | **literal** | any other string | A verbatim inline value. **Plaintext in git — non-secret config only.** |
@@ -183,6 +184,62 @@ it for non-secret per-service config only; use `vault:`, `env:` or `ref:` for an
 
 Env-var names in the reserved `INFORGE_*` namespace are rejected — see
 [Runtime environment](#runtime-environment).
+
+## Grants
+
+A **grant** is a service's declared, permissioned access to a **Grantable** resource — a
+[database](./database) or a [PKI resource](./pki-resource) — materialized as the env vars the service
+composes over the fields that resource publishes. Unlike a `ref:` (which only **reads** an existing
+output), a grant *creates or issues* a credential: a scoped per-service DB role, or a minted
+certificate. Database credentials reach a service **only** this way — `ref:database/*` is rejected.
+
+Grants are authored as a `grants:` list on the **manifest** (topological, beside `pki:` and `ingress:`
+— not in `environment.yaml`):
+
+```yaml title="regional/service/api/manifest.yaml (grants:)"
+grants:
+  - resource: database/main       # <type>/<name>; a global target uses database/global/<name>
+    permission: rw                # ro | rw
+    outputs:
+      DATABASE_URL: "{URL}"       # env var -> template over the fields the resource publishes
+  - resource: pki/daemon-ca
+    permission: ro
+    outputs:
+      CA_CERT_PATH: "{CERT}"      # a file field must stand alone (only the placeholder)
+```
+
+| Field | Description |
+|-------|-------------|
+| `resource` | The granted resource as `<type>/<name>` (`type` ∈ `database` \| `pki`). A global target uses a `global/` name prefix (e.g. `database/global/main`). |
+| `permission` | `ro` or `rw`. Each Grantable maps it to its own domain (see below). One grant per target — `rw` subsumes `ro`. |
+| `outputs` | Map of **env-var name → template** over `{FIELD}` placeholders the resource publishes for that permission. |
+
+### What each resource publishes
+
+| Resource | `ro` fields | `rw` fields | Field kind |
+|----------|-------------|-------------|------------|
+| **database** | `{USER} {PASSWORD} {HOST} {PORT} {DBNAME} {URL}` | same | **value** — composed into a string secret |
+| **pki** | `{CERT}` (verify) | `{CERT} {KEY}` (issue) | **file** — resolves to a projected PEM's on-host path |
+
+- **Database** — `ro` mints a read-only role (`CONNECT`/`USAGE`/`SELECT`); `rw` adds read/write plus
+  `CREATE ON SCHEMA public` (the service owns its own migrations). The role is per-service and scoped;
+  prefer `{URL}` (the already-encoded connection URI) for a DSN rather than hand-assembling
+  `{USER}:{PASSWORD}@…`.
+- **PKI resource** — `ro` publishes the CA certificate (`{CERT}`, to verify); `rw` adds the root
+  signing key (`{KEY}`, to issue). See [PKI resource](./pki-resource).
+
+### Field kinds
+
+A **value field** composes a string secret (delivered like an `environment.yaml` secret). A **file
+field** resolves to the on-host path of a projected PEM — so a file-field template must contain **only**
+the placeholder, nothing around it (e.g. `"{CERT}"`, never `"cert={CERT}"`). The two kinds never mix in
+one template.
+
+`inforge validate` checks each grant credential-free: the target resolves to a supported Grantable of
+the right shape; the permission is `ro`/`rw`; every `{FIELD}` is one the resource publishes for that
+permission; a file field stands alone; and output env-var names avoid the reserved `INFORGE_*` /
+`MTLS_*_PATH` namespaces and don't collide with `environment.yaml` keys or each other across the
+service's grants.
 
 ## Ingress and routes
 
@@ -375,8 +432,15 @@ routes:
 ```
 
 ```yaml title="regional/service/bridge/environment.yaml"
-DATABASE_URL: ref:database/main.connectionUrl
 SESSION_KEY: vault:SESSION_KEY
+```
+
+```yaml title="regional/service/bridge/manifest.yaml (grants:)"
+grants:
+  - resource: database/main       # a scoped per-service DB role, materialized as env vars
+    permission: rw
+    outputs:
+      DATABASE_URL: "{URL}"
 ```
 
 ## Runtime environment

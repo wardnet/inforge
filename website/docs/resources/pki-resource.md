@@ -59,5 +59,5 @@ reads an existing output).
 
 ## See also
 
-- [Service](./service) — grants are authored on the service manifest (`grants:`)
+- [Service — Grants](./service#grants) — how a grant is authored and materialized
 - [`inforge pki`](/cli/pki) — the separate two-tier **mesh** PKI (not a grant target)
