@@ -52,6 +52,50 @@ func TestMeshInputsByHost(t *testing.T) {
 	}
 }
 
+// TestMeshInputsByHostGateway: the gateway is one extra egress caller on its host
+// at the FIXED reserved port — appended after the positional services, whose
+// ports MUST be identical with or without a gateway present (adding a gateway to
+// an env must never shift a service's INFORGE_MESH_URL). A gateway-only host
+// gets an egress-only mesh proxy.
+func TestMeshInputsByHostGateway(t *testing.T) {
+	base := types.Resources{Service: []types.ServiceSpec{
+		{Name: "zeta", Host: "bridge", Pki: "m"},
+		{Name: "alpha", Host: "bridge", Pki: "m"},
+	}}
+	withGw := base
+	withGw.Gateway = []types.GatewaySpec{{Name: "api", Host: "bridge", Pki: "m"}}
+	canonical := map[string]string{"bridge": "bridge-01", "edge": "edge-01"}
+	noopAllowed := func(types.ServiceSpec) []string { return nil }
+
+	plain := meshInputsByHost(base, canonical, "us-east-1", noopAllowed)["bridge-01"]
+	gated := meshInputsByHost(withGw, canonical, "us-east-1", noopAllowed)["bridge-01"]
+	if len(gated.egress) != len(plain.egress)+1 {
+		t.Fatalf("egress with gateway = %d, want %d", len(gated.egress), len(plain.egress)+1)
+	}
+	for i := range plain.egress {
+		if gated.egress[i] != plain.egress[i] {
+			t.Errorf("service egress[%d] changed when a gateway was added: %+v != %+v", i, gated.egress[i], plain.egress[i])
+		}
+	}
+	gw := gated.egress[len(gated.egress)-1]
+	if gw.Name != meshpaths.GatewayMember || gw.EgressPort != meshpaths.GatewayEgressPort {
+		t.Errorf("gateway egress = %+v", gw)
+	}
+	if gw.LeafCertPath != meshpaths.LeafCertPath(meshpaths.GatewayMember) {
+		t.Errorf("gateway leaf path = %q", gw.LeafCertPath)
+	}
+	if len(gated.local) != 0 {
+		t.Errorf("gateway must never be a local callee: %+v", gated.local)
+	}
+
+	// Gateway-only host: egress-only proxy.
+	solo := types.Resources{Gateway: []types.GatewaySpec{{Name: "api", Host: "edge", Pki: "m"}}}
+	mh := meshInputsByHost(solo, canonical, "us-east-1", noopAllowed)["edge-01"]
+	if mh == nil || len(mh.egress) != 1 || len(mh.local) != 0 {
+		t.Fatalf("gateway-only host inputs = %+v", mh)
+	}
+}
+
 func TestMeshEgressPortsByService(t *testing.T) {
 	res := types.Resources{Service: []types.ServiceSpec{
 		{Name: "tunneller", Host: "bridge", Pki: "m"},
@@ -77,8 +121,8 @@ func TestMeshTargetsRegionalIncludesGlobal(t *testing.T) {
 	scopeRes := types.Resources{
 		Compute: []types.ComputeSpec{{Name: "bridge", InstanceCount: 1}},
 		Service: []types.ServiceSpec{
-			{Name: "ddns", Host: "bridge", Pki: "m", Mesh: &types.MeshSpec{Port: 8080}},   // callee -> target
-			{Name: "caller", Host: "bridge", Pki: "m"},                                     // egress-only -> NOT a target
+			{Name: "ddns", Host: "bridge", Pki: "m", Mesh: &types.MeshSpec{Port: 8080}}, // callee -> target
+			{Name: "caller", Host: "bridge", Pki: "m"},                                  // egress-only -> NOT a target
 		},
 	}
 	globalRes := types.Resources{

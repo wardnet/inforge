@@ -443,6 +443,7 @@ func NormalizeGateway(g *types.GatewaySpec) {
 	g.Name = strings.TrimSpace(g.Name)
 	g.Container = strings.TrimSpace(g.Container)
 	g.Host = strings.TrimSpace(g.Host)
+	g.Pki = strings.TrimSpace(g.Pki)
 	g.Subdomain = strings.TrimSpace(g.Subdomain)
 	for i := range g.Routes {
 		g.Routes[i].Path = NormalizeGatewayRoutePath(g.Routes[i].Path)

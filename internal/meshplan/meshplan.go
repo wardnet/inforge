@@ -13,6 +13,7 @@ package meshplan
 import (
 	"sort"
 
+	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -43,6 +44,45 @@ func ServicesByHost(res types.Resources, canonical map[string]string) map[string
 func HostKeys(byHost map[string][]types.ServiceSpec) []string {
 	out := make([]string, 0, len(byHost))
 	for k := range byHost {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// GatewayMemberByHost maps each canonical host running the scope's north-south
+// gateway to the gateway's synthetic mesh member: a pseudo-service named
+// meshpaths.GatewayMember carrying the gateway's pki: membership. The synthetic
+// member is how the gateway flows through the SAME machinery as services —
+// leaf mint (CN=<scope>/gateway), per-host provider keys, the mesh descriptor's
+// service list, the placeholder seed, and the egress caller — without ever
+// entering the positional egress-port math (it gets the fixed
+// meshpaths.GatewayEgressPort instead; see the single-source rule). At most one
+// entry per host (the gateway is a scope singleton).
+func GatewayMemberByHost(res types.Resources, canonical map[string]string) map[string]types.ServiceSpec {
+	out := map[string]types.ServiceSpec{}
+	for _, gw := range res.Gateway {
+		host, ok := canonical[gw.Host]
+		if !ok {
+			continue
+		}
+		out[host] = types.ServiceSpec{Name: meshpaths.GatewayMember, Host: gw.Host, Pki: gw.Pki}
+	}
+	return out
+}
+
+// UnionHostKeys returns the sorted union of the service hosts and gateway hosts —
+// the full set of hosts a scope's mesh materializes on.
+func UnionHostKeys(byHost map[string][]types.ServiceSpec, gwByHost map[string]types.ServiceSpec) []string {
+	seen := map[string]bool{}
+	for k := range byHost {
+		seen[k] = true
+	}
+	for k := range gwByHost {
+		seen[k] = true
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
 		out = append(out, k)
 	}
 	sort.Strings(out)

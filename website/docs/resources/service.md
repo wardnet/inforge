@@ -323,7 +323,7 @@ mesh:
 | Field | Type | Meaning |
 |-------|------|---------|
 | `mesh.port` | int | The `127.0.0.1:<port>` the service binds to **receive** mesh traffic (plain HTTP). Injected as `INFORGE_MESH_PORT`. Omit the whole block for a service that only makes outbound calls. |
-| `mesh.allowed_services` | list | Bare service names permitted to call this service. Enforced at **this** service's local mesh proxy — a disallowed caller is rejected before it reaches the service. Include `gateway` to be reachable by daemon traffic through the north-south gateway. Empty means no service peers may call it. |
+| `mesh.allowed_services` | list | Bare service names permitted to call this service. Enforced at **this** service's local mesh proxy — a disallowed caller is rejected before it reaches the service. Include `gateway` to be reachable by daemon traffic through the [north-south gateway](./gateway). Empty means no service peers may call it. |
 
 **Calling another service.** Read `INFORGE_MESH_URL` and name the target in the `X-Mesh-Target` header;
 the path is your real path, unchanged:

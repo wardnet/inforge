@@ -247,15 +247,19 @@ type regionContext struct {
 	// (which ACME needs) can be rejected.
 	tlsTermIngressByHost map[string]bool
 	// gatewayScopeCount is the number of gateway resources declared in this scope.
-	// A gateway is a scope singleton (≤1 per scope): callers dial their own scope's
-	// gateway (INFORGE_GATEWAY_URL) and its config is derived per-scope, so a second
-	// one is ambiguous. checkGateway rejects the scope when this exceeds 1, and
-	// checkService rejects a gateway route when it is 0 (no gateway to realize on).
+	// A gateway is a scope singleton (≤1 per scope): it is the scope's one public
+	// daemon edge and its config is derived per-scope, so a second one is ambiguous.
+	// checkGateway rejects the scope when this exceeds 1.
 	gatewayScopeCount int
 	// serviceAllowsGateway records whether a service permits the north-south gateway to
 	// call it (its mesh.allowed_services contains "gateway"). checkGateway requires a
 	// route's target service to allow the gateway (the two sides must agree, ADR-0032).
 	serviceAllowsGateway map[string]bool
+	// servicePkiByName maps each service name in this scope to its pki: mesh membership.
+	// checkGateway requires every route target to join the SAME mesh as the gateway —
+	// a callee's trust bundle only admits callers chaining to its own mesh's
+	// intermediates, so a mixed-mesh gateway route could never complete a handshake.
+	servicePkiByName map[string]string
 	// serviceNamesInScope holds every service name declared in this scope (regardless
 	// of pki:), and meshServices the subset that are mesh members (declare pki:). A
 	// gateway route's allowed_services caller must resolve to a mesh member — these two
@@ -526,6 +530,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		ingressNamesByHost:    map[string][]string{},
 		pkiResources:          map[string]string{},
 		serviceAllowsGateway:  map[string]bool{},
+		servicePkiByName:      map[string]string{},
 		serviceNamesInScope:   map[string]bool{},
 		meshServices:          map[string]bool{},
 		callerCandidates:      map[string]bool{},
@@ -609,6 +614,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			continue
 		}
 		ctx.serviceNamesInScope[f.spec.Name] = true
+		ctx.servicePkiByName[f.spec.Name] = f.spec.Pki
 		if f.spec.Pki != "" {
 			ctx.meshServices[f.spec.Name] = true
 		}
@@ -1120,29 +1126,55 @@ func checkServicePKI(r *reporter, base string, scopes []string, store *pki.Store
 			r.report(f.path, errs, nil)
 		}
 	}
+	// The gateway is a mesh member too (client identity <scope>/gateway): its pki:
+	// must satisfy the same membership rules for the scopes it deploys under.
+	gateways, _, err := readFolders[types.GatewaySpec](filepath.Join(base, "gateway"))
+	if err != nil {
+		r.fail(filepath.Join(base, "gateway"), err.Error())
+		return
+	}
+	for i := range gateways {
+		f := gateways[i]
+		if f.parseErr != nil {
+			continue // already reported by validateResourceSet
+		}
+		g := f.spec
+		loader.NormalizeGateway(&g)
+		if errs := pkiMembershipErrors(g.Pki, scopes, store); len(errs) > 0 {
+			r.report(f.path, errs, nil)
+		}
+	}
 }
 
 // servicePKIErrors applies the mesh-membership rules to one service for the
 // given scopes and returns any validation errors. A missing required `pki:` is
 // left to the JSON schema pass, so an empty value yields no error here.
 func servicePKIErrors(s types.ServiceSpec, scopes []string, store *pki.Store) []string {
-	if s.Pki == "" {
+	return pkiMembershipErrors(s.Pki, scopes, store)
+}
+
+// pkiMembershipErrors is the credential-free mesh-membership check shared by
+// services and the north-south gateway: the named PKI must exist in the store,
+// be two-tier, and hold an intermediate for every scope the member deploys
+// under. An empty name yields no error (the JSON schema owns required-ness).
+func pkiMembershipErrors(pkiName string, scopes []string, store *pki.Store) []string {
+	if pkiName == "" {
 		return nil
 	}
 	if store == nil {
-		return []string{fmt.Sprintf("pki %q references the PKI store, but %s does not exist — run `inforge pki init <env>`", s.Pki, pki.FileName)}
+		return []string{fmt.Sprintf("pki %q references the PKI store, but %s does not exist — run `inforge pki init <env>`", pkiName, pki.FileName)}
 	}
-	p, ok := store.Get(s.Pki)
+	p, ok := store.Get(pkiName)
 	if !ok {
-		return []string{fmt.Sprintf("pki: unknown PKI %q — known PKIs: %s", s.Pki, strings.Join(store.Names(), ", "))}
+		return []string{fmt.Sprintf("pki: unknown PKI %q — known PKIs: %s", pkiName, strings.Join(store.Names(), ", "))}
 	}
 	if p.Topology != pki.TopologyTwoTier {
-		return []string{fmt.Sprintf("pki: %q is a %s PKI; the mesh membership field must name a %s (mesh) PKI", s.Pki, p.Topology, pki.TopologyTwoTier)}
+		return []string{fmt.Sprintf("pki: %q is a %s PKI; the mesh membership field must name a %s (mesh) PKI", pkiName, p.Topology, pki.TopologyTwoTier)}
 	}
 	var errs []string
 	for _, scope := range scopes {
 		if _, ok := p.Intermediates[scope]; !ok {
-			errs = append(errs, fmt.Sprintf("pki %q has no intermediate for scope %q — run `inforge pki intermediate <env> %s %s`", s.Pki, scope, s.Pki, scope))
+			errs = append(errs, fmt.Sprintf("pki %q has no intermediate for scope %q — run `inforge pki intermediate <env> %s %s`", pkiName, scope, pkiName, scope))
 		}
 	}
 	return errs
@@ -1299,6 +1331,13 @@ func resolveComputeHost(host, noun string, ctx regionContext) (canonical string,
 }
 
 func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string) {
+	// "gateway" is the north-south gateway's mesh identity (<scope>/gateway): a
+	// service with that name would mint the same leaf CN and be able to forge
+	// daemon-originated traffic (a callee demuxes on X-Service-Identity ==
+	// <scope>/gateway). The name is reserved.
+	if s.Name == gatewayCallerName {
+		errs = append(errs, fmt.Sprintf("name: %q is reserved for the north-south gateway's mesh identity (<scope>/gateway); pick another service name", gatewayCallerName))
+	}
 	// A service on a global host (host: global/<name>) is rejected: a service that
 	// runs on a global host is defined in the global slice itself, not referenced
 	// from a region. Detected before host resolution so the message is specific.
@@ -1712,7 +1751,18 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, which does not resolve to a service in this scope", rt.Path, rt.Service))
 		case !ctx.serviceAllowsGateway[rt.Service]:
 			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, but that service does not permit the gateway — add %q to its mesh.allowed_services", rt.Path, rt.Service, gatewayCallerName))
+		case s.Pki != "" && ctx.servicePkiByName[rt.Service] != s.Pki:
+			// The gateway's client leaf chains to ITS pki's intermediates; a callee
+			// verifies callers against its OWN mesh's trust set. Different meshes can
+			// never complete the handshake, so reject the drift at authoring time.
+			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, which joins mesh %q while the gateway joins %q — a gateway and its route targets must share one pki", rt.Path, rt.Service, ctx.servicePkiByName[rt.Service], s.Pki))
 		}
+	}
+	// The gateway's FQDN lives in the same flat public namespace as app FQDNs
+	// (<subdomain>[.<slug>].<base>) — a subdomain an app already claims would
+	// collide on the DNS record and the ACME cert.
+	if s.Subdomain != "" && ctx.appSubdomainCounts[s.Subdomain] > 0 {
+		errs = append(errs, fmt.Sprintf("subdomain: %q is already used by an app in this scope; the gateway needs its own public FQDN", s.Subdomain))
 	}
 	return errs, warns
 }

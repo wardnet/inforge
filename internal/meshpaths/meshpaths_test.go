@@ -28,8 +28,11 @@ func TestInReservedEgressRange(t *testing.T) {
 		EgressBase - 1:               false,
 		EgressBase:                   true,
 		EgressBase + MaxServices - 1: true,
-		EgressBase + MaxServices:     false,
-		MTLSPort:                     false, // the mТLS port is on the host interface, not the loopback egress range
+		// The gateway's fixed slot sits just past the positional service range
+		// and is reserved too (ADR-0032: the north-south gateway's mesh egress).
+		GatewayEgressPort:     true,
+		GatewayEgressPort + 1: false,
+		MTLSPort:              false, // the mТLS port is on the host interface, not the loopback egress range
 	}
 	for port, want := range cases {
 		if got := InReservedEgressRange(port); got != want {

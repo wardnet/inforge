@@ -480,7 +480,7 @@ func TestRealizeIngressRejectsAppRouteSNICollision(t *testing.T) {
 	require.NoError(t, err)
 	appsByHost := ingressAppsByHost(res, canonical, "use1", "wardnet.network", "")
 
-	err = checkAppSNICollisions(routesByHost, appsByHost)
+	err = checkAppSNICollisions(routesByHost, appsByHost, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "my.use1.wardnet.network")
 	assert.Contains(t, err.Error(), "service api")
@@ -498,7 +498,7 @@ func TestCheckAppSNICollisionsAllows(t *testing.T) {
 	appsByHost := map[string][]types.IngressApp{
 		"edge-01": {{Name: "dashboard", FQDN: "my.use1.wardnet.network"}},
 	}
-	require.NoError(t, checkAppSNICollisions(routesByHost, appsByHost))
+	require.NoError(t, checkAppSNICollisions(routesByHost, appsByHost, nil))
 }
 
 // TestAppProvisionScript: the placeholder is written and `current` is symlinked

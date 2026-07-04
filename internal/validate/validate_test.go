@@ -538,6 +538,7 @@ func meshCtx() regionContext {
 	c.meshServices = map[string]bool{"ddns": true, "tunneller": true}
 	c.serviceNamesInScope = map[string]bool{"ddns": true, "tunneller": true, "nopki": true}
 	c.serviceAllowsGateway = map[string]bool{"ddns": true, "tunneller": true}
+	c.servicePkiByName = map[string]string{"ddns": "mesh", "tunneller": "mesh"}
 	c.targetUsersByHost = map[string]map[int][]string{}
 	c.portUsersByHost = map[string]map[int][]string{}
 	return c
@@ -548,7 +549,7 @@ func meshSvc(m *types.MeshSpec) types.ServiceSpec {
 }
 
 func gw(routes ...types.GatewayRouteSpec) types.GatewaySpec {
-	return types.GatewaySpec{Name: "api", Host: "bridge", Subdomain: "api", Routes: routes}
+	return types.GatewaySpec{Name: "api", Host: "bridge", Pki: "mesh", Subdomain: "api", Routes: routes}
 }
 
 // TestCheckGatewayValid: a gateway on a same-scope vm, sole in scope, routing to a
@@ -614,6 +615,37 @@ func TestCheckGatewayDuplicatePath(t *testing.T) {
 	), meshCtx())
 	require.NotEmpty(t, errs)
 	assert.Contains(t, strings.Join(errs, "\n"), "declared more than once")
+}
+
+// TestCheckGatewayPkiMismatch: a route target in a DIFFERENT mesh than the gateway
+// is rejected — the callee would never trust the gateway's client leaf.
+func TestCheckGatewayPkiMismatch(t *testing.T) {
+	c := meshCtx()
+	c.servicePkiByName["ddns"] = "other-mesh"
+	errs, _ := checkGateway(gw(types.GatewayRouteSpec{Path: "/ddns/", Service: "ddns"}), c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "must share one pki")
+}
+
+// TestCheckGatewaySubdomainCollidesWithApp: a gateway subdomain an app already
+// claims in the scope is rejected (same flat FQDN namespace: DNS record + ACME).
+func TestCheckGatewaySubdomainCollidesWithApp(t *testing.T) {
+	c := meshCtx()
+	c.appSubdomainCounts = map[string]int{"api": 1}
+	errs, _ := checkGateway(gw(), c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "already used by an app")
+}
+
+// TestCheckServiceGatewayNameReserved: a service named "gateway" would mint the
+// gateway's mesh identity (CN=<scope>/gateway) and forge daemon-originated
+// traffic — the name is reserved.
+func TestCheckServiceGatewayNameReserved(t *testing.T) {
+	c := meshCtx()
+	s := types.ServiceSpec{Name: "gateway", Host: "bridge", Type: "raw", User: "svc", Pki: "mesh"}
+	errs, _ := checkService(s, c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "reserved for the north-south gateway")
 }
 
 // TestCheckMeshValid: a service exposing a mesh port with a resolvable allow list

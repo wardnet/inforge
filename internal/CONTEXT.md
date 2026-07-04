@@ -251,6 +251,8 @@ The north-south public edge **daemons HTTPS into** (an authored resource: `host`
 daemon, path-routes, and reaches the target service **through the Mesh** (so it is location-transparent
 and holds no service locations). It does **not** validate the daemon JWT — it forwards it for the service
 to validate. Distinct from **Ingress** (apps/web) and from the **Mesh** (east-west).
+Its mesh member name "gateway" is **reserved** — no service may claim it (it would forge the
+gateway's identity at every callee).
 _Avoid_: "API gateway" as the east-west router (removed); a single `INFORGE_GATEWAY_URL` / scope-singleton
 gateway (removed); a `type: gateway` service route (removed).
 
