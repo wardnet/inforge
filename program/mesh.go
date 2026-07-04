@@ -4,13 +4,18 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"github.com/wardnet/inforge/internal/agent"
 	"github.com/wardnet/inforge/internal/meshnginx"
 	"github.com/wardnet/inforge/internal/meshpaths"
+	"github.com/wardnet/inforge/internal/meshplan"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/registry"
+	iremote "github.com/wardnet/inforge/internal/remote"
 	"github.com/wardnet/inforge/internal/types"
+	"gopkg.in/yaml.v3"
 )
 
 // meshGatewayCaller is the reserved mesh.allowed_services token naming the north-south
@@ -76,28 +81,20 @@ type meshHostInputs struct {
 }
 
 // meshInputsByHost groups a scope's mesh services (those declaring pki:) by their
-// canonical host into the per-host local + egress renderer inputs. A pki service is
-// ALWAYS an egress caller (it can make outbound mesh calls); one that also declares a
-// mesh: block is additionally a local callee (it receives). Egress ports are assigned
-// deterministically per host — meshpaths.EgressPort(index) over the host's services in
-// sorted-name order — so the deploy side and the injected INFORGE_MESH_URL agree. Leaf
-// paths are the mesh proxy's on-host material paths (the custody shift). allowedFor
-// expands a callee's authored allow-list to caller identities (see expandAllowedCallers).
+// canonical host into the per-host local + egress renderer inputs, via the shared
+// meshplan grouping (the renewal path writes per-host material over the same
+// grouping — see .agents/rules/mesh-host-grouping-is-single-sourced.md). A pki
+// service is ALWAYS an egress caller (it can make outbound mesh calls); one that
+// also declares a mesh: block is additionally a local callee (it receives). Egress
+// ports are assigned deterministically per host — meshpaths.EgressPort(index) over
+// the host's services in sorted-name order — so the deploy side and the injected
+// INFORGE_MESH_URL agree. Leaf paths are the mesh proxy's on-host material paths
+// (the custody shift). allowedFor expands a callee's authored allow-list to caller
+// identities (see expandAllowedCallers).
 func meshInputsByHost(res types.Resources, canonical map[string]string, scope string, allowedFor func(types.ServiceSpec) []string) map[string]*meshHostInputs {
-	byHost := map[string][]types.ServiceSpec{}
-	for _, svc := range res.Service {
-		if svc.Pki == "" {
-			continue
-		}
-		host, ok := canonical[svc.Host]
-		if !ok {
-			continue
-		}
-		byHost[host] = append(byHost[host], svc)
-	}
+	byHost := meshplan.ServicesByHost(res, canonical)
 	out := make(map[string]*meshHostInputs, len(byHost))
 	for host, svcs := range byHost {
-		sort.Slice(svcs, func(i, j int) bool { return svcs[i].Name < svcs[j].Name })
 		mh := &meshHostInputs{}
 		for i, svc := range svcs {
 			mh.egress = append(mh.egress, meshnginx.EgressCaller{
@@ -125,27 +122,16 @@ func meshInputsByHost(res types.Resources, canonical map[string]string, scope st
 // meshEgressPortsByService maps each pki: service name in a scope to its
 // deterministic loopback egress port — the port its INFORGE_MESH_URL points at.
 // It MUST agree byte-for-byte with meshInputsByHost's per-host assignment (the
-// mesh proxy binds those egress listeners), so it groups and orders identically:
-// per canonical host, sorted by service name, meshpaths.EgressPort(index). The
-// descriptor render path calls this to inject INFORGE_MESH_URL; the realization
-// binds the matching listener, so the caller's URL and the mesh port never drift.
+// mesh proxy binds those egress listeners), so both consume the same shared
+// meshplan grouping: per canonical host, sorted by service name,
+// meshpaths.EgressPort(index). The descriptor render path calls this to inject
+// INFORGE_MESH_URL; the realization binds the matching listener, so the
+// caller's URL and the mesh port never drift.
 func meshEgressPortsByService(res types.Resources, canonical map[string]string) map[string]int {
-	byHost := map[string][]string{}
-	for _, svc := range res.Service {
-		if svc.Pki == "" {
-			continue
-		}
-		host, ok := canonical[svc.Host]
-		if !ok {
-			continue
-		}
-		byHost[host] = append(byHost[host], svc.Name)
-	}
 	out := map[string]int{}
-	for _, names := range byHost {
-		sort.Strings(names)
-		for i, n := range names {
-			out[n] = meshpaths.EgressPort(i)
+	for _, svcs := range meshplan.ServicesByHost(res, canonical) {
+		for i, svc := range svcs {
+			out[svc.Name] = meshpaths.EgressPort(i)
 		}
 	}
 	return out
@@ -305,6 +291,98 @@ func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, g
 		if err := mp.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], cfg, listenAddr, targetIPs, env, []pulumi.Resource{gate}); err != nil {
 			return err
 		}
+		// The host's material-pull access (ADR-0033): mesh workspace + per-host
+		// identity + on-host mesh descriptor/credential. The service list is the
+		// egress set — every co-located pki: service, already sorted.
+		services := make([]string, 0, len(mh.egress))
+		for _, e := range mh.egress {
+			services = append(services, e.Name)
+		}
+		if err := deliverMeshHost(ctx, reg, hostKey, host, services, deployUserByCompute[hostKey], deployPrivateKey, env, slug, gate); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// deliverMeshHost provisions one mesh host's pull access (the scope's mesh
+// workspace + a per-host identity read-scoped to /<hostKey>) and writes the two
+// on-host files the pull needs into meshpaths.AgentDir: the mesh descriptor
+// (0644, secret-free) and the host-key-encrypted credential (0600). It mirrors
+// deliverServiceSecrets' two-phase shape: read the host SSH public key, encrypt
+// the identity credential to it program-side inside an ApplyT, write both files.
+func deliverMeshHost(ctx *pulumi.Context, reg registry.ProviderRegistry, hostKey string, host types.ComputeOutputs, services []string, deployUser, deployPrivateKey, env, slug string, gate pulumi.Resource) error {
+	provName := reg.SecretsProviderName()
+	if provName == "" {
+		return fmt.Errorf("mesh host %q needs a secrets provider (the mesh proxy pulls its cert material from it) but none is configured for the scope", hostKey)
+	}
+	prov, err := reg.ServiceSecretsProvisioner(provName)
+	if err != nil {
+		return fmt.Errorf("mesh host %q: %w", hostKey, err)
+	}
+	bundle, err := prov.ProvisionMeshHost(ctx, hostKey, env)
+	if err != nil {
+		return fmt.Errorf("mesh host %q: %w", hostKey, err)
+	}
+
+	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
+	name := naming.Resource(env, slug, "mesh", hostKey)
+
+	hostPub, err := readHostPubKey(ctx, conn, name+"-hostkey", gate)
+	if err != nil {
+		return fmt.Errorf("mesh host %q: read host key: %w", hostKey, err)
+	}
+
+	descriptor := bundle.Project.ApplyT(func(project string) (string, error) {
+		return renderMeshDescriptor(bundle, project, services)
+	}).(pulumi.StringOutput)
+
+	credAge := encryptCredentialAge(hostPub, bundle.ClientID, bundle.ClientSecret, "mesh host "+hostKey)
+
+	writeScript := pulumi.All(descriptor, credAge).ApplyT(func(args []interface{}) string {
+		desc, _ := args[0].(string)
+		cred, _ := args[1].(string)
+		return iremote.WriteFileScript(meshpaths.DescriptorPath, desc) + "\n" +
+			iremote.WriteFileScriptMode(meshpaths.CredentialPath, cred, "0600")
+	}).(pulumi.StringOutput)
+
+	deleteScript := iremote.DeleteFileScript(meshpaths.DescriptorPath) + "\n" +
+		iremote.DeleteFileScript(meshpaths.CredentialPath)
+
+	if _, err := remote.NewCommand(ctx, name+"-agent", &remote.CommandArgs{
+		Connection: conn,
+		Create:     writeScript,
+		Update:     writeScript,
+		Delete:     pulumi.String(deleteScript),
+		Triggers:   pulumi.Array{writeScript},
+		// A Triggers change (any mesh descriptor change — e.g. the service list)
+		// replaces this resource; delete-before-replace keeps the old Delete
+		// script from removing the freshly written files after the new Create
+		// (see deliverServiceSecrets).
+	}, pulumi.DependsOn([]pulumi.Resource{hostPub}), pulumi.DeleteBeforeReplace(true)); err != nil {
+		return fmt.Errorf("mesh host %q: write mesh descriptor/credential: %w", hostKey, err)
+	}
+	return nil
+}
+
+// renderMeshDescriptor marshals the on-host mesh descriptor, building the
+// agent's own MeshDescriptor struct (imported, not duplicated) so the producer
+// can never drift from the consumer's schema.
+func renderMeshDescriptor(bundle *types.ServiceSecretsBundle, project string, services []string) (string, error) {
+	d := agent.MeshDescriptor{
+		Version: agent.MeshSupportedVersion,
+		Provider: agent.Provider{
+			Kind:        bundle.ProviderKind,
+			URL:         bundle.URL,
+			Project:     project,
+			Environment: bundle.Environment,
+			SecretPath:  bundle.SecretPath,
+		},
+		Services: services,
+	}
+	b, err := yaml.Marshal(d)
+	if err != nil {
+		return "", fmt.Errorf("marshal mesh descriptor: %w", err)
+	}
+	return string(b), nil
 }

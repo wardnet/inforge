@@ -59,6 +59,19 @@ func SpecKey(name string, instance int) string {
 	return fmt.Sprintf("%s-%02d", name, instance)
 }
 
+// BareComputeName strips the "-NN" instance suffix from a canonical compute
+// specKey ("bridge-01" → "bridge") — SpecKey's inverse, and the bare name a
+// host's DNS record is derived from. The single home for the strip rule: the
+// service deploy descriptor and the mesh deploy descriptor both derive host
+// FQDNs through it, so the two can never disagree on what a specKey's bare
+// name is.
+func BareComputeName(specKey string) string {
+	if i := strings.LastIndex(specKey, "-"); i > 0 {
+		return specKey[:i]
+	}
+	return specKey
+}
+
 // Resource returns wardnet-<env>-<regionSlug>-<type>-<name>. An EMPTY regionSlug
 // is the global scope: the region segment is dropped, yielding the region-less
 // wardnet-<env>-<type>-<name> (identical to GlobalResource). Global resources

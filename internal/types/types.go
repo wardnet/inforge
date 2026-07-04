@@ -265,6 +265,7 @@ type ServiceSpec struct {
 	Type             string            `yaml:"type"`                         // "raw" (built) | "container" (reserved)
 	User             string            `yaml:"user,omitempty"`               // no-login system user the service runs as; raw only
 	Pki              string            `yaml:"pki"`                          // FK -> two-tier (mesh) PKI name in pki.enc.yaml this service is a leaf member of (required)
+	MtlsFiles        bool              `yaml:"mtls_files,omitempty"`         // opt-in: also project this service's own leaf + trust bundle into its tmpfs and inject MTLS_*_PATH — for a raw mTLS plane outside the mesh (e.g. tunneller node↔node); default false = the mesh proxy is the sole leaf custodian (ADR-0033)
 	Reload           string            `yaml:"reload,omitempty"`             // optional ExecReload command to apply a renewed mesh leaf without downtime (e.g. "/bin/kill -HUP $MAINPID"); absent -> renewal restarts the unit
 	Ingress          string            `yaml:"ingress,omitempty"`            // FK -> ingress resource name (same scope) whose nginx fronts this service's Routes; required when Routes is non-empty
 	Routes           []RouteSpec       `yaml:"routes,omitempty"`             // typed inbound routes (tls-termination / forward) realized on the referenced ingress's nginx
@@ -615,6 +616,14 @@ type ServiceSecretsProvisioner interface {
 	// program from the service's database grants (ADR-0025); the provisioner writes
 	// them into the same infra batch alongside the environment.yaml-derived secrets.
 	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, env, region string, all AllOutputs, grantSecrets map[string]pulumi.StringOutput) (*ServiceSecretsBundle, error)
+
+	// ProvisionMeshHost provisions one mesh host's material-pull access
+	// (ADR-0033): it ensures the scope's shared mesh workspace exists and mints a
+	// per-host machine identity whose read scope covers ONLY the host's own path
+	// (/<hostKey>) — exactly the material that host's mesh proxy holds in memory
+	// anyway. The returned bundle feeds the mesh descriptor + host-key-encrypted
+	// credential the program writes to the host; its Env map is always nil.
+	ProvisionMeshHost(ctx *pulumi.Context, hostKey, env string) (*ServiceSecretsBundle, error)
 }
 
 // ManifestContribution is a set of non-secret fields a contributor adds to a

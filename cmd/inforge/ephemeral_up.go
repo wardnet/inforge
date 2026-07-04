@@ -135,6 +135,16 @@ func runEphemeralUp(ctx context.Context, configPath, dir, from, slugFlag, ttlFla
 		return err
 	}
 
+	// The mesh leaf baseline (ADR-0033) under the ephemeral identity: mint the
+	// clone's mesh material (source config, slug identity) into the slug-scoped
+	// mesh workspace and trigger each ephemeral mesh host's pull, so the
+	// replicated services below start against proxies holding real leaves.
+	// Trigger failures inside are warnings (hosts converge on their timer);
+	// only a mint failure aborts before replication.
+	if err := meshBaseline(ctx, s, dir, from, slug, sshKeyPath, os.Stdout); err != nil {
+		return err
+	}
+
 	// Replicate the source's live releases onto the freshly provisioned clone.
 	if err := replicateReleases(ctx, s, projCfg, dir, from, slug, sshKeyPath); err != nil {
 		return err
@@ -323,24 +333,27 @@ func replicateApp(ctx context.Context, store *release.Store, srcEnv, slug, sshKe
 	return nil
 }
 
-// mintReplicatedServiceLeaf mints a fresh mesh leaf for a replicated service
-// under the EPHEMERAL identity (slug) from the SOURCE env's intermediate, writing
-// it to the slug-scoped secrets workspace the ephemeral deploy provisioned — the
-// ephemeral analogue of mintReleasedServiceLeaf. configEnv (the source) selects
-// the pki.enc.yaml/variables/regions; identityEnv (the slug) stamps the SPIFFE ID
-// and Infisical workspace. A non-mesh service (no `pki:`) is a no-op. The source
-// resource set is taken from the already-loaded sourceWorkloads (no re-read).
+// mintReplicatedServiceLeaf mints a fresh leaf for a replicated mtls_files:
+// service under the EPHEMERAL identity (slug) from the SOURCE env's
+// intermediate, writing it to the slug-scoped /<svc>/mtls the ephemeral deploy
+// provisioned — the ephemeral analogue of mintReleasedServiceLeaf. configEnv
+// (the source) selects the pki.enc.yaml/variables/regions; identityEnv (the
+// slug) stamps the SPIFFE ID and Infisical workspace. Any service without
+// mtls_files is a no-op — its mesh copy is written by the ephemeral post-up
+// baseline, not per replicated service (ADR-0033). The source resource set is
+// taken from the already-loaded sourceWorkloads (no re-read).
 func mintReplicatedServiceLeaf(ctx context.Context, dir, srcEnv, slug, svc string, sw sourceWorkloads) error {
-	global := filterServicesByName(sw.globalSvcs, svc)
-	regional := filterServicesByName(sw.regionalSvcs, svc)
-	if !anyServiceHasPki(global) && !anyServiceHasPki(regional) {
-		return nil // not a mesh service — nothing to mint
-	}
-	count, err := renewMeshCertsAs(ctx, dir, srcEnv, slug, global, regional)
+	// renewMeshCertsAs no-ops (before touching the store or INFORGE_SECRETS_KEY)
+	// when the named service has no service-side mtls files to mint.
+	global := types.Resources{Service: sw.globalSvcs}
+	regional := types.Resources{Service: sw.regionalSvcs}
+	count, err := renewMeshCertsAs(ctx, dir, srcEnv, slug, global, regional, svc)
 	if err != nil {
 		return fmt.Errorf("mint mesh leaf for %s under %s: %w", svc, slug, err)
 	}
-	fmt.Printf("  service %s: minted %d mesh leaf certificate(s) under %s\n", svc, count, slug)
+	if count > 0 {
+		fmt.Printf("  service %s: minted %d mesh leaf certificate(s) under %s\n", svc, count, slug)
+	}
 	return nil
 }
 
@@ -462,4 +475,3 @@ func dedupByName[T any](items []T, name func(T) string) []T {
 	}
 	return out
 }
-

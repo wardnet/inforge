@@ -72,17 +72,24 @@ func (h *HetznerMesh) Realize(
 		return fmt.Errorf("mesh %q: install nginx: %w", hostKey, err)
 	}
 
-	// 2. Write the seed script + the systemd unit, then daemon-reload. The seed
-	//    script is also the unit's ExecStartPre, so a reboot self-heals the tmpfs
-	//    cert dir to placeholder material rather than crash-looping.
+	// 2. Write the seed script + the systemd units (proxy + renewal oneshot/timer),
+	//    then daemon-reload. The unit's ExecStartPre chain pulls real material
+	//    (inforge-agent mesh-project, `-`-prefixed) then seeds placeholders for
+	//    anything still absent — so a reboot self-heals the tmpfs cert dir to real
+	//    (or at worst placeholder) material rather than crash-looping (ADR-0033).
+	//    The renewal timer converges the host after `inforge pki renew` rotates
+	//    leaves in the provider.
 	egressNames := make([]string, 0, len(cfg.Egress))
 	for _, e := range cfg.Egress {
 		egressNames = append(egressNames, e.Name)
 	}
 	unitScript := iremote.WriteFileScript(meshnginx.SeedScriptPath, meshnginx.SeedScript(egressNames)) + "\n" +
 		iremote.WriteFileScript(meshnginx.UnitPath, meshnginx.UnitFile()) + "\n" +
+		iremote.WriteFileScript(meshnginx.RenewUnitPath, meshnginx.RenewUnitFile()) + "\n" +
+		iremote.WriteFileScript(meshnginx.RenewTimerPath, meshnginx.RenewTimerFile()) + "\n" +
 		"sudo systemctl daemon-reload\n" +
-		fmt.Sprintf("sudo systemctl enable %s\n", iremote.Quote(meshpaths.UnitName))
+		fmt.Sprintf("sudo systemctl enable %s\n", iremote.Quote(meshpaths.UnitName)) +
+		fmt.Sprintf("sudo systemctl enable --now %s\n", iremote.Quote(meshnginx.RenewUnitName+".timer"))
 	unit, err := remote.NewCommand(ctx, base+"-unit", &remote.CommandArgs{
 		Connection: conn,
 		Create:     pulumi.String(unitScript),

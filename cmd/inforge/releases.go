@@ -16,7 +16,6 @@ import (
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/release"
 	"github.com/wardnet/inforge/internal/service"
-	"github.com/wardnet/inforge/internal/types"
 )
 
 // newReleasesCmd is the `inforge releases` group: push builds + uploads an
@@ -398,11 +397,14 @@ func resolveDeployTargets(ctx context.Context, projCfg projectConfig, env, platf
 	return targets, nil
 }
 
-// mintReleasedServiceLeaf mints a fresh mesh leaf for the released service (when
-// it joins a mesh) and writes it to the secrets provider before delivery, so the
-// unit restarts into a provider that already holds the leaf the boot path will
-// project. A non-mesh service (no `pki:`) is a no-op. It reuses renewMeshCerts —
-// the same minting core as `inforge pki renew` — scoped to just this service.
+// mintReleasedServiceLeaf mints a fresh leaf for the released service and
+// writes it under /<svc>/mtls before delivery, so the unit restarts into a
+// provider that already holds the leaf its boot path will project. Only an
+// mtls_files: opted-in service (the raw-mTLS-plane exception) projects its own
+// leaf — every other service is a no-op here: its mesh copy lives with the
+// host's mesh proxy and is the deploy baseline's / renew cron's business
+// (ADR-0033). It reuses renewMeshCertsAs — the same minting core as
+// `inforge pki renew` — in per-service mode.
 func mintReleasedServiceLeaf(ctx context.Context, dir, env, svc string) error {
 	globalRes, err := loader.LoadGlobalResources(env, dir)
 	if err != nil {
@@ -412,28 +414,16 @@ func mintReleasedServiceLeaf(ctx context.Context, dir, env, svc string) error {
 	if err != nil {
 		return err
 	}
-	global := filterServicesByName(globalRes.Service, svc)
-	regional := filterServicesByName(regionalRes.Service, svc)
-	if !anyServiceHasPki(global) && !anyServiceHasPki(regional) {
-		return nil // not a mesh service — nothing to mint
-	}
-	count, err := renewMeshCerts(ctx, dir, env, global, regional)
+	// renewMeshCertsAs no-ops (before touching the store or INFORGE_SECRETS_KEY)
+	// when the named service has no service-side mtls files to mint.
+	count, err := renewMeshCertsAs(ctx, dir, env, env, globalRes, regionalRes, svc)
 	if err != nil {
 		return fmt.Errorf("mint mesh leaf for %s: %w", svc, err)
 	}
-	fmt.Printf("minted %d mesh leaf certificate(s) for %s\n", count, svc)
-	return nil
-}
-
-// filterServicesByName returns the services whose Name matches svc (0 or 1).
-func filterServicesByName(services []types.ServiceSpec, svc string) []types.ServiceSpec {
-	var out []types.ServiceSpec
-	for _, s := range services {
-		if s.Name == svc {
-			out = append(out, s)
-		}
+	if count > 0 {
+		fmt.Printf("minted %d mesh leaf certificate(s) for %s\n", count, svc)
 	}
-	return out
+	return nil
 }
 
 // mustRequire marks flags required, panicking on the impossible misconfiguration
