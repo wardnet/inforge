@@ -20,6 +20,8 @@ region in `regions.yaml`.
 | [Service](../resources/service) | `regional/service/<name>/` | Application hosted on a VM, reached over the east-west mesh and optionally exposed north-south through an ingress |
 | [Ingress](../resources/ingress) | `regional/ingress/<name>/` | Shared nginx proxy tier (referencing a compute host) that fronts apps and per-service web/SNI routes |
 | [Gateway](../resources/gateway) | `regional/gateway/<name>/` | North-south public edge external daemons HTTPS into; routes each path to a service through the mesh |
+| [App](../resources/app) | `regional/app/<name>/` | Static front-end (SPA) served from disk by an ingress's nginx |
+| [PKI resource](../resources/pki-resource) | `regional/pki/<name>/` | Standalone root-only CA, consumed by a service through a grant |
 
 [DNS](../resources/dns) is **not** an authored resource type: inforge derives every record (host,
 service, vanity) automatically and creates it on the region's
