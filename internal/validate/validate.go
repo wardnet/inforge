@@ -22,6 +22,7 @@ import (
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/meshcert"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/nginx"
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/regions"
@@ -247,15 +248,24 @@ type regionContext struct {
 	// (which ACME needs) can be rejected.
 	tlsTermIngressByHost map[string]bool
 	// gatewayScopeCount is the number of gateway resources declared in this scope.
-	// A gateway is a scope singleton (≤1 per scope): callers dial their own scope's
-	// gateway (INFORGE_GATEWAY_URL) and its config is derived per-scope, so a second
-	// one is ambiguous. checkGateway rejects the scope when this exceeds 1, and
-	// checkService rejects a gateway route when it is 0 (no gateway to realize on).
+	// A gateway is a scope singleton (≤1 per scope): it is the scope's one public
+	// daemon edge and its config is derived per-scope, so a second one is ambiguous.
+	// checkGateway rejects the scope when this exceeds 1.
 	gatewayScopeCount int
 	// serviceAllowsGateway records whether a service permits the north-south gateway to
 	// call it (its mesh.allowed_services contains "gateway"). checkGateway requires a
 	// route's target service to allow the gateway (the two sides must agree, ADR-0032).
 	serviceAllowsGateway map[string]bool
+	// servicePkiByName maps each service name in this scope to its pki: mesh membership.
+	// checkGateway requires every route target to join the SAME mesh as the gateway —
+	// a callee's trust bundle only admits callers chaining to its own mesh's
+	// intermediates, so a mixed-mesh gateway route could never complete a handshake.
+	servicePkiByName map[string]string
+	// serviceHostByName maps each service name in this scope to its host: FK (bare
+	// form). The mesh dials a same-scope callee at its host's PRIVATE IP, so the
+	// mesh network checks (checkMesh caller↔callee, checkGateway gateway↔target)
+	// resolve both ends' hosts through it and require a shared network.
+	serviceHostByName map[string]string
 	// serviceNamesInScope holds every service name declared in this scope (regardless
 	// of pki:), and meshServices the subset that are mesh members (declare pki:). A
 	// gateway route's allowed_services caller must resolve to a mesh member — these two
@@ -526,6 +536,8 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		ingressNamesByHost:    map[string][]string{},
 		pkiResources:          map[string]string{},
 		serviceAllowsGateway:  map[string]bool{},
+		servicePkiByName:      map[string]string{},
+		serviceHostByName:     map[string]string{},
 		serviceNamesInScope:   map[string]bool{},
 		meshServices:          map[string]bool{},
 		callerCandidates:      map[string]bool{},
@@ -609,6 +621,8 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			continue
 		}
 		ctx.serviceNamesInScope[f.spec.Name] = true
+		ctx.servicePkiByName[f.spec.Name] = f.spec.Pki
+		ctx.serviceHostByName[f.spec.Name] = f.spec.Host
 		if f.spec.Pki != "" {
 			ctx.meshServices[f.spec.Name] = true
 		}
@@ -1120,29 +1134,55 @@ func checkServicePKI(r *reporter, base string, scopes []string, store *pki.Store
 			r.report(f.path, errs, nil)
 		}
 	}
+	// The gateway is a mesh member too (client identity <scope>/gateway): its pki:
+	// must satisfy the same membership rules for the scopes it deploys under.
+	gateways, _, err := readFolders[types.GatewaySpec](filepath.Join(base, "gateway"))
+	if err != nil {
+		r.fail(filepath.Join(base, "gateway"), err.Error())
+		return
+	}
+	for i := range gateways {
+		f := gateways[i]
+		if f.parseErr != nil {
+			continue // already reported by validateResourceSet
+		}
+		g := f.spec
+		loader.NormalizeGateway(&g)
+		if errs := pkiMembershipErrors(g.Pki, scopes, store); len(errs) > 0 {
+			r.report(f.path, errs, nil)
+		}
+	}
 }
 
 // servicePKIErrors applies the mesh-membership rules to one service for the
 // given scopes and returns any validation errors. A missing required `pki:` is
 // left to the JSON schema pass, so an empty value yields no error here.
 func servicePKIErrors(s types.ServiceSpec, scopes []string, store *pki.Store) []string {
-	if s.Pki == "" {
+	return pkiMembershipErrors(s.Pki, scopes, store)
+}
+
+// pkiMembershipErrors is the credential-free mesh-membership check shared by
+// services and the north-south gateway: the named PKI must exist in the store,
+// be two-tier, and hold an intermediate for every scope the member deploys
+// under. An empty name yields no error (the JSON schema owns required-ness).
+func pkiMembershipErrors(pkiName string, scopes []string, store *pki.Store) []string {
+	if pkiName == "" {
 		return nil
 	}
 	if store == nil {
-		return []string{fmt.Sprintf("pki %q references the PKI store, but %s does not exist — run `inforge pki init <env>`", s.Pki, pki.FileName)}
+		return []string{fmt.Sprintf("pki %q references the PKI store, but %s does not exist — run `inforge pki init <env>`", pkiName, pki.FileName)}
 	}
-	p, ok := store.Get(s.Pki)
+	p, ok := store.Get(pkiName)
 	if !ok {
-		return []string{fmt.Sprintf("pki: unknown PKI %q — known PKIs: %s", s.Pki, strings.Join(store.Names(), ", "))}
+		return []string{fmt.Sprintf("pki: unknown PKI %q — known PKIs: %s", pkiName, strings.Join(store.Names(), ", "))}
 	}
 	if p.Topology != pki.TopologyTwoTier {
-		return []string{fmt.Sprintf("pki: %q is a %s PKI; the mesh membership field must name a %s (mesh) PKI", s.Pki, p.Topology, pki.TopologyTwoTier)}
+		return []string{fmt.Sprintf("pki: %q is a %s PKI; the mesh membership field must name a %s (mesh) PKI", pkiName, p.Topology, pki.TopologyTwoTier)}
 	}
 	var errs []string
 	for _, scope := range scopes {
 		if _, ok := p.Intermediates[scope]; !ok {
-			errs = append(errs, fmt.Sprintf("pki %q has no intermediate for scope %q — run `inforge pki intermediate <env> %s %s`", s.Pki, scope, s.Pki, scope))
+			errs = append(errs, fmt.Sprintf("pki %q has no intermediate for scope %q — run `inforge pki intermediate <env> %s %s`", pkiName, scope, pkiName, scope))
 		}
 	}
 	return errs
@@ -1299,6 +1339,13 @@ func resolveComputeHost(host, noun string, ctx regionContext) (canonical string,
 }
 
 func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string) {
+	// "gateway" is the north-south gateway's mesh identity (<scope>/gateway): a
+	// service with that name would mint the same leaf CN and be able to forge
+	// daemon-originated traffic (a callee demuxes on X-Service-Identity ==
+	// <scope>/gateway). The name is reserved.
+	if s.Name == gatewayCallerName {
+		errs = append(errs, fmt.Sprintf("name: %q is reserved for the north-south gateway's mesh identity (<scope>/gateway); pick another service name", gatewayCallerName))
+	}
 	// A service on a global host (host: global/<name>) is rejected: a service that
 	// runs on a global host is defined in the global slice itself, not referenced
 	// from a region. Detected before host resolution so the message is specific.
@@ -1391,6 +1438,9 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 			if coLocated && inReservedLoopbackRange(rt.Target) {
 				errs = append(errs, fmt.Sprintf("routes: target %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a backend port outside it", rt.Target, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
 			}
+			if msg := meshEgressRangeErr("routes: target", rt.Target); msg != "" {
+				errs = append(errs, msg)
+			}
 			// A backend port is bound by one process, so two services on the same
 			// backend host cannot share a target (a service may reuse its own).
 			if backendHost != "" {
@@ -1470,6 +1520,9 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 					errs = append(errs, fmt.Sprintf("health_probes_port: %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a port outside it", s.HealthProbesPort, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
 				}
 			}
+			if msg := meshEgressRangeErr("health_probes_port", s.HealthProbesPort); msg != "" {
+				errs = append(errs, msg)
+			}
 		}
 	}
 	// exposed_ports (ADR-0029): each is a private-network backend bind inforge opens
@@ -1526,6 +1579,9 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 			// terminator in the reserved range; a co-located tcp bind there clashes.
 			if hostRunsIngress && inReservedLoopbackRange(ep.Port) {
 				errs = append(errs, fmt.Sprintf("exposed_ports: tcp/%d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators on this ingress host; pick a port outside it", ep.Port, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
+			}
+			if msg := meshEgressRangeErr("exposed_ports: tcp", ep.Port); msg != "" {
+				errs = append(errs, msg)
 			}
 		}
 	}
@@ -1642,6 +1698,21 @@ func inReservedLoopbackRange(port int) bool {
 	return port >= nginx.LoopbackBase && port < nginx.LoopbackBase+nginx.MaxMixedPorts
 }
 
+// meshEgressRangeErr returns the rejection message for a backend bind falling in
+// the mesh proxy's loopback egress range (the positional per-service slots plus
+// the gateway's fixed slot), or "" when the port is outside it. Every service
+// host runs a mesh proxy (pki: is required on every service), so a backend bind
+// in the range races the mesh egress listeners for the 127.0.0.1 bind — preview
+// and `nginx -t` stay green and the loser fails only at runtime, which is why
+// this is rejected at authoring time (rule
+// gateway-mesh-slot-is-fixed-and-name-reserved).
+func meshEgressRangeErr(label string, port int) string {
+	if !meshpaths.InReservedEgressRange(port) {
+		return ""
+	}
+	return fmt.Sprintf("%s: %d falls in the reserved mesh egress range [%d,%d] the mesh proxy binds on loopback; pick a backend port outside it", label, port, meshpaths.EgressBase, meshpaths.GatewayEgressPort)
+}
+
 // checkApp validates an app (front-end) resource: its ingress: foreign key must
 // resolve to an ingress resource in the SAME scope. A global/ prefix is rejected
 // explicitly — an app served from a global ingress is declared in the global
@@ -1680,7 +1751,8 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 		errs = append(errs, fmt.Sprintf("host: %q references a global compute; a gateway on a global host is declared in the global slice itself, not referenced from a region", s.Host))
 		return errs, warns
 	}
-	if _, hostErrs := resolveComputeHost(s.Host, "a gateway", ctx); len(hostErrs) > 0 {
+	gwHost, hostErrs := resolveComputeHost(s.Host, "a gateway", ctx)
+	if len(hostErrs) > 0 {
 		errs = append(errs, hostErrs...)
 	}
 	if ctx.gatewayScopeCount > 1 {
@@ -1712,7 +1784,30 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, which does not resolve to a service in this scope", rt.Path, rt.Service))
 		case !ctx.serviceAllowsGateway[rt.Service]:
 			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, but that service does not permit the gateway — add %q to its mesh.allowed_services", rt.Path, rt.Service, gatewayCallerName))
+		case s.Pki != "" && ctx.servicePkiByName[rt.Service] != s.Pki:
+			// The gateway's client leaf chains to ITS pki's intermediates; a callee
+			// verifies callers against its OWN mesh's trust set. Different meshes can
+			// never complete the handshake, so reject the drift at authoring time.
+			errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q, which joins mesh %q while the gateway joins %q — a gateway and its route targets must share one pki", rt.Path, rt.Service, ctx.servicePkiByName[rt.Service], s.Pki))
 		}
+		// The gateway's mesh egress dials a route target's mesh proxy at its host's
+		// PRIVATE IP (and the target's MTLSPort firewall admits only its own network
+		// CIDR), so a cross-host target must share a network with the gateway host —
+		// the mesh sibling of cross-host-route-requires-same-network. Cross-scope
+		// never occurs here (routes are same-scope by construction).
+		if gwHost != "" && ctx.serviceNamesInScope[rt.Service] {
+			if tHost := canonicalHost(ctx.serviceHostByName[rt.Service], ctx); tHost != "" && tHost != gwHost {
+				if gn, tn := ctx.computeNetwork[gwHost], ctx.computeNetwork[tHost]; gn != tn {
+					errs = append(errs, fmt.Sprintf("routes: gateway path %q routes to service %q on network %q, but the gateway host is on network %q — the mesh dials the target's private IP, so the two hosts must share a network", rt.Path, rt.Service, tn, gn))
+				}
+			}
+		}
+	}
+	// The gateway's FQDN lives in the same flat public namespace as app FQDNs
+	// (<subdomain>[.<slug>].<base>) — a subdomain an app already claims would
+	// collide on the DNS record and the ACME cert.
+	if s.Subdomain != "" && ctx.appSubdomainCounts[s.Subdomain] > 0 {
+		errs = append(errs, fmt.Sprintf("subdomain: %q is already used by an app in this scope; the gateway needs its own public FQDN", s.Subdomain))
 	}
 	return errs, warns
 }
@@ -1745,6 +1840,9 @@ func checkMesh(s types.ServiceSpec, backendHost string, ctx regionContext) []str
 		if s.HealthProbesPort == m.Port {
 			errs = append(errs, fmt.Sprintf("mesh.port: %d collides with this service's health_probes_port; distinct backend binds", m.Port))
 		}
+		if msg := meshEgressRangeErr("mesh.port", m.Port); msg != "" {
+			errs = append(errs, msg)
+		}
 		for _, ep := range s.ExposedPorts {
 			if ep.Proto == "tcp" && ep.Port == m.Port {
 				errs = append(errs, fmt.Sprintf("mesh.port: %d collides with this service's tcp exposed_port; distinct backend binds", m.Port))
@@ -1776,7 +1874,19 @@ func checkMesh(s types.ServiceSpec, backendHost string, ctx regionContext) []str
 		case seenDep[dep]:
 			errs = append(errs, fmt.Sprintf("mesh.allowed_services: lists service %q more than once", dep))
 		case ctx.meshServices[dep] || ctx.callerCandidates[dep]:
-			// resolves to a mesh member in a permitted direction
+			// Resolves to a mesh member in a permitted direction. A SAME-scope caller
+			// dials this callee's mesh proxy at its host's PRIVATE IP (the callee's
+			// MTLSPort firewall admits only its own network CIDR), so a cross-host
+			// caller must share a network with this host — the mesh sibling of
+			// cross-host-route-requires-same-network. A cross-scope caller
+			// (callerCandidates) rides the public global mesh gateway and is exempt.
+			if ctx.meshServices[dep] && backendHost != "" {
+				if callerHost := canonicalHost(ctx.serviceHostByName[dep], ctx); callerHost != "" && callerHost != backendHost {
+					if cn, bn := ctx.computeNetwork[callerHost], ctx.computeNetwork[backendHost]; cn != bn {
+						errs = append(errs, fmt.Sprintf("mesh.allowed_services: caller %q is on network %q but this service's host is on %q — the mesh dials this callee's private IP, so the two hosts must share a network", dep, cn, bn))
+					}
+				}
+			}
 		case ctx.forbiddenCallerNames[dep]:
 			errs = append(errs, fmt.Sprintf("mesh.allowed_services: allows %q, a global service — a global service may only call other global services (regional→global only), so it cannot call this service", dep))
 		case ctx.serviceNamesInScope[dep]:

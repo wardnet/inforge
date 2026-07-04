@@ -101,9 +101,23 @@ func DNSName(scope, service string) string {
 // which port maps to which service. Callers must keep index < MaxServices.
 func EgressPort(index int) int { return EgressBase + index }
 
-// InReservedEgressRange reports whether a port falls in the mesh egress range, so a
-// co-located backend bind can be validated to avoid it (a service that binds an egress
+// GatewayMember is the north-south gateway's mesh member name — the segment in its
+// leaf identity (<scope>/gateway), its material paths (LeafCertPath("gateway")), and
+// its provider keys. It is a FIXED, reserved member: never part of the positional
+// service egress-port math (inserting it there would shift every co-located
+// service's already-injected INFORGE_MESH_URL).
+const GatewayMember = "gateway"
+
+// GatewayEgressPort is the gateway's loopback egress listener — the port the
+// north-south gateway nginx proxies daemon requests into the mesh through. It sits
+// just past the positional service range so it can never collide with (or shift)
+// a service's EgressPort(index).
+const GatewayEgressPort = EgressBase + MaxServices
+
+// InReservedEgressRange reports whether a port falls in the mesh egress range
+// (the positional service slots plus the gateway's fixed slot), so a co-located
+// backend bind can be validated to avoid it (a service that binds an egress
 // port would shadow the mesh proxy's egress listener).
 func InReservedEgressRange(port int) bool {
-	return port >= EgressBase && port < EgressBase+MaxServices
+	return port >= EgressBase && port <= GatewayEgressPort
 }

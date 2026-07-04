@@ -1153,6 +1153,7 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		return fmt.Errorf("ingress: %w", err)
 	}
 	appsByHostKey := ingressAppsByHost(res, canonical, slug, baseDomain, ephemeralSlug)
+	gatewaysByHostKey := gatewaysByHost(res, canonical, slug, baseDomain, ephemeralSlug)
 	// Resolve the ingress-tier services once and feed both derivations below — the
 	// health entries and the cross-host backend set — so the service list is walked a
 	// single time per host realization.
@@ -1169,13 +1170,13 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 	// orders for the hostname. The route-vs-route half of this rule lives in
 	// ingressRoutesByHost; this closes the app-vs-route/app-vs-app half so the
 	// guarantee holds even when `up` runs without a prior `validate`.
-	if err := checkAppSNICollisions(routesByHostKey, appsByHostKey); err != nil {
+	if err := checkAppSNICollisions(routesByHostKey, appsByHostKey, gatewaysByHostKey); err != nil {
 		return fmt.Errorf("ingress: %w", err)
 	}
-	// nginx is installed on an ingress host iff at least one route, app, OR health
-	// endpoint targets it; an app-only or health-only ingress still realizes — its
-	// server blocks and ACME certs provision for the app/service FQDNs alone.
-	hostKeys := ingressHostUnion(routesByHostKey, appsByHostKey, healthByHostKey)
+	// nginx is installed on an ingress host iff at least one route, app, health
+	// endpoint, OR gateway targets it; an app-only, health-only, or gateway-only
+	// host still realizes — its server blocks and ACME certs provision alone.
+	hostKeys := ingressHostUnion(routesByHostKey, appsByHostKey, healthByHostKey, gatewaysByHostKey)
 	if len(hostKeys) == 0 {
 		return nil
 	}
@@ -1216,7 +1217,7 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		if healthPort == 0 {
 			healthPort = types.DefaultHealthProbesPort
 		}
-		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], appsByHostKey[hostKey], healthByHostKey[hostKey], healthPort, backendIPs, env, deps); err != nil {
+		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], appsByHostKey[hostKey], healthByHostKey[hostKey], healthPort, gatewaysByHostKey[hostKey], backendIPs, env, deps); err != nil {
 			return err
 		}
 	}
@@ -1358,6 +1359,63 @@ func ingressAppsByHost(res types.Resources, canonical map[string]string, slug, b
 	return byHost
 }
 
+// resolvedGateway is one gateway with its canonical host and fully-resolved
+// public FQDN — the single derivation the nginx, DNS, and firewall passes all
+// consume so the three can never drift (the gateway analogue of resolveIngressApps;
+// rule mesh-host-grouping-is-single-sourced names gateway realization a consumer).
+type resolvedGateway struct {
+	gw   types.GatewaySpec
+	host string // canonical compute specKey
+	fqdn string // naming.AppFQDN(subdomain, …) — server_name, ACME cert, and DNS record
+}
+
+// resolveGateways resolves each authored gateway to its canonical host and public
+// FQDN once. An unresolved host FK is skipped (validation rejects it long before
+// this), so every consumer sees the same host/FQDN pair.
+func resolveGateways(res types.Resources, canonical map[string]string, slug, baseDomain, ephemeralSlug string) []resolvedGateway {
+	out := make([]resolvedGateway, 0, len(res.Gateway))
+	for _, gw := range res.Gateway {
+		host, ok := canonical[gw.Host]
+		if !ok {
+			continue
+		}
+		out = append(out, resolvedGateway{
+			gw:   gw,
+			host: host,
+			fqdn: naming.AppFQDN(gw.Subdomain, slug, baseDomain, ephemeralSlug),
+		})
+	}
+	return out
+}
+
+// gatewaysByHost groups the scope's north-south gateway (a scope singleton) under
+// its canonical host as the derived types.IngressGateway the public nginx renders
+// (ADR-0032), via the shared resolveGateways derivation. Routes carry the
+// loader-normalized "/<p>/" path and the target service name (the X-Mesh-Target
+// value); the mesh resolves the target's location, so no backend is resolved here.
+func gatewaysByHost(res types.Resources, canonical map[string]string, slug, baseDomain, ephemeralSlug string) map[string][]types.IngressGateway {
+	byHost := map[string][]types.IngressGateway{}
+	for _, rg := range resolveGateways(res, canonical, slug, baseDomain, ephemeralSlug) {
+		byHost[rg.host] = append(byHost[rg.host], types.IngressGateway{
+			Name:   rg.gw.Name,
+			FQDN:   rg.fqdn,
+			Routes: append([]types.IngressGatewayRoute(nil), toGatewayNginxRoutes(rg.gw.Routes)...),
+		})
+	}
+	return byHost
+}
+
+// toGatewayNginxRoutes converts authored gateway routes to the provider-facing
+// nginx route shape (a value-identical copy — the mesh carries the target
+// out-of-band, so no backend is resolved).
+func toGatewayNginxRoutes(routes []types.GatewayRouteSpec) []types.IngressGatewayRoute {
+	out := make([]types.IngressGatewayRoute, len(routes))
+	for i, rt := range routes {
+		out[i] = types.IngressGatewayRoute(rt)
+	}
+	return out
+}
+
 // ingressHealthByHost groups service health endpoints by the canonical specKey of
 // their ingress's host. Each IngressHealth carries the service's canonical FQDN (the
 // strict server_name / Host the ingress demuxes on), the backend health port, and a
@@ -1431,7 +1489,7 @@ func ingressCrossHostBackends(svcs []ingressService) map[string]map[string]strin
 // ingressHostUnion returns the sorted union of the three ingress-host maps' keys —
 // the hosts that have routes, apps, and/or health endpoints — so realization visits
 // each host exactly once in a stable order.
-func ingressHostUnion(routes map[string][]types.IngressRoute, apps map[string][]types.IngressApp, health map[string][]types.IngressHealth) []string {
+func ingressHostUnion(routes map[string][]types.IngressRoute, apps map[string][]types.IngressApp, health map[string][]types.IngressHealth, gateways map[string][]types.IngressGateway) []string {
 	set := map[string]bool{}
 	for k := range routes {
 		set[k] = true
@@ -1442,6 +1500,9 @@ func ingressHostUnion(routes map[string][]types.IngressRoute, apps map[string][]
 	for k := range health {
 		set[k] = true
 	}
+	for k := range gateways {
+		set[k] = true
+	}
 	out := make([]string, 0, len(set))
 	for k := range set {
 		out = append(out, k)
@@ -1450,15 +1511,23 @@ func ingressHostUnion(routes map[string][]types.IngressRoute, apps map[string][]
 	return out
 }
 
-// checkAppSNICollisions rejects an app whose FQDN collides, on its ingress host's
-// :443 listener, with a tls-termination route's SNI or another app — a clash nginx
-// cannot demux (two server blocks sharing one (listen, server_name)) that would also
-// race two ACME orders for the same hostname. Apps always serve on :443, so the
-// conflict set per host is every :443 tls-termination route FQDN plus the app FQDNs.
+// checkAppSNICollisions rejects an app or gateway whose FQDN collides, on its
+// host's :443 listener, with a tls-termination route's SNI, another app, or the
+// gateway — a clash nginx cannot demux (two server blocks sharing one
+// (listen, server_name)) that would also race two ACME orders for the same
+// hostname. Apps and the gateway always serve on :443, so the conflict set per
+// host is every :443 tls-termination route FQDN plus the app + gateway FQDNs.
 // It mirrors the route-vs-route guard in ingressRoutesByHost for the app side.
-func checkAppSNICollisions(routesByHost map[string][]types.IngressRoute, appsByHost map[string][]types.IngressApp) error {
-	for _, hostKey := range sortedKeys(appsByHost) {
-		owner := map[string]string{} // fqdn -> "service X" | "app Y"
+func checkAppSNICollisions(routesByHost map[string][]types.IngressRoute, appsByHost map[string][]types.IngressApp, gatewaysByHost map[string][]types.IngressGateway) error {
+	hosts := map[string]bool{}
+	for k := range appsByHost {
+		hosts[k] = true
+	}
+	for k := range gatewaysByHost {
+		hosts[k] = true
+	}
+	for _, hostKey := range sortedKeys(hosts) {
+		owner := map[string]string{} // fqdn -> "service X" | "app Y" | "gateway Z"
 		for _, rt := range routesByHost[hostKey] {
 			if rt.Type != types.IngressTypeTLSTermination || rt.Listen != 443 {
 				continue
@@ -1472,6 +1541,12 @@ func checkAppSNICollisions(routesByHost map[string][]types.IngressRoute, appsByH
 				return fmt.Errorf("ingress host %q: app %q FQDN %q collides with %s on listen 443; an SNI must be unique per listen port", hostKey, a.Name, a.FQDN, prev)
 			}
 			owner[a.FQDN] = "app " + a.Name
+		}
+		for _, g := range gatewaysByHost[hostKey] {
+			if prev, dup := owner[g.FQDN]; dup {
+				return fmt.Errorf("ingress host %q: gateway %q FQDN %q collides with %s on listen 443; an SNI must be unique per listen port", hostKey, g.Name, g.FQDN, prev)
+			}
+			owner[g.FQDN] = "gateway " + g.Name
 		}
 	}
 	return nil
@@ -1548,6 +1623,16 @@ func firewallPlanByHost(res types.Resources, meshPublic bool) map[string]types.F
 	for _, ia := range resolveIngressApps(res, canonical) {
 		addPublic(ia.ingHost, 443)
 		addPublic(ia.ingHost, 80)
+	}
+	// The north-south gateway host opens the same public pair: daemons HTTPS in
+	// on 443, and :80 serves ACME HTTP-01 for the gateway cert. The gateway's
+	// backends are reached THROUGH the mesh (its own loopback egress → the
+	// callee's MTLSPort, already covered by the mesh rules) — no private rule.
+	// Slug/baseDomain don't affect the host resolution the firewall needs, so the
+	// empty-args resolveGateways call shares the FK resolution with nginx + DNS.
+	for _, rg := range resolveGateways(res, canonical, "", "", "") {
+		addPublic(rg.host, 443)
+		addPublic(rg.host, 80)
 	}
 	// exposed_ports are private binds on the service's own host, with no ingress
 	// involvement — so they are read from every service directly (not via
@@ -1840,6 +1925,12 @@ func derivedRecords(res types.Resources, env, slug, baseDomain, ephemeralSlug st
 	for _, ia := range resolveIngressApps(res, canonical) {
 		fqdn := naming.AppFQDN(ia.app.Subdomain, slug, baseDomain, ephemeralSlug)
 		dedupAdd(fqdn, ia.app.Container, ia.ingHost)
+	}
+	// The gateway's FQDN is a grey-cloud A record at its own host (where its nginx
+	// terminates daemon TLS) — the SAME resolveGateways derivation gatewaysByHost
+	// feeds the server_name/ACME cert from, so record and cert can never drift.
+	for _, rg := range resolveGateways(res, canonical, slug, baseDomain, ephemeralSlug) {
+		dedupAdd(rg.fqdn, rg.gw.Container, rg.host)
 	}
 	return out
 }

@@ -52,8 +52,14 @@ func BuildDeployDescriptor(env, baseDomain string, regional, global types.Resour
 	appendScope := func(res types.Resources, scope, slug string) {
 		canonical := naming.CanonicalComputeKeys(res.Compute)
 		deployUsers := naming.DeployUsersByHost(res.Compute)
+		// Union of service hosts AND the gateway's host: a gateway-only host runs
+		// a mesh proxy too, and the deploy baseline must be able to trigger its
+		// pull — this is the third consumer of the shared grouping (rule
+		// mesh-host-grouping-is-single-sourced), alongside realizeMesh and the
+		// renew core.
 		byHost := ServicesByHost(res, canonical)
-		for _, hostKey := range HostKeys(byHost) {
+		gwByHost := GatewayMemberByHost(res, canonical)
+		for _, hostKey := range UnionHostKeys(byHost, gwByHost) {
 			sshUser := deployUsers[hostKey]
 			if sshUser == "" {
 				sshUser = defaultSSHUser

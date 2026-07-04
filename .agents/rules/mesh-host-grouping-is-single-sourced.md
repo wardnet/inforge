@@ -1,10 +1,14 @@
 # Mesh host grouping must come from internal/meshplan
 
-The derivation of which mesh (`pki:`) services sit on which canonical compute host
-exists once, in `internal/meshplan.ServicesByHost`. The deploy program derives the
-per-host proxy inputs and egress-port assignment from it (`program/mesh.go`), and
-the renewal path writes each host's provider material (`/<hostKey>/<svc>/leaf.*` +
-`bundle.crt`) over it (`cmd/inforge/pki.go`). Re-deriving the grouping inline in
+The derivation of which mesh members sit on which canonical compute host exists
+once, in `internal/meshplan`: `ServicesByHost` for `pki:` services (the POSITIONAL
+egress-port universe) and `GatewayMemberByHost` for the north-south gateway's
+synthetic member (fixed `meshpaths.GatewayEgressPort` — NEVER inserted into the
+positional sort, which would shift every co-located service's injected
+INFORGE_MESH_URL). The deploy program derives the per-host proxy inputs from them
+(`program/mesh.go`), and the renewal path writes each host's provider material
+(`/<hostKey>/<member>/leaf.*` + `bundle.crt`) over the same pair
+(`cmd/inforge/pki.go`). Re-deriving the grouping inline in
 either place lets the two drift: the proxy would present leaves the renew never
 refreshes, or renew would write material no proxy reads — both silent (preview and
 `nginx -t` stay green), surfacing only as expired-leaf handshake failures weeks

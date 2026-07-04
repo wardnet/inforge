@@ -475,6 +475,32 @@ The mesh is the **east-west** plane (service↔service), **derived** — no reso
   `INFORGE_MESH_PORT` (a callee's `mesh.port`, omitted for an egress-only member). These are the env
   vars wardnet-cloud reads (plain-HTTP in/out, `X-Mesh-Target` addressing, `X-Service-Identity` demux).
 
+## North-south gateway realization (ADR-0032, daemon edge)
+
+The `gateway` resource (authored: `host` + **`pki`** + `subdomain` + `routes:[{path,service}]`; scope
+singleton; validated in `checkGateway` incl. route-target `allowed_services` + **same-`pki:`** match)
+is realized in two halves:
+
+- **Edge half (north-south nginx).** `program.gatewaysByHost` derives `types.IngressGateway`
+  (FQDN = `naming.AppFQDN(subdomain,…)` — the same call feeding the DNS A record and the SNI-collision
+  guard, so cert/record/demux can't drift); `realizeIngress`'s host union includes gateway hosts (a
+  gateway-only host still installs nginx); `nginx.Render(routes, apps, health, healthPort, gateways)`
+  emits one ACME server block per gateway with a `location /<p>/` per route: WS-capable
+  (`$connection_upgrade` map), path-preserving (target named out-of-band in `X-Mesh-Target`),
+  Authorization forwarded untouched, XFF stamped, `proxy_pass http://127.0.0.1:<GatewayEgressPort>`,
+  unmatched → 404. A gateway on `:443` joins ssl_preread mixed ports exactly like an app. Firewall:
+  gateway host opens public `443`+`80`.
+- **Mesh-client half.** The gateway is the synthetic mesh member `meshpaths.GatewayMember`
+  ("gateway", reserved — `checkService` rejects the service name) with the FIXED
+  `meshpaths.GatewayEgressPort` (= `EgressBase+MaxServices`; `InReservedEgressRange` covers it) —
+  never in the positional `EgressPort(index)` sort (see rule
+  `gateway-mesh-slot-is-fixed-and-name-reserved`). `meshplan.GatewayMemberByHost` is the
+  single-source grouping (rule `mesh-host-grouping-is-single-sourced`): `meshInputsByHost` appends it
+  as one extra egress caller (a gateway-only host gets an egress-only mesh proxy — `realizeMesh` +
+  `deliverMeshHost` trigger there too), the renew core mints `CN=<scope>/gateway` from the gateway's
+  `pki:` into its host's `/<hostKey>/gateway/leaf.*` aggregate, and the mesh descriptor/seed cover it
+  via the shared egress-names flow. The gateway's leaf rides the ADR-0033 pull like every member.
+
 ## Conventions
 
 - **Provider binary names are load-bearing.** Pulumi locates plugins by the exact filename

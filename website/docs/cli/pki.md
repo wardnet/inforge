@@ -72,17 +72,20 @@ export INFORGE_SECRETS_KEY="AGE-SECRET-KEY-…"   # the CI master identity
 inforge pki renew prd
 ```
 
-`inforge pki renew` mints a fresh leaf for every mesh service (one per scope) and writes the material
+`inforge pki renew` mints a fresh leaf for every mesh member (one per scope) and writes the material
 to the secrets provider:
 
-- **Per mesh host**, every co-located service's leaf + key and the host's trust bundle, under
+- **Per mesh host**, every co-located member's leaf + key and the host's trust bundle, under
   `/<hostKey>/` in the scope's shared **mesh workspace** — this is the copy the per-host **mesh proxy**
-  serves east-west traffic with (the proxy, not the service, holds mesh cert material).
+  serves east-west traffic with (the proxy, not the service, holds mesh cert material). A host running
+  the [north-south gateway](/resources/gateway) also gets the gateway's client leaf
+  (`CN=<scope>/gateway`) here, under `/<hostKey>/gateway/` — so a scope whose **only** mesh member is a
+  gateway still needs `INFORGE_SECRETS_KEY` and its provider credentials to renew.
 - **Per `mtls_files: true` service** (the raw-mTLS-plane exception, e.g. a node↔node forward listener),
   additionally the service's own copy under `/<service>/mtls`.
 
 Leaves are valid for **90 days** and carry a SPIFFE identity
-(`spiffe://<base-domain>/<env>/<scope>/<service>`) so peers can authorize on the encoded scope.
+(`spiffe://<base-domain>/<env>/<scope>/<member>`) so peers can authorize on the encoded scope.
 
 :::info Renew is not a deploy — schedule it
 `inforge pki renew` **only** writes cert material to the provider; it never runs the infra program and

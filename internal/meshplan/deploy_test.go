@@ -52,3 +52,18 @@ func TestBuildDeployDescriptorNoMeshHosts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, desc.Targets)
 }
+
+// A gateway-only host runs a mesh proxy (egress-only) and must be a deploy
+// target — otherwise the post-up baseline never triggers its material pull and
+// the gateway serves placeholders until the daily timer.
+func TestBuildDeployDescriptorGatewayOnlyHost(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "edge", InstanceCount: 1}},
+		Gateway: []types.GatewaySpec{{Name: "api", Host: "edge", Pki: "mesh"}},
+	}
+	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, types.Resources{}, regions.Table{"us-east-1": {Slug: "use1"}})
+	require.NoError(t, err)
+	require.Len(t, desc.Targets, 1)
+	assert.Equal(t, "edge-01", desc.Targets[0].Host)
+	assert.Equal(t, "edge.vm.prd.use1.wardnet.network", desc.Targets[0].HostDNS)
+}

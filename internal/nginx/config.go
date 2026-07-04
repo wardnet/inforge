@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	crossplane "github.com/nginxinc/nginx-go-crossplane"
+	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -50,7 +51,7 @@ type mixedPort struct {
 // strictly by server_name (the service FQDN) and reverse-proxied to the backend
 // health port. http{} is emitted when the host terminates TLS for any route, serves
 // any app, or has any health endpoint; stream{} when it has any forward route.
-func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int) (string, error) {
+func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway) (string, error) {
 	var terminate, forward []types.IngressRoute
 	for _, r := range routes {
 		// Backend is the resolved upstream address the caller must fill — "127.0.0.1"
@@ -104,6 +105,16 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 	}
 	sort.Slice(sortedHealth, func(i, j int) bool { return sortedHealth[i].FQDN < sortedHealth[j].FQDN })
 
+	// Gateways render in a stable order. Each must carry its resolved FQDN — the
+	// server_name and ACME cert SNI; empty means the program wiring failed.
+	sortedGateways := append([]types.IngressGateway(nil), gateways...)
+	for _, g := range sortedGateways {
+		if g.FQDN == "" {
+			return "", fmt.Errorf("nginx: gateway %q has no FQDN", g.Name)
+		}
+	}
+	sort.Slice(sortedGateways, func(i, j int) bool { return sortedGateways[i].FQDN < sortedGateways[j].FQDN })
+
 	// Classify ports: a forward whose listen also carries a tls-termination route
 	// or (on 443) an app is "mixed" and needs ssl_preread; the rest are forward-only.
 	forwardByListen := map[int]types.IngressRoute{}
@@ -117,13 +128,14 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 	for _, t := range terminate {
 		termOnListen[t.Listen] = true
 	}
-	// A forward port is mixed when it also carries a tls-termination route or an app.
-	// Apps are always served on :443 (appServer hardcodes listenDir(443)), so an app
-	// can only make :443 mixed — never another port. If apps ever gain a configurable
-	// port, this 443 literal must move in lockstep with appServer's.
+	// A forward port is mixed when it also carries a tls-termination route, an app,
+	// or a gateway. Apps and gateways are always served on :443 (appServer and
+	// gatewayServer hardcode listenDir(443)), so they can only make :443 mixed —
+	// never another port. If either ever gains a configurable port, this 443
+	// literal must move in lockstep.
 	mixedListens := map[int]bool{}
 	for listen := range forwardByListen {
-		if termOnListen[listen] || (listen == 443 && len(sortedApps) > 0) {
+		if termOnListen[listen] || (listen == 443 && (len(sortedApps) > 0 || len(sortedGateways) > 0)) {
 			mixedListens[listen] = true
 		}
 	}
@@ -147,6 +159,9 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 		if p == 443 {
 			for _, a := range sortedApps {
 				fqdns = append(fqdns, a.FQDN)
+			}
+			for _, g := range sortedGateways {
+				fqdns = append(fqdns, g.FQDN)
 			}
 		}
 		sort.Strings(fqdns)
@@ -178,8 +193,8 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 		block("events", nil, dir("worker_connections", "1024")),
 	)
 
-	if len(terminate) > 0 || len(sortedApps) > 0 || len(sortedHealth) > 0 {
-		top = append(top, httpBlock(terminate, sortedApps, sortedHealth, healthPort, listenDir, len(mixedPorts) > 0))
+	if len(terminate) > 0 || len(sortedApps) > 0 || len(sortedHealth) > 0 || len(sortedGateways) > 0 {
+		top = append(top, httpBlock(terminate, sortedApps, sortedHealth, healthPort, sortedGateways, listenDir, len(mixedPorts) > 0))
 	}
 	if len(forwardOnly) > 0 || len(mixedPorts) > 0 {
 		top = append(top, streamBlock(forwardOnly, mixedPorts))
@@ -201,10 +216,21 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 // and the :80 ACME-challenge/redirect server (only when something terminates TLS).
 // listenDir places a terminating server on its public port or, when that port is
 // mixed, on its internal loopback port.
-func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, listenDir func(int) *crossplane.Directive, anyMixed bool) *crossplane.Directive {
-	terminatesTLS := len(terminate) > 0 || len(apps) > 0
+func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway, listenDir func(int) *crossplane.Directive, anyMixed bool) *crossplane.Directive {
+	terminatesTLS := len(terminate) > 0 || len(apps) > 0 || len(gateways) > 0
 
 	var children crossplane.Directives
+	if len(gateways) > 0 {
+		// WebSocket upgrade support for the gateway's mesh-bound locations: a daemon
+		// WS handshake crosses gateway → gateway-mesh → callee-mesh, and every hop
+		// must pass Upgrade through (ADR-0032 realization invariant).
+		children = append(children,
+			block("map", []string{"$http_upgrade", "$connection_upgrade"},
+				dir("default", "upgrade"),
+				dir("''", "close"),
+			),
+		)
+	}
 	if terminatesTLS {
 		children = append(children,
 			dir("resolver", strings.Fields(resolverAddrs)...),
@@ -229,6 +255,9 @@ func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health [
 	}
 	for _, a := range apps {
 		children = append(children, appServer(a, listenDir(443)))
+	}
+	for _, g := range gateways {
+		children = append(children, gatewayServer(g, listenDir(443)))
 	}
 	for _, h := range health {
 		children = append(children, healthServer(h, healthPort))
@@ -292,6 +321,63 @@ func appServer(a types.IngressApp, listen *crossplane.Directive) *crossplane.Dir
 			dir("try_files", fallback...),
 		),
 	)
+}
+
+// gatewayServer renders the north-south daemon gateway server (ADR-0032): ACME-
+// managed TLS on the gateway's single FQDN, with one path-prefix location per
+// route handing the request to the LOCAL mesh proxy's gateway egress listener.
+// The location proxies plain HTTP to loopback; the mesh does the mTLS hop
+// presenting the gateway's <scope>/gateway leaf, and the callee's mesh stamps
+// X-Service-Identity from that cert. Invariants realized here:
+//   - the target is named out-of-band in X-Mesh-Target, so the PATH IS PRESERVED
+//     byte-for-byte — a daemon's PoP-signed path reaches the service verbatim;
+//   - the daemon's Authorization header is forwarded untouched (the service
+//     validates the JWT, never the gateway);
+//   - every location is WebSocket-capable ($connection_upgrade map, 1h read
+//     timeout) — a daemon WS crosses three proxy hops;
+//   - the real daemon IP is stamped into X-Forwarded-For at this, the TLS edge;
+//   - a path matching no route is 404, never proxied.
+func gatewayServer(g types.IngressGateway, listen *crossplane.Directive) *crossplane.Directive {
+	routes := append([]types.IngressGatewayRoute(nil), g.Routes...)
+	sort.Slice(routes, func(i, j int) bool { return routes[i].Path < routes[j].Path })
+
+	children := crossplane.Directives{
+		listen,
+		dir("server_name", g.FQDN),
+		dir("acme_certificate", acmeIssuer),
+		dir("ssl_certificate", "$acme_certificate"),
+		dir("ssl_certificate_key", "$acme_certificate_key"),
+		dir("ssl_certificate_cache", "max=2"),
+	}
+	for _, rt := range routes {
+		children = append(children,
+			block("location", []string{rt.Path},
+				dir("proxy_http_version", "1.1"),
+				dir("proxy_set_header", "Upgrade", "$http_upgrade"),
+				dir("proxy_set_header", "Connection", "$connection_upgrade"),
+				dir("proxy_set_header", "Host", "$host"),
+				// SET, never append: this is the internet-facing first hop, so a
+				// daemon-supplied X-Forwarded-For is untrusted input — appending
+				// ($proxy_add_x_forwarded_for) would forward a forged first entry
+				// through the mesh and defeat per-IP audit/rate-limit logic.
+				dir("proxy_set_header", "X-Forwarded-For", "$remote_addr"),
+				dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
+				dir("proxy_set_header", "X-Mesh-Target", rt.Service),
+				dir("proxy_read_timeout", "3600s"),
+				dir("proxy_pass", fmt.Sprintf("http://127.0.0.1:%d", meshpaths.GatewayEgressPort)),
+			),
+			// The slashless exact prefix would otherwise hit nginx's implicit 301
+			// (a "/"-terminated prefix location with proxy_pass redirects "/p" to
+			// "/p/"), silently dropping POST bodies and breaking the PoP-signed
+			// path. An exact-match location pre-empts the auto-redirect: unmatched
+			// means 404, never a redirect.
+			block("location", []string{"=", strings.TrimSuffix(rt.Path, "/")},
+				dir("return", "404"),
+			),
+		)
+	}
+	children = append(children, block("location", []string{"/"}, dir("return", "404")))
+	return block("server", nil, children...)
 }
 
 // healthServer renders one plain-HTTP health server on the ingress's public health

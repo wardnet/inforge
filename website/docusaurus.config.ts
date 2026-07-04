@@ -26,6 +26,13 @@ const config: Config = {
     locales: ['en'],
   },
 
+  // Mermaid powers the topology/architecture diagrams (e.g. the gateway shapes)
+  // — text-maintained, theme-aware rendering instead of ASCII art.
+  markdown: {
+    mermaid: true,
+  },
+  themes: ['@docusaurus/theme-mermaid'],
+
   presets: [
     [
       'classic',

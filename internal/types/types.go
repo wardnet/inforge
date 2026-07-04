@@ -75,6 +75,7 @@ type GatewaySpec struct {
 	Name      string             `yaml:"name"`
 	Container string             `yaml:"container"`
 	Host      string             `yaml:"host"`      // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
+	Pki       string             `yaml:"pki"`       // FK -> two-tier (mesh) PKI in pki.enc.yaml the gateway's client leaf (<scope>/gateway) mints from (required); every route target must join the same mesh
 	Subdomain string             `yaml:"subdomain"` // public subdomain; the FQDN is composed at realization from scope + base domain
 	Routes    []GatewayRouteSpec `yaml:"routes"`    // the external API surface: path -> backend service (resolved through the mesh)
 }
@@ -363,6 +364,27 @@ type IngressHealth struct {
 	Backend string // backend address nginx proxies to ("127.0.0.1" co-located; private IP cross-host)
 }
 
+// IngressGateway is the north-south daemon gateway server the public nginx
+// realizes on a host (ADR-0032): one TLS server on the gateway's FQDN whose
+// path-prefix locations hand daemon requests to the LOCAL mesh proxy's gateway
+// egress listener (meshpaths.GatewayEgressPort), naming the target service in
+// X-Mesh-Target. The path is preserved byte-for-byte (daemon PoP signs it) and
+// the daemon's Authorization header is forwarded untouched — the service, not
+// the gateway, validates the JWT. Like an IngressApp it has one FQDN and no
+// resolved backend address: location is the mesh's business.
+type IngressGateway struct {
+	Name   string // gateway resource name (used to name Pulumi command resources)
+	FQDN   string // fully-qualified gateway domain (single SNI / ACME cert)
+	Routes []IngressGatewayRoute
+}
+
+// IngressGatewayRoute is one path-prefix route on the gateway server: daemon
+// requests under Path are handed to Service through the mesh.
+type IngressGatewayRoute struct {
+	Path    string // normalized "/<p>/" prefix (the nginx location)
+	Service string // target service name (the X-Mesh-Target value)
+}
+
 // NetworkOutputs are the values a NetworkProvider returns after creating a
 // network, consumed by the compute provider.
 type NetworkOutputs struct {
@@ -555,7 +577,7 @@ type DnsProvider interface {
 // make its first per-host SSH command depend on it so realization never races
 // deploy_user creation.
 type IngressProvider interface {
-	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, apps []IngressApp, health []IngressHealth, healthPort int, backendIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
+	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, apps []IngressApp, health []IngressHealth, healthPort int, gateways []IngressGateway, backendIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
 }
 
 // MeshProvider realizes a host's east-west mesh proxy — the SECOND nginx, private

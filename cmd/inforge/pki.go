@@ -725,7 +725,7 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 	// Nothing to write anywhere → no-op before touching the store or the CI
 	// identity, so e.g. releasing a service with no service-side mtls files
 	// needs no INFORGE_SECRETS_KEY.
-	if !renewScopeHasWork(global.Service, only) && !renewScopeHasWork(regional.Service, only) {
+	if !renewScopeHasWork(global, only) && !renewScopeHasWork(regional, only) {
 		return 0, nil
 	}
 	store, err := pki.Load(pki.Path(dir, configEnv))
@@ -798,7 +798,8 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 	var errs []error
 
 	// renewSet writes one scope's material, reusing one authenticated writer:
-	// (1) the per-host mesh aggregates — every co-located pki: service's leaf +
+	// (1) the per-host mesh aggregates — every co-located pki: service's leaf,
+	// the north-south gateway's client leaf (<scope>/gateway) on its host, and
 	// the host's trust bundle under /<hostKey> in the mesh workspace, grouped by
 	// the SAME meshplan derivation the deploy program realizes the proxies from
 	// (rule mesh-host-grouping-is-single-sourced) — skipped in per-service mode;
@@ -808,13 +809,19 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 	// an atomic set, so a partial aggregate would stall its pull entirely.
 	renewSet := func(writer *infisical.CertWriter, res types.Resources, scope string) {
 		if only == "" {
-			byHost := meshplan.ServicesByHost(res, naming.CanonicalComputeKeys(res.Compute))
+			canonical := naming.CanonicalComputeKeys(res.Compute)
+			byHost := meshplan.ServicesByHost(res, canonical)
+			gwByHost := meshplan.GatewayMemberByHost(res, canonical)
 		hosts:
-			for _, hostKey := range meshplan.HostKeys(byHost) {
+			for _, hostKey := range meshplan.UnionHostKeys(byHost, gwByHost) {
+				members := byHost[hostKey]
+				if gw, ok := gwByHost[hostKey]; ok {
+					members = append(append([]types.ServiceSpec(nil), members...), gw)
+				}
 				leaves := map[string]map[string]string{}
 				pkiSeen := map[string]bool{}
 				var pkiNames []string
-				for _, svc := range byHost[hostKey] {
+				for _, svc := range members {
 					leafPEM, keyPEM, err := mint(svc, scope)
 					if err != nil {
 						errs = append(errs, err)
@@ -872,9 +879,9 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 	}
 
 	// Global services: scope "global", region-less slug, creds from the global block.
-	if renewScopeHasWork(global.Service, only) {
+	if renewScopeHasWork(global, only) {
 		if globalBlock == nil {
-			return 0, fmt.Errorf("a global service declares pki but the env has no global providers block")
+			return 0, fmt.Errorf("a global service or gateway declares pki but the env has no global providers block")
 		}
 		cID, cSecret, site, org, err := requireInfisicalCreds(globalBlock.Providers, "global")
 		if err != nil {
@@ -888,7 +895,7 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 		}
 	}
 	// Regional services: one leaf per region, scope = region, per-region slug + creds.
-	if renewScopeHasWork(regional.Service, only) {
+	if renewScopeHasWork(regional, only) {
 		for _, region := range allRegions {
 			ar := regionTable[region]
 			cID, cSecret, site, org, err := requireInfisicalCreds(ar.Providers, region)
@@ -911,9 +918,13 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 // and each scope's provider-credential requirement. In per-service mode (only
 // != "") the sole possible write is the named service's /<svc>/mtls copy, so
 // only an mtls_files: match counts; in full mode any pki: member does (the
-// per-host mesh aggregates cover every mesh member).
-func renewScopeHasWork(services []types.ServiceSpec, only string) bool {
-	for _, s := range services {
+// per-host mesh aggregates cover every mesh member), and so does a north-south
+// gateway — its client leaf (<scope>/gateway) is part of its host's aggregate.
+// The gateway counts only when its host FK resolves: an unresolvable host is
+// skipped by the shared grouping (GatewayMemberByHost), so it would never
+// produce a write and must not force provider credentials for nothing.
+func renewScopeHasWork(res types.Resources, only string) bool {
+	for _, s := range res.Service {
 		if s.Pki == "" {
 			continue
 		}
@@ -925,7 +936,7 @@ func renewScopeHasWork(services []types.ServiceSpec, only string) bool {
 		}
 		return true
 	}
-	return false
+	return only == "" && len(meshplan.GatewayMemberByHost(res, naming.CanonicalComputeKeys(res.Compute))) > 0
 }
 
 // requireInfisicalCreds extracts the Infisical admin universal-auth credentials

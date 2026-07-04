@@ -96,6 +96,7 @@ func meshInputsByHost(res types.Resources, canonical map[string]string, scope st
 	out := make(map[string]*meshHostInputs, len(byHost))
 	for host, svcs := range byHost {
 		mh := &meshHostInputs{}
+		out[host] = mh
 		for i, svc := range svcs {
 			mh.egress = append(mh.egress, meshnginx.EgressCaller{
 				Name:         svc.Name,
@@ -114,7 +115,24 @@ func meshInputsByHost(res types.Resources, canonical map[string]string, scope st
 				})
 			}
 		}
-		out[host] = mh
+	}
+	// The north-south gateway is an extra egress caller on its host (ADR-0032: a
+	// mesh client, never a callee) — appended AFTER the positional services with
+	// its FIXED reserved port, so the sorted-index port math above (and the
+	// INFORGE_MESH_URL injection that mirrors it) is untouched. A gateway-only
+	// host gets an egress-only mesh proxy.
+	for host, gw := range meshplan.GatewayMemberByHost(res, canonical) {
+		mh := out[host]
+		if mh == nil {
+			mh = &meshHostInputs{}
+			out[host] = mh
+		}
+		mh.egress = append(mh.egress, meshnginx.EgressCaller{
+			Name:         gw.Name,
+			EgressPort:   meshpaths.GatewayEgressPort,
+			LeafCertPath: meshpaths.LeafCertPath(gw.Name),
+			LeafKeyPath:  meshpaths.LeafKeyPath(gw.Name),
+		})
 	}
 	return out
 }
