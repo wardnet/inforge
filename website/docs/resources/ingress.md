@@ -4,11 +4,16 @@ sidebar_position: 7
 
 # Ingress
 
-An **Ingress** is the standalone, shared proxy tier (nginx) that fronts services (and, in a later
-slice, apps) under a domain. It is a sibling of [Network](./network) — a thing other resources
-reference — not a workload: it references a [Compute](./compute) `host` by name **in the same scope**
-(exactly like `service.host`) and reuses that host's provisioning, firewall, cloud-init, and SSH. It
-carries **no provider** of its own — it inherits its host's.
+An **Ingress** is the standalone, shared proxy tier (nginx) that fronts apps and per-service web/SNI
+routes under a domain. It is a sibling of [Network](./network) — a thing other resources reference —
+not a workload: it references a [Compute](./compute) `host` by name **in the same scope** (exactly
+like `service.host`) and reuses that host's provisioning, firewall, cloud-init, and SSH. It carries
+**no provider** of its own — it inherits its host's.
+
+The ingress is one of two **north-south** (external-facing) tiers. Its sibling is the
+[Gateway](./gateway) — the public edge external **daemons** HTTPS into, which routes each path to a
+service through the east-west mesh. Both are public nginx server blocks and can share one host (they
+merge into a single nginx there); the ingress fronts apps/web, the gateway fronts the daemon API.
 
 An ingress lives in a folder under `regional/ingress/<name>/` (or `global/ingress/<name>/`):
 

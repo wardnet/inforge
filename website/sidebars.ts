@@ -44,6 +44,7 @@ const sidebars: SidebarsConfig = {
         'resources/secrets',
         'resources/service',
         'resources/ingress',
+        'resources/gateway',
       ],
     },
     {
