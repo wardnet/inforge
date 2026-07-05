@@ -13,10 +13,19 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/loader"
+	"github.com/wardnet/inforge/internal/otelcol"
 	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/internal/validate"
 )
+
+// knownReservedSecrets are the (namespace → KEY) pairs inforge itself consumes
+// at deploy from the store's reserved namespace. `secret set --reserved` warns
+// when writing outside this set — almost always a typo, since nothing would read
+// the value — but does not hard-fail, so the set can grow without a CLI change.
+var knownReservedSecrets = map[string]map[string]bool{
+	otelcol.AuthSecretNamespace: {otelcol.AuthSecretKey: true},
+}
 
 // newSecretCmd manages the env's committed encrypted secret store
 // (resources/<env>/secrets.enc.yaml, ADR-0017). Every subcommand writes git
@@ -91,18 +100,19 @@ func runSecretInit(dir, env, recipient string) error {
 }
 
 func newSecretSetCmd(dir *string) *cobra.Command {
-	var generate bool
+	var generate, reserved bool
 	cmd := &cobra.Command{
-		Use:           "set <env> <service> <KEY>",
+		Use:           "set <env> <service|namespace> <KEY>",
 		Short:         "Encrypt a secret value into the store (stdin, or --generate for a fresh random value)",
 		Args:          cobra.ExactArgs(3),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runSecretWrite(*dir, args[0], args[1], args[2], generate)
+			return runSecretWrite(*dir, args[0], args[1], args[2], generate, reserved)
 		},
 	}
 	cmd.Flags().BoolVar(&generate, "generate", false, "mint a 32-byte random value instead of reading stdin (the plaintext is never displayed)")
+	cmd.Flags().BoolVar(&reserved, "reserved", false, "write an inforge-internal reserved secret: the second arg is a reserved namespace (e.g. observability), not a service")
 	return cmd
 }
 
@@ -110,11 +120,29 @@ func newSecretSetCmd(dir *string) *cobra.Command {
 // the store's recipient and save the store. Set is an upsert — replacing a
 // leaked value is the same operation as writing the first one. Git-only by
 // design — the new value reaches the provider when the committed store change
-// merges and `inforge deploy` runs.
-func runSecretWrite(dir, env, svcName, key string, generate bool) error {
-	container, siblings, err := resolveServiceContainer(dir, env, svcName)
-	if err != nil {
-		return err
+// merges and `inforge deploy` runs. With reserved, the value is an
+// inforge-internal env-level secret (`name` is a reserved namespace such as
+// "observability", not a service) consumed directly by the deploy.
+func runSecretWrite(dir, env, name, key string, generate, reserved bool) error {
+	// Resolve the target namespace and warn on a probable mistake: a reserved KEY
+	// inforge does not consume, or a vault key no service references — both mean
+	// the stored value will never be read.
+	var container string
+	var siblings []types.ServiceSpec
+	if reserved {
+		container = name
+		if !knownReservedSecrets[container][key] {
+			fmt.Fprintf(os.Stderr, "warning: %s/%s is not a reserved secret inforge consumes — check the namespace and KEY, or nothing will read this value\n", container, key)
+		}
+	} else {
+		var err error
+		container, siblings, err = resolveServiceContainer(dir, env, name)
+		if err != nil {
+			return err
+		}
+		if declared, err := declaredEncryptedKeys(dir, env, container); err == nil && !declared[key] {
+			fmt.Fprintf(os.Stderr, "warning: vault key %s is not referenced by any `vault:%s` secret on a service in container %q (service/*.yaml) — the stored value will not be provisioned until a service declares it\n", key, key, container)
+		}
 	}
 
 	store, err := secretstore.Load(secretstore.Path(dir, env))
@@ -123,10 +151,6 @@ func runSecretWrite(dir, env, svcName, key string, generate bool) error {
 			return fmt.Errorf("%w — run `inforge secret init %s` first", err, env)
 		}
 		return err
-	}
-
-	if declared, err := declaredEncryptedKeys(dir, env, container); err == nil && !declared[key] {
-		fmt.Fprintf(os.Stderr, "warning: vault key %s is not referenced by any `vault:%s` secret on a service in container %q (service/*.yaml) — the stored value will not be provisioned until a service declares it\n", key, key, container)
 	}
 
 	var value []byte
@@ -149,17 +173,29 @@ func runSecretWrite(dir, env, svcName, key string, generate bool) error {
 	if err != nil {
 		return err
 	}
-	store.Set(container, key, ciphertext)
+	if reserved {
+		store.SetReserved(container, key, ciphertext)
+	} else {
+		store.Set(container, key, ciphertext)
+	}
 	if err := store.Save(secretstore.Path(dir, env)); err != nil {
 		return err
 	}
 
-	fmt.Printf("encrypted %s for container %q in %s\n", key, container, secretstore.Path(dir, env))
+	noun := "container"
+	if reserved {
+		noun = "reserved namespace"
+	}
+	fmt.Printf("encrypted %s for %s %q in %s\n", key, noun, container, secretstore.Path(dir, env))
 	fmt.Println("\nnext steps:")
 	fmt.Println("  1. commit the store file and merge it — the provider is updated by the deploy on merge, never by this CLI")
-	fmt.Println("  2. after that deploy, restart the consuming service(s) to pick up the new value:")
-	for _, svc := range siblings {
-		fmt.Printf("       inforge service restart %s %s\n", env, svc.Name)
+	if reserved {
+		fmt.Println("  2. the value is read by the deploy directly (no service restart needed)")
+	} else {
+		fmt.Println("  2. after that deploy, restart the consuming service(s) to pick up the new value:")
+		for _, svc := range siblings {
+			fmt.Printf("       inforge service restart %s %s\n", env, svc.Name)
+		}
 	}
 	return nil
 }
@@ -183,24 +219,38 @@ func readSecretStdin() ([]byte, error) {
 }
 
 func newSecretLsCmd(dir *string) *cobra.Command {
-	return &cobra.Command{
-		Use:           "ls <env> <service>",
+	var reserved bool
+	cmd := &cobra.Command{
+		Use:           "ls <env> <service|namespace>",
 		Short:         "List the secret keys stored for a service's container",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runSecretLs(*dir, args[0], args[1])
+			return runSecretLs(*dir, args[0], args[1], reserved)
 		},
 	}
+	cmd.Flags().BoolVar(&reserved, "reserved", false, "list an inforge-internal reserved namespace (e.g. observability) rather than a service's container")
+	return cmd
 }
 
-func runSecretLs(dir, env, svcName string) error {
-	container, _, err := resolveServiceContainer(dir, env, svcName)
+func runSecretLs(dir, env, name string, reserved bool) error {
+	store, err := secretstore.Load(secretstore.Path(dir, env))
 	if err != nil {
 		return err
 	}
-	store, err := secretstore.Load(secretstore.Path(dir, env))
+	if reserved {
+		keys := store.ReservedKeys(name)
+		if len(keys) == 0 {
+			fmt.Printf("no secrets stored for reserved namespace %q\n", name)
+			return nil
+		}
+		for _, k := range keys {
+			fmt.Println(k)
+		}
+		return nil
+	}
+	container, _, err := resolveServiceContainer(dir, env, name)
 	if err != nil {
 		return err
 	}
@@ -224,25 +274,38 @@ func runSecretLs(dir, env, svcName string) error {
 }
 
 func newSecretRmCmd(dir *string) *cobra.Command {
-	return &cobra.Command{
-		Use:           "rm <env> <service> <KEY>",
+	var reserved bool
+	cmd := &cobra.Command{
+		Use:           "rm <env> <service|namespace> <KEY>",
 		Short:         "Remove a secret's ciphertext from the store",
 		Args:          cobra.ExactArgs(3),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runSecretRm(*dir, args[0], args[1], args[2])
+			return runSecretRm(*dir, args[0], args[1], args[2], reserved)
 		},
 	}
+	cmd.Flags().BoolVar(&reserved, "reserved", false, "remove from an inforge-internal reserved namespace (e.g. observability) rather than a service's container")
+	return cmd
 }
 
-func runSecretRm(dir, env, svcName, key string) error {
-	container, _, err := resolveServiceContainer(dir, env, svcName)
+func runSecretRm(dir, env, name, key string, reserved bool) error {
+	path := secretstore.Path(dir, env)
+	store, err := secretstore.Load(path)
 	if err != nil {
 		return err
 	}
-	path := secretstore.Path(dir, env)
-	store, err := secretstore.Load(path)
+	if reserved {
+		if !store.DeleteReserved(name, key) {
+			return fmt.Errorf("no secret %s stored for reserved namespace %q", key, name)
+		}
+		if err := store.Save(path); err != nil {
+			return err
+		}
+		fmt.Printf("removed %s for reserved namespace %q\n", key, name)
+		return nil
+	}
+	container, _, err := resolveServiceContainer(dir, env, name)
 	if err != nil {
 		return err
 	}
@@ -300,20 +363,34 @@ func runSecretRotate(dir, env, recipient string) error {
 		return err
 	}
 
+	// Re-encrypt EVERY stored value to the new recipient — both the service
+	// container namespace and the reserved namespace. Missing the reserved map
+	// would leave those ciphertexts bound to the old recipient while the store's
+	// Recipient header advances, orphaning them (the next deploy's
+	// decryptReservedSecret would fail).
 	n := 0
-	for container, kv := range store.Containers {
-		for key, ciphertext := range kv {
-			plaintext, err := secretstore.Decrypt(ciphertext, identity)
-			if err != nil {
-				return fmt.Errorf("decrypt container %q key %q with the current %s: %w", container, key, secretstore.IdentityEnvVar, err)
+	reencrypt := func(kv map[string]map[string]string, set func(ns, key, ct string), label string) error {
+		for ns, byKey := range kv {
+			for key, ciphertext := range byKey {
+				plaintext, err := secretstore.Decrypt(ciphertext, identity)
+				if err != nil {
+					return fmt.Errorf("decrypt %s %q key %q with the current %s: %w", label, ns, key, secretstore.IdentityEnvVar, err)
+				}
+				reencrypted, err := secretstore.Encrypt(plaintext, recipient)
+				if err != nil {
+					return err
+				}
+				set(ns, key, reencrypted)
+				n++
 			}
-			reencrypted, err := secretstore.Encrypt(plaintext, recipient)
-			if err != nil {
-				return err
-			}
-			store.Set(container, key, reencrypted)
-			n++
 		}
+		return nil
+	}
+	if err := reencrypt(store.Containers, store.Set, "container"); err != nil {
+		return err
+	}
+	if err := reencrypt(store.Reserved, store.SetReserved, "reserved namespace"); err != nil {
+		return err
 	}
 	store.Recipient = strings.TrimSpace(recipient)
 	if err := store.Save(path); err != nil {
@@ -370,6 +447,19 @@ func compromisedValueGuidance(dir, env string, store *secretstore.Store) ([]stri
 			} else {
 				lines = append(lines, fmt.Sprintf("# container %q has no declared service for key %s", container, key))
 			}
+		}
+	}
+	// Reserved secrets are exposed in git history exactly like container secrets,
+	// so a compromise rotation must list them too — with the --reserved reissue
+	// form, since they have no service handle.
+	namespaces := make([]string, 0, len(store.Reserved))
+	for ns := range store.Reserved {
+		namespaces = append(namespaces, ns)
+	}
+	sort.Strings(namespaces)
+	for _, ns := range namespaces {
+		for _, key := range store.ReservedKeys(ns) {
+			lines = append(lines, fmt.Sprintf("inforge secret set %s %s %s --reserved", env, ns, key))
 		}
 	}
 	return lines, nil

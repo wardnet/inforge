@@ -240,18 +240,21 @@ func Run(ctx *pulumi.Context) error {
 	}
 
 	// Env-level observability (ADR-0031): when otlp_endpoint is configured, every VM
-	// gets the host-metrics collector. The OTLP Basic-auth credential lives in the
-	// env secret store as the raw "instanceID:token"; base64 it once into the header
-	// value and mark it secret so it is encrypted in Pulumi state. An endpoint set
-	// with no credential is a hard misconfiguration (fail at up, skipped in preview).
+	// gets the host-metrics collector. The OTLP Basic-auth credential is an inforge
+	// RESERVED secret (ADR-0031) — it lives in the store's `reserved:` namespace,
+	// not a service container, and is read directly here (no service references it,
+	// so it is independent of the `vault:` decrypt path). base64 it once into the
+	// header value and mark it secret so it is encrypted in Pulumi state. An
+	// endpoint set with no credential is a hard misconfiguration (fail at up,
+	// skipped in preview).
 	var obsAuthB64 pulumi.StringOutput
 	if vars.Observability.OTLPEndpoint != "" {
-		authRaw := ""
-		if c, ok := encSecrets[otelcol.AuthSecretContainer]; ok {
-			authRaw = c[otelcol.AuthSecretKey]
+		authRaw, err := decryptReservedSecret(dir, srcEnv, otelcol.AuthSecretNamespace, otelcol.AuthSecretKey, ctx.DryRun())
+		if err != nil {
+			return err
 		}
 		if authRaw == "" && !ctx.DryRun() {
-			return fmt.Errorf("observability: otlp_endpoint is set but secrets.enc.yaml has no %s/%s credential", otelcol.AuthSecretContainer, otelcol.AuthSecretKey)
+			return fmt.Errorf("observability: otlp_endpoint is set but secrets.enc.yaml is missing or has no %s/%s credential — run `inforge secret set %s %s %s --reserved` and commit the store", otelcol.AuthSecretNamespace, otelcol.AuthSecretKey, srcEnv, otelcol.AuthSecretNamespace, otelcol.AuthSecretKey)
 		}
 		obsAuthB64 = pulumi.ToSecret(pulumi.String(base64.StdEncoding.EncodeToString([]byte(authRaw)))).(pulumi.StringOutput)
 	}

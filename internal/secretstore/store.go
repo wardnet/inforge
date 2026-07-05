@@ -34,6 +34,14 @@ type Store struct {
 	// ciphertext (not a whole-file blob) keeps diffs reviewable and lets one key
 	// rotate without touching its neighbours.
 	Containers map[string]map[string]string `yaml:"containers,omitempty"`
+	// Reserved holds inforge-internal, env-level secrets that are NOT service
+	// container secrets — they are referenced by no service and consumed directly
+	// by the deploy (e.g. the observability OTLP credential, ADR-0031). Keeping
+	// them in their own namespace (keyed by reserved-namespace -> KEY) means a
+	// user service may freely use ANY container name — a service in container
+	// "observability" never collides with the OTLP credential — and the deploy
+	// read no longer has to be routed through some service's `vault:` reference.
+	Reserved map[string]map[string]string `yaml:"reserved,omitempty"`
 }
 
 // Path returns the store file path for an environment under the resources dir.
@@ -77,46 +85,77 @@ func (s *Store) Save(path string) error {
 	return nil
 }
 
-// Get returns the ciphertext for (container, key), reporting presence.
-func (s *Store) Get(container, key string) (string, bool) {
-	v, ok := s.Containers[container][key]
+// Get returns the ciphertext for a service container's (container, key).
+func (s *Store) Get(container, key string) (string, bool) { return nsGet(s.Containers, container, key) }
+
+// GetReserved returns the ciphertext for a reserved (namespace, key).
+func (s *Store) GetReserved(namespace, key string) (string, bool) {
+	return nsGet(s.Reserved, namespace, key)
+}
+
+// Set stores ciphertext under a service container's (container, key).
+func (s *Store) Set(container, key, ciphertext string) {
+	s.Containers = nsSet(s.Containers, container, key, ciphertext)
+}
+
+// SetReserved stores ciphertext under a reserved (namespace, key).
+func (s *Store) SetReserved(namespace, key, ciphertext string) {
+	s.Reserved = nsSet(s.Reserved, namespace, key, ciphertext)
+}
+
+// Delete removes a service container's (container, key), pruning an emptied
+// map, and reports whether the entry existed.
+func (s *Store) Delete(container, key string) bool { return nsDelete(s.Containers, container, key) }
+
+// DeleteReserved removes a reserved (namespace, key), pruning an emptied map.
+func (s *Store) DeleteReserved(namespace, key string) bool {
+	return nsDelete(s.Reserved, namespace, key)
+}
+
+// Keys returns the sorted secret keys stored for a service container.
+func (s *Store) Keys(container string) []string { return nsKeys(s.Containers, container) }
+
+// ReservedKeys returns the sorted secret keys stored for a reserved namespace.
+func (s *Store) ReservedKeys(namespace string) []string { return nsKeys(s.Reserved, namespace) }
+
+// nsGet/nsSet/nsDelete/nsKeys are the shared two-level-map operations behind the
+// container and reserved accessors, so the two namespaces cannot drift on the
+// nil-allocation, empty-map pruning, or key-sorting behaviour.
+func nsGet(m map[string]map[string]string, ns, key string) (string, bool) {
+	v, ok := m[ns][key]
 	return v, ok
 }
 
-// Set stores ciphertext under (container, key), allocating nested maps as
-// needed.
-func (s *Store) Set(container, key, ciphertext string) {
-	if s.Containers == nil {
-		s.Containers = map[string]map[string]string{}
+func nsSet(m map[string]map[string]string, ns, key, ciphertext string) map[string]map[string]string {
+	if m == nil {
+		m = map[string]map[string]string{}
 	}
-	if s.Containers[container] == nil {
-		s.Containers[container] = map[string]string{}
+	if m[ns] == nil {
+		m[ns] = map[string]string{}
 	}
-	s.Containers[container][key] = ciphertext
+	m[ns][key] = ciphertext
+	return m
 }
 
-// Delete removes (container, key), pruning an emptied container map, and
-// reports whether the entry existed.
-func (s *Store) Delete(container, key string) bool {
-	m, ok := s.Containers[container]
+func nsDelete(m map[string]map[string]string, ns, key string) bool {
+	sub, ok := m[ns]
 	if !ok {
 		return false
 	}
-	if _, ok := m[key]; !ok {
+	if _, ok := sub[key]; !ok {
 		return false
 	}
-	delete(m, key)
-	if len(m) == 0 {
-		delete(s.Containers, container)
+	delete(sub, key)
+	if len(sub) == 0 {
+		delete(m, ns)
 	}
 	return true
 }
 
-// Keys returns the sorted secret keys stored for a container.
-func (s *Store) Keys(container string) []string {
-	m := s.Containers[container]
-	keys := make([]string, 0, len(m))
-	for k := range m {
+func nsKeys(m map[string]map[string]string, ns string) []string {
+	sub := m[ns]
+	keys := make([]string, 0, len(sub))
+	for k := range sub {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
