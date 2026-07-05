@@ -56,13 +56,9 @@ func decryptEncryptedSecrets(res, globalRes types.Resources, dir, env string, dr
 		return nil, err
 	}
 
-	identity, err := secretstore.IdentityFromEnv()
+	identity, err := masterIdentity(dryRun)
 	if err != nil {
-		if dryRun {
-			identity = ""
-		} else {
-			return nil, err
-		}
+		return nil, err
 	}
 
 	out := make(map[string]map[string]string, len(wanted))
@@ -73,18 +69,44 @@ func decryptEncryptedSecrets(res, globalRes types.Resources, dir, env string, dr
 			if !ok {
 				return nil, fmt.Errorf("no ciphertext for container %q key %q in %s — run `inforge secret set %s <service> %s` and commit the store", container, key, storePath, env, key)
 			}
-			if identity == "" {
-				out[container][key] = encryptedPlaceholder
-				continue
-			}
-			plaintext, err := secretstore.Decrypt(ciphertext, identity)
+			val, err := decodeValue(ciphertext, identity)
 			if err != nil {
 				return nil, fmt.Errorf("decrypt secret for container %q key %q: %w", container, key, err)
 			}
-			out[container][key] = string(plaintext)
+			out[container][key] = val
 		}
 	}
 	return out, nil
+}
+
+// masterIdentity resolves the deploy-side master identity (INFORGE_SECRETS_KEY).
+// On a keyless dry run it returns "" — the signal decodeValue turns into the
+// placeholder, so previews stay runnable without credentials; on a keyless real
+// up it returns the error. Shared by every decrypt path so the keyless/preview
+// semantics can never drift between them.
+func masterIdentity(dryRun bool) (string, error) {
+	identity, err := secretstore.IdentityFromEnv()
+	if err != nil {
+		if dryRun {
+			return "", nil
+		}
+		return "", err
+	}
+	return identity, nil
+}
+
+// decodeValue decrypts one armored ciphertext with an already-resolved identity;
+// an empty identity (keyless preview) yields the placeholder, since a preview
+// never provisions the value.
+func decodeValue(ciphertext, identity string) (string, error) {
+	if identity == "" {
+		return encryptedPlaceholder, nil
+	}
+	plaintext, err := secretstore.Decrypt(ciphertext, identity)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
 }
 
 // decryptReservedSecret decrypts one env-level RESERVED secret (a value outside
@@ -93,8 +115,9 @@ func decryptEncryptedSecrets(res, globalRes types.Resources, dir, env string, dr
 // wanted-set: reserved secrets are referenced by no service, so routing them
 // through decryptEncryptedSecrets (which returns nil when no service uses
 // vault:) would never surface them. Returns "" when the store or the entry is
-// absent — the caller decides whether that is a misconfiguration. On a keyless
-// dry run it returns the placeholder (previews never provision).
+// absent — the caller decides whether that is a misconfiguration — and shares
+// the identity/preview handling with the container path via masterIdentity /
+// decodeValue.
 func decryptReservedSecret(dir, env, namespace, key string, dryRun bool) (string, error) {
 	store, err := secretstore.Load(secretstore.Path(dir, env))
 	if err != nil {
@@ -107,16 +130,13 @@ func decryptReservedSecret(dir, env, namespace, key string, dryRun bool) (string
 	if !ok {
 		return "", nil
 	}
-	identity, err := secretstore.IdentityFromEnv()
+	identity, err := masterIdentity(dryRun)
 	if err != nil {
-		if dryRun {
-			return encryptedPlaceholder, nil
-		}
 		return "", err
 	}
-	plaintext, err := secretstore.Decrypt(ciphertext, identity)
+	val, err := decodeValue(ciphertext, identity)
 	if err != nil {
 		return "", fmt.Errorf("decrypt reserved secret %s/%s: %w", namespace, key, err)
 	}
-	return string(plaintext), nil
+	return val, nil
 }

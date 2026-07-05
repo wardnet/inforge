@@ -160,6 +160,10 @@ func TestRunSecretRotate(t *testing.T) {
 	err = runSecretRotate(dir, "prd", newRecipient)
 	require.ErrorContains(t, err, secretstore.IdentityEnvVar)
 
+	// A reserved secret must be rotated too — missing it would orphan the
+	// ciphertext to the old recipient while the store header advances.
+	require.NoError(t, runSecretWrite(dir, "prd", "observability", "otlp_auth", true, true))
+
 	t.Setenv(secretstore.IdentityEnvVar, oldIdentity)
 	require.NoError(t, runSecretRotate(dir, "prd", newRecipient))
 
@@ -174,16 +178,26 @@ func TestRunSecretRotate(t *testing.T) {
 	assert.Len(t, plaintext, 43)
 	_, err = secretstore.Decrypt(ct, oldIdentity)
 	require.Error(t, err)
+
+	// The reserved secret rotated alongside the container secret.
+	rct, ok := store.GetReserved("observability", "otlp_auth")
+	require.True(t, ok)
+	_, err = secretstore.Decrypt(rct, newIdentity)
+	require.NoError(t, err, "reserved secret must be re-encrypted to the new recipient")
+	_, err = secretstore.Decrypt(rct, oldIdentity)
+	require.Error(t, err, "reserved secret must no longer decrypt with the old identity")
 }
 
 // TestCompromisedValueGuidance: rotate's post-rotation warning addresses every
-// stored entry by a real service handle, flagging containers with none.
+// stored entry — container secrets by a real service handle (flagging containers
+// with none) and reserved secrets via the --reserved reissue form.
 func TestCompromisedValueGuidance(t *testing.T) {
 	dir := secretFixture(t)
 	store := &secretstore.Store{Recipient: "age1test"}
 	store.Set("bridge", "API_TOKEN", "ct")
 	store.Set("bridge", "SESSION_KEY", "ct")
 	store.Set("orphan", "TOKEN", "ct")
+	store.SetReserved("observability", "otlp_auth", "ct")
 
 	lines, err := compromisedValueGuidance(dir, "prd", store)
 	require.NoError(t, err)
@@ -192,5 +206,7 @@ func TestCompromisedValueGuidance(t *testing.T) {
 		"inforge secret set prd api API_TOKEN",
 		"inforge secret set prd api SESSION_KEY",
 		`# container "orphan" has no declared service for key TOKEN`,
+		// reserved secrets have no service handle — reissue with --reserved.
+		"inforge secret set prd observability otlp_auth --reserved",
 	}, lines)
 }

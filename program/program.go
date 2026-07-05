@@ -254,7 +254,7 @@ func Run(ctx *pulumi.Context) error {
 			return err
 		}
 		if authRaw == "" && !ctx.DryRun() {
-			return fmt.Errorf("observability: otlp_endpoint is set but secrets.enc.yaml has no %s/%s credential — run `inforge secret set %s %s %s --reserved` and commit the store", otelcol.AuthSecretNamespace, otelcol.AuthSecretKey, srcEnv, otelcol.AuthSecretNamespace, otelcol.AuthSecretKey)
+			return fmt.Errorf("observability: otlp_endpoint is set but secrets.enc.yaml is missing or has no %s/%s credential — run `inforge secret set %s %s %s --reserved` and commit the store", otelcol.AuthSecretNamespace, otelcol.AuthSecretKey, srcEnv, otelcol.AuthSecretNamespace, otelcol.AuthSecretKey)
 		}
 		obsAuthB64 = pulumi.ToSecret(pulumi.String(base64.StdEncoding.EncodeToString([]byte(authRaw)))).(pulumi.StringOutput)
 	}

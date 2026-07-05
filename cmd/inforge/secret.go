@@ -13,10 +13,19 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/loader"
+	"github.com/wardnet/inforge/internal/otelcol"
 	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/internal/validate"
 )
+
+// knownReservedSecrets are the (namespace → KEY) pairs inforge itself consumes
+// at deploy from the store's reserved namespace. `secret set --reserved` warns
+// when writing outside this set — almost always a typo, since nothing would read
+// the value — but does not hard-fail, so the set can grow without a CLI change.
+var knownReservedSecrets = map[string]map[string]bool{
+	otelcol.AuthSecretNamespace: {otelcol.AuthSecretKey: true},
+}
 
 // newSecretCmd manages the env's committed encrypted secret store
 // (resources/<env>/secrets.enc.yaml, ADR-0017). Every subcommand writes git
@@ -115,15 +124,24 @@ func newSecretSetCmd(dir *string) *cobra.Command {
 // inforge-internal env-level secret (`name` is a reserved namespace such as
 // "observability", not a service) consumed directly by the deploy.
 func runSecretWrite(dir, env, name, key string, generate, reserved bool) error {
+	// Resolve the target namespace and warn on a probable mistake: a reserved KEY
+	// inforge does not consume, or a vault key no service references — both mean
+	// the stored value will never be read.
 	var container string
 	var siblings []types.ServiceSpec
 	if reserved {
 		container = name
+		if !knownReservedSecrets[container][key] {
+			fmt.Fprintf(os.Stderr, "warning: %s/%s is not a reserved secret inforge consumes — check the namespace and KEY, or nothing will read this value\n", container, key)
+		}
 	} else {
 		var err error
 		container, siblings, err = resolveServiceContainer(dir, env, name)
 		if err != nil {
 			return err
+		}
+		if declared, err := declaredEncryptedKeys(dir, env, container); err == nil && !declared[key] {
+			fmt.Fprintf(os.Stderr, "warning: vault key %s is not referenced by any `vault:%s` secret on a service in container %q (service/*.yaml) — the stored value will not be provisioned until a service declares it\n", key, key, container)
 		}
 	}
 
@@ -133,12 +151,6 @@ func runSecretWrite(dir, env, name, key string, generate, reserved bool) error {
 			return fmt.Errorf("%w — run `inforge secret init %s` first", err, env)
 		}
 		return err
-	}
-
-	if !reserved {
-		if declared, err := declaredEncryptedKeys(dir, env, container); err == nil && !declared[key] {
-			fmt.Fprintf(os.Stderr, "warning: vault key %s is not referenced by any `vault:%s` secret on a service in container %q (service/*.yaml) — the stored value will not be provisioned until a service declares it\n", key, key, container)
-		}
 	}
 
 	var value []byte
@@ -351,20 +363,34 @@ func runSecretRotate(dir, env, recipient string) error {
 		return err
 	}
 
+	// Re-encrypt EVERY stored value to the new recipient — both the service
+	// container namespace and the reserved namespace. Missing the reserved map
+	// would leave those ciphertexts bound to the old recipient while the store's
+	// Recipient header advances, orphaning them (the next deploy's
+	// decryptReservedSecret would fail).
 	n := 0
-	for container, kv := range store.Containers {
-		for key, ciphertext := range kv {
-			plaintext, err := secretstore.Decrypt(ciphertext, identity)
-			if err != nil {
-				return fmt.Errorf("decrypt container %q key %q with the current %s: %w", container, key, secretstore.IdentityEnvVar, err)
+	reencrypt := func(kv map[string]map[string]string, set func(ns, key, ct string), label string) error {
+		for ns, byKey := range kv {
+			for key, ciphertext := range byKey {
+				plaintext, err := secretstore.Decrypt(ciphertext, identity)
+				if err != nil {
+					return fmt.Errorf("decrypt %s %q key %q with the current %s: %w", label, ns, key, secretstore.IdentityEnvVar, err)
+				}
+				reencrypted, err := secretstore.Encrypt(plaintext, recipient)
+				if err != nil {
+					return err
+				}
+				set(ns, key, reencrypted)
+				n++
 			}
-			reencrypted, err := secretstore.Encrypt(plaintext, recipient)
-			if err != nil {
-				return err
-			}
-			store.Set(container, key, reencrypted)
-			n++
 		}
+		return nil
+	}
+	if err := reencrypt(store.Containers, store.Set, "container"); err != nil {
+		return err
+	}
+	if err := reencrypt(store.Reserved, store.SetReserved, "reserved namespace"); err != nil {
+		return err
 	}
 	store.Recipient = strings.TrimSpace(recipient)
 	if err := store.Save(path); err != nil {
@@ -421,6 +447,19 @@ func compromisedValueGuidance(dir, env string, store *secretstore.Store) ([]stri
 			} else {
 				lines = append(lines, fmt.Sprintf("# container %q has no declared service for key %s", container, key))
 			}
+		}
+	}
+	// Reserved secrets are exposed in git history exactly like container secrets,
+	// so a compromise rotation must list them too — with the --reserved reissue
+	// form, since they have no service handle.
+	namespaces := make([]string, 0, len(store.Reserved))
+	for ns := range store.Reserved {
+		namespaces = append(namespaces, ns)
+	}
+	sort.Strings(namespaces)
+	for _, ns := range namespaces {
+		for _, key := range store.ReservedKeys(ns) {
+			lines = append(lines, fmt.Sprintf("inforge secret set %s %s %s --reserved", env, ns, key))
 		}
 	}
 	return lines, nil
