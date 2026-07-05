@@ -32,6 +32,24 @@ it again), `rotate` changes the *key pair* the store is encrypted to. The `<serv
 resolves to its **container**: secrets are container-scoped, so every service sharing the container
 consumes the same values, and the commands tell you which services are affected.
 
+### Reserved secrets (`--reserved`)
+
+A few secrets are consumed by **inforge itself** at deploy, not by a service — today the
+observability OTLP Basic-auth credential (`observability/otlp_auth`, needed when
+`observability.otlp_endpoint` is set). These live in a separate **reserved namespace** in the store,
+outside the service-container namespace, so they don't need a backing service and a normal service
+can still use the same name as a container. Pass `--reserved` on `set`/`ls`/`rm` and the second
+argument is the reserved namespace instead of a service:
+
+```bash
+# Grafana Cloud hands you an "instanceID:token" for OTLP Basic auth:
+pbpaste | inforge secret set prd observability otlp_auth --reserved
+inforge secret ls prd observability --reserved
+```
+
+The value is read directly by `inforge deploy` (no service restart), so commit the store and let the
+deploy pick it up.
+
 ## The store file
 
 ```yaml title="resources/prd/secrets.enc.yaml"

@@ -102,3 +102,34 @@ func TestGetSetDeleteKeys(t *testing.T) {
 	// Emptied container map is pruned so the saved YAML carries no husk.
 	assert.NotContains(t, s.Containers, "ghost")
 }
+
+// TestReservedNamespaceIsolated: reserved secrets share none of the container
+// namespace — a reserved namespace and a container of the same name coexist
+// without collision (ADR-0034 / the observability fix), and the two-level-map
+// behaviour (nil-alloc, prune, sort) matches the container accessors.
+func TestReservedNamespaceIsolated(t *testing.T) {
+	s := &secretstore.Store{Recipient: "age1test"}
+
+	// A container and a reserved namespace with the same name do not collide.
+	s.Set("observability", "SVC_TOKEN", "ct-svc")
+	s.SetReserved("observability", "otlp_auth", "ct-auth")
+
+	if _, ok := s.Get("observability", "otlp_auth"); ok {
+		t.Error("reserved key leaked into the container namespace")
+	}
+	if _, ok := s.GetReserved("observability", "SVC_TOKEN"); ok {
+		t.Error("container key leaked into the reserved namespace")
+	}
+	v, ok := s.GetReserved("observability", "otlp_auth")
+	assert.True(t, ok)
+	assert.Equal(t, "ct-auth", v)
+	assert.Equal(t, []string{"SVC_TOKEN"}, s.Keys("observability"))
+	assert.Equal(t, []string{"otlp_auth"}, s.ReservedKeys("observability"))
+
+	// Prune behaviour mirrors containers.
+	assert.False(t, s.DeleteReserved("observability", "missing"))
+	assert.True(t, s.DeleteReserved("observability", "otlp_auth"))
+	assert.NotContains(t, s.Reserved, "observability")
+	// The same-named container is untouched by the reserved delete.
+	assert.Equal(t, []string{"SVC_TOKEN"}, s.Keys("observability"))
+}

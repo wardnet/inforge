@@ -104,3 +104,57 @@ func TestDecryptEncryptedSecretsMissingCiphertext(t *testing.T) {
 	_, err := decryptEncryptedSecrets(encryptedSpec("ghost", "API_KEY"), types.Resources{}, dir, "prd", false)
 	require.ErrorContains(t, err, "no ciphertext")
 }
+
+// reservedFixture writes a store holding one reserved (namespace,key) plaintext.
+func reservedFixture(t *testing.T, env, ns, key, plaintext string) (dir, identity string) {
+	t.Helper()
+	identity, recipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	dir = t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, env), 0o755))
+	ct, err := secretstore.Encrypt([]byte(plaintext), recipient)
+	require.NoError(t, err)
+	store := &secretstore.Store{Recipient: recipient}
+	store.SetReserved(ns, key, ct)
+	require.NoError(t, store.Save(secretstore.Path(dir, env)))
+	return dir, identity
+}
+
+// TestDecryptReservedSecret: the reserved read is fully decoupled from the
+// service `vault:` path (bug #2) — it surfaces the credential with NO service
+// referencing it — and degrades to "" (a caller-decided misconfiguration) when
+// the store or the entry is absent.
+func TestDecryptReservedSecret(t *testing.T) {
+	dir, identity := reservedFixture(t, "prd", "observability", "otlp_auth", "id:token")
+	t.Setenv(secretstore.IdentityEnvVar, identity)
+
+	// Round-trip with no services declaring vault: at all.
+	got, err := decryptReservedSecret(dir, "prd", "observability", "otlp_auth", false)
+	require.NoError(t, err)
+	assert.Equal(t, "id:token", got)
+
+	// A missing store is not an error here — the caller turns "" into its own
+	// "endpoint set but no credential" message.
+	got, err = decryptReservedSecret(t.TempDir(), "prd", "observability", "otlp_auth", false)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+
+	// A present store missing the entry likewise returns "".
+	got, err = decryptReservedSecret(dir, "prd", "observability", "MISSING", false)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+func TestDecryptReservedSecretKeyless(t *testing.T) {
+	dir, _ := reservedFixture(t, "prd", "observability", "otlp_auth", "id:token")
+	t.Setenv(secretstore.IdentityEnvVar, "")
+
+	// Keyless preview -> placeholder, no error.
+	got, err := decryptReservedSecret(dir, "prd", "observability", "otlp_auth", true)
+	require.NoError(t, err)
+	assert.Equal(t, encryptedPlaceholder, got)
+
+	// Keyless up -> error (the credential must be real to provision).
+	_, err = decryptReservedSecret(dir, "prd", "observability", "otlp_auth", false)
+	require.ErrorContains(t, err, secretstore.IdentityEnvVar)
+}

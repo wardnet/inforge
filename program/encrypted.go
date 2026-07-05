@@ -86,3 +86,37 @@ func decryptEncryptedSecrets(res, globalRes types.Resources, dir, env string, dr
 	}
 	return out, nil
 }
+
+// decryptReservedSecret decrypts one env-level RESERVED secret (a value outside
+// the service container namespace — e.g. the observability OTLP credential,
+// ADR-0031) from the store. It is deliberately independent of the `vault:`
+// wanted-set: reserved secrets are referenced by no service, so routing them
+// through decryptEncryptedSecrets (which returns nil when no service uses
+// vault:) would never surface them. Returns "" when the store or the entry is
+// absent — the caller decides whether that is a misconfiguration. On a keyless
+// dry run it returns the placeholder (previews never provision).
+func decryptReservedSecret(dir, env, namespace, key string, dryRun bool) (string, error) {
+	store, err := secretstore.Load(secretstore.Path(dir, env))
+	if err != nil {
+		if errors.Is(err, secretstore.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	ciphertext, ok := store.GetReserved(namespace, key)
+	if !ok {
+		return "", nil
+	}
+	identity, err := secretstore.IdentityFromEnv()
+	if err != nil {
+		if dryRun {
+			return encryptedPlaceholder, nil
+		}
+		return "", err
+	}
+	plaintext, err := secretstore.Decrypt(ciphertext, identity)
+	if err != nil {
+		return "", fmt.Errorf("decrypt reserved secret %s/%s: %w", namespace, key, err)
+	}
+	return string(plaintext), nil
+}

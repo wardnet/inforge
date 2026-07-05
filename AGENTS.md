@@ -412,11 +412,17 @@ resource-attribute set so VM metrics and app telemetry correlate on `host.id`.
   `process` scraper is **off** so the agent runs **unprivileged** as the `.deb`'s `otelcol-contrib`
   user. `program.provisionObservability` is an **always-on** per-host pass **gated on env-level
   config**: `variables.yaml` `observability.otlp_endpoint` (non-secret) + the OTLP Basic-auth
-  credential in `secrets.enc.yaml` under the reserved `observability/otlp_auth`
-  (`otelcol.AuthSecret*`). With no endpoint it is a no-op; with an endpoint but no credential it
-  fails the deploy. The credential is base64'd, `pulumi.ToSecret`-wrapped (encrypted in state),
-  written `0600` owned by the collector user, and referenced from the config via the collector's
-  `${file:…}` provider (never inlined). The config stamps the ADR-0030 attribute set + `host.id`.
+  credential in `secrets.enc.yaml`. That credential is an inforge **reserved secret**, NOT a
+  service container secret: it lives under the store's `reserved:` namespace as
+  `observability/otlp_auth` (`otelcol.AuthSecretNamespace`/`AuthSecretKey`), is written with
+  `inforge secret set <env> observability otlp_auth --reserved`, and is read directly by the deploy
+  (`program.decryptReservedSecret`) — decoupled from the `vault:` service-secret path, so it
+  surfaces even when no service uses `vault:`, and a user service may use the container name
+  `observability` without colliding (see rule `reserved-secrets-live-outside-container-namespace`).
+  With no endpoint it is a no-op; with an endpoint but no credential it fails the deploy. The
+  credential is base64'd, `pulumi.ToSecret`-wrapped (encrypted in state), written `0600` owned by
+  the collector user, and referenced from the config via the collector's `${file:…}` provider
+  (never inlined). The config stamps the ADR-0030 attribute set + `host.id`.
 
 ## East-west service mesh (ADR-0032)
 

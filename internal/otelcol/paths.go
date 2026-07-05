@@ -32,12 +32,15 @@ const (
 	DefaultVersion = "0.155.0"
 )
 
-// AuthSecretContainer / AuthSecretKey locate the OTLP Basic-auth credential in the
-// env's secrets.enc.yaml. The stored value is the raw "instanceID:token" Grafana
-// Cloud hands out for OTLP Basic auth; inforge base64-encodes it at deploy and
-// writes the result to CredentialPath.
+// AuthSecretNamespace / AuthSecretKey locate the OTLP Basic-auth credential in the
+// env's secrets.enc.yaml. It is an inforge RESERVED secret (ADR-0031), not a
+// service container secret: it lives under the store's `reserved:` namespace,
+// referenced by no service and read directly by the deploy — so a user service
+// may use the container name "observability" without colliding. The stored value
+// is the raw "instanceID:token" Grafana Cloud hands out for OTLP Basic auth;
+// inforge base64-encodes it at deploy and writes the result to CredentialPath.
 const (
-	AuthSecretContainer = "observability"
+	AuthSecretNamespace = "observability"
 	AuthSecretKey       = "otlp_auth"
 )
 
