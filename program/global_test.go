@@ -124,6 +124,65 @@ func TestCreateInfraGlobalScope(t *testing.T) {
 		"global database should have a region-less name (wardnet-prd-db-shared)")
 }
 
+// TestCreateInfraResolvesProviderDefaults reproduces the production preview
+// failure `hetzner provider received spec with provider=""`: a network/compute/
+// database spec that OMITS `provider:` (relying on inforge.yaml providerDefaults)
+// must still realize. createInfra resolved the provider to SELECT the registry
+// entry but handed the provider the raw spec whose Provider was still empty, and
+// the provider's own guard rejected it — so the dispatch must stamp the resolved
+// provider onto the spec before Create/AttachNetwork.
+func TestCreateInfraResolvesProviderDefaults(t *testing.T) {
+	mocks := &infraMocks{}
+	networkOutputs := map[string]map[string]types.NetworkOutputs{}
+	computeOutputs := map[string]map[string]types.ComputeOutputs{}
+	databaseOutputs := map[string]map[string]types.DatabaseOutputs{}
+
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		config := map[string]map[string]any{
+			"hetzner": {
+				"apiToken":     "t",
+				"location":     "ash",
+				"network_zone": "us-east",
+				"serverTypes":  map[string]any{"SMALL": "cx23"},
+				"images":       map[string]any{"ubuntu-24.04": "ubuntu-24.04"},
+			},
+			"neon": {"apiKey": "k", "region": "aws-us-east-2"},
+		}
+		reg := registry.BuildRegistry(ctx, config, nil, types.SSHConfig{}, regions.Table{}, "proj", "prd", globalScope, tags.Ephemeral{}, nil)
+
+		// Every spec OMITS Provider — exactly the consumer's manifests after moving
+		// the provider to inforge.yaml providerDefaults.
+		res := types.Resources{
+			Network: []types.NetworkSpec{{
+				Name: "corenet", Container: "core",
+				CIDR:    "10.0.0.0/16",
+				Subnets: []types.SubnetSpec{{Name: "main", CIDR: "10.0.0.0/24"}},
+			}},
+			Compute: []types.ComputeSpec{{
+				Name: "edge", Container: "core",
+				Network: "corenet", Size: "SMALL", Image: "ubuntu-24.04",
+				Kind: "vm", InstanceCount: 1,
+			}},
+			Database: []types.DatabaseSpec{{
+				Name: "shared", Container: "shared",
+				Engine: "postgresql", Branch: "main", Database: "shared", Owner: "app",
+			}},
+		}
+
+		defaults := types.ProviderDefaults{
+			Compute:  "hetzner",
+			Database: map[string]string{"postgresql": "neon"},
+		}
+		return createInfra(ctx, reg, res, "prd", globalScope, "", "example.com",
+			defaults, networkOutputs, computeOutputs, databaseOutputs)
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	assert.Contains(t, networkOutputs[globalScope], "corenet/main", "network realized from provider default")
+	assert.Contains(t, computeOutputs[globalScope], "edge-01", "compute realized from provider default")
+	assert.Contains(t, databaseOutputs[globalScope], "shared", "database realized from provider default")
+}
+
 // TestDerivedRecordsGlobalService: a global service (empty slug) derives REGION-LESS
 // records — the host <compute>.vm.<env>, the service <svc>.svc.<env>, and any vanity
 // — all keyed to the service's ingress host. This mirrors the consumer's global
