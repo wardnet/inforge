@@ -45,6 +45,35 @@ func fakeRelease(t *testing.T, ver string, binary []byte, checksum string) *http
 	return srv
 }
 
+// TestUpdateAvailable guards the version-ordering of the update nudge and the
+// `inforge update` guard: an update is offered only when the resolved latest is
+// STRICTLY newer than the running version. Regression for the stale-cache bug
+// where a cached older tag (v4.0.0) nudged a newer build (v4.0.1) to "update".
+func TestUpdateAvailable(t *testing.T) {
+	cases := []struct {
+		name        string
+		latest, cur string
+		want        bool
+	}{
+		{"newer patch", "4.0.1", "4.0.0", true},
+		{"newer minor", "4.1.0", "4.0.9", true},
+		{"newer major", "5.0.0", "4.9.9", true},
+		{"same version", "4.0.1", "4.0.1", false},
+		{"older patch (stale cache)", "4.0.0", "4.0.1", false},
+		{"older major", "3.9.9", "4.0.0", false},
+		{"empty latest (check failed/never ran)", "", "4.0.1", false},
+		{"unparseable current (non-release build)", "4.0.1", "garbage", false},
+		{"unparseable latest", "garbage", "4.0.1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := updateAvailable(tc.latest, tc.cur); got != tc.want {
+				t.Errorf("updateAvailable(%q, %q) = %v, want %v", tc.latest, tc.cur, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLatestReleaseVersion(t *testing.T) {
 	fakeRelease(t, "1.9.0", []byte("bin"), "")
 
@@ -142,5 +171,24 @@ func TestUpdateCmdRefusesDevBuild(t *testing.T) {
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "built from source") {
 		t.Fatalf("expected built-from-source refusal, got %v", err)
+	}
+}
+
+// TestUpdateCmdRejectsUnrecognizedVersion: a non-"dev" build whose version is not
+// valid semver (a hand-built binary) must fail `inforge update` with a clear
+// message rather than silently reporting "already the latest release".
+func TestUpdateCmdRejectsUnrecognizedVersion(t *testing.T) {
+	orig := version
+	version = "not-a-release"
+	t.Cleanup(func() { version = orig })
+
+	// A release must resolve so control reaches the version-validity check.
+	fakeRelease(t, "9.9.9", []byte("bin"), "")
+
+	cmd := newUpdateCmd()
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "not a recognized release version") {
+		t.Fatalf("expected unrecognized-version error, got %v", err)
 	}
 }
