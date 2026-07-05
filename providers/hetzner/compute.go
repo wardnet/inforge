@@ -140,10 +140,8 @@ func (h *HetznerCompute) Create(
 	env, abstractRegion, domain, manifest string,
 	fwPorts types.FirewallPorts,
 ) (types.ComputeOutputs, error) {
-	if spec.Provider != "hetzner" {
-		return types.ComputeOutputs{}, fmt.Errorf("hetzner provider received spec with provider=%q", spec.Provider)
-	}
-
+	// No provider guard here — see HetznerNetwork.Create: the registry already
+	// dispatched by the resolved provider, so spec.Provider may be empty (defaulted).
 	regionCfg, err := ResolveRegion(abstractRegion, h.regions)
 	if err != nil {
 		return types.ComputeOutputs{}, err
@@ -280,9 +278,7 @@ func (h *HetznerCompute) Create(
 // See the ComputeProvider contract and
 // .agents/rules/attach-private-network-after-cloud-init-gate.md.
 func (h *HetznerCompute) AttachNetwork(ctx *pulumi.Context, spec types.ComputeSpec, instance int, dependsOn []pulumi.Resource) (pulumi.StringOutput, error) {
-	if spec.Provider != "hetzner" {
-		return pulumi.StringOutput{}, fmt.Errorf("hetzner provider received spec with provider=%q", spec.Provider)
-	}
+	// No provider guard — the registry dispatched by resolved provider (see Create).
 	key := naming.SpecKey(spec.Name, instance)
 	h.mu.Lock()
 	sh, ok := h.servers[key]

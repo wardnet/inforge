@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/mod/semver"
 )
 
 // releaseBaseURL is the GitHub project URL releases are downloaded from.
@@ -28,6 +29,29 @@ const updateCheckTTL = 24 * time.Hour
 // releaseAssetURL returns the download URL for a named asset of release ver.
 func releaseAssetURL(ver, asset string) string {
 	return fmt.Sprintf("%s/releases/download/v%s/%s", releaseBaseURL, ver, asset)
+}
+
+// canonicalVersion prefixes a bare version ("4.0.1") with the "v" that
+// golang.org/x/mod/semver requires and reports whether the result is valid
+// semver. Both the release tag (redirect target, "v" trimmed) and the injected
+// build version are bare, so both flow through here.
+func canonicalVersion(v string) (string, bool) {
+	sv := "v" + v
+	return sv, semver.IsValid(sv)
+}
+
+// updateAvailable reports whether latest is a strictly newer release than
+// current, so the nudge and `inforge update` only offer a real upgrade — never
+// a sideways or downward move (e.g. a stale cache holding an older tag).
+// Comparison is semantic, not lexical. An empty or unparseable latest OR current
+// (a failed/never-run check, or a non-release build) is treated as "no update".
+func updateAvailable(latest, current string) bool {
+	l, lok := canonicalVersion(latest)
+	c, cok := canonicalVersion(current)
+	if !lok || !cok {
+		return false
+	}
+	return semver.Compare(l, c) > 0
 }
 
 func newUpdateCmd() *cobra.Command {
@@ -52,7 +76,14 @@ func newUpdateCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("resolve latest release: %w", err)
 			}
-			if latest == version {
+			// A non-release build version (not "dev", but not valid semver either)
+			// can't be ordered against the latest tag. Surface it explicitly on this
+			// explicit-action path rather than letting updateAvailable's silent
+			// false read as "already the latest release".
+			if _, ok := canonicalVersion(version); !ok {
+				return fmt.Errorf("running version %q is not a recognized release version — reinstall from a GitHub release to enable updates", version)
+			}
+			if !updateAvailable(latest, version) {
 				fmt.Printf("inforge v%s is already the latest release\n", version)
 				return nil
 			}
@@ -224,7 +255,7 @@ func maybeNudgeUpdate() {
 			}
 		}
 	}
-	if st.Latest != "" && st.Latest != version {
+	if updateAvailable(st.Latest, version) {
 		_, _ = fmt.Fprintf(os.Stderr, "\ninforge v%s is available (you have v%s) — run 'inforge update'\n",
 			st.Latest, version)
 	}

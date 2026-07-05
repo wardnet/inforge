@@ -53,10 +53,10 @@ func New(provider *hcloud.Provider, project, slug string, eph tags.Ephemeral, re
 // to call concurrently: containers for the same container name are deduplicated
 // via a mutex-protected map. Returns a map from subnet name to NetworkOutputs.
 func (h *HetznerNetwork) Create(ctx *pulumi.Context, spec types.NetworkSpec, env, abstractRegion string) (map[string]types.NetworkOutputs, error) {
-	if spec.Provider != "hetzner" {
-		return nil, fmt.Errorf("hetzner provider received spec with provider=%q", spec.Provider)
-	}
-
+	// No provider guard: the registry already dispatched to this provider by the
+	// caller's resolved provider name (types.ResolveProvider over providerDefaults),
+	// so spec.Provider — which may legitimately be empty when defaulted — is not the
+	// contract and must not be re-checked here.
 	regionCfg, err := ResolveRegion(abstractRegion, h.regions)
 	if err != nil {
 		return nil, err
