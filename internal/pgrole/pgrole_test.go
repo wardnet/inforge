@@ -93,11 +93,15 @@ func TestMintRoleSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MintRoleSQL: %v", err)
 	}
-	if len(stmts) != 7 { // 1 create + 6 grants
-		t.Fatalf("got %d statements, want 7", len(stmts))
+	if len(stmts) != 13 { // 1 create + 6 revoke + 6 grants
+		t.Fatalf("got %d statements, want 13", len(stmts))
 	}
 	if !strings.HasPrefix(stmts[0], "DO $$") {
 		t.Errorf("first statement should be the create DO block, got %q", stmts[0])
+	}
+	// The revoke block precedes the grants so a downgrade drops stale privileges.
+	if !strings.HasPrefix(stmts[1], "REVOKE ALL PRIVILEGES ON ALL TABLES") {
+		t.Errorf("second statement should begin the revoke block, got %q", stmts[1])
 	}
 	if _, err := MintRoleSQL("svc", "pw", "app", "bogus"); err == nil {
 		t.Error("bad permission must propagate an error")

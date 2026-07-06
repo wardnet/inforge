@@ -17,11 +17,15 @@ import (
 
 // clusterPortsByHost assigns each database-cluster its deterministic TCP port on its
 // host (ADR-0036): clusters co-located on one host are sorted by name and given
-// postgres.ClusterPort(index). The assignment is host-scoped and stable across
-// deploys, so the firewall (which opens each cluster's port privately) and the
-// realization (which starts each postmaster on it) agree — the single source of the
-// port scheme. It is keyed by canonical host specKey, then cluster name -> port.
-// Clusters whose host FK does not resolve are skipped (validation reports them).
+// postgres.ClusterPort(index). Within one deploy the firewall (which opens each
+// cluster's port privately) and the realization (which starts each postmaster on it)
+// call this and therefore agree — it is the single source of the port scheme. The
+// assignment is by SORTED POSITION, so adding or removing a co-located cluster can
+// shift the ports of clusters that sort after it, restarting their postmasters onto a
+// new port on the next deploy (the data directory is keyed by cluster name, not port,
+// so no data is lost). This positional scheme mirrors the mesh egress-port assignment.
+// Keyed by canonical host specKey, then cluster name -> port. Clusters whose host FK
+// does not resolve are skipped (validation reports them).
 func clusterPortsByHost(res types.Resources, canonical map[string]string) map[string]map[string]int {
 	byHost := map[string][]string{}
 	for _, c := range res.DatabaseCluster {
@@ -91,6 +95,11 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 	for _, c := range res.Compute {
 		computeByName[c.Name] = c
 	}
+	// hostLast chains clusters co-located on one host: each cluster's first command
+	// waits on the previous cluster's last command on that host, so two clusters never
+	// run `apt-get install` (or append /etc/fstab) concurrently and race the dpkg lock.
+	// Clusters on different hosts stay parallel.
+	hostLast := map[string]pulumi.Resource{}
 
 	for _, cluster := range res.DatabaseCluster {
 		effective := types.ResolveProvider(cluster.Provider, "database", cluster.Engine, defaults)
@@ -147,14 +156,19 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 			return fmt.Errorf("database-cluster %q: create volume: %w", cluster.Name, err)
 		}
 
-		// 1) Install the version-pinned Postgres server package.
+		// 1) Install the version-pinned Postgres server package. Serialize with any
+		// prior cluster on this host (hostLast) so co-located apt installs don't race.
+		installDeps := []pulumi.Resource{gate}
+		if prev := hostLast[hostKey]; prev != nil {
+			installDeps = append(installDeps, prev)
+		}
 		install := postgres.InstallScript(cluster.Version)
 		installCmd, err := remote.NewCommand(ctx, name+"-install", &remote.CommandArgs{
 			Connection: conn,
 			Create:     pulumi.String(install),
 			Update:     pulumi.String(install),
 			Triggers:   pulumi.Array{pulumi.String(install)},
-		}, pulumi.DependsOn([]pulumi.Resource{gate}))
+		}, pulumi.DependsOn(installDeps))
 		if err != nil {
 			return fmt.Errorf("database-cluster %q: install postgres: %w", cluster.Name, err)
 		}
@@ -233,9 +247,13 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 				privateIP: host.PrivateIP,
 				port:      port,
 				database:  db.Database,
+				owner:     db.Owner,
 				dependsOn: dbCmd,
 			}}
 		}
+		// Record this cluster's final command as the host's tail so the next co-located
+		// cluster's install waits on it (serializing apt/fstab on the shared host).
+		hostLast[hostKey] = lastDep
 	}
 	return nil
 }
@@ -252,7 +270,9 @@ type selfHostedRoleProvisioner struct {
 	privateIP pulumi.StringOutput
 	port      int
 	database  string
-	dependsOn pulumi.Resource
+	owner     string          // the logical database owner, for role teardown (REASSIGN OWNED)
+	dependsOn pulumi.Resource // the command that created the database + owner
+	lastMint  pulumi.Resource // the previous role mint on THIS database, to serialize mints
 }
 
 // ProvisionRole generates a stable per-service password (random.RandomPassword,
@@ -273,15 +293,29 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 	mintScript := pw.Result.ApplyT(func(password string) (string, error) {
 		return postgres.MintRoleScript(p.port, roleName, password, p.database, permission)
 	}).(pulumi.StringOutput)
+	// On teardown (grant/service removed) reassign the role's owned objects to the
+	// database owner and drop the role, so a retired service leaves no live login.
+	dropScript := postgres.DropRoleScript(p.port, roleName, p.owner)
+	// Serialize mints against ONE database: each mint depends on its db-create command
+	// AND the previous mint on this database, so concurrent GRANT/ALTER DEFAULT
+	// PRIVILEGES sessions never contend on the shared catalog. Different databases hold
+	// different provisioners, so their mints still run in parallel. ProvisionRole is
+	// called synchronously during program construction, so mutating lastMint is safe.
+	mintDeps := []pulumi.Resource{p.dependsOn}
+	if p.lastMint != nil {
+		mintDeps = append(mintDeps, p.lastMint)
+	}
 	mintCmd, err := remote.NewCommand(ctx, roleName+"-mint", &remote.CommandArgs{
 		Connection: p.conn,
 		Create:     mintScript,
 		Update:     mintScript,
+		Delete:     pulumi.String(dropScript),
 		Triggers:   pulumi.Array{mintScript},
-	}, pulumi.DependsOn([]pulumi.Resource{p.dependsOn}))
+	}, pulumi.DependsOn(mintDeps))
 	if err != nil {
 		return types.DBRoleFields{}, fmt.Errorf("db role %q: mint role: %w", roleName, err)
 	}
+	p.lastMint = mintCmd
 	// gate returns v carrying a dependency on the mint command (via its stdout output),
 	// so a field is not consumed before the role is provisioned.
 	gate := func(v pulumi.StringInput) pulumi.StringOutput {

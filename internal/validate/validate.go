@@ -27,6 +27,7 @@ import (
 	"github.com/wardnet/inforge/internal/nginx"
 	"github.com/wardnet/inforge/internal/pathglob"
 	"github.com/wardnet/inforge/internal/pki"
+	"github.com/wardnet/inforge/internal/postgres"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/sizes"
@@ -194,6 +195,10 @@ type regionContext struct {
 	// mirroring ingress/app FKs). Name uniqueness is enforced generically in
 	// validateType; this map answers FK existence.
 	clusterNames map[string]bool
+	// clusterHosts marks each canonical compute specKey that runs >=1 self-hosted
+	// database-cluster, so checkService can reject a co-located service backend bind
+	// that falls in the reserved Postgres port range (postgres.ClusterPort, 5432+).
+	clusterHosts map[string]bool
 	// ingressNames holds the ingress resource names declared in this scope. An
 	// app's or service's `ingress:` foreign key must resolve to one of them —
 	// same-scope only, exactly like a service's host must be a compute in the same
@@ -559,6 +564,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		computeNetwork:        map[string]string{},
 		databaseNames:         map[string]bool{},
 		clusterNames:          map[string]bool{},
+		clusterHosts:          map[string]bool{},
 		ingressNames:          map[string]bool{},
 		ingressHost:           map[string]string{},
 		appSubdomainCounts:    map[string]int{},
@@ -627,6 +633,12 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for _, f := range clusterFiles {
 		if f.parseErr == nil {
 			ctx.clusterNames[f.spec.Name] = true
+			// Record the cluster's host (canonical specKey) so checkService can keep a
+			// co-located service off the reserved Postgres port range. A host FK that
+			// does not resolve is left absent — checkDatabaseCluster reports it.
+			if hk := canonicalHost(f.spec.Host, ctx); hk != "" {
+				ctx.clusterHosts[hk] = true
+			}
 		}
 	}
 	for _, f := range databaseFiles {
@@ -1726,6 +1738,31 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 			}
 		}
 	}
+	// A co-located self-hosted database-cluster reserves the Postgres port range on this
+	// host (postgres.ClusterPort, 5432+); a service backend bind in that range would
+	// clash with a postmaster at runtime (both bind the host), so reject it up front —
+	// mirroring the reserved loopback range guard for ssl_preread terminators.
+	if canonical != "" && ctx.clusterHosts[canonical] {
+		reserveErr := func(label string, port int) {
+			if postgres.InReservedPortRange(port) {
+				errs = append(errs, fmt.Sprintf("%s: %d falls in the reserved database-cluster port range [%d,%d) a co-located Postgres cluster binds on this host; pick a port outside it", label, port, postgres.PortBase, postgres.PortBase+postgres.MaxClustersPerHost))
+			}
+		}
+		for i, rt := range s.Routes {
+			reserveErr(fmt.Sprintf("routes[%d].target", i), rt.Target)
+		}
+		if s.HealthProbesPort > 0 {
+			reserveErr("health_probes_port", s.HealthProbesPort)
+		}
+		if s.Mesh != nil && s.Mesh.Port != 0 {
+			reserveErr("mesh.port", s.Mesh.Port)
+		}
+		for i, ep := range s.ExposedPorts {
+			if ep.Proto == "tcp" {
+				reserveErr(fmt.Sprintf("exposed_ports[%d]", i), ep.Port)
+			}
+		}
+	}
 	errs = append(errs, checkGrants(s, ctx)...)
 	return errs, warns
 }
@@ -2188,9 +2225,17 @@ func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
 		targetResolved := false
 		switch typ {
 		case "database":
-			if ctx.databaseNames[name] {
+			switch {
+			case strings.HasPrefix(name, "global/"):
+				// A self-hosted database is reachable only over its own scope's private
+				// network (5432 is opened to the host's CIDR only, never publicly), so a
+				// regional service cannot reach a global cluster. Reject the cross-scope
+				// grant explicitly instead of minting a role whose connection URL points
+				// at an unreachable private IP (ADR-0036).
+				errs = append(errs, fmt.Sprintf("%s.resource: cross-scope database access is not supported — a self-hosted database is private to its scope, so a regional service cannot grant a global database %q", label, name))
+			case ctx.databaseNames[name]:
 				targetResolved = true
-			} else {
+			default:
 				errs = append(errs, fmt.Sprintf("%s.resource: database %q not found", label, name))
 			}
 		case "pki":

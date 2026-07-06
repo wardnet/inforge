@@ -83,15 +83,40 @@ END
 $$`, QuoteLiteral(role), QuoteIdent(role), QuoteLiteral(password), QuoteIdent(role), QuoteLiteral(password))
 }
 
+// RevokeAllSQL returns the statements that strip every privilege a per-service role
+// currently holds on database — its schema-public table/sequence privileges, the
+// schema and database privileges, and the default privileges for future objects. It
+// is run before re-applying the current permission's GRANTs so a re-mint is fully
+// declarative: downgrading a grant from rw to ro actually drops the write privileges
+// instead of leaving them in place (a REVOKE for a privilege the role never held is a
+// harmless no-op). Run as the database owner / superuser.
+func RevokeAllSQL(role, database string) []string {
+	r := QuoteIdent(role)
+	db := QuoteIdent(database)
+	return []string{
+		fmt.Sprintf(`REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM %s`, r),
+		fmt.Sprintf(`REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM %s`, r),
+		fmt.Sprintf(`REVOKE ALL PRIVILEGES ON SCHEMA public FROM %s`, r),
+		fmt.Sprintf(`REVOKE ALL PRIVILEGES ON DATABASE %s FROM %s`, db, r),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM %s`, r),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM %s`, r),
+	}
+}
+
 // MintRoleSQL is the full self-hosted role-provisioning statement list: ensure the
-// LOGIN role exists with password, then apply its ro/rw GRANTs on database. It is the
-// unit the on-host psql script executes for a grant (ADR-0036).
+// LOGIN role exists with password, revoke every privilege it currently holds, then
+// apply its ro/rw GRANTs on database. The revoke-then-grant makes the mint
+// declarative — a permission downgrade (rw→ro) drops the stale write grants rather
+// than accumulating privileges across deploys. It is the unit the on-host psql script
+// executes for a grant (ADR-0036).
 func MintRoleSQL(role, password, database, permission string) ([]string, error) {
 	grants, err := GrantSQL(permission, role, database)
 	if err != nil {
 		return nil, err
 	}
-	return append([]string{CreateRoleLoginSQL(role, password)}, grants...), nil
+	stmts := []string{CreateRoleLoginSQL(role, password)}
+	stmts = append(stmts, RevokeAllSQL(role, database)...)
+	return append(stmts, grants...), nil
 }
 
 // ReassignDropSQL returns the ordered cleanup statements to run (as the owner or a
