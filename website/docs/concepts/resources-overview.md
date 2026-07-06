@@ -16,7 +16,8 @@ region in `regions.yaml`.
 |------|-----------|-------------|
 | [Network](../resources/network) | `regional/network/<name>/` | VPC / network (Hetzner) |
 | [Compute](../resources/compute) | `regional/compute/<name>/` | Virtual machine |
-| [Database](../resources/database) | `regional/database/<name>/` | Managed PostgreSQL (Neon) |
+| [Database cluster](../resources/database-cluster) | `regional/database-cluster/<name>/` | A self-hosted PostgreSQL engine on a compute host |
+| [Database](../resources/database) | `regional/database/<name>/` | A logical PostgreSQL database inside a cluster |
 | [Service](../resources/service) | `regional/service/<name>/` | Application hosted on a VM, reached over the east-west mesh and optionally exposed north-south through an ingress |
 | [Ingress](../resources/ingress) | `regional/ingress/<name>/` | Shared nginx proxy tier (referencing a compute host) that fronts apps and per-service web/SNI routes |
 | [Gateway](../resources/gateway) | `regional/gateway/<name>/` | North-south public edge external daemons HTTPS into; routes each path to a service through the mesh |

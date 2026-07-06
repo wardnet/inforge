@@ -53,13 +53,14 @@ func (h *HetznerCompute) CreateVolume(ctx *pulumi.Context, req types.StorageRequ
 
 	// Attach as a separate resource gated on the cloud-init readiness gate; Automount
 	// off because inforge owns the mkfs/mount lifecycle on-host.
-	if _, err := hcloud.NewVolumeAttachment(ctx, volName+"-attach", &hcloud.VolumeAttachmentArgs{
+	attach, err := hcloud.NewVolumeAttachment(ctx, volName+"-attach", &hcloud.VolumeAttachmentArgs{
 		VolumeId:  idToInt(vol.ID()),
 		ServerId:  idToInt(sh.server.ID()),
 		Automount: pulumi.Bool(false),
-	}, append(h.providerOpts(), pulumi.DependsOn(dependsOn))...); err != nil {
+	}, append(h.providerOpts(), pulumi.DependsOn(dependsOn))...)
+	if err != nil {
 		return types.StorageOutputs{}, fmt.Errorf("attach volume %s: %w", volName, err)
 	}
 
-	return types.StorageOutputs{DevicePath: vol.LinuxDevice}, nil
+	return types.StorageOutputs{DevicePath: vol.LinuxDevice, Attachment: attach}, nil
 }

@@ -16,7 +16,6 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
-	"github.com/wardnet/inforge/providers/neon"
 )
 
 // ProviderRegistry resolves provider names to provider implementations for one
@@ -66,9 +65,6 @@ type registry struct {
 
 	cfDnsOnce sync.Once
 	cfDns     *cfprovider.CloudflareDns
-
-	neonDbOnce sync.Once
-	neonDb     *neon.NeonDatabaseAdapter
 }
 
 // BuildRegistry constructs a ProviderRegistry from the provider config, SSH
@@ -249,20 +245,13 @@ func (r *registry) DNS(name string) (types.DnsProvider, error) {
 	}
 }
 
+// Database resolves a managed database provider. ADR-0036 retired Neon and made
+// self-hosted Postgres the realization in use (program.provisionDatabaseClusters,
+// which does NOT go through this method). The managed seam (types.DatabaseProvider)
+// is retained so a managed provider can be re-registered here later; today no
+// provider is registered, so every name is unknown.
 func (r *registry) Database(name string) (types.DatabaseProvider, error) {
-	switch name {
-	case "neon":
-		r.neonDbOnce.Do(func() {
-			apiKey := providerCfgString(r.config, "neon", "apiKey")
-			// region is empty for a regional block (the abstract region maps to a
-			// Neon region) and set for the global block (no abstract region to map).
-			region := providerCfgString(r.config, "neon", "region")
-			r.neonDb = neon.New(apiKey, r.project, r.slug, region)
-		})
-		return r.neonDb, nil
-	default:
-		return nil, unknownProvider(name)
-	}
+	return nil, unknownProvider(name)
 }
 
 func unknownProvider(name string) error {

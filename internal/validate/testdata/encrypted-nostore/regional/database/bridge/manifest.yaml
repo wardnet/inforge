@@ -1,7 +1,5 @@
 name: bridge
 container: bridge
-provider: neon
-engine: postgresql
-branch: main
+cluster: pg
 database: bridge
 owner: app

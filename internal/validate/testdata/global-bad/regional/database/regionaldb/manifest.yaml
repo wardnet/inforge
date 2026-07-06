@@ -1,9 +1,5 @@
-# A regional database. A GLOBAL resource must not reference it: global resources
-# may only reference other global resources.
 name: regionaldb
 container: regionaldb
-provider: neon
-engine: postgresql
-branch: main
+cluster: pg
 database: regionaldb
 owner: app

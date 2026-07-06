@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	"github.com/wardnet/inforge/internal/agent"
@@ -188,6 +189,11 @@ type regionContext struct {
 	computeNames     map[string]bool              // bare compute names; service.host must be one of these
 	computeNetwork   map[string]string            // canonical specKey (and bare name) -> network name; for the cross-host same-network check
 	databaseNames    map[string]bool
+	// clusterNames holds the database-cluster resource names declared in this scope.
+	// A logical database's cluster: FK must resolve to one of them (same scope only,
+	// mirroring ingress/app FKs). Name uniqueness is enforced generically in
+	// validateType; this map answers FK existence.
+	clusterNames map[string]bool
 	// ingressNames holds the ingress resource names declared in this scope. An
 	// app's or service's `ingress:` foreign key must resolve to one of them —
 	// same-scope only, exactly like a service's host must be a compute in the same
@@ -450,6 +456,10 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	if err != nil {
 		return err
 	}
+	clusterFiles, _, err := readFolders[types.DatabaseClusterSpec](filepath.Join(base, "database-cluster"))
+	if err != nil {
+		return err
+	}
 	databaseFiles, _, err := readFolders[types.DatabaseSpec](filepath.Join(base, "database"))
 	if err != nil {
 		return err
@@ -482,8 +492,15 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	for i := range computeFiles {
 		loader.NormalizeCompute(&computeFiles[i].spec, computeFolders[i])
 	}
+	for i := range clusterFiles {
+		if clusterFiles[i].parseErr == nil {
+			loader.NormalizeDatabaseCluster(&clusterFiles[i].spec)
+		}
+	}
 	for i := range databaseFiles {
-		loader.NormalizeDatabase(&databaseFiles[i].spec)
+		if databaseFiles[i].parseErr == nil {
+			loader.NormalizeDatabase(&databaseFiles[i].spec)
+		}
 	}
 	for i := range pkiFiles {
 		if pkiFiles[i].parseErr == nil {
@@ -541,6 +558,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		computeNames:          map[string]bool{},
 		computeNetwork:        map[string]string{},
 		databaseNames:         map[string]bool{},
+		clusterNames:          map[string]bool{},
 		ingressNames:          map[string]bool{},
 		ingressHost:           map[string]string{},
 		appSubdomainCounts:    map[string]int{},
@@ -606,6 +624,11 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	// Canonicalization (any compute FK form -> expanded specKey) is shared with
 	// the program so validation and realization agree on host identity.
 	ctx.computeCanonical = naming.CanonicalComputeKeys(computeSpecs)
+	for _, f := range clusterFiles {
+		if f.parseErr == nil {
+			ctx.clusterNames[f.spec.Name] = true
+		}
+	}
 	for _, f := range databaseFiles {
 		ctx.databaseNames[f.spec.Name] = true
 	}
@@ -788,6 +811,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	validateType(r, schemaSet["compute"], computeFiles, func(s types.ComputeSpec) string { return s.Name }, func(s types.ComputeSpec) ([]string, []string) {
 		return checkCompute(s, ctx)
 	})
+	validateType(r, schemaSet["database-cluster"], clusterFiles, func(s types.DatabaseClusterSpec) string { return s.Name }, func(s types.DatabaseClusterSpec) ([]string, []string) {
+		return checkDatabaseCluster(s, ctx)
+	})
 	validateType(r, schemaSet["database"], databaseFiles, func(s types.DatabaseSpec) string { return s.Name }, func(s types.DatabaseSpec) ([]string, []string) {
 		return checkDatabase(s, ctx)
 	})
@@ -847,7 +873,7 @@ func validateType[T any](r *reporter, schema *jsonschema.Schema, files []fileOf[
 
 // compileSchemas compiles every embedded JSON Schema, keyed by resource type.
 func compileSchemas() (map[string]*jsonschema.Schema, error) {
-	names := []string{"network", "compute", "database", "service", "environment", "pkiresource", "ingress", "app", "gateway"}
+	names := []string{"network", "compute", "database-cluster", "database", "service", "environment", "pkiresource", "ingress", "app", "gateway"}
 	c := jsonschema.NewCompiler()
 	for _, n := range names {
 		b, err := schemas.FS.ReadFile(n + ".json")
@@ -1015,8 +1041,15 @@ func collectProviderRefs(base string, defaults types.ProviderDefaults) ([]provid
 	} else {
 		refs = append(refs, rs...)
 	}
-	if rs, err := refsOf[types.DatabaseSpec](filepath.Join(base, "database"), func(s types.DatabaseSpec) string {
-		return types.ResolveProvider(s.Provider, "database", s.Engine, defaults)
+	// The database provider lives on the cluster (ADR-0036). A self-hosted cluster
+	// needs no regions.yaml provider entry, so return "" for it — refsOf skips empty
+	// providers, exempting self-hosted from the per-region availability pass.
+	if rs, err := refsOf[types.DatabaseClusterSpec](filepath.Join(base, "database-cluster"), func(s types.DatabaseClusterSpec) string {
+		p := types.ResolveProvider(s.Provider, "database", s.Engine, defaults)
+		if p == types.SelfHostedProvider {
+			return ""
+		}
+		return p
 	}); err != nil {
 		return nil, err
 	} else {
@@ -1201,6 +1234,11 @@ func checkGlobalProviderAvailability(r *reporter, globalBase string, global *reg
 // (checkProviderAvailability) is a separate step.
 func resolvedProviderErr(specProvider, class, engine string, ctx regionContext) []string {
 	effective := types.ResolveProvider(specProvider, class, engine, ctx.providerDefaults)
+	// A self-hosted database engine (ADR-0036) is inforge itself — it needs no cloud
+	// credentials and no regions.yaml providers entry, so skip the availability check.
+	if effective == types.SelfHostedProvider {
+		return nil
+	}
 	if effective == "" {
 		switch class {
 		case "network", "compute":
@@ -1261,8 +1299,60 @@ func checkCompute(s types.ComputeSpec, ctx regionContext) (errs, warns []string)
 	return errs, warns
 }
 
-func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []string) {
+// checkDatabaseCluster validates a database-cluster (ADR-0036): its provider must
+// resolve, and its host: FK is REQUIRED when the resolved provider is self-hosted
+// (inforge installs the engine on that compute host) and FORBIDDEN when a managed
+// provider is used. A self-hosted host FK resolves to a single-instance vm in the
+// SAME scope through the shared resolveComputeHost helper (a global/ prefix is
+// rejected explicitly, exactly like service.host/ingress.host). The cluster carries
+// no authored volume size — it is derived from its logical databases' sizes.
+func checkDatabaseCluster(s types.DatabaseClusterSpec, ctx regionContext) (errs, warns []string) {
 	errs = append(errs, resolvedProviderErr(s.Provider, "database", s.Engine, ctx)...)
+	effective := types.ResolveProvider(s.Provider, "database", s.Engine, ctx.providerDefaults)
+	switch {
+	case effective == types.SelfHostedProvider:
+		switch {
+		case s.Host == "":
+			errs = append(errs, "host: required for a self-hosted database-cluster (the compute host inforge installs the engine on)")
+		case strings.HasPrefix(s.Host, "global/"):
+			errs = append(errs, fmt.Sprintf("host: %q references a global compute; a database-cluster on a global host is declared in the global slice itself, not referenced from a region", s.Host))
+		default:
+			_, hostErrs := resolveComputeHost(s.Host, "a database cluster", ctx)
+			errs = append(errs, hostErrs...)
+		}
+	case s.Host != "":
+		errs = append(errs, fmt.Sprintf("host: %q is set but provider %q is managed; host: is only valid for a self-hosted cluster", s.Host, effective))
+	}
+	return errs, warns
+}
+
+// checkDatabase validates a logical database (ADR-0036): its cluster: FK must
+// resolve to a database-cluster in the SAME scope (a global/ prefix is rejected,
+// exactly like service.host/ingress.host — a database on a global cluster is
+// declared in the global slice itself), its declared size must be non-negative, and
+// its backup policy must be coherent when enabled.
+func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []string) {
+	switch {
+	case strings.HasPrefix(s.Cluster, "global/"):
+		errs = append(errs, fmt.Sprintf("cluster: %q references a global database-cluster; a database on a global cluster is declared in the global slice itself, not referenced from a region", s.Cluster))
+	case !ctx.clusterNames[s.Cluster]:
+		errs = append(errs, fmt.Sprintf("cluster: %q does not resolve to a database-cluster in this scope", s.Cluster))
+	}
+	if s.SizeGB < 0 {
+		errs = append(errs, fmt.Sprintf("size_gb: %d must be >= 0", s.SizeGB))
+	}
+	// Backups default to enabled (loader). When enabled the interval must parse as a
+	// positive Go duration and keep must retain at least one backup.
+	if s.Backup.Enabled == nil || *s.Backup.Enabled {
+		if d, err := time.ParseDuration(s.Backup.Interval); err != nil {
+			errs = append(errs, fmt.Sprintf("backup.interval: %q is not a valid duration (e.g. \"24h\")", s.Backup.Interval))
+		} else if d <= 0 {
+			errs = append(errs, fmt.Sprintf("backup.interval: %q must be positive", s.Backup.Interval))
+		}
+		if s.Backup.Keep < 1 {
+			errs = append(errs, fmt.Sprintf("backup.keep: %d must be >= 1 when backups are enabled", s.Backup.Keep))
+		}
+	}
 	return errs, warns
 }
 

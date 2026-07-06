@@ -1,7 +1,5 @@
 name: shared
 container: shared
-provider: neon
-engine: postgresql
-branch: main
+cluster: pg
 database: shared
 owner: app

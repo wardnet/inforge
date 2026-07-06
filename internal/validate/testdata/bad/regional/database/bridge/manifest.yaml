@@ -1,7 +1,5 @@
-# provider not defined in this region's regions.yaml providers block -> FAIL.
 name: bridge
 container: bridge
-provider: mystery
-engine: postgresql
+cluster: pg
 database: bridge
 owner: app

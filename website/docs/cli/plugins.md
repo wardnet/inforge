@@ -22,11 +22,9 @@ inforge plugins install [--version <tag>]
 
 ### What it installs
 
-- `pulumi-resource-neon` — Neon PostgreSQL provider
-
-Binaries are downloaded from the matching GitHub release and placed in the same directory
-as the `inforge` binary (or on `$PATH`). Hetzner and Cloudflare providers use the standard
-Pulumi Go SDK and do not require separate installation.
+The standard Pulumi provider plugins the project needs — `pulumi-resource-hcloud` (Hetzner),
+`pulumi-resource-cloudflare`, and `pulumi-resource-random` (stable per-service database passwords) —
+downloaded from their published releases. Self-hosted PostgreSQL (ADR-0036) ships no custom plugin.
 
 ### Example
 

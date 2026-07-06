@@ -1,13 +1,13 @@
 # goreleaser configuration for inforge.
 #
-# Builds three binaries from a single repository:
-#   - inforge                  the CLI
+# Builds two binaries from a single repository:
+#   - inforge              the CLI
 #   - inforge-agent        on-host runtime agent (service ExecStart)
-#   - pulumi-resource-neon     Pulumi provider plugin (Neon)
 #
-# The provider binary must keep the `pulumi-resource-<name>` naming
-# convention exactly — Pulumi locates plugins by that filename. inforge-agent
-# is downloaded onto each host by `inforge deploy` from the raw archive, pinned to
+# ADR-0036 retired the bundled pulumi-resource-neon plugin; self-hosted Postgres
+# uses only standard Pulumi provider plugins (hcloud, cloudflare, random), which
+# `inforge plugins install` pulls from their own releases. inforge-agent is
+# downloaded onto each host by `inforge deploy` from the raw archive, pinned to
 # the deploying inforge version.
 version: 2
 
@@ -49,23 +49,8 @@ builds:
     ldflags:
       - -s -w -X main.version={{ .Version }}
 
-  - id: pulumi-resource-neon
-    main: ./providers/neon/cmd/pulumi-resource-neon
-    binary: pulumi-resource-neon
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-    goarch:
-      - amd64
-      - arm64
-    ldflags:
-      - -s -w -X main.version={{ .Version }}
-
-# One archive per binary so consumers download only what they need:
-# `inforge plugins install neon` pulls the Neon provider archive alone,
-# never the whole release. A fourth archive publishes every binary in raw,
-# uncompressed form for curl-and-run usage.
+# One archive per binary so consumers download only what they need. A raw
+# archive publishes every binary in uncompressed form for curl-and-run usage.
 archives:
   - id: inforge
     ids:
@@ -73,19 +58,12 @@ archives:
     name_template: >-
       inforge_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 
-  - id: pulumi-resource-neon
-    ids:
-      - pulumi-resource-neon
-    name_template: >-
-      pulumi-resource-neon_{{ .Version }}_{{ .Os }}_{{ .Arch }}
-
   # Raw, uncompressed binaries — download a single os/arch binary and run it
   # directly, no extraction step.
   - id: raw
     ids:
       - inforge
       - inforge-agent
-      - pulumi-resource-neon
     formats:
       - binary
     name_template: >-
@@ -121,9 +99,8 @@ release:
     A Go toolchain that turns declarative infrastructure definitions into real
     deployments via Pulumi and GitHub Actions.
 
-    This release ships three statically-linked binaries: the `inforge` CLI, the
-    `inforge-agent` on-host runtime agent, and the `pulumi-resource-neon`
-    provider plugin.
+    This release ships two statically-linked binaries: the `inforge` CLI and the
+    `inforge-agent` on-host runtime agent.
 
     **Install / update**
 

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "database-cluster.json",
+  "title": "Database cluster resource",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "container", "engine"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "container": { "type": "string", "minLength": 1 },
+    "engine": { "type": "string", "enum": ["postgresql"] },
+    "host": { "type": "string", "minLength": 1 },
+    "provider": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "minLength": 1 }
+  }
+}
