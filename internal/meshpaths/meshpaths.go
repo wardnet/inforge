@@ -38,15 +38,18 @@ const (
 	UnitName = "wardnet-mesh"
 	// ConfigPath is the mesh nginx config file, separate from the north-south nginx's.
 	ConfigPath = "/etc/wardnet/mesh-nginx.conf"
-	// AgentDir is the mesh projection's on-host config directory: it holds the mesh
-	// descriptor (descriptor.yaml) and the host-key-encrypted provider credential
-	// (credential.age) `inforge-agent mesh-project` pulls the mesh material with
-	// (ADR-0033). The persistent sibling of the tmpfs RuntimeDir.
+	// AgentDir is the mesh proxy's persistent, on-host config directory: it holds
+	// the mesh descriptor (descriptor.yaml, secret-free — just the co-located
+	// Services list, written by deploy) and the host-key-encrypted, renew-owned
+	// leaf material (leaf.age — every co-located service's leaf + the shared
+	// trust bundle, written by `inforge pki renew`'s SSH push, ADR-0035). Unlike a
+	// service, the mesh proxy never gets a deploy-owned secrets.age: deploy has
+	// no leaf material to give it. The persistent sibling of the tmpfs RuntimeDir.
 	AgentDir = "/etc/wardnet/mesh"
-	// DescriptorPath / CredentialPath are the mesh descriptor and credential files
+	// DescriptorPath / LeafPath are the mesh descriptor and leaf-material files
 	// within AgentDir — the same basenames the agent expects in any descriptor dir.
 	DescriptorPath = AgentDir + "/descriptor.yaml"
-	CredentialPath = AgentDir + "/credential.age"
+	LeafPath       = AgentDir + "/leaf.age"
 	// PIDPath is the mesh nginx master pid file — distinct from the north-south nginx's
 	// /run/nginx.pid, since two nginx instances cannot share a pid file.
 	PIDPath = "/run/wardnet-mesh-nginx.pid"

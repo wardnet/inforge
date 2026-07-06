@@ -620,48 +620,6 @@ type DatabaseProvider interface {
 	Create(ctx *pulumi.Context, spec DatabaseSpec, env, region string) (DatabaseOutputs, error)
 }
 
-// ServiceSecretsBundle is everything inforge needs to deliver one service's
-// runtime secrets contract to its host: the provider coordinates and env-var ->
-// vault-key mapping for the descriptor, plus the per-service machine identity's
-// universal-auth credentials (Outputs, ClientSecret sensitive) the agent
-// logs in with. Project is the workspace ID (what the on-host fetcher sends as
-// the workspaceId query param), so it is an Output resolved at deploy time. The
-// program age-encrypts {ClientId, ClientSecret} to the host key and writes the
-// descriptor + credential; the provider that produced the bundle stays unaware
-// of hosts and SSH.
-type ServiceSecretsBundle struct {
-	Project      pulumi.StringOutput // workspace ID
-	ClientID     pulumi.StringOutput // identity universal-auth client ID
-	ClientSecret pulumi.StringOutput // identity universal-auth client secret (sensitive)
-	ProviderKind string              // e.g. "infisical"
-	URL          string              // provider site URL
-	Environment  string              // provider environment slug
-	SecretPath   string              // the service's scoped path, e.g. "/ghost"
-	// Env maps each service env var name to its vault key relative to SecretPath
-	// (e.g. "DATABASE_URL" -> "infra/DATABASE_URL").
-	Env map[string]string
-}
-
-// ServiceSecretsProvisioner provisions one service's runtime secrets: it writes
-// the service's infra secrets under its scoped path and mints a per-service
-// machine identity scoped read-only to that path, returning the bundle the
-// program needs to write the descriptor + host-key-encrypted credential. It
-// returns a nil bundle (no error) when the service has no secrets to deliver.
-type ServiceSecretsProvisioner interface {
-	// grantSecrets are env-var → value-field secret outputs already resolved by the
-	// program from the service's database grants (ADR-0025); the provisioner writes
-	// them into the same infra batch alongside the environment.yaml-derived secrets.
-	ProvisionService(ctx *pulumi.Context, svc ServiceSpec, env, region string, all AllOutputs, grantSecrets map[string]pulumi.StringOutput) (*ServiceSecretsBundle, error)
-
-	// ProvisionMeshHost provisions one mesh host's material-pull access
-	// (ADR-0033): it ensures the scope's shared mesh workspace exists and mints a
-	// per-host machine identity whose read scope covers ONLY the host's own path
-	// (/<hostKey>) — exactly the material that host's mesh proxy holds in memory
-	// anyway. The returned bundle feeds the mesh descriptor + host-key-encrypted
-	// credential the program writes to the host; its Env map is always nil.
-	ProvisionMeshHost(ctx *pulumi.Context, hostKey, env string) (*ServiceSecretsBundle, error)
-}
-
 // ManifestContribution is a set of non-secret fields a contributor adds to a
 // compute instance's manifest.
 type ManifestContribution = map[string]any

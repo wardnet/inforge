@@ -14,6 +14,7 @@ import (
 
 	"github.com/wardnet/inforge/internal/agehost"
 	"github.com/wardnet/inforge/internal/agent"
+	"github.com/wardnet/inforge/internal/hostsecrets"
 )
 
 // hostKeyPair returns an SSH host key pair as the two on-disk artifacts inforge
@@ -61,31 +62,31 @@ func TestEncryptTrimsPublicKeyNewline(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
-// TestInteropProgramEncryptAgentDecrypt is the critical 2a<->2b interop
-// test: the program-side encrypt (agehost.Encrypt to a host public key) must be
-// readable by the agent-side decrypt (agent.DecryptCredential
-// reading credential.age with the host private key). Both run the real
-// production code paths — no re-implementation — so a drift in either half fails
-// here.
+// TestInteropProgramEncryptAgentDecrypt is the critical program<->agent
+// interop test (ADR-0035): the program-side encrypt (hostsecrets.EncryptBlob,
+// wrapping agehost.Encrypt, to a host public key) must be readable by the
+// agent-side decrypt (agent.DecryptSecretsBlob reading secrets.age with the
+// host private key). Both run the real production code paths — no
+// re-implementation — so a drift in either half fails here.
 func TestInteropProgramEncryptAgentDecrypt(t *testing.T) {
 	pubLine, privPEM := hostKeyPair(t)
-	plaintext := []byte(`{"client_id":"svc-id","client_secret":"svc-secret"}`)
+	blob := hostsecrets.Blob{Env: map[string]string{"client_id": "svc-id", "client_secret": "svc-secret"}}
 
 	// Producer (inforge program): encrypt to the host public key.
-	ct, err := agehost.Encrypt(plaintext, pubLine)
+	ct, err := hostsecrets.EncryptBlob(blob, pubLine)
 	require.NoError(t, err)
 
 	// Lay the bytes out on disk exactly as deploy + the host do.
 	dir := t.TempDir()
-	credPath := filepath.Join(dir, "credential.age")
+	secretsPath := filepath.Join(dir, "secrets.age")
 	keyPath := filepath.Join(dir, "ssh_host_ed25519_key")
-	require.NoError(t, os.WriteFile(credPath, ct, 0o600))
+	require.NoError(t, os.WriteFile(secretsPath, ct, 0o600))
 	require.NoError(t, os.WriteFile(keyPath, privPEM, 0o600))
 
 	// Consumer (inforge-agent): decrypt with the host private key.
-	got, err := agent.DecryptCredential(credPath, keyPath)
+	got, err := agent.DecryptSecretsBlob(secretsPath, keyPath)
 	require.NoError(t, err)
-	assert.Equal(t, plaintext, got)
+	assert.Equal(t, blob, got)
 }
 
 func TestDecryptWrongKeyFails(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/wardnet/inforge/internal/agent"
 	"github.com/wardnet/inforge/internal/meshnginx"
@@ -314,76 +313,45 @@ func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, g
 		if err := mp.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], cfg, listenAddr, targetIPs, env, []pulumi.Resource{gate}); err != nil {
 			return err
 		}
-		// The host's material-pull access (ADR-0033): mesh workspace + per-host
-		// identity + on-host mesh descriptor/credential. The service list is the
-		// egress set — every co-located pki: service, already sorted.
+		// The on-host mesh descriptor (secret-free): the service list is the
+		// egress set — every co-located pki: service, already sorted. There is no
+		// material to deliver here (ADR-0035): the mesh proxy's leaf.age is
+		// written later, directly, by `inforge pki renew`'s SSH push.
 		services := make([]string, 0, len(mh.egress))
 		for _, e := range mh.egress {
 			services = append(services, e.Name)
 		}
-		if err := deliverMeshHost(ctx, reg, hostKey, host, services, deployUserByCompute[hostKey], deployPrivateKey, env, slug, gate); err != nil {
+		if err := deliverMeshHost(ctx, hostKey, host, services, deployUserByCompute[hostKey], deployPrivateKey, env, slug, gate); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// deliverMeshHost provisions one mesh host's pull access (the scope's mesh
-// workspace + a per-host identity read-scoped to /<hostKey>) and writes the two
-// on-host files the pull needs into meshpaths.AgentDir: the mesh descriptor
-// (0644, secret-free) and the host-key-encrypted credential (0600). It mirrors
-// deliverServiceSecrets' two-phase shape: read the host SSH public key, encrypt
-// the identity credential to it program-side inside an ApplyT, write both files.
-func deliverMeshHost(ctx *pulumi.Context, reg registry.ProviderRegistry, hostKey string, host types.ComputeOutputs, services []string, deployUser, deployPrivateKey, env, slug string, gate pulumi.Resource) error {
-	provName := reg.SecretsProviderName()
-	if provName == "" {
-		return fmt.Errorf("mesh host %q needs a secrets provider (the mesh proxy pulls its cert material from it) but none is configured for the scope", hostKey)
-	}
-	prov, err := reg.ServiceSecretsProvisioner(provName)
-	if err != nil {
-		return fmt.Errorf("mesh host %q: %w", hostKey, err)
-	}
-	bundle, err := prov.ProvisionMeshHost(ctx, hostKey, env)
-	if err != nil {
-		return fmt.Errorf("mesh host %q: %w", hostKey, err)
-	}
-
+// deliverMeshHost writes the on-host mesh descriptor (0644, secret-free —
+// just the co-located Services list) into meshpaths.AgentDir. Unlike a
+// service, a mesh host gets no secrets.age/leaf.age from deploy: the mesh
+// proxy has never received deploy-time secrets (ProvisionMeshHost only ever
+// minted pull-access identity, never material), and under ADR-0035 the actual
+// leaf + trust-bundle content is delivered later, directly, by `inforge pki
+// renew`'s SSH push as leaf.age — a separate persistent artifact this deploy
+// pass does not write (see docs/adr/0035, refinement 1). So there is no host
+// key to read and nothing to encrypt here — a single static command suffices.
+func deliverMeshHost(ctx *pulumi.Context, hostKey string, host types.ComputeOutputs, services []string, deployUser, deployPrivateKey, env, slug string, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "mesh", hostKey)
 
-	hostPub, err := readHostPubKey(ctx, conn, name+"-hostkey", gate)
+	descriptor, err := renderMeshDescriptor(services)
 	if err != nil {
-		return fmt.Errorf("mesh host %q: read host key: %w", hostKey, err)
+		return fmt.Errorf("mesh host %q: %w", hostKey, err)
 	}
 
-	descriptor := bundle.Project.ApplyT(func(project string) (string, error) {
-		return renderMeshDescriptor(bundle, project, services)
-	}).(pulumi.StringOutput)
-
-	credAge := encryptCredentialAge(hostPub, bundle.ClientID, bundle.ClientSecret, "mesh host "+hostKey)
-
-	writeScript := pulumi.All(descriptor, credAge).ApplyT(func(args []interface{}) string {
-		desc, _ := args[0].(string)
-		cred, _ := args[1].(string)
-		return iremote.WriteFileScript(meshpaths.DescriptorPath, desc) + "\n" +
-			iremote.WriteFileScriptMode(meshpaths.CredentialPath, cred, "0600")
-	}).(pulumi.StringOutput)
-
-	deleteScript := iremote.DeleteFileScript(meshpaths.DescriptorPath) + "\n" +
-		iremote.DeleteFileScript(meshpaths.CredentialPath)
-
-	if _, err := remote.NewCommand(ctx, name+"-agent", &remote.CommandArgs{
-		Connection: conn,
-		Create:     writeScript,
-		Update:     writeScript,
-		Delete:     pulumi.String(deleteScript),
-		Triggers:   pulumi.Array{writeScript},
-		// A Triggers change (any mesh descriptor change — e.g. the service list)
-		// replaces this resource; delete-before-replace keeps the old Delete
-		// script from removing the freshly written files after the new Create
-		// (see deliverServiceSecrets).
-	}, pulumi.DependsOn([]pulumi.Resource{hostPub}), pulumi.DeleteBeforeReplace(true)); err != nil {
-		return fmt.Errorf("mesh host %q: write mesh descriptor/credential: %w", hostKey, err)
+	// A Triggers change (the service list changed) replaces this resource;
+	// writeHostFile's delete-before-replace keeps the old Delete script from
+	// removing the freshly written descriptor after the new Create (see
+	// deliverServiceSecrets).
+	if _, err := writeHostFile(ctx, name, "-agent", conn, meshpaths.DescriptorPath, descriptor, gate); err != nil {
+		return fmt.Errorf("mesh host %q: write mesh descriptor: %w", hostKey, err)
 	}
 	return nil
 }
@@ -391,16 +359,9 @@ func deliverMeshHost(ctx *pulumi.Context, reg registry.ProviderRegistry, hostKey
 // renderMeshDescriptor marshals the on-host mesh descriptor, building the
 // agent's own MeshDescriptor struct (imported, not duplicated) so the producer
 // can never drift from the consumer's schema.
-func renderMeshDescriptor(bundle *types.ServiceSecretsBundle, project string, services []string) (string, error) {
+func renderMeshDescriptor(services []string) (string, error) {
 	d := agent.MeshDescriptor{
-		Version: agent.MeshSupportedVersion,
-		Provider: agent.Provider{
-			Kind:        bundle.ProviderKind,
-			URL:         bundle.URL,
-			Project:     project,
-			Environment: bundle.Environment,
-			SecretPath:  bundle.SecretPath,
-		},
+		Version:  agent.MeshSupportedVersion,
 		Services: services,
 	}
 	b, err := yaml.Marshal(d)

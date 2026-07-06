@@ -1,9 +1,9 @@
 # inforge — agent guide
 
 Inforge is a Go toolchain that turns declarative infrastructure definitions into real deployments
-via Pulumi and GitHub Actions. This repository builds four statically-linked binaries: the `inforge`
-CLI, the `inforge-agent` on-host runtime agent (every service's systemd ExecStart), and two
-Pulumi provider plugins (`pulumi-resource-neon`, `pulumi-resource-infisical`).
+via Pulumi and GitHub Actions. This repository builds three statically-linked binaries: the `inforge`
+CLI, the `inforge-agent` on-host runtime agent (every service's systemd ExecStart), and one
+Pulumi provider plugin (`pulumi-resource-neon`).
 
 ## Commands
 
@@ -27,7 +27,6 @@ internal/pki/                                      # PKI store (pki.enc.yaml rea
 internal/meshcert/                                 # deploy/renew orchestration: decrypt intermediate, mint leaf, compute trust set
 internal/validate/                                 # inforge validate — structural checks incl. credential-free PKI pass
 providers/neon/cmd/pulumi-resource-neon/           # Pulumi provider plugin — Neon
-providers/infisical/cmd/pulumi-resource-infisical/ # Pulumi provider plugin — Infisical
 .goreleaser.yml                                    # build/release config (v2 schema)
 .golangci.yml                                      # lint config (v2 schema)
 .github/workflows/{ci,release}.yml                 # CI on PRs to main; release on v* tags
@@ -100,12 +99,12 @@ Deploy-time and renewal leaf minting is live. Key packages:
   `TrustSet` computes the peer-verification scope set (global service → all regions + global; regional
   service → own region + global). Shared delivery constants: `MtlsDir`, `EnvLeafCertPath`,
   `EnvLeafKeyPath`, `EnvTrustBundlePath`, `CertFiles`, `DescriptorFiles`.
-- **`providers/infisical.CertWriter`** — imperative (non-Pulumi) write path for `inforge pki renew`;
-  authenticates once, caches workspace IDs; uses `workspaceName` / `servicePath` helpers shared with
-  the Pulumi deploy path so renewed certs land at the same provider address deploy provisioned.
-- **`internal/agent.Descriptor`** — `SupportedVersion` is now **4**; the `Files` map
-  (`env-var → provider secret key`) carries mesh material paths. A descriptor with `files:` but no
-  `provider.kind` is rejected.
+- **Delivery (superseded by ADR-0035, see below).** `inforge pki renew`'s write path is no longer a
+  provider client — it SSH-pushes an age-encrypted `leaf.age` directly to each host and signals
+  reload-or-restart (`cmd/inforge/pki.go`, `cmd/inforge/sshpush.go`). There is no more
+  `providers/infisical` package.
+- **`internal/agent.Descriptor`** — the `Files` map (`env-var → key into the decrypted secrets/leaf
+  blob`) carries mesh material paths.
 - **Observability env-var contract (#134).** `agent.buildEnv` injects a non-secret OTel
   resource-identity set into every service (under the reserved `INFORGE_*` prefix):
   `INFORGE_SERVICE_NAMESPACE` (= service name, `service.namespace`), `INFORGE_INSTANCE_ID`
@@ -162,17 +161,16 @@ Key internal seams introduced in slice #110:
 - **The `MTLS_*_PATH` env names are reserved.** `inforge validate` rejects a service `environment:`
   key colliding with a `meshcert.DescriptorFiles()` name (projection would overwrite it), and rejects
   a multi-line `reload:` (it becomes one `ExecReload=` line).
-- **Renewal is pull-based, per consumer.** An `mtls_files:` service's `wardnet-<svc>-renew.timer` runs
-  `inforge-agent project <dir>` daily; on a changed leaf it runs `systemctl reload-or-restart` —
-  **reload** when the service declares `reload:` (emitted as `ExecReload=`, no downtime), else
-  **restart**. The mesh proxy's `wardnet-mesh-renew.timer` runs `inforge-agent mesh-project` the same
-  way (ADR-0033). `inforge pki renew` only writes the provider; hosts converge on their own. Neither
-  renewal oneshot may declare its own `RuntimeDirectory=` (systemd would delete the running unit's
-  dir when the oneshot stops).
+- **Renewal is push-based (ADR-0035, superseding ADR-0033's pull design).** There are no more
+  on-host renewal timers: `inforge pki renew` mints a fresh leaf and SSH-pushes the host's
+  `leaf.age` directly, then unconditionally signals `systemctl reload-or-restart` — **reload** when
+  the service declares `reload:` (emitted as `ExecReload=`, no downtime), else **restart**. The mesh
+  proxy's own leaf.age (aggregating every co-located service's leaf + trust bundle) is pushed and
+  reloaded the same way. See "Secrets and mesh leaf delivery" below.
 - **A service is provisioned only when it has something to fetch.** The skip is
-  `len(svc.Environment)==0 && !svc.MtlsFiles` (+ no grants) in both `program.provisionServiceSecrets`
-  and `infisical.ProvisionService` — `pki:` alone no longer forces a workspace/identity: a plain mesh
-  member's leaf is the mesh proxy's business (ADR-0033).
+  `len(svc.Environment)==0 && !svc.MtlsFiles` (+ no grants) in `program.provisionServiceSecrets` —
+  `pki:` alone no longer forces anything to be delivered at deploy time: a plain mesh member's leaf
+  is the mesh proxy's business, and an `mtls_files:` service's own leaf is `inforge pki renew`'s.
 
 ## Grants (#117, ADR-0025)
 
@@ -195,8 +193,9 @@ is now rejected — DB credentials flow only through grants). slice C = the PKI 
   `types.DatabaseOutputs.RoleProvisioner` threaded through `AllOutputs` (so a regional service granting a
   `database/global/<name>` resolves the same way `ref:` does); the per-service role is named for the
   **consuming** service instance (`naming.Resource(env, consumerSlug, "dbrole", svc-db)`). The deploy
-  wiring is `program.resolveDatabaseGrants` → `infisical.ProvisionService(…, grantSecrets)`, merging
-  grant value secrets into the same `/<svc>/infra` batch. Agent untouched.
+  wiring is `program.resolveDatabaseGrants` merging grant value secrets into the same resolved
+  plaintext map `deliverServiceSecrets` age-encrypts into the service's `secrets.age` (ADR-0035).
+  Agent untouched.
 
 - **`internal/grant`** is the abstraction. `Grantable.FieldNames(perm) (values, files)` is
   **credential- and instance-independent** (keyed by resource *type* + permission) — the validator calls
@@ -456,27 +455,27 @@ feed the gateway's derived routing table (rule `gateway-routes-are-derived-from-
   systemd unit + a **placeholder-cert seed** (self-signed leaf/key/bundle per SNI, only-when-absent —
   the `provisionApps` idiom) run as an `ExecStartPre`, so `nginx -t` is green and the proxy starts
   before real leaves land.
-- **Real leaf delivery is PULL-based (ADR-0033, the custody shift).** Per scope, deploy creates one
-  shared **mesh workspace** (container `mesh`); per mesh host, a **per-host identity** read-scoped to
-  `/<hostKey>` only, plus an on-host **mesh descriptor** (`agent.MeshDescriptor`, own
-  `MeshSupportedVersion=1`, strict fields) + host-key-encrypted `credential.age` in
-  `meshpaths.AgentDir` (`program.deliverMeshHost` → `infisical.ProvisionMeshHost`). The proxy pulls
-  with `inforge-agent mesh-project <dir>`: fetch `/<hostKey>` → atomic-project into the tmpfs
-  `RuntimeDir` (owner nginx, 0400) — run as the unit's first `ExecStartPre`, `-`-prefixed so a
-  degraded pull never blocks the proxy start (a reboot re-seeds REAL material; the placeholder seed
-  runs second, filling only gaps), and from a daily `wardnet-mesh-renew.timer` (reload only on
-  change + active unit). The binary itself fails HARD, so the un-prefixed renew oneshot surfaces
-  persistent pull breakage as a failed unit. `inforge pki renew` writes the per-host aggregates
-  (each co-located service's leaf + one concatenated trust bundle) via
-  `infisical.CertWriter.WriteMeshHost`, grouped by the shared `internal/meshplan.ServicesByHost`
-  derivation (rule `mesh-host-grouping-is-single-sourced`) — still zero Pulumi, zero SSH, and
-  per-host/per-service failures accumulate rather than aborting the run. The deploy baseline
+- **Real leaf delivery is PUSH-based (ADR-0035, superseding ADR-0033's pull design and the custody
+  shift it made).** There is no mesh workspace, no per-host provider identity, and no
+  `credential.age` any more. Deploy writes only the on-host **mesh descriptor**
+  (`agent.MeshDescriptor`, `MeshSupportedVersion=2`, strict fields, secret-free) to
+  `meshpaths.AgentDir` (`program.deliverMeshHost`). `inforge pki renew` mints the per-host
+  aggregate (each co-located service's leaf + one concatenated trust bundle, grouped by the shared
+  `internal/meshplan.ServicesByHost` derivation, rule `mesh-host-grouping-is-single-sourced`),
+  age-encrypts it to the host's own SSH host public key (read live over SSH), and SSH-writes it
+  directly to `meshpaths.LeafPath` (`leaf.age`) before signaling
+  `systemctl reload-or-restart wardnet-mesh` over the same connection (`cmd/inforge/pki.go`,
+  `cmd/inforge/sshpush.go`) — zero Pulumi, still, and per-host/per-service failures accumulate
+  rather than aborting the run. On the host, nginx cannot decrypt age itself: the mesh unit's
+  `ExecStartPre` runs `inforge-agent mesh-project <dir>`, now a purely **local** decrypt of
+  whatever `leaf.age` already sits on disk (no network, no retry loop) that projects each file into
+  the tmpfs `RuntimeDir` (owner nginx, 0400) — `-`-prefixed so an absent/corrupt leaf.age (first
+  boot, before the first push) never blocks the proxy start; the placeholder seed fills any
+  remaining gap. There is no on-host renewal timer any more — a reboot's ordinary boot flow
+  (local decrypt → project → start) is the self-heal. The deploy baseline
   (`cmd/inforge.meshBaseline`, post-`up` in `deploy`/`ephemeral up`) resolves the SSH key up front,
-  mints via the same renew core, then SSH-triggers each host's renew oneshot (targets from the
-  `meshDeployDescriptor` stack output; key via `--ssh-key`/`INFORGE_DEPLOY_KEY`; configEnv honors
-  the stack's `source_environment`) — a **signal push, never material**; trigger failures are
-  warnings, only the mint phase fails the command, and `-o json` still gets its summary. The
-  provider-key ↔ on-host-path scheme is single-sourced in `meshpaths`
+  then calls the same mint-and-push core (`renewMeshCertsAs`) directly — there is no separate
+  "trigger" step. The provider-key ↔ on-host-path scheme is single-sourced in `meshpaths`
   (`LeafCertKey`/`LeafKeyKey`/`BundleKey`; `RuntimeDir + key == LeafCertPath`).
 - **Firewall (`firewallPlanByHost(res, meshPublic)`).** A mesh host opens `meshpaths.MTLSPort` to its
   private network CIDR (regional) or `0.0.0.0/0` (the global host — the cross-scope mesh gateway; this is

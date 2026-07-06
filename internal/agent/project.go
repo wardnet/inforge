@@ -4,21 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 )
-
-// systemctl runs a systemctl command; overridden in tests. The renewal projector
-// uses it to check the unit is active and to reload-or-restart it after a leaf
-// changes.
-var systemctl = func(args ...string) error {
-	out, err := exec.Command("systemctl", args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("systemctl %v: %w: %s", args, err, bytes.TrimSpace(out))
-	}
-	return nil
-}
 
 // projectFiles writes each of the descriptor's files: entries (env-var → provider
 // key) as a PEM file under dir, mode 0400 owned by uid:gid. The agent runs

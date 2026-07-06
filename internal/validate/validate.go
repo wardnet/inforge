@@ -1047,47 +1047,6 @@ func refsOf[T any](dir string, providerOf func(T) string) ([]providerRef, error)
 	return refs, nil
 }
 
-// secretsProviderNames are the providers that can serve a service's runtime
-// secrets. Keep in sync with registry.SecretsProviderName and the cases in
-// registry.ServiceSecretsProvisioner.
-var secretsProviderNames = []string{"infisical"}
-
-// hasSecretsProvider reports whether an available provider set includes any
-// secrets-capable provider.
-func hasSecretsProvider(available map[string]bool) bool {
-	for _, name := range secretsProviderNames {
-		if available[name] {
-			return true
-		}
-	}
-	return false
-}
-
-// servicesWithSecrets returns the path of every parsed service file under base
-// that declares at least one secret. A service with any secrets needs a secrets
-// provider to write them to at deploy (program.provisionServiceSecrets fails
-// otherwise), regardless of the secrets' source kind.
-func servicesWithSecrets(base string) ([]string, error) {
-	files, folders, err := readFolders[types.ServiceSpec](filepath.Join(base, "service"))
-	if err != nil {
-		return nil, err
-	}
-	var paths []string
-	for i, f := range files {
-		if f.parseErr != nil {
-			continue
-		}
-		env, err := loader.LoadEnvironmentFile(folders[i])
-		if err != nil {
-			return nil, err
-		}
-		if len(env) > 0 {
-			paths = append(paths, filepath.Join(folders[i], "environment.yaml"))
-		}
-	}
-	return paths, nil
-}
-
 // checkProviderAvailability verifies, for every region in the table, that each
 // resource's declared provider is present in that region's providers block. The
 // shared set deploys into every region, so a provider missing from any region is
@@ -1098,10 +1057,6 @@ func servicesWithSecrets(base string) ([]string, error) {
 // files within each are reported in sorted order for deterministic output.
 func checkProviderAvailability(r *reporter, base string, table regions.Table, defaults types.ProviderDefaults) error {
 	refs, err := collectProviderRefs(base, defaults)
-	if err != nil {
-		return err
-	}
-	secretSvcPaths, err := servicesWithSecrets(base)
 	if err != nil {
 		return err
 	}
@@ -1117,11 +1072,6 @@ func checkProviderAvailability(r *reporter, base string, table regions.Table, de
 		for _, ref := range refs {
 			if !available[ref.provider] {
 				msgs = append(msgs, fmt.Sprintf("%s: provider %q not defined in this region's regions.yaml providers block", ref.path, ref.provider))
-			}
-		}
-		if len(secretSvcPaths) > 0 && !hasSecretsProvider(available) {
-			for _, path := range secretSvcPaths {
-				msgs = append(msgs, fmt.Sprintf("%s: declares secrets but this region's regions.yaml providers block has no secrets provider (one of: %s)", path, strings.Join(secretsProviderNames, ", ")))
 			}
 		}
 		if len(msgs) > 0 {
@@ -1231,20 +1181,11 @@ func checkGlobalProviderAvailability(r *reporter, globalBase string, global *reg
 	if err != nil {
 		return err
 	}
-	secretSvcPaths, err := servicesWithSecrets(globalBase)
-	if err != nil {
-		return err
-	}
 	available := availableProviders(global.Providers)
 	var msgs []string
 	for _, ref := range refs {
 		if !available[ref.provider] {
 			msgs = append(msgs, fmt.Sprintf("%s: provider %q not defined in regions.yaml global providers block", ref.path, ref.provider))
-		}
-	}
-	if len(secretSvcPaths) > 0 && !hasSecretsProvider(available) {
-		for _, path := range secretSvcPaths {
-			msgs = append(msgs, fmt.Sprintf("%s: declares secrets but regions.yaml global providers block has no secrets provider (one of: %s)", path, strings.Join(secretsProviderNames, ", ")))
 		}
 	}
 	if len(msgs) > 0 {

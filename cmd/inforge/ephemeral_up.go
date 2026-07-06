@@ -135,13 +135,11 @@ func runEphemeralUp(ctx context.Context, configPath, dir, from, slugFlag, ttlFla
 		return err
 	}
 
-	// The mesh leaf baseline (ADR-0033) under the ephemeral identity: mint the
-	// clone's mesh material (source config, slug identity) into the slug-scoped
-	// mesh workspace and trigger each ephemeral mesh host's pull, so the
-	// replicated services below start against proxies holding real leaves.
-	// Trigger failures inside are warnings (hosts converge on their timer);
-	// only a mint failure aborts before replication.
-	if err := meshBaseline(ctx, s, dir, from, slug, sshKeyPath, os.Stdout); err != nil {
+	// The mesh leaf baseline (ADR-0035) under the ephemeral identity: mint the
+	// clone's mesh material (source config, slug identity) and SSH-push it
+	// directly to each ephemeral mesh host, so the replicated services below
+	// start against proxies already holding real leaves.
+	if err := meshBaseline(ctx, dir, from, slug, sshKeyPath, os.Stdout); err != nil {
 		return err
 	}
 
@@ -273,7 +271,7 @@ func replicateService(ctx context.Context, store *release.Store, dir, srcEnv, sl
 	// A mesh service's leaf is minted under the ephemeral identity (slug) from the
 	// SOURCE's intermediate, written to the slug-scoped workspace the deploy just
 	// provisioned — so the restart below lands a fresh leaf rather than crash-loop.
-	if err := mintReplicatedServiceLeaf(ctx, dir, srcEnv, slug, svc.Name, sw); err != nil {
+	if err := mintReplicatedServiceLeaf(ctx, dir, srcEnv, slug, svc.Name, sshKeyPath, sw); err != nil {
 		return err
 	}
 
@@ -338,16 +336,16 @@ func replicateApp(ctx context.Context, store *release.Store, srcEnv, slug, sshKe
 // intermediate, writing it to the slug-scoped /<svc>/mtls the ephemeral deploy
 // provisioned — the ephemeral analogue of mintReleasedServiceLeaf. configEnv
 // (the source) selects the pki.enc.yaml/variables/regions; identityEnv (the
-// slug) stamps the SPIFFE ID and Infisical workspace. Any service without
+// slug) stamps the SPIFFE ID and the on-host leaf.age this SSH-pushes to. Any service without
 // mtls_files is a no-op — its mesh copy is written by the ephemeral post-up
 // baseline, not per replicated service (ADR-0033). The source resource set is
 // taken from the already-loaded sourceWorkloads (no re-read).
-func mintReplicatedServiceLeaf(ctx context.Context, dir, srcEnv, slug, svc string, sw sourceWorkloads) error {
+func mintReplicatedServiceLeaf(ctx context.Context, dir, srcEnv, slug, svc, sshKeyPath string, sw sourceWorkloads) error {
 	// renewMeshCertsAs no-ops (before touching the store or INFORGE_SECRETS_KEY)
 	// when the named service has no service-side mtls files to mint.
 	global := types.Resources{Service: sw.globalSvcs}
 	regional := types.Resources{Service: sw.regionalSvcs}
-	count, err := renewMeshCertsAs(ctx, dir, srcEnv, slug, global, regional, svc)
+	count, err := renewMeshCertsAs(ctx, dir, srcEnv, slug, global, regional, svc, sshKeyPath, os.Stdout)
 	if err != nil {
 		return fmt.Errorf("mint mesh leaf for %s under %s: %w", svc, slug, err)
 	}

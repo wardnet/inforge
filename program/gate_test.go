@@ -149,7 +149,7 @@ func TestProvisioningDependsOnGate(t *testing.T) {
 		}
 		gates := map[string]pulumi.Resource{}
 		// No bundle for ghost -> secret-less descriptor path.
-		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", "us-east-1", "use1", "example.com", "1.2.3")
+		return provisionServices(ctx, res, computeOut, map[string]map[string]pulumi.StringOutput{}, gates, "priv", "prd", "us-east-1", "use1", "example.com", "1.2.3")
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 
@@ -189,7 +189,7 @@ func TestTLSAndServiceShareOneGate(t *testing.T) {
 		if err := realizeIngress(ctx, reg, res, computeOut, gates, nil, "priv", "prd", "use1", "example.com", "", types.ProviderDefaults{}); err != nil {
 			return err
 		}
-		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", "us-east-1", "use1", "example.com", "1.2.3")
+		return provisionServices(ctx, res, computeOut, map[string]map[string]pulumi.StringOutput{}, gates, "priv", "prd", "us-east-1", "use1", "example.com", "1.2.3")
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 

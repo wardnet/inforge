@@ -125,10 +125,10 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 		return fmt.Errorf("push state: %w", pushErr)
 	}
 
-	// The mesh leaf baseline (ADR-0033): mint real mesh material into the
-	// provider and trigger each mesh host's pull, so the proxies the up just
-	// (re)configured leave their placeholders now rather than on the daily
-	// timer. The config source honors the stack's source_environment (an
+	// The mesh leaf baseline (ADR-0035): mint real mesh material and SSH-push it
+	// directly to each mesh host, so the proxies the up just (re)configured
+	// leave their placeholders now rather than waiting for the next `inforge
+	// pki renew`. The config source honors the stack's source_environment (an
 	// ephemeral stack reads its SOURCE env's tree — same split program.Run
 	// applies; see rule ephemeral-identity-vs-config-source); its identity is
 	// the stack name. Progress goes to humanW (stderr in JSON mode), and the
@@ -138,7 +138,7 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 	if v, cfgErr := s.GetConfig(ctx, cfgKeySourceEnvironment); cfgErr == nil && v.Value != "" {
 		configEnv = v.Value
 	}
-	baseErr := meshBaseline(ctx, s, dir, configEnv, stackName, sshKeyPath, humanW)
+	baseErr := meshBaseline(ctx, dir, configEnv, stackName, sshKeyPath, humanW)
 
 	if jsonMode {
 		if err := printChangeSummaryJSON(stackName, p.Changes(), p.Failures()); err != nil {

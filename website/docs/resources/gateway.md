@@ -167,8 +167,8 @@ The gateway participates in the health tier on both sides:
 
 The gateway's public cert is ACME (Let's Encrypt) on its FQDN, exactly like an app. Its **mesh
 client leaf** (`CN=<scope>/gateway`, minted from its `pki:`) is delivered like every mesh leaf:
-written to the host's path in the mesh workspace by `inforge deploy` (baseline) and
-[`inforge pki renew`](/cli/pki), pulled by the host's `wardnet-mesh-renew` timer. Nothing to run
+SSH-pushed into the host's `leaf.age` by `inforge deploy` (baseline) and
+[`inforge pki renew`](/cli/pki), which also reload-or-restarts the mesh proxy. Nothing to run
 per gateway.
 
 ## See also

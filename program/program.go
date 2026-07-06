@@ -14,10 +14,11 @@ import (
 	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
-	"github.com/wardnet/inforge/internal/agehost"
 	"github.com/wardnet/inforge/internal/agent"
 	"github.com/wardnet/inforge/internal/app"
 	"github.com/wardnet/inforge/internal/grant"
+	"github.com/wardnet/inforge/internal/hostpaths"
+	"github.com/wardnet/inforge/internal/hostsecrets"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/manifest"
 	"github.com/wardnet/inforge/internal/meshcert"
@@ -301,11 +302,11 @@ func Run(ctx *pulumi.Context) error {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
-		bundles, err := provisionServiceSecrets(ctx, sc.reg, sc.res, all, env, sc.key, sc.slug)
+		serviceSecrets, err := provisionServiceSecrets(ctx, sc.res, all, env, sc.key, sc.slug)
 		if err != nil {
 			return err
 		}
-		if err := provisionServices(ctx, sc.res, computeOutputs[sc.key], bundles, gates, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug, vars.BaseDomain, inforgeVersion); err != nil {
+		if err := provisionServices(ctx, sc.res, computeOutputs[sc.key], serviceSecrets, gates, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug, vars.BaseDomain, inforgeVersion); err != nil {
 			return err
 		}
 		if err := provisionObservability(ctx, sc.res, computeOutputs[sc.key], gates, vars.Observability, obsAuthB64, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
@@ -477,7 +478,7 @@ func attachPrivateNetworks(ctx *pulumi.Context, reg registry.ProviderRegistry, r
 // whole `pulumi up`. The unit is written, daemon-reloaded, and enabled (for
 // boot persistence); release performs the first real start with code present.
 // Connection details and the preview/up guard mirror realizeIngress.
-func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, bundles map[string]*types.ServiceSecretsBundle, gates map[string]pulumi.Resource, deployPrivateKey, env, region, slug, baseDomain, inforgeVersion string) error {
+func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, serviceSecrets map[string]map[string]pulumi.StringOutput, gates map[string]pulumi.Resource, deployPrivateKey, env, region, slug, baseDomain, inforgeVersion string) error {
 	if len(res.Service) == 0 {
 		return nil
 	}
@@ -522,11 +523,13 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		if err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug, inforgeVersion, gate); err != nil {
 			return err
 		}
-		// Every service gets a descriptor.yaml. A secret-bearing service also gets a
-		// host-key-encrypted credential.age; a secret-less one (no bundle) gets a
-		// static descriptor with an empty provider and no env.
-		if bundle := bundles[svc.Name]; bundle != nil {
-			if err := deliverServiceSecrets(ctx, svc, host, bundle, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], gate); err != nil {
+		// Every service gets a descriptor.yaml. A service with resolved env/grant
+		// secrets also gets a host-key-encrypted secrets.age (ADR-0035); a
+		// secret-less one gets a static descriptor with no env (mtls_files: still
+		// gets its files: entries in the descriptor — its leaf.age is delivered
+		// later by `inforge pki renew`, not here).
+		if secretEnv := serviceSecrets[svc.Name]; len(secretEnv) > 0 {
+			if err := deliverServiceSecrets(ctx, svc, host, secretEnv, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], gate); err != nil {
 				return err
 			}
 		} else {
@@ -707,43 +710,41 @@ func appProvisionScript(name string) string {
 	}, "\n")
 }
 
-// provisionServiceSecrets provisions each service's runtime secrets bundle: it
-// writes the service's infra secrets under its scoped vault path and mints a
-// per-service machine identity, returning the bundles keyed by service name. A
-// service whose container has no infisical secrets yields no bundle (and gets a
-// unit + a static secret-less descriptor, but no credential — see
-// deliverServiceDescriptor).
-func provisionServiceSecrets(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, all types.AllOutputs, env, region, slug string) (map[string]*types.ServiceSecretsBundle, error) {
-	bundles := map[string]*types.ServiceSecretsBundle{}
-	provName := reg.SecretsProviderName()
+// provisionServiceSecrets resolves each service's final env-var secrets set
+// (ADR-0035): environment.yaml refs (resolveRef) merged with database grant
+// outputs (resolveDatabaseGrants), keyed by env-var name, unresolved
+// (pulumi.StringOutput) until deliverServiceSecrets awaits them inside the
+// remote command's ApplyT. A service with neither yields no entry — it gets a
+// unit + a static secret-less descriptor (see deliverServiceDescriptor); an
+// mtls_files: true service with no env/grants also takes that path here (its
+// leaf.age is delivered later by `inforge pki renew`, not this pass) but still
+// gets its descriptor files: entries via renderDescriptor.
+func provisionServiceSecrets(ctx *pulumi.Context, res types.Resources, all types.AllOutputs, env, region, slug string) (map[string]map[string]pulumi.StringOutput, error) {
+	out := map[string]map[string]pulumi.StringOutput{}
 	for _, svc := range res.Service {
-		// A service needs provisioning when it has infra secrets, database grants, OR
-		// opts into service-side mtls files (mtls_files: true — the raw-plane
-		// exception; the host fetches its leaf from /<svc>/mtls). A plain mesh
-		// member needs nothing here: its leaf lives with the mesh proxy (ADR-0033).
-		if len(svc.Environment) == 0 && !svc.MtlsFiles && len(svc.Grants) == 0 {
+		if len(svc.Environment) == 0 && len(svc.Grants) == 0 {
 			continue
 		}
-		if provName == "" {
-			return nil, fmt.Errorf("service %q needs a secrets provider (it has secrets, grants, or a mesh pki) but region %q has none configured", svc.Name, region)
+		resolved := map[string]pulumi.StringOutput{}
+		for key, source := range svc.Environment {
+			val, err := resolveRef(source, svc.Container, region, all)
+			if err != nil {
+				return nil, fmt.Errorf("service %q: resolve ref for secret %q: %w", svc.Name, key, err)
+			}
+			resolved[key] = val
 		}
 		grantSecrets, err := resolveDatabaseGrants(ctx, svc, all, env, region, slug)
 		if err != nil {
 			return nil, fmt.Errorf("service %q: resolve grants: %w", svc.Name, err)
 		}
-		prov, err := reg.ServiceSecretsProvisioner(provName)
-		if err != nil {
-			return nil, err
+		for key, val := range grantSecrets {
+			resolved[key] = val
 		}
-		bundle, err := prov.ProvisionService(ctx, svc, env, region, all, grantSecrets)
-		if err != nil {
-			return nil, fmt.Errorf("service %q: provision secrets: %w", svc.Name, err)
-		}
-		if bundle != nil {
-			bundles[svc.Name] = bundle
+		if len(resolved) > 0 {
+			out[svc.Name] = resolved
 		}
 	}
-	return bundles, nil
+	return out, nil
 }
 
 // resolveDatabaseGrants materializes a service's database/* grants into env-var →
@@ -828,15 +829,19 @@ func interpolateGrantOutput(tmpl string, values map[string]pulumi.StringOutput) 
 }
 
 // deliverServiceSecrets writes a service's agent inputs onto its host: the
-// secret-free descriptor.yaml (0644) and the host-key-encrypted credential.age
-// (0600). It is a two-phase output dependency: a command reads the host SSH
-// public key (Stdout), the program age-encrypts the identity credentials to that
-// key inside an ApplyT over the pubkey + identity outputs (program-side encrypt —
-// the plaintext credential never lands on disk and the host needs no age), and a
-// second command writes both files. The descriptor's provider.project is the
-// workspace ID, so it too is rendered inside an ApplyT on that output. Connection
-// details and the preview/up guards mirror provisionService.
-func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, meshEgressPort int, gate pulumi.Resource) error {
+// secret-free descriptor.yaml (0644, fully known at plan time — no Output to
+// await) and the host-key-encrypted secrets.age (0600, ADR-0035). It is a
+// two-phase output dependency: a command reads the host SSH public key
+// (Stdout), then a second command builds the final hostsecrets.Blob (env-var
+// name -> resolved plaintext) inside an ApplyT over the pubkey + every
+// resolved secret Output, hashes it (Blob.Hash — the change-detection input,
+// NOT the non-deterministic age ciphertext), age-encrypts it to the host key,
+// and writes both files. The reload-or-restart step rides in the SAME
+// command's script, so it only runs when Pulumi actually re-executes Create/
+// Update — i.e. only when the resolved plaintext hash (or the static
+// descriptor content) changed. Connection details and the preview/up guards
+// mirror provisionService.
+func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, secretEnv map[string]pulumi.StringOutput, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, meshEgressPort int, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
@@ -845,30 +850,67 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 		return fmt.Errorf("service %q: read host key: %w", svc.Name, err)
 	}
 
-	// descriptor.yaml depends on the workspace ID (provider.project), so render it
-	// inside an ApplyT on that output.
-	descriptor := bundle.Project.ApplyT(func(project string) (string, error) {
-		return renderDescriptor(svc, host, bundle, project, env, region, slug, baseDomain, computeKey, meshEgressPort)
+	// The descriptor names every env var the service expects (an identity
+	// map — the resolved value lives only in secrets.age, never here) and is
+	// fully static: no Output to await.
+	names := sortedKeys(secretEnv)
+	descriptor, err := renderDescriptor(svc, host, names, env, region, slug, baseDomain, computeKey, meshEgressPort)
+	if err != nil {
+		return err
+	}
+
+	valueOuts := make([]any, len(names))
+	for i, n := range names {
+		valueOuts[i] = secretEnv[n]
+	}
+
+	// The Triggers hash depends only on the resolved plaintext, never the host
+	// public key — so it stays stable across a host key rotation and only
+	// changes when a secret value actually moves.
+	hashOut := pulumi.All(valueOuts...).ApplyT(func(args []interface{}) (string, error) {
+		envMap, err := secretsEnvMap(names, args)
+		if err != nil {
+			return "", fmt.Errorf("service %q: %w", svc.Name, err)
+		}
+		hash, err := (hostsecrets.Blob{Env: envMap}).Hash()
+		if err != nil {
+			return "", fmt.Errorf("service %q: hash secrets blob: %w", svc.Name, err)
+		}
+		return hash, nil
 	}).(pulumi.StringOutput)
 
-	credAge := encryptCredentialAge(hostKey, bundle.ClientID, bundle.ClientSecret, "service "+svc.Name)
-
-	writeScript := pulumi.All(descriptor, credAge).ApplyT(func(args []interface{}) string {
-		desc, _ := args[0].(string)
-		cred, _ := args[1].(string)
-		return iremote.WriteFileScript(service.DescriptorPath(svc.Name), desc) + "\n" +
-			iremote.WriteFileScriptMode(service.CredentialPath(svc.Name), cred, "0600")
+	writeArgs := append([]any{hostKey.Stdout}, valueOuts...)
+	writeScript := pulumi.All(writeArgs...).ApplyT(func(args []interface{}) (string, error) {
+		pub, _ := args[0].(string)
+		if pub == "" {
+			return "", fmt.Errorf("service %q: empty host public key while building secrets.age", svc.Name)
+		}
+		envMap, err := secretsEnvMap(names, args[1:])
+		if err != nil {
+			return "", fmt.Errorf("service %q: %w", svc.Name, err)
+		}
+		ct, err := hostsecrets.EncryptBlob(hostsecrets.Blob{Env: envMap}, pub)
+		if err != nil {
+			return "", fmt.Errorf("service %q: encrypt secrets blob: %w", svc.Name, err)
+		}
+		return iremote.WriteFileScript(service.DescriptorPath(svc.Name), descriptor) + "\n" +
+			iremote.WriteFileScriptMode(service.SecretsPath(svc.Name), string(ct), "0600") + "\n" +
+			reloadOrRestartScript(svc), nil
 	}).(pulumi.StringOutput)
 
 	deleteScript := iremote.DeleteFileScript(service.DescriptorPath(svc.Name)) + "\n" +
-		iremote.DeleteFileScript(service.CredentialPath(svc.Name))
+		iremote.DeleteFileScript(service.SecretsPath(svc.Name))
 
 	if _, err := remote.NewCommand(ctx, name+"-secrets", &remote.CommandArgs{
 		Connection: conn,
 		Create:     writeScript,
 		Update:     writeScript,
 		Delete:     pulumi.String(deleteScript),
-		Triggers:   pulumi.Array{writeScript},
+		// The static descriptor content triggers a rewrite on its own change (e.g.
+		// a host/mesh-port change with no secret change); hashOut is the
+		// ADR-0035 plaintext-hash trigger for a secret value change. Either
+		// changing re-runs Create/Update, which re-issues reloadOrRestartScript.
+		Triggers: pulumi.Array{pulumi.String(descriptor), hashOut},
 		// A Triggers change replaces the resource; with the engine's default
 		// create-before-delete the OLD resource's Delete script (recorded in
 		// state) would run AFTER the new Create and remove the freshly written
@@ -876,18 +918,52 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 		// reuses this URN. Delete-before-replace makes the old files go first
 		// and the new write land last.
 	}, pulumi.DependsOn([]pulumi.Resource{hostKey}), pulumi.DeleteBeforeReplace(true)); err != nil {
-		return fmt.Errorf("service %q: write descriptor/credential: %w", svc.Name, err)
+		return fmt.Errorf("service %q: write descriptor/secrets: %w", svc.Name, err)
 	}
 	return nil
 }
 
+// secretsEnvMap resolves the pulumi.All args (each a resolved secret value, in
+// the same order as names) into the plaintext env map a hostsecrets.Blob
+// carries. Every value must be non-empty — a 200 with a missing/empty
+// resolved secret must never reach the host.
+func secretsEnvMap(names []string, args []interface{}) (map[string]string, error) {
+	m := make(map[string]string, len(names))
+	for i, n := range names {
+		v, _ := args[i].(string)
+		if v == "" {
+			return nil, fmt.Errorf("empty resolved value for secret %q while building secrets.age", n)
+		}
+		m[n] = v
+	}
+	return m, nil
+}
+
+// reloadOrRestartScript renders the systemctl step that applies a changed
+// secrets.age (or descriptor) to the running unit: reload (no downtime) when
+// the service declares reload:, else restart. It is best-effort (|| true): on
+// a service's FIRST deploy the unit is enabled but not yet started (its
+// ExecStart payload does not exist until `inforge release` delivers it, see
+// provisionService), so this step's first run would otherwise fail and abort
+// the whole `pulumi up` — a conservative, deliberately narrower guarantee than
+// the ADR's "always restart on change" until a later slice tightens it (e.g.
+// by only restarting a unit already known to be active).
+func reloadOrRestartScript(svc types.ServiceSpec) string {
+	unit := iremote.Quote(service.UnitName(svc.Name))
+	cmd := "restart"
+	if svc.Reload != "" {
+		cmd = "reload"
+	}
+	return fmt.Sprintf("sudo systemctl %s %s 2>/dev/null || true", cmd, unit)
+}
+
 // readHostPubKey registers the remote command that reads a host's SSH public
 // key. It is world-readable, so no sudo is needed; its Stdout (with a trailing
-// newline agehost.Encrypt trims) is the age recipient a credential is
+// newline agehost.Encrypt trims) is the age recipient secrets.age is
 // encrypted to. It is the first per-host SSH command in a delivery path, so it
-// waits on the cloud-init gate; the credential write chains off it transitively.
+// waits on the cloud-init gate; the secrets write chains off it transitively.
 func readHostPubKey(ctx *pulumi.Context, conn remote.ConnectionArgs, name string, gate pulumi.Resource) (*remote.Command, error) {
-	const readHostKey = "cat /etc/ssh/ssh_host_ed25519_key.pub"
+	readHostKey := "cat " + hostpaths.SSHHostPubKeyPath
 	return remote.NewCommand(ctx, name, &remote.CommandArgs{
 		Connection: conn,
 		Create:     pulumi.String(readHostKey),
@@ -895,66 +971,45 @@ func readHostPubKey(ctx *pulumi.Context, conn remote.ConnectionArgs, name string
 	}, pulumi.DependsOn([]pulumi.Resource{gate}))
 }
 
-// encryptCredentialAge encrypts {client_id, client_secret} to the host key
-// inside an ApplyT over the pubkey read AND both identity outputs, so the
-// dependency is automatic and the ciphertext is never built against a
-// stale/empty key. In preview the pubkey Stdout is unknown, so Pulumi skips
-// the ApplyT entirely; if it runs at up with any input empty, that is a real
-// failure (e.g. the host key wasn't readable) and must abort the deploy rather
-// than write an empty credential. subject names the consumer in errors. This
-// is the single credential-encryption path — the JSON shape is the
-// credential.age contract agent.DecryptCredential reads.
-func encryptCredentialAge(hostKey *remote.Command, clientID, clientSecret pulumi.StringOutput, subject string) pulumi.StringOutput {
-	return pulumi.All(hostKey.Stdout, clientID, clientSecret).ApplyT(
-		func(args []interface{}) (string, error) {
-			pub, _ := args[0].(string)
-			id, _ := args[1].(string)
-			secret, _ := args[2].(string)
-			if pub == "" || id == "" || secret == "" {
-				return "", fmt.Errorf("%s: empty host public key or identity credential while building credential.age", subject)
-			}
-			plaintext, err := json.Marshal(map[string]string{
-				"client_id":     id,
-				"client_secret": secret,
-			})
-			if err != nil {
-				return "", fmt.Errorf("marshal credential: %w", err)
-			}
-			ct, err := agehost.Encrypt(plaintext, pub)
-			if err != nil {
-				return "", fmt.Errorf("encrypt credential: %w", err)
-			}
-			return string(ct), nil
-		}).(pulumi.StringOutput)
-}
-
-// deliverServiceDescriptor writes a secret-less service's descriptor.yaml (0644)
-// onto its host: a single static command, with no provider, no env, no host-key
-// read, and no credential. The descriptor is fully known at plan time (no
-// workspace ID to resolve), so it needs no ApplyT. Connection details and the
-// preview/up guards mirror provisionService.
-func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, meshEgressPort int, gate pulumi.Resource) error {
-	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
-	name := naming.Resource(env, slug, "svc", svc.Name)
-
-	descriptor, err := renderDescriptor(svc, host, nil, "", env, region, slug, baseDomain, computeKey, meshEgressPort)
-	if err != nil {
-		return err
-	}
-	writeScript := iremote.WriteFileScript(service.DescriptorPath(svc.Name), descriptor)
-	deleteScript := iremote.DeleteFileScript(service.DescriptorPath(svc.Name))
-
-	if _, err := remote.NewCommand(ctx, name+"-secrets", &remote.CommandArgs{
+// writeHostFile registers the shared write/delete remote.Command shape used
+// by every "deliver a single static file to a host" path (a service's
+// descriptor.yaml, a mesh host's mesh-descriptor.yaml, …): write on
+// create/update, delete on destroy, retrigger on content change, gated on the
+// cloud-init gate, and delete-before-replace so a Triggers-driven replacement
+// never lets the old Delete script remove the freshly written file after the
+// new Create runs (the two logical steps of a "replace" would otherwise race
+// in the wrong order). nameSuffix distinguishes the resource name from
+// sibling commands against the same host (e.g. "-secrets", "-agent").
+func writeHostFile(ctx *pulumi.Context, name, nameSuffix string, conn remote.ConnectionArgs, path, content string, gate pulumi.Resource) (*remote.Command, error) {
+	writeScript := iremote.WriteFileScript(path, content)
+	deleteScript := iremote.DeleteFileScript(path)
+	return remote.NewCommand(ctx, name+nameSuffix, &remote.CommandArgs{
 		Connection: conn,
 		Create:     pulumi.String(writeScript),
 		Update:     pulumi.String(writeScript),
 		Delete:     pulumi.String(deleteScript),
 		Triggers:   pulumi.Array{pulumi.String(writeScript)},
-		// Same URN as deliverServiceSecrets' command (the two are the same
-		// logical resource in different shapes); delete-before-replace keeps a
-		// shape flip or trigger change from letting the old Delete script remove
-		// the freshly written descriptor (see deliverServiceSecrets).
-	}, pulumi.DependsOn([]pulumi.Resource{gate}), pulumi.DeleteBeforeReplace(true)); err != nil {
+	}, pulumi.DependsOn([]pulumi.Resource{gate}), pulumi.DeleteBeforeReplace(true))
+}
+
+// deliverServiceDescriptor writes a secret-less service's descriptor.yaml (0644)
+// onto its host: a single static command, with no env and no secrets.age. The
+// descriptor is fully known at plan time, so it needs no ApplyT. Connection
+// details and the preview/up guards mirror provisionService.
+func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, meshEgressPort int, gate pulumi.Resource) error {
+	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
+	name := naming.Resource(env, slug, "svc", svc.Name)
+
+	descriptor, err := renderDescriptor(svc, host, nil, env, region, slug, baseDomain, computeKey, meshEgressPort)
+	if err != nil {
+		return err
+	}
+	// Same URN as deliverServiceSecrets' command (the two are the same
+	// logical resource in different shapes); writeHostFile's delete-before-
+	// replace keeps a shape flip or trigger change from letting the old
+	// Delete script remove the freshly written descriptor (see
+	// deliverServiceSecrets).
+	if _, err := writeHostFile(ctx, name, "-secrets", conn, service.DescriptorPath(svc.Name), descriptor, gate); err != nil {
 		return fmt.Errorf("service %q: write descriptor: %w", svc.Name, err)
 	}
 	return nil
@@ -962,14 +1017,15 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 
 // renderDescriptor marshals the on-host agent descriptor for a service.
 // It builds the agent's own Descriptor struct (imported, not duplicated)
-// so the producer can never drift from the consumer's schema. A nil bundle is a
-// secret-less service: the provider is left zero-valued and env nil, which the
-// agent reads as "no secrets to fetch". For a secret-bearing service,
-// project is the resolved workspace ID. The deployment block (region/env/domain/
-// fqdn/host) is derived from the deployment context and is present for every
-// service, secret-bearing or not. hostKey is the service's resolved compute key
-// ("<name>-<NN>", e.g. "bridge-01"); the host id is its full VM resource name.
-func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *types.ServiceSecretsBundle, project, env, region, slug, baseDomain, hostKey string, meshEgressPort int) (string, error) {
+// so the producer can never drift from the consumer's schema. secretNames is
+// the sorted set of env-var names the service expects (nil for a secret-less
+// service) — an identity map into d.Env; the resolved VALUES live only in the
+// host's secrets.age, decrypted at boot (ADR-0035), never here. The deployment
+// block (region/env/domain/fqdn/host) is derived from the deployment context
+// and is present for every service, secret-bearing or not. hostKey is the
+// service's resolved compute key ("<name>-<NN>", e.g. "bridge-01"); the host id
+// is its full VM resource name.
+func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, secretNames []string, env, region, slug, baseDomain, hostKey string, meshEgressPort int) (string, error) {
 	// The mesh scope (ADR-0032) is the region name, or the literal ScopeGlobal for
 	// the global slice — captured BEFORE region is blanked below, since the mesh
 	// identity/SNI segment is "global", not empty.
@@ -1004,23 +1060,21 @@ func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, bundle *
 			MachineType:      host.MachineType,
 		},
 	}
-	if bundle != nil {
-		d.Provider = agent.Provider{
-			Kind:        bundle.ProviderKind,
-			URL:         bundle.URL,
-			Project:     project,
-			Environment: bundle.Environment,
-			SecretPath:  bundle.SecretPath,
+	if len(secretNames) > 0 {
+		d.Env = make(map[string]string, len(secretNames))
+		for _, n := range secretNames {
+			d.Env[n] = n
 		}
-		d.Env = bundle.Env
-		// Only an mtls_files: opted-in service (a raw mTLS plane outside the mesh,
-		// e.g. tunneller node↔node) still receives its own leaf/key/CA-bundle:
-		// `inforge pki renew` keeps writing them under /<svc>/mtls and files:
-		// advertises them for boot projection (#109). Every other mesh member holds
-		// no cert material — the mesh proxy is the sole leaf custodian (ADR-0033).
-		if svc.MtlsFiles {
-			d.Files = meshcert.DescriptorFiles()
-		}
+	}
+	// Only an mtls_files: opted-in service (a raw mTLS plane outside the mesh,
+	// e.g. tunneller node↔node) still receives its own leaf/key/CA-bundle:
+	// `inforge pki renew` keeps writing them under a persistent leaf.age and
+	// files: advertises them for boot projection (#109). Every other mesh
+	// member holds no cert material — the mesh proxy is the sole leaf custodian
+	// (ADR-0033). This no longer depends on whether the service also has
+	// env/grant secrets (there is no more "bundle" gate).
+	if svc.MtlsFiles {
+		d.Files = meshcert.DescriptorFiles()
 	}
 	// A mesh member (any pki: service) gets the east-west endpoint contract
 	// (ADR-0032), independent of whether it has a secrets provider: INFORGE_MESH_URL
@@ -1065,26 +1119,12 @@ func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string
 		// write); release extracts the payload into it as root.
 		fmt.Sprintf("sudo install -d -m 0755 %s", iremote.Quote(service.Folder(svc.Name))),
 		iremote.WriteFileScript(service.UnitPath(svc.Name), service.Unit(svc)),
-	)
-	// Only an mtls_files: service gets the per-service renewal timer that
-	// re-projects its own leaf and reload-or-restarts the unit when `inforge pki
-	// renew` rotates it. Other mesh members hold no cert material — the mesh
-	// proxy's own renew timer converges their leaves (ADR-0033).
-	if svc.MtlsFiles {
-		steps = append(steps,
-			iremote.WriteFileScript(service.RenewUnitPath(svc.Name), service.RenewService(svc)),
-			iremote.WriteFileScript(service.RenewTimerPath(svc.Name), service.RenewTimer(svc)),
-		)
-	}
-	steps = append(steps,
 		"sudo systemctl daemon-reload",
 		fmt.Sprintf("sudo systemctl enable %s", iremote.Quote(service.UnitName(svc.Name))),
 	)
-	if svc.MtlsFiles {
-		steps = append(steps,
-			fmt.Sprintf("sudo systemctl enable --now %s", iremote.Quote(service.RenewTimerName(svc.Name))),
-		)
-	}
+	// An mtls_files: service's leaf.age is delivered later by `inforge pki
+	// renew`'s SSH push, which also signals reload-or-restart directly — there
+	// is no on-host renewal timer to enable (ADR-0035 removed it).
 	return strings.Join(steps, "\n")
 }
 
@@ -1131,10 +1171,7 @@ func agentDownloadStep(inforgeVersion string) string {
 func serviceDeprovisionScript(svc types.ServiceSpec) string {
 	return strings.Join([]string{
 		fmt.Sprintf("sudo systemctl disable --now %s 2>/dev/null || true", iremote.Quote(service.UnitName(svc.Name))),
-		// The renewal timer/oneshot exist only for mesh services; disable/remove
-		// them best-effort regardless (rm -f and `|| true` are no-ops when absent).
-		fmt.Sprintf("sudo systemctl disable --now %s 2>/dev/null || true", iremote.Quote(service.RenewTimerName(svc.Name))),
-		fmt.Sprintf("sudo rm -f %s %s %s", iremote.Quote(service.UnitPath(svc.Name)), iremote.Quote(service.RenewTimerPath(svc.Name)), iremote.Quote(service.RenewUnitPath(svc.Name))),
+		fmt.Sprintf("sudo rm -f %s", iremote.Quote(service.UnitPath(svc.Name))),
 		"sudo systemctl daemon-reload",
 	}, "\n")
 }

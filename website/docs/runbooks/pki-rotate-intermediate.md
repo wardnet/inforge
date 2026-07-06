@@ -41,8 +41,8 @@ does.
    inforge pki renew <env>
    ```
 
-4. **Converge hosts.** Hosts pick up the new leaf + bundle on their daily timer; to apply now, run
-   `systemctl start wardnet-<svc>-renew.service` on each affected host.
+4. **Hosts converge immediately.** `inforge pki renew` already pushed the new leaf + bundle to every
+   affected host and reload-or-restarted it in step 3 — there is nothing further to run.
 
 ## Verify
 

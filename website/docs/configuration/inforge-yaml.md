@@ -100,9 +100,9 @@ providers:
 - **`database.<engine>`** — default provider for databases of that engine (e.g. `postgresql: neon`).
 
 When `providers:` is omitted every Compute, Network, and Database resource must declare `provider:`
-explicitly. The secrets provider is **not** configured here — it is selected per region by adding an
-`infisical` block to that region's `providers:` in [`regions.yaml`](/configuration/regions-yaml), and
-inforge uses it automatically for any service with `vault:`/`ref:` env vars.
+explicitly. Secrets need no provider configuration at all: inforge resolves a service's
+`vault:`/`ref:`/grant values at deploy time and age-encrypts them directly to the target host's own
+SSH key, delivering them over the same SSH connection inforge already uses to provision the host.
 
 ## Minimal example
 

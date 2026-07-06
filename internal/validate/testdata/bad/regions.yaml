@@ -12,5 +12,3 @@ regions:
         apiToken: test-token
       neon:
         apiKey: test-key
-      infisical:
-        clientId: test-id

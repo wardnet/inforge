@@ -52,17 +52,28 @@ func ExecPath(name string) string {
 	return Folder(name) + "/run"
 }
 
-// DescriptorPath / CredentialPath are the two files inforge writes into a
+// DescriptorPath / SecretsPath / LeafPath are the files inforge writes into a
 // service's DescriptorDir for the agent to read: the versioned, secret-free
-// descriptor (0644) and the host-key-encrypted provider credential (0600). The
-// filenames must match the agent's descriptorFile/credentialFile constants.
+// descriptor (0644), the host-key-encrypted, deploy-owned secrets.age (0600,
+// ADR-0035 — env vars + grant secrets), and the host-key-encrypted,
+// renew-owned leaf.age (0600 — an mtls_files: true service's own leaf/key/
+// bundle, written later by `inforge pki renew`'s SSH push, not by deploy). The
+// filenames must match the agent's descriptorFile/secretsFile/leafFile
+// constants.
 func DescriptorPath(name string) string {
 	return DescriptorDir(name) + "/descriptor.yaml"
 }
 
-// CredentialPath returns the on-host path of a service's age-encrypted credential.
-func CredentialPath(name string) string {
-	return DescriptorDir(name) + "/credential.age"
+// SecretsPath returns the on-host path of a service's deploy-owned,
+// age-encrypted secrets blob (renamed from credential.age, ADR-0035).
+func SecretsPath(name string) string {
+	return DescriptorDir(name) + "/secrets.age"
+}
+
+// LeafPath returns the on-host path of a service's renew-owned, age-encrypted
+// leaf material blob (mtls_files: true services only; ADR-0035).
+func LeafPath(name string) string {
+	return DescriptorDir(name) + "/leaf.age"
 }
 
 // unitTemplate renders the unit. The service runs as root under inforge-agent
@@ -111,47 +122,10 @@ func RuntimeDir(name string) string {
 	return hostpaths.RuntimeDir(name)
 }
 
-// RenewUnitName / RenewTimerName name the per-service renewal oneshot + timer
-// that re-project the current mesh leaf and reload the unit on change.
-func RenewUnitName(name string) string  { return "wardnet-" + name + "-renew.service" }
-func RenewTimerName(name string) string { return "wardnet-" + name + "-renew.timer" }
-
-// RenewUnitPath / RenewTimerPath are the on-host paths of those units.
-func RenewUnitPath(name string) string  { return "/etc/systemd/system/" + RenewUnitName(name) }
-func RenewTimerPath(name string) string { return "/etc/systemd/system/" + RenewTimerName(name) }
-
-const renewServiceTemplate = `[Unit]
-Description=wardnet %s mesh certificate renewal
-
-[Service]
-Type=oneshot
-ExecStart=%s project %s
-`
-
-// RenewService renders the oneshot that runs `inforge-agent project` for a
-// service: re-fetch the current leaf, re-project it into the RuntimeDir, and
-// reload-or-restart the unit if it changed.
-func RenewService(spec types.ServiceSpec) string {
-	return fmt.Sprintf(renewServiceTemplate, spec.Name, AgentBin, DescriptorDir(spec.Name))
-}
-
-const renewTimerTemplate = `[Unit]
-Description=wardnet %s mesh certificate renewal timer
-
-[Timer]
-OnCalendar=daily
-RandomizedDelaySec=1h
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-`
-
-// RenewTimer renders the timer that fires the renewal oneshot daily (with a
-// randomized delay), well inside the 90-day leaf TTL.
-func RenewTimer(spec types.ServiceSpec) string {
-	return fmt.Sprintf(renewTimerTemplate, spec.Name)
-}
+// There is no on-host per-service renewal timer (ADR-0035 removed it, along
+// with the mesh proxy's): an mtls_files: service's leaf.age is delivered by
+// `inforge pki renew`'s SSH push, which also signals reload-or-restart, so
+// nothing on the host needs to poll for a rotated leaf.
 
 // DeployTarget is one service's deployment coordinates: where to push the
 // payload (the host DNS name), the folder to extract it into, the unit to

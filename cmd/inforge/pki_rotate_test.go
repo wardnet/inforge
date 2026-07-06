@@ -89,7 +89,7 @@ func TestRunPkiRecoverIntermediateReplacesAndWarns(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, out, "BURNED")
-	assert.Contains(t, out, "wardnet-<svc>-renew.service")
+	assert.Contains(t, out, "--ssh-key")
 
 	after, err := pki.Load(pki.Path(dir, "prd"))
 	require.NoError(t, err)

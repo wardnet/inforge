@@ -253,7 +253,7 @@ func TestGlobalServiceRealizesRegionLess(t *testing.T) {
 		if err := realizeIngress(ctx, reg, res, computeOut, gates, nil, "priv", "prd", "", "wardnet.network", "", types.ProviderDefaults{}); err != nil {
 			return err
 		}
-		return provisionServices(ctx, res, computeOut, map[string]*types.ServiceSecretsBundle{}, gates, "priv", "prd", globalScope, "", "wardnet.network", "1.2.3")
+		return provisionServices(ctx, res, computeOut, map[string]map[string]pulumi.StringOutput{}, gates, "priv", "prd", globalScope, "", "wardnet.network", "1.2.3")
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 

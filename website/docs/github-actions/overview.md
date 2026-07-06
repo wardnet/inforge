@@ -77,8 +77,6 @@ jobs:
       CLOUDFLARE_API_TOKEN:     ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ZONE_ID:       ${{ secrets.CLOUDFLARE_ZONE_ID }}
       NEON_API_KEY:             ${{ secrets.NEON_API_KEY }}
-      INFISICAL_CLIENT_ID:      ${{ secrets.INFISICAL_CLIENT_ID }}
-      INFISICAL_CLIENT_SECRET:  ${{ secrets.INFISICAL_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - uses: wardnet/inforge@v1
@@ -111,8 +109,6 @@ jobs:
       CLOUDFLARE_API_TOKEN:       ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ZONE_ID:         ${{ secrets.CLOUDFLARE_ZONE_ID }}
       NEON_API_KEY:               ${{ secrets.NEON_API_KEY }}
-      INFISICAL_CLIENT_ID:        ${{ secrets.INFISICAL_CLIENT_ID }}
-      INFISICAL_CLIENT_SECRET:    ${{ secrets.INFISICAL_CLIENT_SECRET }}
       INFORGE_SECRETS_KEY:        ${{ secrets.INFORGE_SECRETS_KEY }}
       INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
     steps:
@@ -169,8 +165,6 @@ jobs:
       HCLOUD_TOKEN:               ${{ secrets.HCLOUD_TOKEN }}
       CLOUDFLARE_API_TOKEN:       ${{ secrets.CLOUDFLARE_API_TOKEN }}
       NEON_API_KEY:               ${{ secrets.NEON_API_KEY }}
-      INFISICAL_CLIENT_ID:        ${{ secrets.INFISICAL_CLIENT_ID }}
-      INFISICAL_CLIENT_SECRET:    ${{ secrets.INFISICAL_CLIENT_SECRET }}
       INFORGE_SECRETS_KEY:        ${{ secrets.INFORGE_SECRETS_KEY }}
       INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
     steps:

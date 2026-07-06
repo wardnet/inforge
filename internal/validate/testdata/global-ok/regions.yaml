@@ -5,9 +5,6 @@ regions:
     providers:
       neon:
         apiKey: test-key
-      infisical:
-        clientId: test-id
-        clientSecret: test-secret
 # The global slot carries provider config only (no slug): the global slice
 # realizes against it with region-less naming.
 global:
