@@ -13,7 +13,10 @@ inforge separates two distinct lifecycles: **provisioning** and **deployment**.
 - The on-host folder `/srv/wardnet/<service>`
 - An inforge-managed systemd unit `wardnet-<service>.service` whose `ExecStart` is `inforge-agent`
 - The service's secret-free `descriptor.yaml` and, for a secret-bearing service, its host-key-encrypted
-  `credential.age` under `/etc/wardnet/services/<service>/` (the service fetches its secrets at runtime)
+  `secrets.age` under `/etc/wardnet/services/<service>/` — the resolved env-var/grant values,
+  age-encrypted directly to the host's own SSH key (a mesh/mtls-leaf-bearing service additionally gets
+  a separate, renew-owned `leaf.age`). `inforge-agent` decrypts these locally at boot; there is no
+  runtime fetch from any backend.
 
 Provisioning is triggered by `inforge deploy` when the Pulumi state shows changes.
 inforge **owns** the unit — it controls start, restart, and configuration. Service code

@@ -1,8 +1,8 @@
 # An ephemeral environment never shares a Hetzner Network with any other environment
 
 An ephemeral environment (ADR-0028) is a clone of a source env's resource definition deployed under a
-distinct slug identity. It runs in the **same Hetzner project / Neon account / Cloudflare zone /
-Infisical org** as every other env, isolated only by the slug baked into every name and the
+distinct slug identity. It runs in the **same Hetzner project / Neon account / Cloudflare zone**
+as every other env, isolated only by the slug baked into every name and the
 `ephemeral=true` label. The one isolation that must hold unconditionally is **network segregation**: an
 ephemeral host must never be able to route to a real env's private IPs, even though the clone inherits
 the source's Network CIDR verbatim.

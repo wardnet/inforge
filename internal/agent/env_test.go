@@ -158,7 +158,7 @@ func TestBuildEnvMesh(t *testing.T) {
 // must fail the start rather than emit a duplicate that collides with the injected
 // deployment context.
 func TestBuildEnvRejectsReservedName(t *testing.T) {
-	d := Descriptor{User: "ghost", Provider: Provider{Kind: "infisical"}, Env: map[string]string{"INFORGE_DEPLOYMENT_REGION": "infra/INFORGE_DEPLOYMENT_REGION"}}
+	d := Descriptor{User: "ghost", Env: map[string]string{"INFORGE_DEPLOYMENT_REGION": "infra/INFORGE_DEPLOYMENT_REGION"}}
 
 	_, err := buildEnv(d, map[string]string{"infra/INFORGE_DEPLOYMENT_REGION": "x"}, "/home/ghost", "i")
 	require.Error(t, err)

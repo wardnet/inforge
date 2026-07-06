@@ -14,7 +14,6 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
-	"github.com/wardnet/inforge/providers/infisical"
 	"github.com/wardnet/inforge/providers/neon"
 )
 
@@ -260,14 +259,6 @@ func TestRegistryUnknownProvider(t *testing.T) {
 	_, err = r.Database("unknown-db")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown provider: "unknown-db"`)
-
-	// "infisical" is a known service-secrets provisioner — must succeed.
-	ssp, err := r.ServiceSecretsProvisioner("infisical")
-	require.NoError(t, err)
-	assert.IsType(t, (*infisical.InfisicalSecretsAdapter)(nil), ssp)
-
-	_, err = r.ServiceSecretsProvisioner("unknown-secrets")
-	require.Error(t, err)
 
 	// Unknown network provider still errors.
 	_, err = r.Network("unknown-cloud")

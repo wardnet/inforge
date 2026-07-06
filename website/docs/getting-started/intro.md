@@ -14,9 +14,9 @@ multi-provider infrastructure model with built-in runtime secret delivery for se
 1. **Validates** your resource definitions against JSON schemas
 2. **Previews** what Pulumi would create, update, or destroy
 3. **Deploys** your infrastructure via the Pulumi Automation API
-4. **Delivers secrets** to services — writing each service's provider coordinates and a
-   host-key-encrypted machine-identity credential to the host, so the service fetches its own secrets
-   at runtime (no secret value is ever baked into an artifact)
+4. **Delivers secrets** to services — resolving each service's env-var and grant values and writing
+   them, age-encrypted directly to the host's own SSH key, to the host as `secrets.age` (no secret
+   value is ever baked into an artifact, and there is no runtime fetch from any backend)
 5. **Provides reusable GitHub Actions** so consumer repos get preview/deploy/reconcile
    workflows with a single `uses:` line
 
@@ -27,7 +27,6 @@ multi-provider infrastructure model with built-in runtime secret delivery for se
 | Hetzner Cloud | Network, Compute |
 | Cloudflare | DNS |
 | Neon | Database (PostgreSQL) |
-| Infisical | Secrets |
 
 ## Quick links
 

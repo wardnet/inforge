@@ -67,8 +67,9 @@ downloads it, delivers it to every host the service resolves to in that environm
 inforge-managed unit, and records `host → {sha, deployedAt}` in `manifest.<env>.yaml` via an
 `If-Match` compare-and-swap (safe under concurrent deploys).
 
-For an `mtls_files: true` service it first mints the service's own leaf into the secrets provider
-(needs `INFORGE_SECRETS_KEY`), so the restarted unit never boots against an empty `/<svc>/mtls`. Every
+For an `mtls_files: true` service it first mints the service's own leaf and SSH-pushes it as
+`leaf.age` (needs `INFORGE_SECRETS_KEY`), so the restarted unit never boots against an empty
+`/<svc>/mtls`. Every
 other service skips this — a plain mesh member's leaf lives with its host's mesh proxy, delivered by
 `inforge deploy` / `inforge pki renew`, independent of releases. See
 [`inforge pki`](./pki#the-release-time-mint-mtls_files-services-only).

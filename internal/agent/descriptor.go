@@ -31,28 +31,33 @@ import (
 // Files map, and v4 swapped Deployment.Namespace for Deployment.HostID; v5 added the
 // cloud/host resource-identity fields (CloudProvider/CloudRegion/AvailabilityZone/
 // MachineType, ADR-0030); v6 added the Mesh block (the east-west service-mesh
-// endpoint contract — INFORGE_MESH_URL/PORT/SCOPE, ADR-0032). An older agent
-// meeting a newer descriptor fails cleanly on the version rather than on an
-// unknown field.
-const SupportedVersion = 6
+// endpoint contract — INFORGE_MESH_URL/PORT/SCOPE, ADR-0032); v7 removed the
+// Provider block (ADR-0035 retires the runtime secrets backend — secret VALUES
+// now live only in the host's decrypted secrets.age/leaf.age, never fetched
+// from a provider). An older agent meeting a newer descriptor fails cleanly on
+// the version rather than on an unknown field.
+const SupportedVersion = 7
 
 // Descriptor is the versioned, secret-free on-host contract inforge writes to
 // /etc/wardnet/services/<svc>/descriptor.yaml (0644 root). It names the service,
-// the binary to exec, the run-as user, the secrets provider coordinates, and the
-// env-var -> vault-key mapping (keys are relative to provider secret_path, with
-// an infra/ or custom/ prefix encoding origin). It carries no secret values.
+// the binary to exec, the run-as user, and which env vars / files the service
+// expects — the ACTUAL values are resolved separately, at boot, from the
+// host's decrypted secrets.age and/or leaf.age (ADR-0035). It carries no secret
+// values itself.
 type Descriptor struct {
-	Version  int               `yaml:"version"`
-	Service  string            `yaml:"service"`
-	Exec     string            `yaml:"exec"`
-	User     string            `yaml:"user"`
-	Provider Provider          `yaml:"provider"`
-	Env      map[string]string `yaml:"env"`
-	// Files maps an env-var name → a provider secret key (relative to the
-	// provider secret_path). For a mesh service, inforge writes the leaf/key/CA
-	// bundle to the provider and lists them here; the agent fetches each,
-	// writes the PEM to a tmpfs file, and sets the env var to that path (#109).
-	// Empty for services with no mesh PKI material.
+	Version int    `yaml:"version"`
+	Service string `yaml:"service"`
+	Exec    string `yaml:"exec"`
+	User    string `yaml:"user"`
+	// Env names the env vars this service expects (an identity map: name -> the
+	// same name, the key into the decrypted secrets.age Env map). Empty for a
+	// secret-less service.
+	Env map[string]string `yaml:"env"`
+	// Files maps an env-var name → a key in the decrypted secrets.age/leaf.age
+	// Files map. For an mtls_files: true service, inforge lists its leaf/key/CA
+	// bundle keys here; the agent looks each up, writes the PEM to a tmpfs file,
+	// and sets the env var to that path (#109). Empty for services with no mesh
+	// PKI material.
 	Files      map[string]string `yaml:"files,omitempty"`
 	Deployment Deployment        `yaml:"deployment"`
 	// Mesh is the east-west service-mesh endpoint contract (ADR-0032), present
@@ -135,17 +140,6 @@ func ParseDescriptor(b []byte) (Descriptor, error) {
 	}
 	if d.User == "" {
 		return Descriptor{}, fmt.Errorf("descriptor: user is required")
-	}
-	// provider is optional: a descriptor with no provider.kind is a secret-less
-	// service. It MUST then carry no env mapping — there is nothing to resolve the
-	// keys against — so an env without a provider is a producer bug, rejected here.
-	if d.Provider.Kind == "" && len(d.Env) > 0 {
-		return Descriptor{}, fmt.Errorf("descriptor: env is set but provider.kind is empty (a secret-less service must have no env entries)")
-	}
-	// files: are provider secret keys too — like env, they are meaningless with no
-	// provider to fetch them from, so the same producer-bug guard applies.
-	if d.Provider.Kind == "" && len(d.Files) > 0 {
-		return Descriptor{}, fmt.Errorf("descriptor: files is set but provider.kind is empty (mesh material requires a provider to fetch it)")
 	}
 	return d, nil
 }

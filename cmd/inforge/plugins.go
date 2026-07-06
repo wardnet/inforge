@@ -44,7 +44,7 @@ func newPluginsCmd() *cobra.Command {
 
 			// Custom providers ship as raw binaries in wardnet/inforge releases.
 			// The version must match the running inforge binary; "dev" has no release.
-			for _, name := range []string{"neon", "infisical"} {
+			for _, name := range []string{"neon"} {
 				if version == "dev" {
 					fmt.Printf("skipping pulumi-resource-%s: build is 'dev' — no GitHub release available\n", name)
 					continue

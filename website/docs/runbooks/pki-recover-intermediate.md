@@ -30,24 +30,18 @@ re-project on every host at once.
 
 2. **Commit** `resources/<env>/pki.enc.yaml` and merge promptly.
 
-3. **Re-mint leaves immediately (CI):**
+3. **Re-mint and push leaves immediately (CI):**
 
    ```bash
    export INFORGE_SECRETS_KEY="AGE-SECRET-KEY-…"   # the CI master identity
    inforge pki renew <env>
    ```
 
-4. **Force re-projection on every host in the scope** — do not wait for the daily timers:
+   This SSH-pushes the fresh `leaf.age` to every mesh host in the scope (the proxy's leaves + bundle)
+   and any `mtls_files: true` service's own copy, then unconditionally reload-or-restarts each
+   consumer — there is no separate re-projection step to trigger.
 
-   ```bash
-   systemctl start wardnet-mesh-renew.service    # on each mesh host in the scope (the proxy's leaves + bundle)
-   systemctl start wardnet-<svc>-renew.service   # additionally, on each host of an mtls_files: service
-   ```
-
-   The first converges the mesh proxy (which holds every co-located service's mesh leaf); the second
-   exists only for `mtls_files: true` services, which also hold their own raw-plane copy.
-
-5. **Confirm** no service still presents a leaf signed by the old key (check the leaf's issuer /
+4. **Confirm** no service still presents a leaf signed by the old key (check the leaf's issuer /
    served chain on each host).
 
 ## Scope of the blast radius

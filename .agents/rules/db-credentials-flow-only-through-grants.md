@@ -9,7 +9,7 @@ mints a scoped per-service role with only the privileges that permission level g
 
 ## Applies to
 
-`internal/validate/validate.go` (`checkService`, `checkGrants`), `providers/infisical/secrets.go`
+`internal/validate/validate.go` (`checkService`, `checkGrants`), `program/secretresolve.go`
 (`resolveRef`), and any code that adds a new output field to `types.DatabaseOutputs`.
 
 ## Example

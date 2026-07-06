@@ -21,8 +21,6 @@ config:
   hcloud:token: ""                    # set via HCLOUD_TOKEN
   cloudflare:apiToken: ""             # set via CLOUDFLARE_API_TOKEN
   neon:apiKey: ""                     # set via NEON_API_KEY
-  infisical:clientId: ""              # set via INFISICAL_CLIENT_ID
-  infisical:clientSecret: ""          # set via INFISICAL_CLIENT_SECRET
 ```
 
 ## inforge-specific config keys

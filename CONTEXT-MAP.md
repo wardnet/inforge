@@ -14,16 +14,17 @@ implemented.
   Pulumi program in `program/` and the CLI in `cmd/inforge/`.
 - **Neon provider** (`providers/neon/`) — Pulumi plugin (`pulumi-resource-neon`) provisioning Neon
   Postgres. *Stub — no resolved domain yet; CONTEXT.md added when implemented.*
-- **Infisical provider** (`providers/infisical/`) — Pulumi plugin (`pulumi-resource-infisical`)
-  managing Infisical workspaces/secrets. *Stub — CONTEXT.md added when implemented.*
 
 ## Relationships
 
 - **Toolkit → providers**: the Toolkit defines provider interfaces (`NetworkProvider`,
-  `ComputeProvider`, `DnsProvider`, `DatabaseProvider`, `IngressProvider`,
-  `ServiceSecretsProvisioner`) and a `ProviderRegistry`. Each provider context satisfies one or more
-  of these.
-- **Toolkit ↔ secrets**: services fetch their own secrets at runtime via `inforge-agent`. inforge
-  writes each service's provider coordinates and a host-key-encrypted machine-identity credential to
-  the host; it bakes no secret values and uses no key broker. See
-  [ADR-0010](./docs/adr/0010-runtime-secret-fetch.md).
+  `ComputeProvider`, `DnsProvider`, `DatabaseProvider`, `IngressProvider`). Each provider context
+  satisfies one or more of these. Secrets delivery is **not** a provider — it is intrinsic to the
+  Toolkit (see below).
+- **Toolkit ↔ secrets**: services decrypt their own secrets at start via `inforge-agent`. inforge
+  resolves each service's secret values from the git-committed encrypted store and writes them,
+  age-encrypted directly to the host's own SSH key (`secrets.age`), to the host; it bakes no
+  plaintext into any artifact and uses no runtime key broker or backend. See
+  [ADR-0035](./docs/adr/0035-git-backed-per-host-secrets-delivery.md) (superseding the Infisical
+  fetch described in the now-retired parts of
+  [ADR-0010](./docs/adr/0010-runtime-secret-fetch.md)).

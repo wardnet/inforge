@@ -21,3 +21,16 @@ func UnitName(service string) string { return "wardnet-" + service + ".service" 
 // service unit's ExecStart, the per-service renew timers, and the mesh proxy's
 // material pull (ExecStartPre + wardnet-mesh-renew).
 const AgentBin = "/usr/local/bin/inforge-agent"
+
+// SSHHostPubKeyPath is the on-host path of the SSH host's own Ed25519 public
+// key, read (via "cat") by both the deploy-time host-key discovery
+// (program.readHostPubKey, inside a Pulumi remote.Command) and the CLI's SSH
+// push path (cmd/inforge.sshReadHostPubKey) — the two must agree on the exact
+// command byte-for-byte, so both build their command string from this single
+// constant instead of each hardcoding the literal.
+//
+// This is the PUBLIC half; the host's PRIVATE key path
+// (/etc/ssh/ssh_host_ed25519_key, used by internal/agent's decrypt path via
+// its own defaultHostKeyPath) is a distinct concern (agent-side decryption,
+// not deploy/push tooling) and is kept as a separate constant.
+const SSHHostPubKeyPath = "/etc/ssh/ssh_host_ed25519_key.pub"

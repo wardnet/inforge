@@ -568,13 +568,7 @@ func TestServiceProvisionScriptDownloadsAgent(t *testing.T) {
 // Descriptor struct and SupportedVersion constant.
 func TestRenderDescriptorRoundTrips(t *testing.T) {
 	svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost"}
-	bundle := &types.ServiceSecretsBundle{
-		ProviderKind: "infisical",
-		URL:          "https://app.infisical.com",
-		Environment:  "prod",
-		SecretPath:   "/ghost",
-		Env:          map[string]string{"DATABASE_URL": "infra/DATABASE_URL"},
-	}
+	secretNames := []string{"DATABASE_URL"}
 
 	// Provider-supplied cloud/host identity flows off the host's outputs (ADR-0030).
 	host := types.ComputeOutputs{
@@ -583,7 +577,7 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 		AvailabilityZone: "ash",
 		MachineType:      "cx23",
 	}
-	out, err := renderDescriptor(svc, host, bundle, "ws-123", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01", 0)
+	out, err := renderDescriptor(svc, host, secretNames, "prd", "us-east-1", "use1", "wardnet.network", "ghost-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))
@@ -592,11 +586,9 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 	assert.Equal(t, "ghost", d.Service)
 	assert.Equal(t, service.ExecPath("ghost"), d.Exec)
 	assert.Equal(t, "ghost", d.User)
-	assert.Equal(t, "infisical", d.Provider.Kind)
-	assert.Equal(t, "ws-123", d.Provider.Project) // project is the workspace id
-	assert.Equal(t, "prod", d.Provider.Environment)
-	assert.Equal(t, "/ghost", d.Provider.SecretPath)
-	assert.Equal(t, "infra/DATABASE_URL", d.Env["DATABASE_URL"])
+	// d.Env is an identity map (name -> name): the resolved value lives only in
+	// secrets.age, never in the descriptor (ADR-0035).
+	assert.Equal(t, "DATABASE_URL", d.Env["DATABASE_URL"])
 	// Deployment context is derived from env/region/slug/baseDomain + service + host.
 	assert.Equal(t, "us-east-1", d.Deployment.Region)
 	assert.Equal(t, "use1", d.Deployment.RegionSlug)
@@ -621,7 +613,7 @@ func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
 
 	// Driven exactly as the scopes loop drives the global slice: region=globalScope,
 	// slug="".
-	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "", "prd", globalScope, "", "wardnet.network", "tenants-01", 0)
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "prd", globalScope, "", "wardnet.network", "tenants-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))
@@ -632,13 +624,12 @@ func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
 	assert.Equal(t, "wardnet-prd-vm-tenants-01", d.Deployment.HostID, "region-less host id")
 }
 
-// TestRenderDescriptorSecretLess: a nil bundle renders a secret-less descriptor —
-// empty provider, no env — that round-trips through the agent's parser
-// (which accepts a provider-less descriptor with no env).
+// TestRenderDescriptorSecretLess: no secret names renders a secret-less
+// descriptor — no env — that round-trips through the agent's parser.
 func TestRenderDescriptorSecretLess(t *testing.T) {
 	svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost"}
 
-	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "", "prd", "us-east-1", "use1", "wardnet.network", "ghost-01", 0)
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "prd", "us-east-1", "use1", "wardnet.network", "ghost-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))
@@ -647,7 +638,6 @@ func TestRenderDescriptorSecretLess(t *testing.T) {
 	assert.Equal(t, "ghost", d.Service)
 	assert.Equal(t, service.ExecPath("ghost"), d.Exec)
 	assert.Equal(t, "ghost", d.User)
-	assert.Equal(t, "", d.Provider.Kind)
 	assert.Empty(t, d.Env)
 	// A secret-less service still carries the deployment context.
 	assert.Equal(t, "ghost.svc.prd.use1.wardnet.network", d.Deployment.FQDN)

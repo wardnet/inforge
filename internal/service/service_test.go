@@ -48,18 +48,7 @@ func TestUnitRuntimeDirectoryAndReload(t *testing.T) {
 	assert.NotContains(t, noReload, "ExecReload")
 }
 
-func TestRenewUnits(t *testing.T) {
-	svc := types.ServiceSpec{Name: "api"}
-	s := RenewService(svc)
-	assert.Contains(t, s, "Type=oneshot")
-	assert.Contains(t, s, "ExecStart="+AgentBin+" project "+DescriptorDir("api"))
-
-	tmr := RenewTimer(svc)
-	assert.Contains(t, tmr, "OnCalendar=daily")
-	assert.Contains(t, tmr, "WantedBy=timers.target")
-
-	assert.Equal(t, "wardnet-api-renew.service", RenewUnitName("api"))
-	assert.Equal(t, "wardnet-api-renew.timer", RenewTimerName("api"))
+func TestRuntimeDir(t *testing.T) {
 	assert.Equal(t, "/run/wardnet/api", RuntimeDir("api"))
 }
 

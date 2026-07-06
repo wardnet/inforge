@@ -16,6 +16,6 @@ be imported from the renewal path.
 // WRONG — renew must not call auto or up
 pulumi.RunWithContext(ctx, func(pCtx *pulumi.Context) error { ... })
 
-// RIGHT — renew writes directly to the provider via infisical.CertWriter
-writer.Write(ctx, svc.Container, svc.Name, meshcert.MtlsDir, files)
+// RIGHT — renew SSH-pushes leaf.age directly to the host (ADR-0035)
+pushHostSecrets(ctx, sshKeyPath, account, hostsecrets.Blob{Files: files}, meshpaths.LeafPath, meshpaths.UnitName, true, w)
 ```

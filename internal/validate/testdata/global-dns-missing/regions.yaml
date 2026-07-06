@@ -12,9 +12,6 @@ regions:
         network_zone: us-east
         serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
         images: {ubuntu-24.04: ubuntu-24.04}
-      infisical:
-        clientId: test-id
-        clientSecret: test-secret
 global:
   placementRegion: us-east-1
   providers:
@@ -24,6 +21,3 @@ global:
       network_zone: us-east
       serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
       images: {ubuntu-24.04: ubuntu-24.04}
-    infisical:
-      clientId: test-id
-      clientSecret: test-secret

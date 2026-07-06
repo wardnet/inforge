@@ -1,12 +1,11 @@
 # goreleaser configuration for inforge.
 #
-# Builds four binaries from a single repository:
+# Builds three binaries from a single repository:
 #   - inforge                  the CLI
 #   - inforge-agent        on-host runtime agent (service ExecStart)
 #   - pulumi-resource-neon     Pulumi provider plugin (Neon)
-#   - pulumi-resource-infisical Pulumi provider plugin (Infisical)
 #
-# The two provider binaries must keep the `pulumi-resource-<name>` naming
+# The provider binary must keep the `pulumi-resource-<name>` naming
 # convention exactly — Pulumi locates plugins by that filename. inforge-agent
 # is downloaded onto each host by `inforge deploy` from the raw archive, pinned to
 # the deploying inforge version.
@@ -63,19 +62,6 @@ builds:
     ldflags:
       - -s -w -X main.version={{ .Version }}
 
-  - id: pulumi-resource-infisical
-    main: ./providers/infisical/cmd/pulumi-resource-infisical
-    binary: pulumi-resource-infisical
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-    goarch:
-      - amd64
-      - arm64
-    ldflags:
-      - -s -w -X main.version={{ .Version }}
-
 # One archive per binary so consumers download only what they need:
 # `inforge plugins install neon` pulls the Neon provider archive alone,
 # never the whole release. A fourth archive publishes every binary in raw,
@@ -93,12 +79,6 @@ archives:
     name_template: >-
       pulumi-resource-neon_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 
-  - id: pulumi-resource-infisical
-    ids:
-      - pulumi-resource-infisical
-    name_template: >-
-      pulumi-resource-infisical_{{ .Version }}_{{ .Os }}_{{ .Arch }}
-
   # Raw, uncompressed binaries — download a single os/arch binary and run it
   # directly, no extraction step.
   - id: raw
@@ -106,7 +86,6 @@ archives:
       - inforge
       - inforge-agent
       - pulumi-resource-neon
-      - pulumi-resource-infisical
     formats:
       - binary
     name_template: >-
@@ -142,9 +121,9 @@ release:
     A Go toolchain that turns declarative infrastructure definitions into real
     deployments via Pulumi and GitHub Actions.
 
-    This release ships four statically-linked binaries: the `inforge` CLI, the
+    This release ships three statically-linked binaries: the `inforge` CLI, the
     `inforge-agent` on-host runtime agent, and the `pulumi-resource-neon`
-    and `pulumi-resource-infisical` provider plugins.
+    provider plugin.
 
     **Install / update**
 

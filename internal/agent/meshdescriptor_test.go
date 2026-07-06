@@ -9,13 +9,7 @@ import (
 )
 
 const validMeshDescriptor = `
-version: 1
-provider:
-  kind: infisical
-  url: https://app.infisical.com
-  project: wsid
-  environment: prod
-  secret_path: /bridge-01
+version: 2
 services:
   - tenants
   - tunneller
@@ -26,16 +20,15 @@ func TestParseMeshDescriptor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseMeshDescriptor: %v", err)
 	}
-	if d.Provider.SecretPath != "/bridge-01" || len(d.Services) != 2 {
+	if len(d.Services) != 2 {
 		t.Fatalf("unexpected descriptor: %+v", d)
 	}
 }
 
 func TestParseMeshDescriptorRejects(t *testing.T) {
 	cases := map[string]string{
-		"wrong version": strings.Replace(validMeshDescriptor, "version: 1", "version: 2", 1),
-		"no provider":   "version: 1\nservices: [a]\n",
-		"no services":   "version: 1\nprovider: {kind: infisical}\n",
+		"wrong version": strings.Replace(validMeshDescriptor, "version: 2", "version: 1", 1),
+		"no services":   "version: 2\n",
 		"unknown field": validMeshDescriptor + "extra: true\n",
 	}
 	for name, in := range cases {
@@ -71,15 +64,5 @@ func TestMeshFilesLandAtMeshPaths(t *testing.T) {
 		default:
 			t.Errorf("unexpected key %q", key)
 		}
-	}
-}
-
-// A pull failure (here: a missing mesh descriptor) must exit non-zero so the
-// renew timer's oneshot lands in systemd's failed state — the monitorable
-// signal for persistent breakage. The proxy's own start is protected by the
-// `-` ExecStartPre prefix instead, never by swallowing the error.
-func TestRunMeshProjectFailsHard(t *testing.T) {
-	if err := runMeshProject(t.TempDir()); err == nil {
-		t.Fatal("runMeshProject on empty dir: want an error (missing descriptor), got nil")
 	}
 }

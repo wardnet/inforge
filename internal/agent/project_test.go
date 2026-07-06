@@ -94,13 +94,3 @@ func TestProjectFilesEmpty(t *testing.T) {
 	assert.Empty(t, pathEnv)
 	assert.False(t, changed)
 }
-
-func TestReloadUnitUsesReloadOrRestart(t *testing.T) {
-	var got []string
-	orig := systemctl
-	systemctl = func(args ...string) error { got = args; return nil }
-	defer func() { systemctl = orig }()
-
-	require.NoError(t, reloadUnit("bridge"))
-	assert.Equal(t, []string{"reload-or-restart", "wardnet-bridge.service"}, got)
-}

@@ -179,18 +179,19 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 		return nil
 	}
 
-	// A mesh service's leaf must already live in the provider before the unit
-	// restarts into it: the boot path projects whatever the provider holds, so
-	// the first release (and every update) re-mints here so the restart lands a
-	// fresh leaf rather than crash-looping until the daily renew timer fires.
-	// `inforge releases deploy` runs from the infra repo, so it holds the same
-	// INFORGE_SECRETS_KEY as `inforge deploy` and can sign from the intermediate.
-	if err := mintReleasedServiceLeaf(ctx, dir, env, svc); err != nil {
+	sshKeyPath, err = resolveSSHKey(sshKeyPath)
+	if err != nil {
 		return err
 	}
 
-	sshKeyPath, err = resolveSSHKey(sshKeyPath)
-	if err != nil {
+	// A mesh service's leaf.age must already be on the host before the unit
+	// restarts into it: the boot path decrypts+projects whatever leaf.age
+	// already sits on disk, so the first release (and every update) re-mints
+	// and SSH-pushes it here so the restart lands a fresh leaf rather than
+	// crash-looping. `inforge releases deploy` runs from the infra repo, so it
+	// holds the same INFORGE_SECRETS_KEY as `inforge deploy` and can sign from
+	// the intermediate.
+	if err := mintReleasedServiceLeaf(ctx, dir, env, svc, sshKeyPath); err != nil {
 		return err
 	}
 
@@ -405,7 +406,7 @@ func resolveDeployTargets(ctx context.Context, projCfg projectConfig, env, platf
 // host's mesh proxy and is the deploy baseline's / renew cron's business
 // (ADR-0033). It reuses renewMeshCertsAs — the same minting core as
 // `inforge pki renew` — in per-service mode.
-func mintReleasedServiceLeaf(ctx context.Context, dir, env, svc string) error {
+func mintReleasedServiceLeaf(ctx context.Context, dir, env, svc, sshKeyPath string) error {
 	globalRes, err := loader.LoadGlobalResources(env, dir)
 	if err != nil {
 		return err
@@ -416,7 +417,7 @@ func mintReleasedServiceLeaf(ctx context.Context, dir, env, svc string) error {
 	}
 	// renewMeshCertsAs no-ops (before touching the store or INFORGE_SECRETS_KEY)
 	// when the named service has no service-side mtls files to mint.
-	count, err := renewMeshCertsAs(ctx, dir, env, env, globalRes, regionalRes, svc)
+	count, err := renewMeshCertsAs(ctx, dir, env, env, globalRes, regionalRes, svc, sshKeyPath, os.Stdout)
 	if err != nil {
 		return fmt.Errorf("mint mesh leaf for %s: %w", svc, err)
 	}

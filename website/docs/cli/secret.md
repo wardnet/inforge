@@ -10,11 +10,13 @@ Manage an environment's **git-committed encrypted secret store** — the file be
 file. See [ADR-0017](https://github.com/wardnet/inforge/blob/main/docs/adr/0017-git-native-encrypted-secret-store.md).
 
 :::info Git-only by design
-No `inforge secret` subcommand ever writes the secrets provider. The provider is updated exclusively
-by `inforge deploy` when the committed store change merges — a single writer, so a deploy can never
-roll back a value the provider already serves. The flow for every change is: **write the store →
-commit & merge → deploy projects it into the provider → `inforge service restart` makes the running
-service pick it up** (services fetch secrets at start).
+No `inforge secret` subcommand ever writes to a host. The value only reaches a service via
+`inforge deploy`, which resolves the committed store, age-encrypts the result directly to each
+host's own SSH key, and pushes it as `secrets.age` — a single writer, so a deploy can never roll back
+a value already delivered. The flow for every change is: **write the store → commit & merge →
+`inforge deploy` pushes the resolved value and reload-or-restarts the affected service automatically**
+(the push is hash-gated, so it only runs — and only reloads/restarts — when a value actually changed;
+no separate restart step is needed).
 :::
 
 ## Subcommands
@@ -101,11 +103,8 @@ Declare the key with `vault:<KEY>` on a consuming service in its `environment.ya
 the store in both directions (a declared key with no ciphertext fails validation; `ls` flags stored
 keys that no service references).
 
-After merging, the deploy writes the provider; then restart the consumers:
-
-```
-inforge service restart prd api
-```
+After merging, `inforge deploy` pushes the resolved value to each consumer's host and
+reload-or-restarts it automatically — no separate restart step needed.
 
 ## `inforge secret rotate`
 
@@ -127,8 +126,9 @@ internal one) and `set` it; merge, deploy, restart:
 
 ```
 pbpaste | inforge secret set prd bridge STRIPE_API_KEY
-inforge service restart prd api        # after the deploy lands
 ```
+
+Commit and merge — `inforge deploy` pushes the new value and restarts the service automatically.
 
 **The master identity leaked** (`INFORGE_SECRETS_KEY` exposed). Two steps, in this order:
 

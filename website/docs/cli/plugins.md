@@ -23,7 +23,6 @@ inforge plugins install [--version <tag>]
 ### What it installs
 
 - `pulumi-resource-neon` — Neon PostgreSQL provider
-- `pulumi-resource-infisical` — Infisical secrets provider
 
 Binaries are downloaded from the matching GitHub release and placed in the same directory
 as the `inforge` binary (or on `$PATH`). Hetzner and Cloudflare providers use the standard

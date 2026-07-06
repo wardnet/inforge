@@ -78,7 +78,7 @@ Database credentials are **not** declared here — they flow through a [grant](#
 | `user` | string | Yes | No-login system user the service runs as. inforge emits `User=<name>` in the systemd unit and creates the account via SSH on first deploy; the agent drops privilege to it before exec. |
 | `pki` | string | Yes | Name of the **two-tier (mesh) PKI** in `pki.enc.yaml` this service is a leaf member of. `inforge validate` checks it names an existing two-tier PKI with an intermediate for every scope the service deploys under (a global service → `global`; a regional service → every region). See [`inforge pki`](/cli/pki). |
 | `mtls_files` | bool | No | **Opt-in** (default `false`): also project this service's **own** leaf + trust bundle into its tmpfs and inject the `MTLS_*_PATH` env vars — for a service running a **raw mTLS plane outside the mesh** (e.g. a node↔node forward listener on an [exposed port](#exposed-ports)). By default the per-host **mesh proxy** is the sole custodian of a service's mesh leaf and the service holds no cert material at all. See [Leaf custody](#east-west-service-mesh). |
-| `reload` | string | No | `ExecReload=` command the service uses to apply a renewed leaf **without a restart** (e.g. `/bin/kill -HUP $MAINPID`, `nginx -s reload`). Only meaningful with `mtls_files: true` (only then does the service hold cert material and get a per-service renewal timer); when set, the timer reloads the unit, else restarts (a brief interruption). Must be a **single line** (it becomes one `ExecReload=` directive; a newline would inject extra unit directives). The leaf/key/bundle paths are in the `MTLS_LEAF_CERT_PATH` / `MTLS_LEAF_KEY_PATH` / `MTLS_TRUST_BUNDLE_PATH` env vars — these names are **reserved**: a service's own `environment:` may not use them. |
+| `reload` | string | No | `ExecReload=` command the service uses to apply a renewed leaf **without a restart** (e.g. `/bin/kill -HUP $MAINPID`, `nginx -s reload`). Only meaningful with `mtls_files: true` (only then does the service hold its own cert material); when set, `inforge pki renew`'s push reloads the unit, else restarts (a brief interruption). Must be a **single line** (it becomes one `ExecReload=` directive; a newline would inject extra unit directives). The leaf/key/bundle paths are in the `MTLS_LEAF_CERT_PATH` / `MTLS_LEAF_KEY_PATH` / `MTLS_TRUST_BUNDLE_PATH` env vars — these names are **reserved**: a service's own `environment:` may not use them. |
 | `ingress` | string | When `routes` is set | **Name** of the [ingress](#ingress-and-routes) resource (same scope) whose nginx fronts this service's `routes`. The ingress host and this service's host must share a network when they differ (cross-host routing). |
 | `routes` | array | No | Typed inbound routes (`tls-termination` / `forward`) realized on the referenced ingress's nginx. Each route binds a public `listen` port and a backend `target` port. See [Ingress and routes](#ingress-and-routes) below. |
 | `health_probes_port` | int | No | Backend port the service serves health checks on, surfaced on a public [health port](./ingress#health-probes) (default `81`) demuxed by the service's FQDN. The health server renders on the service's `ingress:` host — or, for a service **without** an ingress that is listed in the scope [gateway](./gateway)'s `services:`, on the **gateway's** host. Requires ≥1 `health_probe_paths`. See [Health probes](#health-probes) below. |
@@ -93,9 +93,9 @@ inforge injects when the service starts. If absent the service has no environmen
 [Environment](#environment) below.
 
 :::note No `provider` field
-A service has **no `provider`** — it is host-managed, not realized by a cloud provider. The secrets
-provider a service's environment variables are written to is selected per region by the `infisical`
-block in that region's `providers:` in `regions.yaml`, not declared on the service.
+A service has **no `provider`** — it is host-managed, not realized by a cloud provider. Its secrets
+need no provider configuration either: inforge resolves them at deploy time and age-encrypts them
+directly to the service's host, over the same SSH connection used to provision it.
 :::
 
 ## Folder layout
@@ -179,10 +179,10 @@ The source kinds are:
 | **literal** | any other string | A verbatim inline value. **Plaintext in git — non-secret config only.** |
 
 Environment variables are **container-scoped**: every service sharing a `container` receives the
-same set. At deploy, inforge resolves every entry (regardless of source kind), writes the value to
-the secrets provider under the service's scoped path, and `inforge-agent` injects it as an env
-var at start. The [`vault:`](/cli/secret) and full delivery mechanics are covered in
-[Secrets](./secrets).
+same set. At deploy, inforge resolves every entry (regardless of source kind), age-encrypts the
+resulting map directly to the host's own SSH key as `secrets.age`, and `inforge-agent` decrypts it
+locally and injects each value as an env var at start. The [`vault:`](/cli/secret) and full delivery
+mechanics are covered in [Secrets](./secrets).
 
 :::warning Literals are not secrets
 A literal value (any string without a `ref:`/`env:`/`vault:` prefix) is committed **in plaintext**. Use
@@ -472,13 +472,15 @@ belong in `internal_paths`, where no gateway will ever serve them.
 :::
 
 **Leaf custody.** The mesh proxy — not the service — holds every co-located service's mesh leaf and the
-trust bundle: it pulls them from the secrets provider with a per-host identity (scoped to only that
-host's material) at proxy start and on a daily renewal timer, so a reboot self-heals with real
-certificates and [`inforge pki renew`](/cli/pki) never connects to a host. A service therefore ships
-**no TLS code and no cert files** for east-west traffic. The one exception is `mtls_files: true`: a
-service running its own raw mTLS listener outside the mesh (e.g. an inter-node forward plane on an
-exposed port) additionally gets its own leaf + bundle projected into its tmpfs with the `MTLS_*_PATH`
-env vars — a second, independent leaf; the mesh proxy's copy is unaffected.
+trust bundle, in its host's persistent `leaf.age`: [`inforge pki renew`](/cli/pki) mints fresh material
+and SSH-pushes the updated `leaf.age` directly to each mesh host, then reload-or-restarts the proxy so
+it picks it up immediately. At boot, `inforge-agent` decrypts `leaf.age` locally with the host's own
+SSH key, so a reboot always restores real certificates from disk with no network round-trip. A service
+therefore ships **no TLS code and no cert files** for east-west traffic. The one exception is
+`mtls_files: true`: a service running its own raw mTLS listener outside the mesh (e.g. an inter-node
+forward plane on an exposed port) additionally gets its own leaf + bundle projected into its tmpfs from
+its own `leaf.age` with the `MTLS_*_PATH` env vars — a second, independent leaf; the mesh proxy's copy
+is unaffected.
 
 ## Example
 

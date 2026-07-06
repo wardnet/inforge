@@ -75,12 +75,13 @@ The store key is independent of the env-var name, so `DATABASE_URL: vault:PROD_D
 are written with the [`inforge secret`](/cli/secret) CLI — the only writer of the store — and encrypted
 to the store's committed public **recipient**, so **anyone with commit access can add or replace a
 secret value without any private key** (and cannot decrypt what they wrote). At deploy, inforge decrypts
-the values in CI with the master identity from the `INFORGE_SECRETS_KEY` environment variable and writes
-the plaintext into the provider, exactly where the other source kinds land.
+the values in CI with the master identity from the `INFORGE_SECRETS_KEY` environment variable and folds
+the plaintext into the same resolved map as the other source kinds, delivered to each host as
+`secrets.age`.
 
 `vault:` is the right default for app secrets that should live in git (API keys, signing keys, tokens).
-The provider is a *derived cache*: it is written only by the deploy, never by the CLI, so it always
-reflects the last deployed git state (see
+A host's `secrets.age` is a *derived cache*: it is written only by the deploy, never by the CLI, so it
+always reflects the last deployed git state (see
 [ADR-0017](https://github.com/wardnet/inforge/blob/main/docs/adr/0017-git-native-encrypted-secret-store.md)).
 `inforge validate` fails if a `vault:` secret has no matching ciphertext entry in the env's store, so a
 missing value is caught before any deploy.
@@ -126,15 +127,12 @@ A `vault:` value lives in the env's committed, age-encrypted store. The full lif
    inforge secret set prd api SESSION_KEY --generate # random 32-byte value
    ```
 
-4. **Commit and merge** the updated `secrets.enc.yaml`. The provider is written by `inforge deploy` on
-   merge — **never by the CLI** — so a deploy from `main` can never roll back a value the provider
-   already serves.
+4. **Commit and merge** the updated `secrets.enc.yaml`. `inforge deploy` resolves and pushes the value
+   to the consumer's host on merge — **never the CLI** — so a deploy from `main` can never roll back a
+   value already delivered.
 
-5. **Restart the consumers** after the deploy lands, so they re-fetch at start:
-
-   ```sh
-   inforge service restart prd api
-   ```
+5. **No separate restart needed.** The push is hash-gated: `inforge deploy` reload-or-restarts the
+   consumer automatically whenever the resolved value actually changes.
 
 Adding the 2nd…Nth secret never touches your workflow — only step 1 (the one-time
 `INFORGE_SECRETS_KEY`) does.
@@ -161,26 +159,25 @@ Full subcommand reference (`set`, `ls`, `rm`, `rotate`) and incident-response ru
 
 ## How secrets reach a service
 
-inforge does not bake secret values into any artifact. At deploy time, for each service that declares
-secrets, inforge:
+inforge does not bake secret values into any artifact, and there is no runtime secrets backend to
+configure or operate. At deploy time, for each service that declares secrets, inforge:
 
 1. Resolves every `environment.yaml` entry (`ref:` from stack outputs, `vault:` by decrypting the
-   store, `env:` from the deploy environment, literals verbatim) and writes the values to the secrets
-   provider under the service's scoped path.
-2. Mints a **per-service machine identity**, scoped read-only to that service's path.
+   store, `env:` from the deploy environment, literals verbatim, plus any `grants:` outputs) into one
+   plaintext env/file map.
+2. Age-encrypts that map directly to the target host's own SSH host public key (read live over the
+   same SSH connection inforge already uses to provision the host).
 3. Writes two files onto the host under `/etc/wardnet/services/<service>/`:
-   - `descriptor.yaml` — a secret-free document with the provider coordinates and an env-var → vault-key
-     mapping.
-   - `credential.age` — the machine-identity credential, age-encrypted to the host's own SSH host key
-     (encrypted in memory to the key read over SSH; the plaintext never lands on disk).
+   - `descriptor.yaml` — a secret-free document naming which env var or file each value belongs to.
+   - `secrets.age` — the age-encrypted plaintext map above (mode 0600).
 
-At service start, `inforge-agent` (the systemd `ExecStart` for every service) decrypts the
-credential with the host key, logs in to the provider, fetches the secrets, injects them as environment
-variables, drops privilege to the service's `user`, and execs the real binary. Secret *values* live
-only in the service process's environment — never on disk, in the journal, or in argv. A service that
-declares no secrets gets a descriptor with no provider and starts with no fetch at all.
+At service start, `inforge-agent` (the systemd `ExecStart` for every service) decrypts `secrets.age`
+(and, for a mesh member, its renew-owned `leaf.age`) with the host's own SSH host key, injects the
+values as environment variables, drops privilege to the service's `user`, and execs the real binary.
+Secret *values* live only in memory and the service process's environment — never on disk in
+plaintext, in the journal, or in argv. A service that declares no secrets gets a descriptor with no
+`secrets.age` at all and starts with no decrypt step.
 
-The secrets provider a service's values are written to is selected per region by the `infisical` block
-in that region's `providers:` in [`regions.yaml`](/configuration/regions-yaml) — there is no
-`secretsStore` key in `inforge.yaml`. A service that declares environment variables in a region (or
-global slice) with no matching secrets provider fails `inforge validate`, before any deploy.
+A secret rotation takes effect the next time `inforge deploy` (or `inforge pki renew`, for mesh/mtls
+leaves) runs and reload-or-restarts the affected service — there is nothing to configure per region
+and no `secretsStore` key in `inforge.yaml`.

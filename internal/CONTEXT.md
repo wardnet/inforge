@@ -269,16 +269,15 @@ Mesh on a host. A service reaches it over **plain HTTP on loopback** at a stable
 presenting the caller's leaf. It holds the co-located services' leaf keys and enforces the callee's
 `allowed_services`. On regional hosts it never binds the public IP.
 
-**Mesh identity**:
-The per-host machine identity a mesh proxy pulls its cert material with (ADR-0033). Its read scope
-covers **only** the host's own path (`/<hostKey>`) in the scope's shared **mesh workspace** — exactly
-the material that host's proxy already holds in memory, so it broadens no blast radius. Deploy mints
-it and leaves a mesh descriptor + host-key-encrypted credential on the host; `inforge-agent
-mesh-project` uses it at proxy start (reboot self-heal) and on the daily renew timer. Distinct from a
-per-service identity (which reads `/<svc>` — kept only by `mtls_files:` services).
-_Avoid_: a per-host identity that reads every service's `/<svc>/mtls` (the rejected "omniscient"
-layout); SSH-pushing cert material to mesh hosts (renewal never SSHes — only the deploy baseline
-pushes a start **signal**).
+**Mesh secrets blob** *(formerly "mesh identity", ADR-0035 — reverses ADR-0033's pull decision)*:
+The per-host, host-key-encrypted `secrets.age` aggregating every co-located service's leaf + the
+trust bundle for that host's mesh proxy. Deploy writes it initially; `inforge pki renew` SSH-pushes
+fresh leaf material into it directly and signals a reload-or-restart — there is no pull, no
+per-host machine identity, and no renewal timer. A leak exposes only that host's own material
+(blast radius unchanged from the retired per-host identity model), but there is no login step: the
+proxy decrypts the blob locally at start, exactly like any other `secrets.age` consumer.
+_Avoid_: describing renewal as "pulling" (removed); a per-host identity that reads every service's
+`/<svc>/mtls` (the rejected "omniscient" layout, never built).
 The **global-scope-only** public mesh entry (SNI L4 passthrough, ADR-0027) for cross-scope
 (regional→global) calls. Regional scopes have no public mesh listener — which structurally enforces the
 **regional→global-only** direction rule.
@@ -292,8 +291,9 @@ no caller code, manifest, or URL changes.
 ### Providers
 
 **Provider**:
-A named cloud/service integration (`hetzner`, `cloudflare`, `neon`, `infisical`) selected per
-resource by its `provider` field. The `provider` field is optional when a project-level default is
+A named cloud/service integration (`hetzner`, `cloudflare`, `neon`) selected per resource by its
+`provider` field. Secrets delivery is **not** provider-selected (ADR-0035) — it is a fixed,
+intrinsic part of the toolkit, like the git-committed secret store itself. The `provider` field is optional when a project-level default is
 set for the resource's class in `inforge.yaml`'s `providers:` block; an explicit field always takes
 precedence (see ADR-0021).
 _Avoid_: confusing with a Pulumi provider object (an implementation detail inside a provider).
@@ -329,18 +329,22 @@ to the secrets provider under the service's scoped path, and the service fetches
 
 **Runtime secret fetch** (`inforge-agent`):
 Every inforge-managed service's systemd `ExecStart` is `inforge-agent`, a small statically-linked
-Go binary. At start it reads the service's on-host `descriptor.yaml` (secret-free: provider
-coordinates + env-var → vault-key mapping), decrypts the service's `credential.age` with the host SSH
-key, logs in to the provider with that machine identity, fetches the secrets, injects them as env
-vars, drops privilege to the service's `user`, and execs the real binary. Secret values live only in
-the child process's environment — never on disk, in the journal, or in argv. A secret-less service has
-no provider and no `credential.age`, and skips the fetch entirely. See ADR-0010.
+Go binary. At start it reads the service's on-host `descriptor.yaml` (secret-free: which env vars
+and files a service expects) and decrypts `secrets.age` — a git-committed-store-derived,
+age-encrypted-to-the-host's-SSH-key blob written at deploy/renew time — with the host SSH key,
+injects the decrypted values as env vars, drops privilege to the service's `user`, and execs the
+real binary. Secret values live only in the child process's environment — never on disk, in the
+journal, or in argv; only file-shaped material (mesh leaves, mtls PEMs) is staged into tmpfs. A
+secret-less service has neither `Env`/`Files` entries nor a `secrets.age`, and skips the decrypt
+entirely. There is no runtime backend to log into — see ADR-0035, which retired the Infisical
+fetch this term used to describe (superseding that half of ADR-0010).
 
-**Per-service identity**:
-For each secret-bearing service, inforge mints a machine identity scoped read-only to that service's
-path (`/<service>`) and writes the container's secrets under `/<service>/infra`. The standing on-host
-secret is this rotatable identity credential, host-key-encrypted; a leak exposes only that one
-service's path.
+**Per-service identity** *(retired, ADR-0035)*:
+Formerly, inforge minted a machine identity scoped read-only to a service's path and delivered it
+host-key-encrypted so the service could log into Infisical and fetch its secrets. There is no
+identity to mint anymore — the resolved secret values themselves are host-key-encrypted directly
+into `secrets.age` at deploy/renew time. A leak of that file still exposes only that one service's
+own secrets (blast radius unchanged), but there is no longer a credential or a login step.
 
 ### Provisioning vs deployment
 

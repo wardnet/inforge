@@ -43,6 +43,21 @@ func CertFiles(leafPEM, keyPEM, bundlePEM string) map[string]string {
 	return map[string]string{leafCertFile: leafPEM, leafKeyFile: keyPEM, bundleFile: bundlePEM}
 }
 
+// BlobFiles maps a service's minted mesh material to the SAME keys
+// DescriptorFiles() points each *_PATH env var at (MtlsDir-prefixed), so it
+// drops straight into an mtls_files: service's hostsecrets.Blob.Files
+// (ADR-0035) — the SSH-pushed leaf.age's plaintext — and the agent's
+// projectFiles lookup (files[envVar] == key, secrets[key] == value) resolves
+// without any further translation.
+func BlobFiles(leafPEM, keyPEM, bundlePEM string) map[string]string {
+	files := CertFiles(leafPEM, keyPEM, bundlePEM)
+	out := make(map[string]string, len(files))
+	for k, v := range files {
+		out[MtlsDir+"/"+k] = v
+	}
+	return out
+}
+
 // DescriptorFiles is the descriptor `files:` map for a mesh service: each *_PATH
 // env var → its provider key relative to the service secret path. The host
 // agent fetches the key, writes the PEM to a tmpfs file, and sets the env

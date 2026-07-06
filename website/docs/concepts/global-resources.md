@@ -46,7 +46,6 @@ regions:
     slug: use1
     providers:
       neon: { apiKey: ${NEON_API_KEY} }
-      infisical: { clientId: ${INFISICAL_CLIENT_ID}, clientSecret: ${INFISICAL_CLIENT_SECRET} }
 global:
   placementRegion: us-east-1    # required — must match a key under regions:
   providers:

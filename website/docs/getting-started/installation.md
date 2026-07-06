@@ -35,9 +35,8 @@ After installing `inforge`, install the provider plugins it needs:
 inforge plugins install
 ```
 
-This downloads `pulumi-resource-neon` and `pulumi-resource-infisical` from the matching release
-and places them on `$PATH`. The Hetzner and Cloudflare providers use the standard Pulumi SDK and
-require no additional installation.
+This downloads `pulumi-resource-neon` from the matching release and places it on `$PATH`. The
+Hetzner and Cloudflare providers use the standard Pulumi SDK and require no additional installation.
 
 ## Verify
 

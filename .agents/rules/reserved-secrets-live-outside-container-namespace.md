@@ -26,8 +26,9 @@ Do NOT re-introduce an env-level inforge secret as a magic container name (a blo
 plausible user name) or via a name-mangling sentinel (`inforge::…` breaks the moment a name reaches
 `workspaceName`/`naming.Resource`, whose charset forbids `:`). Add it to the `reserved` namespace.
 
-`mesh` is different and stays a real container: it maps to a provisioned Infisical workspace of
-per-host material (`providers/infisical`), not an env-level value read locally.
+`mesh` is different: it is not a container or a reserved secret at all. Mesh leaf/bundle material
+never touches the secret store — it is minted at deploy/renew time and SSH-pushed directly to each
+host as `leaf.age` (ADR-0035), so there is no provider-side workspace of any kind to model here.
 
 ## Applies to
 

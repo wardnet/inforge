@@ -28,10 +28,6 @@ regions:                       # required — one entry per region this env depl
         apiToken: ${CLOUDFLARE_API_TOKEN}
       neon:
         apiKey: ${NEON_API_KEY}
-      infisical:
-        clientId: ${INFISICAL_CLIENT_ID}
-        clientSecret: ${INFISICAL_CLIENT_SECRET}
-        siteUrl: https://app.infisical.com
 
 global:                        # optional — region-less slot (no slug)
   placementRegion: us-east-1   # required when global: is present — must match a key under regions:

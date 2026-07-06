@@ -13,8 +13,9 @@ inforge service restart <env> <service> [--ssh-key <path>] [--stack-config <path
 ```
 
 Restarts the service's systemd unit on **every host it deploys to**, then verifies the unit is
-active. Its main use is the last step of a [secret value change](/cli/secret): services fetch their
-secrets at start, so after a replaced value merges and deploys, a restart is what makes it live.
+active. Useful for a manual bounce independent of any change — `inforge deploy` already restarts a
+service automatically whenever its resolved secrets change (the push to `secrets.age` is hash-gated,
+so a [secret value change](/cli/secret) takes effect on the next deploy without a separate restart).
 
 Targets (host DNS, unit name, SSH user) come from the infra stack's `deployDescriptor` output — the
 same source [`inforge releases deploy`](/cli/releases) delivers by — so restart can never disagree

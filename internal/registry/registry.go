@@ -16,7 +16,6 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
-	"github.com/wardnet/inforge/providers/infisical"
 	"github.com/wardnet/inforge/providers/neon"
 )
 
@@ -29,10 +28,6 @@ type ProviderRegistry interface {
 	Mesh(name string) (types.MeshProvider, error)
 	DNS(name string) (types.DnsProvider, error)
 	Database(name string) (types.DatabaseProvider, error)
-	ServiceSecretsProvisioner(name string) (types.ServiceSecretsProvisioner, error)
-	// SecretsProviderName returns the name of the secrets provider configured
-	// for this region (e.g. "infisical"), or "" if none is configured.
-	SecretsProviderName() string
 }
 
 type registry struct {
@@ -73,9 +68,6 @@ type registry struct {
 
 	neonDbOnce sync.Once
 	neonDb     *neon.NeonDatabaseAdapter
-
-	infisicalOnce    sync.Once
-	infisicalSecrets *infisical.InfisicalSecretsAdapter
 }
 
 // BuildRegistry constructs a ProviderRegistry from the provider config, SSH
@@ -250,36 +242,6 @@ func (r *registry) Database(name string) (types.DatabaseProvider, error) {
 	default:
 		return nil, unknownProvider(name)
 	}
-}
-
-func (r *registry) ServiceSecretsProvisioner(name string) (types.ServiceSecretsProvisioner, error) {
-	switch name {
-	case "infisical":
-		return r.infisicalAdapter(), nil
-	default:
-		return nil, unknownProvider(name)
-	}
-}
-
-func (r *registry) SecretsProviderName() string {
-	// Keep this list in sync with the cases in ServiceSecretsProvisioner.
-	if _, ok := r.config["infisical"]; ok {
-		return "infisical"
-	}
-	return ""
-}
-
-// infisicalAdapter lazily creates the shared InfisicalSecretsAdapter.
-// Subsequent calls return the cached instance.
-func (r *registry) infisicalAdapter() *infisical.InfisicalSecretsAdapter {
-	r.infisicalOnce.Do(func() {
-		clientId := providerCfgString(r.config, "infisical", "clientId")
-		clientSecret := providerCfgString(r.config, "infisical", "clientSecret")
-		siteUrl := providerCfgString(r.config, "infisical", "siteUrl")
-		organizationId := providerCfgString(r.config, "infisical", "organizationId")
-		r.infisicalSecrets = infisical.New(clientId, clientSecret, siteUrl, organizationId, r.slug)
-	})
-	return r.infisicalSecrets
 }
 
 func unknownProvider(name string) error {

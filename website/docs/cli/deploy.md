@@ -38,22 +38,23 @@ Use `--yes` in CI or scripted contexts.
 
 ## Secret delivery
 
-For each service whose container declares secrets, `deploy` writes the secrets to the provider under
-the service's scoped path, mints a per-service machine identity, and writes a secret-free
-`descriptor.yaml` plus a host-key-encrypted `credential.age` onto the host over SSH. The service fetches
-its own secrets at runtime via `inforge-agent`; no secret value is baked into any artifact. See
-[Secrets → How secrets reach a service](../resources/secrets#how-secrets-reach-a-service).
+For each service whose container declares secrets, `deploy` resolves every `environment.yaml` entry
+(plus any `grants:` outputs) into one plaintext map, age-encrypts it directly to the host's own SSH
+key, and writes a secret-free `descriptor.yaml` plus that encrypted `secrets.age` onto the host over
+SSH. `inforge-agent` decrypts `secrets.age` locally at boot and injects the values as environment
+variables; no secret value is baked into any artifact and there is no runtime fetch from any backend.
+See [Secrets → How secrets reach a service](../resources/secrets#how-secrets-reach-a-service).
 
 ## Mesh baseline
 
 When the environment has mesh services (any service with `pki:`), `deploy` runs one more step after a
-successful `up`: it mints the environment's mesh cert material into the secrets provider (the same
-core as [`inforge pki renew`](./pki)) and SSHes each mesh host to start its `wardnet-mesh-renew`
-oneshot, so the per-host mesh proxies pull real leaves immediately instead of serving their
-placeholder certificates until the daily timer. The step needs `INFORGE_SECRETS_KEY` (already required
-for secret delivery) and the deploy SSH key (`--ssh-key` / `INFORGE_DEPLOY_KEY`). A failed trigger is
-reported per host but the material is already in the provider — those hosts converge on their own
-timer. See [How a renewed leaf reaches a running host](./pki#how-a-renewed-leaf-reaches-a-running-host).
+successful `up`: it mints the environment's mesh leaf material (the same core as
+[`inforge pki renew`](./pki)) and SSHes each mesh host to push its updated `leaf.age` directly, then
+unconditionally reload-or-restarts the mesh proxy — so the per-host proxies pick up real leaves
+immediately instead of serving their self-signed placeholder certificates. The step needs
+`INFORGE_SECRETS_KEY` (already required for secret delivery) and the deploy SSH key (`--ssh-key` /
+`INFORGE_DEPLOY_KEY`). A failed push is reported per host; rerun `inforge pki renew` to retry. See
+[How a renewed leaf reaches a running host](./pki#how-a-renewed-leaf-reaches-a-running-host).
 
 ## State management
 

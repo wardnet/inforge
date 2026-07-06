@@ -29,9 +29,9 @@ regional service deploys to all regions, so each needs an intermediate).
 4. **Validate.** `inforge validate <env>` now passes — every regional service has an intermediate for
    the new region (credential-free check).
 
-5. **Deploy.** `inforge deploy <env>` provisions the region's infrastructure and per-service
-   workspaces. Leaves for the new region are minted at deploy / `inforge releases deploy` time, and
-   each host projects them on boot.
+5. **Deploy.** `inforge deploy <env>` provisions the region's infrastructure. Leaves for the new
+   region are minted and SSH-pushed to each host at deploy (the mesh baseline) / `inforge releases
+   deploy` time, and `inforge-agent` decrypts them locally on boot.
 
 ## Verify
 

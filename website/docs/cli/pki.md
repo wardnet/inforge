@@ -26,7 +26,7 @@ intermediate and root-only issuer keys, which deploy and `inforge pki renew` use
 | `inforge pki intermediate <env> <name> <scope>` | **Offline, operator-run.** Mint a per-scope intermediate CA for a two-tier PKI, signed by its cold root. Needs the offline root identity in `INFORGE_PKI_ROOT_KEY`. |
 | `inforge pki rotate <env> <name> --leaf\|--intermediate <scope>\|--root` | Rotate a tier. `--leaf` documents leaf renewal; `--intermediate` re-mints one scope's intermediate from the cold root (**offline**); `--root` runs a dual-root overlap (`--finalize` ends it). |
 | `inforge pki recover-intermediate <env> <name> <scope>` | **Offline.** Compromise recovery for one intermediate: fresh-key re-mint + forced, immediate host re-projection. |
-| `inforge pki renew <env>` | Mint fresh mesh **leaf** certificates for every service and write them to the secrets provider. Decoupled from `inforge deploy`. |
+| `inforge pki renew <env>` | Mint fresh mesh **leaf** certificates for every service and SSH-push them directly to each host's `leaf.age`. Decoupled from `inforge deploy`. |
 | `inforge pki ls <env>` | List the PKIs in the store with their topology and the tiers present. |
 
 :::tip Operator runbooks
@@ -72,66 +72,68 @@ export INFORGE_SECRETS_KEY="AGE-SECRET-KEY-…"   # the CI master identity
 inforge pki renew prd
 ```
 
-`inforge pki renew` mints a fresh leaf for every mesh member (one per scope) and writes the material
-to the secrets provider:
+`inforge pki renew` mints a fresh leaf for every mesh member (one per scope) and SSH-pushes the
+material directly to each host's `leaf.age`, then reload-or-restarts the consumer:
 
-- **Per mesh host**, every co-located member's leaf + key and the host's trust bundle, under
-  `/<hostKey>/` in the scope's shared **mesh workspace** — this is the copy the per-host **mesh proxy**
-  serves east-west traffic with (the proxy, not the service, holds mesh cert material). A host running
-  the [north-south gateway](/resources/gateway) also gets the gateway's client leaf
-  (`CN=<scope>/gateway`) here, under `/<hostKey>/gateway/` — so a scope whose **only** mesh member is a
-  gateway still needs `INFORGE_SECRETS_KEY` and its provider credentials to renew.
+- **Per mesh host**, every co-located member's leaf + key and the host's trust bundle land in one
+  `leaf.age` at `/etc/wardnet/mesh/` — this is the copy the per-host **mesh proxy** serves east-west
+  traffic with (the proxy, not the service, holds mesh cert material). A host running the
+  [north-south gateway](/resources/gateway) also gets the gateway's client leaf (`CN=<scope>/gateway`)
+  in the same aggregate — so a scope whose **only** mesh member is a gateway still needs
+  `INFORGE_SECRETS_KEY` and SSH reachability to renew.
 - **Per `mtls_files: true` service** (the raw-mTLS-plane exception, e.g. a node↔node forward listener),
-  additionally the service's own copy under `/<service>/mtls`.
+  additionally the service's own `leaf.age` under `/etc/wardnet/services/<service>/mtls`.
 
 Leaves are valid for **90 days** and carry a SPIFFE identity
 (`spiffe://<base-domain>/<env>/<scope>/<member>`) so peers can authorize on the encoded scope.
 
 :::info Renew is not a deploy — schedule it
-`inforge pki renew` **only** writes cert material to the provider; it never runs the infra program and
-never connects to a host, so it is safe to run while your working tree has un-shipped infra changes.
-Every run re-mints a fresh 90-day leaf, so the effective rotation interval is how often you run it —
-**schedule it on a cron** (e.g. weekly, well inside the 90-day window) so leaves never approach expiry.
-The workspaces must already exist — run `inforge deploy` for the environment first; renew adopts them,
-never creates them.
+`inforge pki renew` **never runs the infra program** (Pulumi), so it is safe to run while your working
+tree has un-shipped infra changes — but it does connect over SSH to push the renewed material to every
+mesh/mtls host, unlike a plain secret rotation. Every run re-mints a fresh 90-day leaf, so the effective
+rotation interval is how often you run it — **schedule it on a cron** (e.g. weekly, well inside the
+90-day window) so leaves never approach expiry. The targets must already exist — run `inforge deploy`
+for the environment first; renew reuses them, never creates them.
 :::
 
 ## How a renewed leaf reaches a running host
 
-Renewal is pull-based: each consumer has a daily systemd timer that re-fetches its material from the
-provider and applies it **only if it changed**.
+Renewal is push-based: `inforge pki renew` SSHes directly to each mesh/mtls host, writes the fresh
+material into its persistent `leaf.age` (age-encrypted to the host's own SSH key), and
+unconditionally reload-or-restarts the consumer — a fresh leaf always differs, so there is no
+hash-gating on this path.
 
-- **The mesh proxy** (every host running ≥1 `pki:` service) has a `wardnet-mesh-renew.timer` running
-  `inforge-agent mesh-project`: it fetches the host's own `/<hostKey>/` path (with a per-host identity
-  that can read only that path) and atomically projects every co-located service's leaf + the trust
-  bundle into the proxy's tmpfs, then reloads the mesh nginx — no downtime, and the services themselves
-  are untouched (they hold no cert material). The same projection runs at proxy start, so a **reboot
-  re-seeds real material** before nginx accepts traffic.
-- **An `mtls_files: true` service** additionally has a per-service `wardnet-<svc>-renew.timer` running
-  `inforge-agent project`, which re-projects `/<svc>/mtls` into the service's tmpfs and then
-  **reloads** the unit when it declares a [`reload:`](/resources/service) command, else **restarts** it.
+- **The mesh proxy** (every host running ≥1 `pki:` service) receives one aggregate `leaf.age` at
+  `/etc/wardnet/mesh/` holding every co-located service's leaf + the trust bundle. `inforge-agent`
+  decrypts it locally and reloads the mesh nginx — no downtime, and the services themselves are
+  untouched (they hold no cert material). Because `leaf.age` is persistent, an ordinary **reboot**
+  re-decrypts the same real material from disk with no network round-trip — a reboot's normal boot
+  flow *is* the self-heal.
+- **An `mtls_files: true` service** additionally receives its own `leaf.age` under
+  `/etc/wardnet/services/<service>/mtls`, decrypted the same way, and then **reloads** the unit when
+  it declares a [`reload:`](/resources/service) command, else **restarts** it.
 
-So renewal is hands-off: `inforge pki renew` writes the provider, and each host converges on its own
-within the timer interval (well inside the 90-day TTL), with no CLI→host connection required. Leaf
-private keys live only in tmpfs (RAM) for the life of a boot — never written to persistent disk.
+So renewal needs SSH reachability to every target host at renewal time — `inforge pki renew` mints and
+pushes in one step, with no separate on-host timer or pull to converge afterward. Leaf private keys are
+decrypted only in memory at boot/reload — never written to disk in plaintext.
 
 ### The deploy baseline
 
 Right after `pulumi up`, `inforge deploy` (and `inforge ephemeral up`) runs a **mesh baseline** step:
-it mints the environment's mesh material with the same core as `inforge pki renew`, then SSHes each
-mesh host and starts its `wardnet-mesh-renew` oneshot — so the freshly (re)configured proxies leave
-their self-signed placeholder certificates immediately instead of waiting for the daily timer. The
-trigger pushes a *signal*, never cert material. It needs the deploy SSH key (`--ssh-key` or
-`INFORGE_DEPLOY_KEY`); if a trigger fails, the material is already in the provider and the host
-converges on its own timer.
+it mints the environment's mesh material with the same core as `inforge pki renew` and SSH-pushes each
+mesh host's `leaf.age`, then reload-or-restarts the proxy — so the freshly (re)configured proxies pick
+up real leaves immediately instead of serving their self-signed placeholder certificates. It needs the
+deploy SSH key (`--ssh-key` or `INFORGE_DEPLOY_KEY`); a failed push is reported per host — rerun
+`inforge pki renew` to retry.
 
 ### The release-time mint (`mtls_files` services only)
 
 An `mtls_files: true` service only starts running on its **first `inforge releases deploy`**. Because
-its boot path projects whatever the provider holds, that first start would crash-loop until the daily
-renew timer first fired. To close the gap, `inforge releases deploy` mints the released service's leaf
-**before** it restarts the unit. Every other service — mesh member or not — skips this step: a plain
-mesh member's leaf is delivered to the mesh proxy by deploy/renew, independent of releases.
+its boot path decrypts whatever `leaf.age` currently holds, that first start would crash-loop with no
+material yet pushed. To close the gap, `inforge releases deploy` mints the released service's leaf and
+pushes its `leaf.age` **before** it restarts the unit. Every other service — mesh member or not — skips
+this step: a plain mesh member's leaf is delivered to the mesh proxy by deploy/renew, independent of
+releases.
 
 ## Rotation and recovery
 

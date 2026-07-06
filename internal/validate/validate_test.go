@@ -472,10 +472,10 @@ func TestCheckRegionsFile(t *testing.T) {
 // must have each declared provider available in EVERY region it deploys into: a
 // provider present in one region but absent from another fails for the region
 // that lacks it. It runs against the ok fixture (which uses hetzner, cloudflare,
-// neon and infisical).
+// and neon).
 func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 	full := map[string]map[string]any{
-		"hetzner": {}, "cloudflare": {}, "neon": {}, "infisical": {},
+		"hetzner": {}, "cloudflare": {}, "neon": {},
 	}
 
 	t.Run("all providers in every region", func(t *testing.T) {
@@ -492,7 +492,7 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 		r := &reporter{}
 		// eu-central-1 omits neon, which the shared database resource requires.
 		noNeon := map[string]map[string]any{
-			"hetzner": {}, "cloudflare": {}, "infisical": {},
+			"hetzner": {}, "cloudflare": {},
 		}
 		table := regions.Table{
 			"us-east-1":    {Slug: "use1", Providers: full},
@@ -500,21 +500,6 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 		}
 		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok", "regional"), table, types.ProviderDefaults{}))
 		assert.True(t, r.failed, "neon is unavailable in eu-central-1")
-	})
-
-	t.Run("secrets provider missing", func(t *testing.T) {
-		r := &reporter{}
-		// The ok set has a service that declares secrets; a region with no
-		// secrets provider (infisical) can't write them, so it must fail
-		// validation rather than surfacing only at deploy time.
-		noSecrets := map[string]map[string]any{
-			"hetzner": {}, "cloudflare": {}, "neon": {},
-		}
-		table := regions.Table{
-			"us-east-1": {Slug: "use1", Providers: noSecrets},
-		}
-		require.NoError(t, checkProviderAvailability(r, filepath.Join(testdataDir, "ok", "regional"), table, types.ProviderDefaults{}))
-		assert.True(t, r.failed, "a service declares secrets but the region has no secrets provider")
 	})
 }
 

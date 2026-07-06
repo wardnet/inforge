@@ -56,7 +56,6 @@ const sidebars: SidebarsConfig = {
         'providers/hetzner',
         'providers/cloudflare',
         'providers/neon',
-        'providers/infisical',
       ],
     },
     {
