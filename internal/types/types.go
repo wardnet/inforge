@@ -558,6 +558,35 @@ type ComputeProvider interface {
 	AttachNetwork(ctx *pulumi.Context, spec ComputeSpec, instance int, dependsOn []pulumi.Resource) (pulumi.StringOutput, error)
 }
 
+// StorageRequest describes a persistent block volume to provision for a compute host
+// (ADR-0036). It is provider-neutral: a Hetzner realization creates an hcloud.Volume;
+// a future AWS realization would create an EBS volume of the same intent.
+type StorageRequest struct {
+	Name        string // logical volume name (the database-cluster name)
+	Env         string
+	Region      string // abstract region → the provider's location/zone
+	Container   string // grouping label
+	HostSpecKey string // naming.SpecKey of the compute instance the volume attaches to
+	SizeGB      int    // requested size; the provider floors it at its own minimum
+}
+
+// StorageOutputs is the realized volume's on-host handle.
+type StorageOutputs struct {
+	// DevicePath is the stable on-host block-device path the volume appears at (e.g.
+	// Hetzner's /dev/disk/by-id/scsi-0HC_Volume_<id>), used to mkfs/mount it on-host.
+	DevicePath pulumi.StringOutput
+}
+
+// StorageProvider provisions a persistent block volume and attaches it to a compute
+// host built by the matching ComputeProvider (ADR-0036). The attach MUST be gated on
+// the host's cloud-init readiness (dependsOn), exactly like ComputeProvider.AttachNetwork,
+// so on-host formatting/mounting runs against a ready host. The volume is created
+// unformatted so a reattached, already-populated volume is never reformatted. A
+// provider floors SizeGB at its own minimum volume size.
+type StorageProvider interface {
+	CreateVolume(ctx *pulumi.Context, req StorageRequest, dependsOn []pulumi.Resource) (StorageOutputs, error)
+}
+
 // DnsProvider creates a derived DNS record pointing at a compute instance, on a
 // region's DNS authority.
 type DnsProvider interface {
