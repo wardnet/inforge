@@ -77,8 +77,8 @@ The fully-qualified resource name `wardnet-<env>-<slug>-<type>-<name>[-<NN>]`.
 ### Resources
 
 **Resource**:
-One of the declarative types under a region: **Network**, **Compute**, **Database**,
-**Service**. Each is a named **folder** containing a `manifest.yaml` validated against an embedded JSON
+One of the declarative types under a region: **Network**, **Compute**, **Database cluster**,
+**Database**, **Service**. Each is a named **folder** containing a `manifest.yaml` validated against an embedded JSON
 schema, plus optional sidecar files in the same folder (e.g. `cloud-init.sh` for compute,
 `environment.yaml` for service — see **Resource folder** and ADR-0018). Secrets are **not** a resource
 type — a service's secret/non-secret env vars live in its `environment.yaml` sidecar (ADR-0020). DNS is
@@ -101,6 +101,26 @@ _Avoid_: server, node, instance (an instance is one expanded specKey, not the sp
 The set of valid compute size *names* — cloud-agnostic vocabulary, no `cpus`/`memory` payload (a
 provider maps the name to a concrete SKU; see **Region realization**). Defaults (`SMALL`, `MEDIUM`,
 `LARGE`) in `internal/sizes`; a per-environment `sizes.yaml` **replaces** them wholesale.
+
+**Database cluster**:
+A single-instance database **engine** (today PostgreSQL) that hosts one or more logical **Databases**.
+A resource folder (`…/database-cluster/<name>/`) declaring the `engine`, the compute **host** it runs on
+(a same-scope `host:` FK), its `provider`, and the engine `version`. Its data lives on a single
+persistent volume whose size is **derived** from its **Databases** (not authored on the cluster). It is
+explicitly **single-instance** — no replication or failover — despite the word "cluster",
+which follows PostgreSQL's own term for one `initdb` instance managing several databases. A managed
+provider maps a cluster to its hosted equivalent and carries no host/storage.
+_Avoid_: reading "cluster" as multi-node/HA; conflating with compute `kind: cluster` (k8s, reserved).
+
+**Database**:
+A single logical database **within** a **Database cluster**: its `database` name, `owner`, a `cluster:`
+FK (same scope), and an optional per-database `backup` policy and intended `size`. It carries **no**
+`engine`/`host`/`provider` — those belong to its cluster. Several Databases may share one cluster (e.g.
+`ddns` and `tunneller` on the `edge` cluster). It is the **Grantable** a service targets. The `size` is
+declared intent a provider realizes as its engine allows — PostgreSQL sizes the cluster's volume as the
+sum of its Databases and does not enforce per-database.
+_Avoid_: conflating the logical Database with its Database cluster (the engine instance); the pre-split
+`database` resource that fused the two.
 
 **Service**:
 A component hosted *on* a compute, referenced by its `host` field — the compute's `name` (e.g.
@@ -193,7 +213,8 @@ _Avoid_: conflating with `ref:` (a grant *creates/issues* a credential; a `ref:`
 existing output) or with mesh `pki:` membership.
 
 **Grantable**:
-A resource type that can be the target of a **Grant** — currently a **Database** or a **PKI
+A resource type that can be the target of a **Grant** — currently a **Database** (the logical database,
+whose role is minted in its **Database cluster**) or a **PKI
 resource**. Granting means something type-specific: for a Database, creating a scoped DB user; for a
 PKI resource, delivering cert material. Each Grantable maps the universal `ro`/`rw` permission to its
 own domain (DB: read-only vs read-write user; PKI: `verify` = CA cert only vs `issue` = signing key)

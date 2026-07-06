@@ -40,6 +40,7 @@ const sidebars: SidebarsConfig = {
         'resources/network',
         'resources/compute',
         'resources/dns',
+        'resources/database-cluster',
         'resources/database',
         'resources/secrets',
         'resources/service',
@@ -55,7 +56,6 @@ const sidebars: SidebarsConfig = {
       items: [
         'providers/hetzner',
         'providers/cloudflare',
-        'providers/neon',
       ],
     },
     {

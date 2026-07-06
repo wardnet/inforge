@@ -1,6 +1,5 @@
 name: bridge
 container: bridge
-engine: postgresql
-branch: main
+cluster: pg
 database: bridge
 owner: app

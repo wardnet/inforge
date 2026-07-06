@@ -34,6 +34,8 @@ func newPluginsCmd() *cobra.Command {
 			for _, p := range []stdPlugin{
 				{"hcloud", "1.38.0", "pulumi/pulumi-hcloud"},
 				{"cloudflare", "6.17.0", "pulumi/pulumi-cloudflare"},
+				// pulumi-random backs stable per-service database passwords (ADR-0036).
+				{"random", "4.16.8", "pulumi/pulumi-random"},
 			} {
 				fmt.Printf("installing pulumi-resource-%s v%s...\n", p.name, p.version)
 				if err := installPulumiPlugin(ctx, p.name, p.version, p.repo); err != nil {
@@ -42,19 +44,8 @@ func newPluginsCmd() *cobra.Command {
 				fmt.Printf("  installed pulumi-resource-%s\n", p.name)
 			}
 
-			// Custom providers ship as raw binaries in wardnet/inforge releases.
-			// The version must match the running inforge binary; "dev" has no release.
-			for _, name := range []string{"neon"} {
-				if version == "dev" {
-					fmt.Printf("skipping pulumi-resource-%s: build is 'dev' — no GitHub release available\n", name)
-					continue
-				}
-				fmt.Printf("installing pulumi-resource-%s v%s...\n", name, version)
-				if err := installCustomPlugin(ctx, name, version); err != nil {
-					return fmt.Errorf("install %s: %w", name, err)
-				}
-				fmt.Printf("  installed pulumi-resource-%s\n", name)
-			}
+			// No custom (raw-binary) providers ship today: ADR-0036 retired the Neon
+			// plugin and self-hosted Postgres needs none. The seam remains if one returns.
 
 			fmt.Println("all plugins installed")
 			return nil
@@ -81,24 +72,6 @@ func installPulumiPlugin(ctx context.Context, name, ver, repo string) error {
 		return err
 	}
 	return downloadAndExtractTarGz(ctx, url, pluginDir, binary)
-}
-
-// installCustomPlugin downloads a custom inforge provider raw binary from the
-// wardnet/inforge GitHub release and installs it into the Pulumi plugins dir.
-func installCustomPlugin(ctx context.Context, name, ver string) error {
-	goos := runtime.GOOS
-	goarch := runtime.GOARCH
-	binary := "pulumi-resource-" + name
-
-	// goreleaser raw binary name: <binary>_<version>_<os>_<arch>
-	filename := fmt.Sprintf("%s_%s_%s_%s", binary, ver, goos, goarch)
-	url := releaseAssetURL(ver, filename)
-
-	pluginDir, err := pulumiPluginDir(name, ver)
-	if err != nil {
-		return err
-	}
-	return downloadBinary(ctx, url, filepath.Join(pluginDir, binary), 0o755)
 }
 
 func pulumiPluginDir(name, ver string) (string, error) {

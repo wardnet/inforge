@@ -160,15 +160,48 @@ type DnsRecord struct {
 	Proxied    bool
 }
 
-// DatabaseSpec is one managed database resource.
-type DatabaseSpec struct {
+// DatabaseClusterSpec is one database-cluster resource: a single-instance database
+// engine (one initdb/postmaster) whose data lives on a single persistent volume
+// (ADR-0036). Many logical databases live in one cluster, and many clusters may run
+// on one host. It is deliberately single-instance — no HA/replication — despite the
+// word "cluster" (PostgreSQL's own term for one initdb instance managing several
+// databases). Host is a same-scope compute FK, REQUIRED when the resolved provider
+// is self-hosted (inforge installs Postgres on that host) and FORBIDDEN when a
+// managed provider is used. The volume size is not authored here — it is derived
+// from the sizes of the cluster's logical databases (see DatabaseSpec.SizeGB).
+type DatabaseClusterSpec struct {
 	Name      string `yaml:"name"`
 	Container string `yaml:"container"`
-	Provider  string `yaml:"provider"`
-	Engine    string `yaml:"engine"` // "postgresql"
-	Branch    string `yaml:"branch"` // default "main"
-	Database  string `yaml:"database"`
-	Owner     string `yaml:"owner"` // PostgreSQL role that owns the database
+	Engine    string `yaml:"engine"`   // "postgresql"
+	Host      string `yaml:"host"`     // same-scope compute FK (self-hosted only)
+	Provider  string `yaml:"provider"` // e.g. "self-hosted"; defaults per ProviderDefaults
+	Version   string `yaml:"version"`  // engine major (e.g. "17"); default per loader
+}
+
+// DatabaseSpec is one logical database inside a database-cluster (ADR-0036). It
+// names its cluster by FK (same scope), the logical Database and its Owner role,
+// an optional declared SizeGB (intent — Postgres has no per-database quota, so it
+// contributes to its cluster's derived volume size), and an optional per-database
+// Backup policy. Engine/provider/branch live on the cluster, not here.
+type DatabaseSpec struct {
+	Name      string       `yaml:"name"`
+	Container string       `yaml:"container"`
+	Cluster   string       `yaml:"cluster"`  // database-cluster FK (same scope)
+	Database  string       `yaml:"database"` // the logical database name
+	Owner     string       `yaml:"owner"`    // PostgreSQL role that owns the database (NOLOGIN)
+	SizeGB    int          `yaml:"size_gb"`  // declared size intent; sums into the cluster volume
+	Backup    BackupPolicy `yaml:"backup"`   // per-database backup policy (loader-defaulted)
+}
+
+// BackupPolicy is a logical database's backup configuration (ADR-0036). Enabled is a
+// pointer so an absent block defaults to enabled while an explicit `enabled: false`
+// opts a throwaway/derived database out. Interval is the pg_dump cadence (RPO) and
+// Keep is how many backups to retain. The backup delivery itself lands in a later
+// slice; this slice defines and validates the authored shape.
+type BackupPolicy struct {
+	Enabled  *bool  `yaml:"enabled"`  // default true when omitted
+	Interval string `yaml:"interval"` // default "24h"
+	Keep     int    `yaml:"keep"`     // default 7
 }
 
 // DeployUserSpec configures the deploy user provisioned on a compute instance
@@ -558,6 +591,38 @@ type ComputeProvider interface {
 	AttachNetwork(ctx *pulumi.Context, spec ComputeSpec, instance int, dependsOn []pulumi.Resource) (pulumi.StringOutput, error)
 }
 
+// StorageRequest describes a persistent block volume to provision for a compute host
+// (ADR-0036). It is provider-neutral: a Hetzner realization creates an hcloud.Volume;
+// a future AWS realization would create an EBS volume of the same intent.
+type StorageRequest struct {
+	Name        string // logical volume name (the database-cluster name)
+	Env         string
+	Region      string // abstract region → the provider's location/zone
+	Container   string // grouping label
+	HostSpecKey string // naming.SpecKey of the compute instance the volume attaches to
+	SizeGB      int    // requested size; the provider floors it at its own minimum
+}
+
+// StorageOutputs is the realized volume's on-host handle.
+type StorageOutputs struct {
+	// DevicePath is the stable on-host block-device path the volume appears at (e.g.
+	// Hetzner's /dev/disk/by-id/scsi-0HC_Volume_<id>), used to mkfs/mount it on-host.
+	DevicePath pulumi.StringOutput
+	// Attachment is the volume-attachment resource. An on-host mkfs/mount command must
+	// DependsOn it so it never runs before the device is attached to the server.
+	Attachment pulumi.Resource
+}
+
+// StorageProvider provisions a persistent block volume and attaches it to a compute
+// host built by the matching ComputeProvider (ADR-0036). The attach MUST be gated on
+// the host's cloud-init readiness (dependsOn), exactly like ComputeProvider.AttachNetwork,
+// so on-host formatting/mounting runs against a ready host. The volume is created
+// unformatted so a reattached, already-populated volume is never reformatted. A
+// provider floors SizeGB at its own minimum volume size.
+type StorageProvider interface {
+	CreateVolume(ctx *pulumi.Context, req StorageRequest, dependsOn []pulumi.Resource) (StorageOutputs, error)
+}
+
 // DnsProvider creates a derived DNS record pointing at a compute instance, on a
 // region's DNS authority.
 type DnsProvider interface {
@@ -615,9 +680,16 @@ type MeshProvider interface {
 	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, cfg meshnginx.Config, listenAddr pulumi.StringInput, targetIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
 }
 
-// DatabaseProvider creates a managed database.
+// DatabaseProvider realizes a database-cluster and its logical databases on a
+// managed backend, returning one DatabaseOutputs (carrying a bound DBRoleProvisioner)
+// per logical database keyed by the database resource name. It is the retained
+// managed seam (ADR-0036): the self-hosted path does NOT go through it (it realizes
+// the cluster on a compute host directly and constructs its own on-host
+// DBRoleProvisioner), but the interface stays so a managed provider (a future Neon
+// re-add, RDS, …) plugs back in without touching grants. No provider is registered
+// today — registry.Database returns an unknown-provider error for every name.
 type DatabaseProvider interface {
-	Create(ctx *pulumi.Context, spec DatabaseSpec, env, region string) (DatabaseOutputs, error)
+	Create(ctx *pulumi.Context, cluster DatabaseClusterSpec, databases []DatabaseSpec, env, region string) (map[string]DatabaseOutputs, error)
 }
 
 // ManifestContribution is a set of non-secret fields a contributor adds to a
@@ -665,14 +737,15 @@ type ObservabilityConfig struct {
 
 // Resources is the full set of resource specs for one region.
 type Resources struct {
-	Network  []NetworkSpec
-	Compute  []ComputeSpec
-	Database []DatabaseSpec
-	Service  []ServiceSpec
-	PKI      []PKIResourceSpec
-	Ingress  []IngressSpec
-	App      []AppSpec
-	Gateway  []GatewaySpec
+	Network         []NetworkSpec
+	Compute         []ComputeSpec
+	DatabaseCluster []DatabaseClusterSpec
+	Database        []DatabaseSpec
+	Service         []ServiceSpec
+	PKI             []PKIResourceSpec
+	Ingress         []IngressSpec
+	App             []AppSpec
+	Gateway         []GatewaySpec
 }
 
 // HasAny reports whether the set declares any resource of any kind. Used to decide
@@ -680,18 +753,25 @@ type Resources struct {
 // an absent global/ dir loads as the zero Resources. Counting every field keeps it
 // honest as new resource kinds are added.
 func (r Resources) HasAny() bool {
-	return len(r.Network)+len(r.Compute)+len(r.Database)+
+	return len(r.Network)+len(r.Compute)+len(r.DatabaseCluster)+len(r.Database)+
 		len(r.Service)+len(r.PKI)+len(r.Ingress)+len(r.App)+len(r.Gateway) > 0
 }
 
 // ProviderDefaults are project-level provider fallbacks. When a resource spec omits
 // its provider field, the effective provider is resolved from this block.
 // Compute applies to both network and compute specs (they share one cloud provider).
-// Database maps engine name to provider (e.g. "postgresql": "neon").
+// Database maps engine name to provider. When no override and no default is
+// configured, a database engine resolves to "self-hosted" (ADR-0036) — inforge
+// installs and runs the engine on a compute host it provisions.
 type ProviderDefaults struct {
 	Compute  string            `yaml:"compute"`
 	Database map[string]string `yaml:"database"`
 }
+
+// SelfHostedProvider is the database provider value meaning inforge runs the engine
+// itself on a compute host (ADR-0036), as opposed to a managed cloud database. It is
+// the default when a database-cluster names no provider and none is configured.
+const SelfHostedProvider = "self-hosted"
 
 // ResolveProvider returns the effective provider for a resource: override wins if
 // non-empty, then the class default (engine-keyed for databases). Returns "" when
@@ -707,7 +787,9 @@ func ResolveProvider(override, class, engine string, d ProviderDefaults) string 
 		if p, ok := d.Database[engine]; ok && p != "" {
 			return p
 		}
-		return ""
+		// No override and no configured default: inforge self-hosts the engine
+		// (ADR-0036). This is the flipped default that retires managed-by-default.
+		return SelfHostedProvider
 	}
 	return ""
 }

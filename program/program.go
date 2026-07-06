@@ -301,6 +301,15 @@ func Run(ctx *pulumi.Context) error {
 		if err := realizeMesh(ctx, sc.reg, sc.res, globalRes, computeOutputs, sc.key, sc.slug, regionNames, gates, vars.SSH.DeployPrivateKey, env, providerDefaults); err != nil {
 			return err
 		}
+		// Self-hosted database clusters (ADR-0036): install Postgres on each cluster's
+		// host, provision its data volume + logical databases, and register a
+		// per-database DBRoleProvisioner into databaseOutputs. Runs after the private
+		// network is attached (it needs the host's private IP) and before service
+		// secrets (grants resolve against databaseOutputs). The global slice runs first
+		// (scopes are global-first), so a regional grant on a global database resolves.
+		if err := provisionDatabaseClusters(ctx, sc.reg, sc.res, computeOutputs[sc.key], databaseOutputs[sc.key], gates, providerDefaults, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug); err != nil {
+			return err
+		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
 		serviceSecrets, err := provisionServiceSecrets(ctx, sc.res, all, env, sc.key, sc.slug)
 		if err != nil {
@@ -384,17 +393,10 @@ func createInfra(
 		}
 	}
 
-	for _, spec := range res.Database {
-		dp, err := reg.Database(types.ResolveProvider(spec.Provider, "database", spec.Engine, defaults))
-		if err != nil {
-			return err
-		}
-		out, err := dp.Create(ctx, spec, env, region)
-		if err != nil {
-			return err
-		}
-		databaseOutputs[region][spec.Name] = out
-	}
+	// Database clusters are NOT realized here: a self-hosted cluster needs each host's
+	// private IP + cloud-init gate (attached in the host-level pipeline), so it is
+	// realized by provisionDatabaseClusters after attachPrivateNetworks and before
+	// provisionServiceSecrets, populating databaseOutputs[region] there (ADR-0036).
 	return nil
 }
 
@@ -1821,6 +1823,16 @@ func firewallPlanByHost(res types.Resources, meshPublic bool) map[string]types.F
 		}
 		for _, ep := range svc.ExposedPorts {
 			addExposed(svcHost, ep)
+		}
+	}
+	// A self-hosted database-cluster host opens each co-located cluster's TCP port
+	// (postgres.ClusterPort, 5432+) to its private network CIDR only — never the public
+	// internet. Peers reach Postgres over the private network; the port assignment is
+	// single-sourced with the realization via clusterPortsByHost (ADR-0036, rule
+	// exposed-ports-are-private-only).
+	for host, byCluster := range clusterPortsByHost(res, canonical) {
+		for _, port := range byCluster {
+			addPrivate(host, port)
 		}
 	}
 	// The east-west mesh materializes on every host running ≥1 pki: service (ADR-0032);

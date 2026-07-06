@@ -14,7 +14,6 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
-	"github.com/wardnet/inforge/providers/neon"
 )
 
 // provMocks records the (typeToken, name) of every resource registered through it.
@@ -251,10 +250,11 @@ func TestRegistryUnknownProvider(t *testing.T) {
 	require.NoError(t, err)
 	assert.IsType(t, (*cfprovider.CloudflareDns)(nil), dp)
 
-	// "neon" is now a known database provider — must succeed.
-	dbp, err := r.Database("neon")
-	require.NoError(t, err)
-	assert.IsType(t, (*neon.NeonDatabaseAdapter)(nil), dbp)
+	// ADR-0036 retired the managed (Neon) database provider — no name resolves now
+	// (self-hosted Postgres does not go through registry.Database).
+	_, err = r.Database("neon")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown provider: "neon"`)
 
 	_, err = r.Database("unknown-db")
 	require.Error(t, err)

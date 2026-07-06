@@ -20,7 +20,7 @@ backend:
 providers:                # optional — project-level provider defaults
   compute: hetzner        # default provider for all Compute resources
   database:
-    postgresql: neon      # default provider for postgresql Database resources
+    postgresql: self-hosted   # default provider for postgresql database-clusters
 ```
 
 ## Fields
@@ -92,14 +92,16 @@ takes precedence.
 providers:
   compute: hetzner
   database:
-    postgresql: neon
+    postgresql: self-hosted
 ```
 
 - **`compute`** — default provider name for all Compute resources. Network resources inherit this
   same default (there is no separate `network` key).
-- **`database.<engine>`** — default provider for databases of that engine (e.g. `postgresql: neon`).
+- **`database.<engine>`** — default provider for [database-clusters](../resources/database-cluster) of
+  that engine. When unset it defaults to **`self-hosted`** — inforge installs and runs the engine on a
+  compute host you provision (ADR-0036).
 
-When `providers:` is omitted every Compute, Network, and Database resource must declare `provider:`
+When `providers:` is omitted every Compute and Network resource must declare `provider:`
 explicitly. Secrets need no provider configuration at all: inforge resolves a service's
 `vault:`/`ref:`/grant values at deploy time and age-encrypts them directly to the target host's own
 SSH key, delivering them over the same SSH connection inforge already uses to provision the host.

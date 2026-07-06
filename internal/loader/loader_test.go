@@ -89,15 +89,19 @@ func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
 func TestLoadGlobalResources(t *testing.T) {
 	global, err := LoadGlobalResources("global-ok", testdataDir)
 	require.NoError(t, err)
-	require.Len(t, global.Database, 1, "the global slice declares one database")
+	require.Len(t, global.Database, 1, "the global slice declares one logical database")
 	assert.Equal(t, "shared", global.Database[0].Name)
-	assert.Equal(t, "main", global.Database[0].Branch, "database branch should default to main")
+	assert.Equal(t, "pg", global.Database[0].Cluster, "the logical database names its cluster")
+	require.Len(t, global.DatabaseCluster, 1, "the global slice declares one database-cluster")
+	assert.Equal(t, "pg", global.DatabaseCluster[0].Name)
+	assert.Equal(t, "17", global.DatabaseCluster[0].Version, "the cluster version defaults to 17")
 
 	// The regional set of the same environment does NOT include the global
-	// database: global/ is loaded separately, not as a regional resource type.
+	// database/cluster: global/ is loaded separately, not as a regional resource type.
 	regional, err := LoadResources("global-ok", testdataDir)
 	require.NoError(t, err)
 	assert.Empty(t, regional.Database, "global/ must not leak into the regional set")
+	assert.Empty(t, regional.DatabaseCluster, "global/ must not leak into the regional set")
 }
 
 // TestLoadIngressAndApp reads the ingress and app resource folders at both

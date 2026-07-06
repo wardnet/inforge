@@ -84,7 +84,6 @@ func TestCreateInfraGlobalScope(t *testing.T) {
 				"serverTypes":  map[string]any{"SMALL": "cx23"},
 				"images":       map[string]any{"ubuntu-24.04": "ubuntu-24.04"},
 			},
-			"neon": {"apiKey": "k", "region": "aws-us-east-2"},
 		}
 		reg := registry.BuildRegistry(ctx, config, nil, types.SSHConfig{}, regions.Table{}, "proj", "prd", globalScope, tags.Ephemeral{}, nil)
 
@@ -99,10 +98,6 @@ func TestCreateInfraGlobalScope(t *testing.T) {
 				Network: "corenet", Size: "SMALL", Image: "ubuntu-24.04",
 				Kind: "vm", InstanceCount: 1,
 			}},
-			Database: []types.DatabaseSpec{{
-				Name: "shared", Container: "shared", Provider: "neon",
-				Engine: "postgresql", Branch: "main", Database: "shared", Owner: "app",
-			}},
 		}
 
 		return createInfra(ctx, reg, res, "prd", globalScope, "", "example.com",
@@ -110,18 +105,16 @@ func TestCreateInfraGlobalScope(t *testing.T) {
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 
-	// Outputs land in the reserved "global" slot.
+	// Outputs land in the reserved "global" slot. Databases are realized separately
+	// (provisionDatabaseClusters, ADR-0036), not by createInfra.
 	require.Contains(t, computeOutputs, globalScope)
 	assert.Contains(t, computeOutputs[globalScope], "edge-01", "global compute output under the global slot")
-	assert.Contains(t, databaseOutputs[globalScope], "shared", "global database output under the global slot")
 	assert.Contains(t, networkOutputs[globalScope], "corenet/main", "global subnet output under the global slot")
 
 	// Names are region-less (no slug segment): the empty slug propagated through
 	// naming.ResourceInstance and naming.Resource.
 	assert.True(t, mocks.has(naming.ResourceInstance("prd", "", "vm", "edge", 1)),
 		"global server should have a region-less name (wardnet-prd-vm-edge-01)")
-	assert.True(t, mocks.has(naming.Resource("prd", "", "db", "shared")),
-		"global database should have a region-less name (wardnet-prd-db-shared)")
 }
 
 // TestCreateInfraResolvesProviderDefaults reproduces the production preview
@@ -146,7 +139,6 @@ func TestCreateInfraResolvesProviderDefaults(t *testing.T) {
 				"serverTypes":  map[string]any{"SMALL": "cx23"},
 				"images":       map[string]any{"ubuntu-24.04": "ubuntu-24.04"},
 			},
-			"neon": {"apiKey": "k", "region": "aws-us-east-2"},
 		}
 		reg := registry.BuildRegistry(ctx, config, nil, types.SSHConfig{}, regions.Table{}, "proj", "prd", globalScope, tags.Ephemeral{}, nil)
 
@@ -163,15 +155,10 @@ func TestCreateInfraResolvesProviderDefaults(t *testing.T) {
 				Network: "corenet", Size: "SMALL", Image: "ubuntu-24.04",
 				Kind: "vm", InstanceCount: 1,
 			}},
-			Database: []types.DatabaseSpec{{
-				Name: "shared", Container: "shared",
-				Engine: "postgresql", Branch: "main", Database: "shared", Owner: "app",
-			}},
 		}
 
 		defaults := types.ProviderDefaults{
-			Compute:  "hetzner",
-			Database: map[string]string{"postgresql": "neon"},
+			Compute: "hetzner",
 		}
 		return createInfra(ctx, reg, res, "prd", globalScope, "", "example.com",
 			defaults, networkOutputs, computeOutputs, databaseOutputs)
@@ -180,7 +167,6 @@ func TestCreateInfraResolvesProviderDefaults(t *testing.T) {
 
 	assert.Contains(t, networkOutputs[globalScope], "corenet/main", "network realized from provider default")
 	assert.Contains(t, computeOutputs[globalScope], "edge-01", "compute realized from provider default")
-	assert.Contains(t, databaseOutputs[globalScope], "shared", "database realized from provider default")
 }
 
 // TestDerivedRecordsGlobalService: a global service (empty slug) derives REGION-LESS

@@ -4,15 +4,16 @@ sidebar_position: 4
 
 # Database
 
-A **Database** resource defines a managed PostgreSQL database via the Neon provider.
+A **Database** is a single *logical* PostgreSQL database inside a
+[database cluster](./database-cluster) — the `CREATE DATABASE app` unit, owned by a
+role, that a service connects to. Many databases can share one cluster.
 
-:::note Status
-The Neon provider is implemented via a Pulumi Go provider (`pulumi-resource-neon`).
-Core database provisioning is available; advanced features (branching, connection pooling)
-are planned for a future release.
-:::
+The engine, host, and version live on the **cluster**; a database only names its
+cluster, its logical name, its owner, an optional declared size, and an optional
+backup policy.
 
-A database resource lives in a folder under `regional/database/<name>/`:
+A database lives in a folder under `regional/database/<name>/` (or
+`global/database/<name>/`):
 
 ```
 regional/database/main/
@@ -24,26 +25,29 @@ regional/database/main/
 `manifest.yaml`:
 
 ```yaml
-name: main               # required
-container: bridge        # required
-provider: neon           # optional — inherits from inforge.yaml providers.database.postgresql
-engine: postgresql       # required — must be "postgresql"
-branch: main             # optional — Neon branch name (default "main")
-database: app            # required — database name within the branch
-owner: app               # required — PostgreSQL role that owns the database
+name: main               # required — resource name
+container: bridge        # required — grouping label
+cluster: pg              # required — database-cluster FK (SAME scope)
+database: app            # required — the logical database name
+owner: app               # required — PostgreSQL role that owns it (created NOLOGIN)
+size_gb: 5               # optional — declared size intent (default 0)
+backup:                  # optional — per-database backup policy
+  enabled: true          #   default true (set false to opt a throwaway db out)
+  interval: 24h          #   default 24h
+  keep: 7                #   default 7
 ```
 
 ## Fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | Yes | Resource name. |
+| `name` | string | Yes | Resource name (unique within the scope). |
 | `container` | string | Yes | Grouping label. |
-| `provider` | string | No | Must be `neon`. Inherits from `inforge.yaml` `providers.database.<engine>` if omitted. |
-| `engine` | string | Yes | Must be `postgresql`. |
-| `branch` | string | No | Neon branch name (default `main`). |
-| `database` | string | Yes | PostgreSQL database name. |
-| `owner` | string | Yes | PostgreSQL role that owns the database. |
+| `cluster` | string | Yes | The [database cluster](./database-cluster) this database belongs to (same scope). |
+| `database` | string | Yes | The logical PostgreSQL database name. |
+| `owner` | string | Yes | The owner role (created `NOLOGIN` — nothing logs in as it; per-service login roles are minted by grants). |
+| `size_gb` | integer | No | Declared size intent (default `0`). PostgreSQL has no per-database quota, so this sums into the cluster's derived [volume size](./database-cluster#self-hosted-realization) rather than being enforced. |
+| `backup` | object | No | Backup policy — `enabled` (default `true`), `interval` (default `24h`), `keep` (default `7`). |
 
 ## Access
 
@@ -55,27 +59,21 @@ connection fields as env vars:
 
 ```yaml title="in regional/service/api/manifest.yaml"
 grants:
-  - resource: database/main
+  - resource: database/main         # the logical database name
     permission: rw
     outputs:
-      DATABASE_URL: "{URL}"     # {USER} {PASSWORD} {HOST} {PORT} {DBNAME} {URL} are published
+      DATABASE_URL: "{URL}"          # {USER} {PASSWORD} {HOST} {PORT} {DBNAME} {URL} are published
 ```
 
-See [Service — Grants](./service#grants) for the full field set and mechanics.
+Consumer manifests are unchanged by the cluster/database split — a grant still targets the logical
+`database/<name>`. See [Service — Grants](./service#grants) for the full field set and mechanics.
 
 ## Example
 
 ```yaml title="regional/database/main/manifest.yaml"
 name: main
 container: bridge
-engine: postgresql
+cluster: pg
 database: app
 owner: app
 ```
-
-## Provider requirements
-
-The Neon provider is installed via `inforge plugins install`. It requires:
-
-- `NEON_API_KEY` environment variable
-- `neon.projectId` in the provider config

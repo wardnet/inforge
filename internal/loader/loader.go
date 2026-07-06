@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/wardnet/inforge/internal/postgres"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/sizes"
 	"github.com/wardnet/inforge/internal/types"
@@ -312,6 +313,15 @@ func loadResourceSet(base string) (types.Resources, error) {
 	}
 	res.Compute = computeSpecs
 
+	clusterSpecs, _, err := loadTypeFromFolders[types.DatabaseClusterSpec](filepath.Join(base, "database-cluster"))
+	if err != nil {
+		return types.Resources{}, err
+	}
+	for i := range clusterSpecs {
+		NormalizeDatabaseCluster(&clusterSpecs[i])
+	}
+	res.DatabaseCluster = clusterSpecs
+
 	dbSpecs, _, err := loadTypeFromFolders[types.DatabaseSpec](filepath.Join(base, "database"))
 	if err != nil {
 		return types.Resources{}, err
@@ -396,10 +406,41 @@ func NormalizeCompute(c *types.ComputeSpec, computeDir string) {
 	}
 }
 
-// NormalizeDatabase applies database defaults (branch defaults to "main").
+// NormalizeDatabaseCluster trims the cluster's free-text and FK fields and defaults
+// the engine version to postgres.DefaultVersion when omitted (ADR-0036). There is no
+// default provider to apply here — ResolveProvider supplies "self-hosted" when the
+// spec and inforge.yaml name none.
+func NormalizeDatabaseCluster(d *types.DatabaseClusterSpec) {
+	d.Name = strings.TrimSpace(d.Name)
+	d.Container = strings.TrimSpace(d.Container)
+	d.Engine = strings.TrimSpace(d.Engine)
+	d.Host = strings.TrimSpace(d.Host)
+	d.Provider = strings.TrimSpace(d.Provider)
+	d.Version = strings.TrimSpace(d.Version)
+	if d.Version == "" {
+		d.Version = postgres.DefaultVersion
+	}
+}
+
+// NormalizeDatabase trims the logical database's free-text and FK fields and applies
+// the backup-policy defaults (ADR-0036): backups default to enabled (an absent block
+// or absent enabled → true; an explicit `enabled: false` opts out), a 24h interval,
+// and keep 7.
 func NormalizeDatabase(d *types.DatabaseSpec) {
-	if d.Branch == "" {
-		d.Branch = "main"
+	d.Name = strings.TrimSpace(d.Name)
+	d.Container = strings.TrimSpace(d.Container)
+	d.Cluster = strings.TrimSpace(d.Cluster)
+	d.Database = strings.TrimSpace(d.Database)
+	d.Owner = strings.TrimSpace(d.Owner)
+	if d.Backup.Enabled == nil {
+		enabled := true
+		d.Backup.Enabled = &enabled
+	}
+	if d.Backup.Interval == "" {
+		d.Backup.Interval = "24h"
+	}
+	if d.Backup.Keep == 0 {
+		d.Backup.Keep = 7
 	}
 }
 

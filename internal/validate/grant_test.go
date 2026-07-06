@@ -39,7 +39,6 @@ func TestCheckGrantsValid(t *testing.T) {
 	}{
 		{"database rw composed url", types.GrantSpec{Resource: "database/main", Permission: "rw", Outputs: map[string]string{"DB_URL": "{USER}:{PASSWORD}@{HOST}:{PORT}/{DBNAME}"}}},
 		{"database ro discrete vars", types.GrantSpec{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"DB_USER": "{USER}", "DB_PASS": "{PASSWORD}"}}},
-		{"database global target", types.GrantSpec{Resource: "database/global/shared", Permission: "ro", Outputs: map[string]string{"DB_URL": "{USER}@{HOST}"}}},
 		{"pki verify cert", types.GrantSpec{Resource: "pki/daemon", Permission: "ro", Outputs: map[string]string{"CA_CERT_PATH": "{CERT}"}}},
 		{"pki issue cert+key", types.GrantSpec{Resource: "pki/daemon", Permission: "rw", Outputs: map[string]string{"CA_CERT_PATH": "{CERT}", "CA_KEY_PATH": "{KEY}"}}},
 		{"pki global target", types.GrantSpec{Resource: "pki/global/rootca", Permission: "ro", Outputs: map[string]string{"CA_CERT_PATH": "{CERT}"}}},
@@ -64,6 +63,7 @@ func TestCheckGrantsErrors(t *testing.T) {
 		{"invalid permission", nil, []types.GrantSpec{{Resource: "database/main", Permission: "admin", Outputs: map[string]string{"X": "{USER}"}}}, "permission"},
 		{"database not found", nil, []types.GrantSpec{{Resource: "database/nope", Permission: "ro", Outputs: map[string]string{"X": "{USER}"}}}, "database \"nope\" not found"},
 		{"regional cannot reach global-less name", nil, []types.GrantSpec{{Resource: "database/shared", Permission: "ro", Outputs: map[string]string{"X": "{USER}"}}}, "not found"},
+		{"cross-scope database grant rejected", nil, []types.GrantSpec{{Resource: "database/global/shared", Permission: "ro", Outputs: map[string]string{"X": "{USER}"}}}, "cross-scope database access is not supported"},
 		{"pki not found", nil, []types.GrantSpec{{Resource: "pki/nope", Permission: "ro", Outputs: map[string]string{"X": "{CERT}"}}}, "pki resource \"nope\" not found"},
 		{"pki not root-only", nil, []types.GrantSpec{{Resource: "pki/bad", Permission: "ro", Outputs: map[string]string{"X": "{CERT}"}}}, "must be \"root-only\""},
 		{"unpublished value field", nil, []types.GrantSpec{{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"X": "{FOO}"}}}, "field {FOO} is not published"},

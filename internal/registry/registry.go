@@ -16,7 +16,6 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 	cfprovider "github.com/wardnet/inforge/providers/cloudflare"
 	"github.com/wardnet/inforge/providers/hetzner"
-	"github.com/wardnet/inforge/providers/neon"
 )
 
 // ProviderRegistry resolves provider names to provider implementations for one
@@ -24,6 +23,7 @@ import (
 type ProviderRegistry interface {
 	Network(name string) (types.NetworkProvider, error)
 	Compute(name string) (types.ComputeProvider, error)
+	Storage(name string) (types.StorageProvider, error)
 	Ingress(name string) (types.IngressProvider, error)
 	Mesh(name string) (types.MeshProvider, error)
 	DNS(name string) (types.DnsProvider, error)
@@ -65,9 +65,6 @@ type registry struct {
 
 	cfDnsOnce sync.Once
 	cfDns     *cfprovider.CloudflareDns
-
-	neonDbOnce sync.Once
-	neonDb     *neon.NeonDatabaseAdapter
 }
 
 // BuildRegistry constructs a ProviderRegistry from the provider config, SSH
@@ -137,24 +134,44 @@ func (r *registry) Network(name string) (types.NetworkProvider, error) {
 	}
 }
 
+// hetznerCompute builds (once) and returns the scope's HetznerCompute. It backs both
+// Compute and Storage — the same instance implements ComputeProvider and
+// StorageProvider, so a volume attaches to a server the same provider created (it holds
+// the h.servers map).
+func (r *registry) hetznerCompute() *hetzner.HetznerCompute {
+	r.hetznerCompOnce.Do(func() {
+		realizations := hetzner.ExtractRegionConfigs(r.region, r.config)
+		r.hetznerComp = hetzner.NewCompute(
+			r.ssh.AuthorizedKeys,
+			r.ssh.DeployPublicKey,
+			providerCfgString(r.config, "hetzner", "apiToken"),
+			r.hetznerProv(),
+			r.project,
+			r.slug,
+			r.eph,
+			realizations,
+			r.sshKeys,
+		)
+	})
+	return r.hetznerComp
+}
+
 func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 	switch name {
 	case "hetzner":
-		r.hetznerCompOnce.Do(func() {
-			realizations := hetzner.ExtractRegionConfigs(r.region, r.config)
-			r.hetznerComp = hetzner.NewCompute(
-				r.ssh.AuthorizedKeys,
-				r.ssh.DeployPublicKey,
-				providerCfgString(r.config, "hetzner", "apiToken"),
-				r.hetznerProv(),
-				r.project,
-				r.slug,
-				r.eph,
-				realizations,
-				r.sshKeys,
-			)
-		})
-		return r.hetznerComp, nil
+		return r.hetznerCompute(), nil
+	default:
+		return nil, unknownProvider(name)
+	}
+}
+
+// Storage returns the provider that provisions persistent volumes for a compute host
+// (ADR-0036). For Hetzner it is the same instance as Compute, so the volume attaches to
+// a server that provider built.
+func (r *registry) Storage(name string) (types.StorageProvider, error) {
+	switch name {
+	case "hetzner":
+		return r.hetznerCompute(), nil
 	default:
 		return nil, unknownProvider(name)
 	}
@@ -228,20 +245,13 @@ func (r *registry) DNS(name string) (types.DnsProvider, error) {
 	}
 }
 
+// Database resolves a managed database provider. ADR-0036 retired Neon and made
+// self-hosted Postgres the realization in use (program.provisionDatabaseClusters,
+// which does NOT go through this method). The managed seam (types.DatabaseProvider)
+// is retained so a managed provider can be re-registered here later; today no
+// provider is registered, so every name is unknown.
 func (r *registry) Database(name string) (types.DatabaseProvider, error) {
-	switch name {
-	case "neon":
-		r.neonDbOnce.Do(func() {
-			apiKey := providerCfgString(r.config, "neon", "apiKey")
-			// region is empty for a regional block (the abstract region maps to a
-			// Neon region) and set for the global block (no abstract region to map).
-			region := providerCfgString(r.config, "neon", "region")
-			r.neonDb = neon.New(apiKey, r.project, r.slug, region)
-		})
-		return r.neonDb, nil
-	default:
-		return nil, unknownProvider(name)
-	}
+	return nil, unknownProvider(name)
 }
 
 func unknownProvider(name string) error {

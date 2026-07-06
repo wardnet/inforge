@@ -217,7 +217,11 @@ is now rejected — DB credentials flow only through grants). slice C = the PKI 
   that permission; a file field stands alone; output env names avoid the reserved
   `INFORGE_*`/`meshcert.DescriptorFiles()` names and don't collide with `environment.yaml` keys or each
   other across the service's grants. The cross-region boundary falls out of target resolution (shared
-  regional set + `global/` prefix), exactly like `ref:`.
+  regional set + `global/` prefix), exactly like `ref:` — **except a cross-scope `database/global/<name>`
+  grant is rejected** (ADR-0036): a self-hosted database is private to its scope (5432 opens to the host's
+  own CIDR only), so a regional service cannot reach a global cluster. `pki/global/<name>` grants stay
+  valid (file-projected, no network hop). This is enforced in `checkGrants`; `checkService` additionally
+  rejects a co-located service backend bind in the reserved Postgres port range (`postgres.ClusterPort`).
 
 ## Ingress and App (ADR-0026)
 
