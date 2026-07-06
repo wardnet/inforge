@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/pulumi/pulumi-go-provider/infer"
+	"github.com/wardnet/inforge/internal/pgrole"
 )
 
 // NeonRoleArgs are the inputs for a scoped per-service database role (ADR-0025).
@@ -63,7 +64,7 @@ func (*NeonRole) Create(
 		return infer.CreateResponse[NeonRoleState]{}, err
 	}
 
-	stmts, err := grantSQL(inp.Permission, inp.RoleName, inp.Database)
+	stmts, err := pgrole.GrantSQL(inp.Permission, inp.RoleName, inp.Database)
 	if err != nil {
 		return infer.CreateResponse[NeonRoleState]{}, err
 	}
@@ -118,11 +119,7 @@ func (*NeonRole) Delete(
 	// which surfaces a real error if the role still owns objects. The operator can
 	// re-run destroy once the endpoint is warm if cleanup was needed.
 	if owner, err := connURIUser(st.OwnerConnectionURI); err == nil {
-		cleanup := []string{
-			fmt.Sprintf(`REASSIGN OWNED BY %s TO %s`, quoteIdent(st.RoleName), quoteIdent(owner)),
-			fmt.Sprintf(`DROP OWNED BY %s`, quoteIdent(st.RoleName)),
-		}
-		_ = runAsOwner(ctx, st.OwnerConnectionURI, cleanup)
+		_ = runAsOwner(ctx, st.OwnerConnectionURI, pgrole.ReassignDropSQL(st.RoleName, owner))
 	}
 
 	url := fmt.Sprintf("%s/projects/%s/branches/%s/roles/%s",
@@ -168,42 +165,6 @@ func (*NeonRole) Diff(_ context.Context, req infer.DiffRequest[NeonRoleArgs, Neo
 	}
 	// ownerConnectionUri and apiKey are deliberately ignored.
 	return infer.DiffResponse{HasChanges: len(diff) > 0, DetailedDiff: diff}, nil
-}
-
-// grantSQL returns the ordered Postgres statements that grant the role its ro/rw
-// privileges on schema public, run as the database owner. ALTER DEFAULT PRIVILEGES
-// covers tables/sequences the owner creates later. rw additionally grants CREATE on
-// the schema so the service can run its own migrations; ro is read-only.
-func grantSQL(permission, role, database string) ([]string, error) {
-	r := quoteIdent(role)
-	db := quoteIdent(database)
-	switch permission {
-	case "ro":
-		return []string{
-			fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`, db, r),
-			fmt.Sprintf(`GRANT USAGE ON SCHEMA public TO %s`, r),
-			fmt.Sprintf(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO %s`, r),
-			fmt.Sprintf(`GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO %s`, r),
-			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO %s`, r),
-			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON SEQUENCES TO %s`, r),
-		}, nil
-	case "rw":
-		return []string{
-			fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`, db, r),
-			fmt.Sprintf(`GRANT USAGE, CREATE ON SCHEMA public TO %s`, r),
-			fmt.Sprintf(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s`, r),
-			fmt.Sprintf(`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO %s`, r),
-			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s`, r),
-			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO %s`, r),
-		}, nil
-	default:
-		return nil, fmt.Errorf("neon: unknown grant permission %q (want ro or rw)", permission)
-	}
-}
-
-// quoteIdent safely quotes a Postgres identifier (role/db/schema name).
-func quoteIdent(ident string) string {
-	return pgx.Identifier{ident}.Sanitize()
 }
 
 // runAsOwner opens a single pgx connection to connURI (the database owner's) and
