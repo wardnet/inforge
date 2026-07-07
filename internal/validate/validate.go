@@ -190,6 +190,15 @@ type regionContext struct {
 	computeNames     map[string]bool              // bare compute names; service.host must be one of these
 	computeNetwork   map[string]string            // canonical specKey (and bare name) -> network name; for the cross-host same-network check
 	databaseNames    map[string]bool
+	// databasePhysicalByCluster counts, per "<cluster>\x00<database>" pair, how many
+	// logical database resources in this scope target that physical database in that
+	// cluster. Two resources sharing one (cluster, database) would create the same
+	// Postgres database and — load-bearing for ADR-0036 backups — collide on the
+	// per-database backup unit/URN and R2 key; checkDatabase rejects a count > 1.
+	databasePhysicalByCluster map[string]int
+	// backupsBucketConfigured is whether inforge.yaml declares a backups.bucket (set
+	// via WithBackupsBucket). When false, a backups-enabled database fails validation.
+	backupsBucketConfigured bool
 	// clusterNames holds the database-cluster resource names declared in this scope.
 	// A logical database's cluster: FK must resolve to one of them (same scope only,
 	// mirroring ingress/app FKs). Name uniqueness is enforced generically in
@@ -322,13 +331,34 @@ type regionContext struct {
 	providerDefaults types.ProviderDefaults
 }
 
+// validateOptions carries optional project-level facts a caller threads in beyond
+// the resource tree — today only whether inforge.yaml declares a backups.bucket, so
+// the credential-free "backups enabled but no destination" check can run at validate
+// time rather than mid-deploy (ADR-0036).
+type validateOptions struct {
+	backupsBucketConfigured bool
+}
+
+// ValidateOption configures optional project-level inputs to ValidateResources.
+type ValidateOption func(*validateOptions)
+
+// WithBackupsBucket tells validation whether inforge.yaml declares a backups.bucket,
+// so a database defaulting to backups-enabled with no destination fails validation.
+func WithBackupsBucket(configured bool) ValidateOption {
+	return func(o *validateOptions) { o.backupsBucketConfigured = configured }
+}
+
 // ValidateResources validates the single shared resource set under <dir>/<env>/
 // and returns an error if any file failed. The resource set is defined once and
 // instantiated into every region in regions.yaml, so its schema and foreign-key
 // graph are region-independent and checked once; provider availability is then
 // checked per region (a resource's provider must be declared in every region the
 // set deploys into).
-func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
+func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ...ValidateOption) error {
+	var vo validateOptions
+	for _, o := range opts {
+		o(&vo)
+	}
 	schemaSet, err := compileSchemas()
 	if err != nil {
 		return fmt.Errorf("compile schemas: %w", err)
@@ -399,7 +429,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	// graph resolves only against global resources, so a global resource
 	// referencing a regional one fails as not-found — enforcing "global → global
 	// only". A global slice with resources but no global providers block is an error.
-	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil, regionalMeshServices, encStore, defaults); err != nil {
+	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil, regionalMeshServices, encStore, defaults, vo.backupsBucketConfigured); err != nil {
 		return err
 	}
 	if global == nil && globalRes.HasAny() {
@@ -426,7 +456,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	// graph, with the global outputs injected so a regional secrets `ref:` may
 	// resolve a global/<name> target. Provider availability is region-specific, so
 	// it is skipped here (available nil) and checked separately per region below.
-	if err := validateResourceSet(r, schemaSet, regionalBase, nil, sizeTable, buildGlobalRefs(globalRes), nil, encStore, defaults); err != nil {
+	if err := validateResourceSet(r, schemaSet, regionalBase, nil, sizeTable, buildGlobalRefs(globalRes), nil, encStore, defaults, vo.backupsBucketConfigured); err != nil {
 		return err
 	}
 
@@ -452,7 +482,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults) error {
 	return nil
 }
 
-func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, siblingServices map[string]bool, encStore *secretstore.Store, defaults types.ProviderDefaults) error {
+func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, siblingServices map[string]bool, encStore *secretstore.Store, defaults types.ProviderDefaults, backupsBucketConfigured bool) error {
 	networkFiles, _, err := readFolders[types.NetworkSpec](filepath.Join(base, "network"))
 	if err != nil {
 		return err
@@ -562,7 +592,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		computeDeployer:       map[string]bool{},
 		computeNames:          map[string]bool{},
 		computeNetwork:        map[string]string{},
-		databaseNames:         map[string]bool{},
+		databaseNames:             map[string]bool{},
+		databasePhysicalByCluster: map[string]int{},
+		backupsBucketConfigured:   backupsBucketConfigured,
 		clusterNames:          map[string]bool{},
 		clusterHosts:          map[string]bool{},
 		ingressNames:          map[string]bool{},
@@ -643,6 +675,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	}
 	for _, f := range databaseFiles {
 		ctx.databaseNames[f.spec.Name] = true
+		if f.parseErr == nil && f.spec.Cluster != "" && f.spec.Database != "" {
+			ctx.databasePhysicalByCluster[f.spec.Cluster+"\x00"+f.spec.Database]++
+		}
 	}
 	for _, f := range pkiFiles {
 		if f.parseErr == nil {
@@ -1353,6 +1388,12 @@ func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []strin
 	if s.SizeGB < 0 {
 		errs = append(errs, fmt.Sprintf("size_gb: %d must be >= 0", s.SizeGB))
 	}
+	// A physical (cluster, database) pair must be unique: two logical resources
+	// targeting the same database in the same cluster create the same Postgres
+	// database and collide on the per-database backup unit/URN and R2 key (ADR-0036).
+	if s.Cluster != "" && s.Database != "" && ctx.databasePhysicalByCluster[s.Cluster+"\x00"+s.Database] > 1 {
+		errs = append(errs, fmt.Sprintf("database: %q is declared more than once in cluster %q; each logical database in a cluster must be unique", s.Database, s.Cluster))
+	}
 	// Backups default to enabled (loader). When enabled the interval must parse as a
 	// positive Go duration and keep must retain at least one backup.
 	if s.Backup.Enabled == nil || *s.Backup.Enabled {
@@ -1363,6 +1404,14 @@ func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []strin
 		}
 		if s.Backup.Keep < 1 {
 			errs = append(errs, fmt.Sprintf("backup.keep: %d must be >= 1 when backups are enabled", s.Backup.Keep))
+		}
+		// Backups are on by default (ADR-0036) but need a destination. `inforge deploy`
+		// hard-fails when the bucket is absent; here — credential-free — we WARN so CI
+		// running `inforge validate` flags it before the deploy touches any host. It is a
+		// warning (not an error) so a project that intentionally leaves backups.bucket
+		// unset for now still validates.
+		if !ctx.backupsBucketConfigured {
+			warns = append(warns, "backup is enabled but inforge.yaml declares no backups.bucket — `inforge deploy` will fail; set backups.bucket (distinct from the state and artifacts buckets) or backup.enabled: false")
 		}
 	}
 	return errs, warns

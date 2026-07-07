@@ -69,6 +69,7 @@ const sidebars: SidebarsConfig = {
         'cli/secret',
         'cli/pki',
         'cli/service',
+        'cli/db',
         'cli/matrix',
         'cli/plugins',
       ],
@@ -83,6 +84,7 @@ const sidebars: SidebarsConfig = {
         'runbooks/pki-rotate-intermediate',
         'runbooks/pki-rotate-root',
         'runbooks/pki-recover-intermediate',
+        'runbooks/database-backups',
       ],
     },
     {

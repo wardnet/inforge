@@ -38,6 +38,36 @@ type projectConfig struct {
 	// Ephemeral configures the `inforge ephemeral` command group (ADR-0028).
 	// Optional — only the ephemeral commands read it.
 	Ephemeral ephemeralConfig `yaml:"ephemeral"`
+	// Backups configures the self-hosted Postgres backup destination (ADR-0036).
+	// Optional — only cluster hosts with a backup-enabled database read it.
+	Backups backupsConfig `yaml:"backups"`
+}
+
+// backupsConfig is the inforge.yaml `backups:` block: the dedicated R2 bucket
+// per-database Postgres dumps are uploaded to (ADR-0036). It is authored flat as a
+// bucket NAME (not a backend URL); the R2 endpoint is derived from
+// CLOUDFLARE_ACCOUNT_ID, exactly like the artifacts store. The bucket must be
+// distinct from both the state and the artifacts buckets (validated at load) — it
+// holds sensitive full data with its own lifecycle, so it never colocates with
+// state or release tarballs.
+type backupsConfig struct {
+	Bucket string `yaml:"bucket"`
+}
+
+// configured reports whether a backups bucket is declared.
+func (b backupsConfig) configured() bool { return b.Bucket != "" }
+
+// resolve returns the backup destination bucket and its R2 S3 endpoint URL. The
+// endpoint is derived from CLOUDFLARE_ACCOUNT_ID like the artifacts/state R2 stores.
+func (b backupsConfig) resolve() (bucket, endpoint string, err error) {
+	if b.Bucket == "" {
+		return "", "", fmt.Errorf("backups.bucket is not configured")
+	}
+	endpoint, err = r2Endpoint()
+	if err != nil {
+		return "", "", err
+	}
+	return b.Bucket, endpoint, nil
 }
 
 // ephemeralConfig is the inforge.yaml `ephemeral:` block (ADR-0028).
@@ -130,13 +160,10 @@ func r2Bucket(raw string) (string, error) {
 	return bucket, nil
 }
 
-// r2ToS3URL translates an r2://<bucket> URL to the Pulumi s3:// URL format
-// for Cloudflare R2's S3-compatible API.
-func r2ToS3URL(raw string) (string, error) {
-	bucket, err := r2Bucket(raw)
-	if err != nil {
-		return "", err
-	}
+// r2Endpoint returns the Cloudflare R2 S3-compatible endpoint URL for the account
+// named by CLOUDFLARE_ACCOUNT_ID, validating the account id is lowercase hex. It is
+// shared by the state/artifacts backend translation and the backups destination.
+func r2Endpoint() (string, error) {
 	accountID := os.Getenv("CLOUDFLARE_ACCOUNT_ID")
 	if accountID == "" {
 		return "", fmt.Errorf("r2 backend requires CLOUDFLARE_ACCOUNT_ID environment variable")
@@ -146,7 +173,20 @@ func r2ToS3URL(raw string) (string, error) {
 			return "", fmt.Errorf("CLOUDFLARE_ACCOUNT_ID must be a lowercase hex string, got %q", accountID)
 		}
 	}
-	endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", accountID)
+	return fmt.Sprintf("https://%s.r2.cloudflarestorage.com", accountID), nil
+}
+
+// r2ToS3URL translates an r2://<bucket> URL to the Pulumi s3:// URL format
+// for Cloudflare R2's S3-compatible API.
+func r2ToS3URL(raw string) (string, error) {
+	bucket, err := r2Bucket(raw)
+	if err != nil {
+		return "", err
+	}
+	endpoint, err := r2Endpoint()
+	if err != nil {
+		return "", err
+	}
 	// region=auto is R2's pseudo-region; the AWS SDK requires a region even
 	// though R2 does not use one.
 	return fmt.Sprintf("s3://%s?region=auto&endpoint=%s&s3ForcePathStyle=true", bucket, url.QueryEscape(endpoint)), nil
@@ -171,31 +211,56 @@ func loadProjectConfig(path string) (projectConfig, error) {
 	if cfg.Name == "" {
 		return cfg, fmt.Errorf("%s: name is required", path)
 	}
-	if err := cfg.validateArtifacts(); err != nil {
+	if err := cfg.validateBuckets(); err != nil {
 		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
 }
 
-// validateArtifacts enforces that the release-artifact bucket is distinct from
-// the state bucket — colocating release tarballs with Pulumi state risks a
-// retention sweep touching state objects. A bucket name can only be compared for
-// r2/s3 backends; other state backend types (file, git-branch) trivially differ.
-func (c projectConfig) validateArtifacts() error {
-	if !c.Artifacts.configured() {
-		return nil
-	}
-	artBucket, err := c.Artifacts.Backend.bucket()
-	if err != nil {
-		return fmt.Errorf("artifacts.backend: %w", err)
-	}
+// validateBuckets enforces bucket separation across the three object stores inforge
+// keys into R2 (ADR-0016 extended to a third store in ADR-0036): the Pulumi state
+// bucket, the release-artifact bucket, and the Postgres backups bucket must be
+// mutually distinct. Colocating them risks one store's retention/lifecycle sweep
+// touching another's objects — and backups hold sensitive full data with their own
+// lifecycle. A bucket name is only known for r2/s3 backends; file/git-branch state
+// trivially differs, so it is compared only when it has a bucket.
+func (c projectConfig) validateBuckets() error {
+	// stateBucket is "" for file/git-branch backends (no object bucket to collide).
+	stateBucket := ""
 	if c.Backend.Type == "r2" || c.Backend.Type == "s3" {
-		stateBucket, err := c.Backend.bucket()
+		b, err := c.Backend.bucket()
 		if err != nil {
 			return fmt.Errorf("backend: %w", err)
 		}
-		if artBucket == stateBucket {
+		stateBucket = b
+	}
+
+	artBucket := ""
+	if c.Artifacts.configured() {
+		b, err := c.Artifacts.Backend.bucket()
+		if err != nil {
+			return fmt.Errorf("artifacts.backend: %w", err)
+		}
+		artBucket = b
+		if stateBucket != "" && artBucket == stateBucket {
 			return fmt.Errorf("artifacts.backend bucket %q must differ from the state backend bucket", artBucket)
+		}
+	}
+
+	if c.Backups.configured() {
+		bakBucket := c.Backups.Bucket
+		// backups.bucket is a BARE bucket name (the R2 endpoint is derived), unlike the
+		// state/artifacts backends which take an r2://<bucket> URL. Reject a URL/path here
+		// so a copied `r2://…` value fails at load rather than producing a broken
+		// `s3://r2://…` upload target that only fails on each host at timer time.
+		if strings.ContainsAny(bakBucket, ":/") {
+			return fmt.Errorf("backups.bucket %q must be a bare bucket name, not a URL or path (the R2 endpoint is derived from CLOUDFLARE_ACCOUNT_ID)", bakBucket)
+		}
+		if stateBucket != "" && bakBucket == stateBucket {
+			return fmt.Errorf("backups.bucket %q must differ from the state backend bucket", bakBucket)
+		}
+		if artBucket != "" && bakBucket == artBucket {
+			return fmt.Errorf("backups.bucket %q must differ from the artifacts backend bucket", bakBucket)
 		}
 	}
 	return nil

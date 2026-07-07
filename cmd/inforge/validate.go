@@ -22,16 +22,18 @@ func newValidateCmd(dir, configPath *string) *cobra.Command {
 			// no defaults (zero). A file that exists but fails to parse is a real
 			// error — propagate it so validate gives the same signal as deploy.
 			var defaults types.ProviderDefaults
+			var opts []validate.ValidateOption
 			if _, err := os.Stat(*configPath); err == nil {
 				projCfg, err := loadProjectConfig(*configPath)
 				if err != nil {
 					return err
 				}
 				defaults = projCfg.Providers
+				opts = append(opts, validate.WithBackupsBucket(projCfg.Backups.configured()))
 			} else if !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("stat %s: %w", *configPath, err)
 			}
-			if err := validate.ValidateResources(args[0], *dir, defaults); err != nil {
+			if err := validate.ValidateResources(args[0], *dir, defaults, opts...); err != nil {
 				return err
 			}
 			fmt.Println("\nall resource files are valid")

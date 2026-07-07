@@ -36,17 +36,27 @@ consumes the same values, and the commands tell you which services are affected.
 
 ### Reserved secrets (`--reserved`)
 
-A few secrets are consumed by **inforge itself** at deploy, not by a service — today the
-observability OTLP Basic-auth credential (`observability/otlp_auth`, needed when
-`observability.otlp_endpoint` is set). These live in a separate **reserved namespace** in the store,
-outside the service-container namespace, so they don't need a backing service and a normal service
-can still use the same name as a container. Pass `--reserved` on `set`/`ls`/`rm` and the second
-argument is the reserved namespace instead of a service:
+A few secrets are consumed by **inforge itself** at deploy, not by a service:
+
+- the observability OTLP Basic-auth credential (`observability/otlp_auth`, needed when
+  `observability.otlp_endpoint` is set);
+- the Postgres **backups** R2 credential — two keys `backups/r2_access_key_id` and
+  `backups/r2_secret_access_key` (needed when `backups.bucket` is set and any database has backups
+  enabled). See [Database — Backups](../resources/database#backups).
+
+These live in a separate **reserved namespace** in the store, outside the service-container namespace,
+so they don't need a backing service and a normal service can still use the same name as a container.
+Pass `--reserved` on `set`/`ls`/`rm` and the second argument is the reserved namespace instead of a
+service:
 
 ```bash
 # Grafana Cloud hands you an "instanceID:token" for OTLP Basic auth:
 pbpaste | inforge secret set prd observability otlp_auth --reserved
 inforge secret ls prd observability --reserved
+
+# A backup-scoped R2 API token (object read/write on the backups bucket only):
+printf %s "$R2_ACCESS_KEY_ID"     | inforge secret set prd backups r2_access_key_id --reserved
+printf %s "$R2_SECRET_ACCESS_KEY" | inforge secret set prd backups r2_secret_access_key --reserved
 ```
 
 The value is read directly by `inforge deploy` (no service restart), so commit the store and let the

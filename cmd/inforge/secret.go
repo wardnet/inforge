@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/wardnet/inforge/internal/dbbackup"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/otelcol"
 	"github.com/wardnet/inforge/internal/secretstore"
@@ -25,6 +26,10 @@ import (
 // the value — but does not hard-fail, so the set can grow without a CLI change.
 var knownReservedSecrets = map[string]map[string]bool{
 	otelcol.AuthSecretNamespace: {otelcol.AuthSecretKey: true},
+	dbbackup.AuthSecretNamespace: {
+		dbbackup.AccessKeyIDKey:     true,
+		dbbackup.SecretAccessKeyKey: true,
+	},
 }
 
 // newSecretCmd manages the env's committed encrypted secret store

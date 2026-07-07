@@ -77,10 +77,10 @@ func TestBackendBucket(t *testing.T) {
 	}
 }
 
-func TestValidateArtifacts(t *testing.T) {
+func TestValidateBuckets(t *testing.T) {
 	t.Run("unconfigured is fine", func(t *testing.T) {
 		c := projectConfig{Backend: backendConfig{Type: "r2", URL: "r2://state"}}
-		if err := c.validateArtifacts(); err != nil {
+		if err := c.validateBuckets(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -90,7 +90,7 @@ func TestValidateArtifacts(t *testing.T) {
 			Backend:   backendConfig{Type: "r2", URL: "r2://wardnet-state"},
 			Artifacts: artifactsConfig{Backend: backendConfig{Type: "r2", URL: "r2://wardnet-artifacts"}, Keep: 10},
 		}
-		if err := c.validateArtifacts(); err != nil {
+		if err := c.validateBuckets(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -100,7 +100,7 @@ func TestValidateArtifacts(t *testing.T) {
 			Backend:   backendConfig{Type: "r2", URL: "r2://wardnet-state"},
 			Artifacts: artifactsConfig{Backend: backendConfig{Type: "r2", URL: "r2://wardnet-state"}},
 		}
-		if err := c.validateArtifacts(); err == nil {
+		if err := c.validateBuckets(); err == nil {
 			t.Fatal("expected error for artifacts bucket == state bucket")
 		}
 	})
@@ -111,7 +111,70 @@ func TestValidateArtifacts(t *testing.T) {
 			Backend:   backendConfig{Type: "file", URL: "file://.pulumi"},
 			Artifacts: artifactsConfig{Backend: backendConfig{Type: "r2", URL: "r2://wardnet-artifacts"}},
 		}
-		if err := c.validateArtifacts(); err != nil {
+		if err := c.validateBuckets(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("distinct backups bucket is fine", func(t *testing.T) {
+		c := projectConfig{
+			Backend:   backendConfig{Type: "r2", URL: "r2://wardnet-state"},
+			Artifacts: artifactsConfig{Backend: backendConfig{Type: "r2", URL: "r2://wardnet-artifacts"}},
+			Backups:   backupsConfig{Bucket: "wardnet-backups"},
+		}
+		if err := c.validateBuckets(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("backups bucket equal to state is rejected", func(t *testing.T) {
+		c := projectConfig{
+			Backend: backendConfig{Type: "r2", URL: "r2://wardnet-state"},
+			Backups: backupsConfig{Bucket: "wardnet-state"},
+		}
+		if err := c.validateBuckets(); err == nil {
+			t.Fatal("expected error for backups bucket == state bucket")
+		}
+	})
+
+	t.Run("backups bucket equal to artifacts is rejected", func(t *testing.T) {
+		c := projectConfig{
+			Backend:   backendConfig{Type: "r2", URL: "r2://wardnet-state"},
+			Artifacts: artifactsConfig{Backend: backendConfig{Type: "r2", URL: "r2://wardnet-artifacts"}},
+			Backups:   backupsConfig{Bucket: "wardnet-artifacts"},
+		}
+		if err := c.validateBuckets(); err == nil {
+			t.Fatal("expected error for backups bucket == artifacts bucket")
+		}
+	})
+
+	t.Run("backups bucket as an r2:// URL is rejected", func(t *testing.T) {
+		c := projectConfig{
+			Backend: backendConfig{Type: "r2", URL: "r2://wardnet-state"},
+			Backups: backupsConfig{Bucket: "r2://wardnet-backups"},
+		}
+		if err := c.validateBuckets(); err == nil {
+			t.Fatal("expected error for backups.bucket that is a URL, not a bare name")
+		}
+	})
+
+	t.Run("backups bucket with a slash is rejected", func(t *testing.T) {
+		c := projectConfig{
+			Backend: backendConfig{Type: "r2", URL: "r2://wardnet-state"},
+			Backups: backupsConfig{Bucket: "wardnet-backups/prefix"},
+		}
+		if err := c.validateBuckets(); err == nil {
+			t.Fatal("expected error for backups.bucket with a path")
+		}
+	})
+
+	t.Run("backups bucket with file-backed state is fine", func(t *testing.T) {
+		// A file-backed state has no bucket; a backups bucket must still validate.
+		c := projectConfig{
+			Backend: backendConfig{Type: "file", URL: "file://.pulumi"},
+			Backups: backupsConfig{Bucket: "wardnet-backups"},
+		}
+		if err := c.validateBuckets(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})

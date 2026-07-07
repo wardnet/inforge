@@ -130,6 +130,10 @@ func runEphemeralUp(ctx context.Context, configPath, dir, from, slugFlag, ttlFla
 		return fmt.Errorf("set provider defaults: %w", err)
 	}
 
+	if err := setBackups(ctx, s, projCfg.Backups); err != nil {
+		return fmt.Errorf("set backups config: %w", err)
+	}
+
 	fmt.Printf("spinning up ephemeral env %q from source %q (ttl %s, expires_at %s)\n", slug, from, ttl, expiresAt)
 	if err := runStackUp(ctx, s, slug); err != nil {
 		return err

@@ -45,10 +45,17 @@ func sshReadHostPubKey(ctx context.Context, keyPath, account string) (string, er
 // (age ciphertext is binary). `install -D` creates any missing parent
 // directory and sets the final mode atomically.
 func sshWriteFile(ctx context.Context, keyPath, account, remotePath string, content []byte) error {
+	return sshWriteFileFrom(ctx, keyPath, account, remotePath, bytes.NewReader(content))
+}
+
+// sshWriteFileFrom is sshWriteFile's streaming form: it copies r straight into
+// the SSH stdin without buffering the whole payload in memory, for large inputs
+// like a database dump (`inforge db restore --from-dump`).
+func sshWriteFileFrom(ctx context.Context, keyPath, account, remotePath string, r io.Reader) error {
 	remoteCmd := fmt.Sprintf("sudo install -D -m 0600 /dev/stdin %s", remotePath)
 	args := append(append([]string{}, sshArgs(keyPath)...), account, remoteCmd)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
-	cmd.Stdin = bytes.NewReader(content)
+	cmd.Stdin = r
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
