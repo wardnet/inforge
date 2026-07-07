@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-05-30
+issue: "#15"
+---
+
 # Provisioning and deployment are separate lifecycles
 
 inforge **provisions** a service's host-side scaffolding — its folder, metadata, and an

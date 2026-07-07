@@ -1,4 +1,12 @@
+---
+status: accepted
+date: 2026-06-15
+issue: "#122"
+---
+
 # A service is granted a permissioned credential on a resource, materialized as env vars / files it composes
+
+> _Note: the Grant capability stands, but its Database realization below (the `neon:resources:NeonRole` plugin + pgx) was replaced by on-host self-hosted role minting ([ADR-0036](0036-self-hosted-postgres-and-cluster-database-split.md)); Infisical is retired ([ADR-0035](0035-git-backed-per-host-secrets-delivery.md))._
 
 Issue #117. Spun out of the ADR-0024 amendment, which **removed** the two bespoke daemon service
 fields (`issues:` / `verifies:`) on the grounds that exposing a PKI to a service *with a permission*

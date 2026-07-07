@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-28
+issue: "#148"
+---
+
 # OTel resource-attribute enrichment (cloud.*/host.*)
 
 Extends the #134 observability env-var contract so every service's telemetry

@@ -1,4 +1,12 @@
+---
+status: accepted
+date: 2026-06-23
+issue: "#139"
+---
+
 # Ephemeral (preview) environments: identity decoupled from config source
+
+> _Note: "Neon"/"Infisical" in the lists below are retired backends ([ADR-0035](0035-git-backed-per-host-secrets-delivery.md), [ADR-0036](0036-self-hosted-postgres-and-cluster-database-split.md)); the ephemeral-environment mechanism is unchanged._
 
 Wardnet deploys are infrequent, so a permanently-running test environment is not justified — yet there
 is a real need to spin up a faithful, isolated copy of an existing environment on demand, run actual

@@ -1,4 +1,12 @@
+---
+status: accepted
+date: 2026-07-03
+issue: "#159"
+---
+
 # East-west service traffic runs through a derived per-host mesh, distinct from the north-south ingress and gateway
+
+> _Note: the gateway's authored `routes: [{path, service}]` surface was replaced by `services: [names]` + a derived routing table ([ADR-0034](0034-path-level-exposure-control.md)); the mesh itself is unchanged._
 
 An earlier iteration (wardnet-cloud ADR-0013) modelled service-to-service authentication as a single
 central **API gateway**: every service dialed one `INFORGE_GATEWAY_URL`, the gateway terminated the

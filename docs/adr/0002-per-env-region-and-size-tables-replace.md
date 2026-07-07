@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-05-30
+issue: "#15"
+---
+
 # Per-environment region and size tables replace the built-in defaults
 
 The abstract-region→slug map (region table) and the size→cpu/memory map (size table) ship as built-in

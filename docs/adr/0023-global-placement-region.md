@@ -1,4 +1,12 @@
+---
+status: accepted
+date: 2026-06-12
+issue: "#96"
+---
+
 # `regions.yaml` global block requires a `placementRegion`
+
+> _Note: the `neon`/`NEON_API_KEY` provider example below is retired ([ADR-0036](0036-self-hosted-postgres-and-cluster-database-split.md)); the `placementRegion` decision is unchanged._
 
 The `global:` block in `regions.yaml` carries a `providers` map used to realise global
 resources (those under `resources/<env>/global/`). Global resources have region-less names

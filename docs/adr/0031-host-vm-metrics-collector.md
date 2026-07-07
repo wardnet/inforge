@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-28
+issue: "#148"
+---
+
 # Host VM-metrics collector
 
 Application telemetry (ADR-0030, #134) tells us nothing about the VM itself — CPU,

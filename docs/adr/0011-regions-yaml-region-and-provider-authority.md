@@ -1,6 +1,12 @@
+---
+status: accepted
+date: 2026-06-07
+issue: "#71"
+---
+
 # regions.yaml is the authority for which regions deploy and all provider config
 
-Supersedes [ADR-0009](0009-provider-centric-config-region-realizations.md).
+Supersedes [ADR-0009](archive/0009-provider-centric-config-region-realizations.md).
 
 Under ADR-0009 an environment's configuration was split across two files whose boundary was a source
 of confusion: `variables.yaml` declared *which* regions deployed (`regions[]`) **and** owned all

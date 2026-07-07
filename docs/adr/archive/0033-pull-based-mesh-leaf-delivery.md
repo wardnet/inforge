@@ -1,7 +1,10 @@
-# 33. Mesh leaf delivery is pull-based via a per-host mesh identity
+---
+status: superseded by ADR-0035
+date: 2026-07-03
+issue: "#162"
+---
 
-Date: 2026-07-03
-Status: Accepted
+# Mesh leaf delivery is pull-based via a per-host mesh identity
 
 > Completes ADR-0032's "leaf custody shifts" with the delivery mechanism: how each
 > mesh proxy comes to hold its co-located services' real leaves + trust bundle, at

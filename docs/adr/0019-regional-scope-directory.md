@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-12
+issue: "#96"
+---
+
 # Non-global resources live under a `regional/` subdirectory
 
 The environment directory (`resources/<env>/`) previously held the resource type directories

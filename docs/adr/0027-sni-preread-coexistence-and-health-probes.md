@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-23
+issue: "#138"
+---
+
 # nginx ssl_preread lets a forward coexist with tls-termination on one port, and a health tier
 
 ADR-0015 split a service host's ingress into two contexts: `tls-termination` routes in `http{}`

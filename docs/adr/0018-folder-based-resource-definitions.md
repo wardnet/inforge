@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-12
+issue: "#96"
+---
+
 # Resource definitions are named folders containing manifest.yaml
 
 Each YAML file under a resource type directory previously held exactly one resource spec and

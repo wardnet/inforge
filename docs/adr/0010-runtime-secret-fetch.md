@@ -1,4 +1,12 @@
+---
+status: accepted
+date: 2026-06-06
+issue: "#66"
+---
+
 # Services fetch their own secrets at runtime; inforge bakes nothing
+
+> _Note: the runtime secrets-provider fetch and the `inforge-bootstrap` binary described below were replaced — secrets are now age-decrypted at boot by `inforge-agent` (see [ADR-0035](0035-git-backed-per-host-secrets-delivery.md)). The "services own their secrets, inforge bakes nothing" principle still holds._
 
 A service's secrets are no longer encrypted into its manifest, escrowed through a key broker, or
 re-keyed at first boot. Instead each service fetches its own secrets at process start, directly from

@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-12
+issue: "#96"
+---
+
 # Service environment contract moves to environment.yaml; `secrets` → `environment`
 
 A service's runtime environment variables were declared in a `secrets:` map inside the service
