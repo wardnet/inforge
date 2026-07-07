@@ -77,9 +77,9 @@ func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha st
 // behind the seam is behaviour-preserving.
 func serviceApplyScript(t service.DeployTarget) string {
 	return strings.Join([]string{
-		fmt.Sprintf("sudo tar -xzf %s -C %s", remotePayloadPath, t.Folder),
+		fmt.Sprintf("sudo tar -xzf %s -C %s", remotePayloadPath, remote.Quote(t.Folder)),
 		fmt.Sprintf("rm -f %s", remotePayloadPath),
-		fmt.Sprintf("sudo systemctl restart %s", t.Unit),
+		fmt.Sprintf("sudo systemctl restart %s", remote.Quote(t.Unit)),
 	}, " && ")
 }
 
@@ -109,8 +109,11 @@ func appReleaseScript(t iapp.DeployTarget, sha string) string {
 		fmt.Sprintf("sudo mkdir -p %s", remote.Quote(bundleDir)),
 		fmt.Sprintf("sudo tar -xzf %s -C %s", remotePayloadPath, remote.Quote(bundleDir)),
 		fmt.Sprintf("rm -f %s", remotePayloadPath),
+		// Validate BEFORE swapping `current`: if `nginx -t` fails, the swap never
+		// runs (&&), so the served doc root and `current` can't diverge.
+		"sudo nginx -t",
 		iapp.SwapCurrentScript(t.App, sha),
-		"sudo nginx -t && sudo systemctl reload nginx",
+		"sudo systemctl reload nginx",
 		iapp.GCReleasesScript(t.App),
 	}, " && ")
 }
@@ -124,8 +127,10 @@ func appRollbackScript(t iapp.DeployTarget, sha string) string {
 	return strings.Join([]string{
 		fmt.Sprintf("{ test -d %s || { echo \"bundle %s not present on %s — release it before rolling back\" >&2; exit 1; }; }",
 			remote.Quote(bundleDir), sha, t.App),
+		// Validate before the swap (see appReleaseScript).
+		"sudo nginx -t",
 		iapp.SwapCurrentScript(t.App, sha),
-		"sudo nginx -t && sudo systemctl reload nginx",
+		"sudo systemctl reload nginx",
 	}, " && ")
 }
 

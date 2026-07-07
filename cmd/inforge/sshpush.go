@@ -52,7 +52,13 @@ func sshWriteFile(ctx context.Context, keyPath, account, remotePath string, cont
 // the SSH stdin without buffering the whole payload in memory, for large inputs
 // like a database dump (`inforge db restore --from-dump`).
 func sshWriteFileFrom(ctx context.Context, keyPath, account, remotePath string, r io.Reader) error {
-	remoteCmd := fmt.Sprintf("sudo install -D -m 0600 /dev/stdin %s", remotePath)
+	// Stage to <path>.tmp then atomically mv into place: `inforge pki renew` signals
+	// reload-or-restart immediately after this write, so an interrupted SSH stream
+	// must never leave a truncated leaf.age/secrets.age at the live path (the reload
+	// would then project a broken cert). install -D creates the parent dir; the mv is
+	// a same-directory atomic rename. Renew is per-host sequential, so the fixed .tmp
+	// suffix is not raced.
+	remoteCmd := fmt.Sprintf("sudo install -D -m 0600 /dev/stdin %[1]s.tmp && sudo mv %[1]s.tmp %[1]s", remotePath)
 	args := append(append([]string{}, sshArgs(keyPath)...), account, remoteCmd)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdin = r

@@ -53,18 +53,27 @@ func WriteFileScript(absPath, content string) string {
 // are written so the file is never momentarily world-readable.
 func WriteFileScriptMode(absPath, content, mode string) string {
 	b64 := base64.StdEncoding.EncodeToString([]byte(content))
-	steps := []string{
+	if mode == "" {
+		// Default effective mode (matches the pre-atomic `tee` behaviour: umask 022
+		// on root → 0644). A restrictive caller passes 0600 (e.g. secrets.age).
+		mode = "0644"
+	}
+	dir := path.Dir(absPath)
+	// Stage to a UNIQUE temp in the SAME directory (so the final `mv` is an atomic
+	// same-filesystem rename), set the mode on the temp, then move it into place. A
+	// partial/interrupted write (disk full, killed mid-stream, bad base64) leaves the
+	// temp truncated but never touches the live path — critical for secrets.age /
+	// nginx configs, where a truncated live file would crash-loop the unit at boot.
+	// The temp is created 0600 by mktemp and never widened before the mode is set, so
+	// the content is never briefly world-readable.
+	return strings.Join([]string{
 		"set -euo pipefail",
-		fmt.Sprintf("sudo install -d -m 0755 %s", Quote(path.Dir(absPath))),
-	}
-	if mode != "" {
-		// Create the file with the restrictive mode up front so the subsequent
-		// tee never widens it and the content is never briefly world-readable.
-		steps = append(steps, fmt.Sprintf("sudo install -m %s /dev/null %s", Quote(mode), Quote(absPath)))
-	}
-	steps = append(steps,
-		fmt.Sprintf("printf '%%s' %s | base64 -d | sudo tee %s >/dev/null", Quote(b64), Quote(absPath)))
-	return strings.Join(steps, "\n")
+		fmt.Sprintf("sudo install -d -m 0755 %s", Quote(dir)),
+		fmt.Sprintf("tmp=$(sudo mktemp %s)", Quote(dir+"/.inforge-write.XXXXXX")),
+		fmt.Sprintf(`printf '%%s' %s | base64 -d | sudo tee "$tmp" >/dev/null`, Quote(b64)),
+		fmt.Sprintf(`sudo chmod %s "$tmp"`, Quote(mode)),
+		fmt.Sprintf(`sudo mv "$tmp" %s`, Quote(absPath)),
+	}, "\n")
 }
 
 // DeleteFileScript renders the command run when a written file's resource is
