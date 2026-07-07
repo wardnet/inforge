@@ -125,8 +125,12 @@ func TestInstallScriptParses(t *testing.T) {
 func TestCredentialScriptIsOwnedAndPrivate(t *testing.T) {
 	s := CredentialScript("YWJjOnRrbg==")
 	assert.Contains(t, s, CredentialPath)
-	assert.Contains(t, s, "-m '0600'")
+	assert.Contains(t, s, "chmod '0600'")
 	assert.Contains(t, s, "chown '"+User+":"+User+"'")
+	// Written via temp + atomic mv (install /dev/stdin over an existing file fails on
+	// coreutils 9 / Ubuntu 26.04).
+	assert.Contains(t, s, "mktemp")
+	assert.Contains(t, s, "mv \"$tmp\" ")
 	// The value travels base64'd, decoded on the host — never as plaintext argv.
 	assert.Contains(t, s, "base64 -d")
 }

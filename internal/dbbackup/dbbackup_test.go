@@ -198,8 +198,13 @@ func TestCredentialScript(t *testing.T) {
 	if !strings.Contains(got, CredentialPath) {
 		t.Errorf("CredentialScript missing target path\n%s", got)
 	}
-	if !strings.Contains(got, "-m '0600'") {
+	if !strings.Contains(got, "chmod '0600'") {
 		t.Errorf("CredentialScript must write 0600\n%s", got)
+	}
+	// Written via temp + atomic mv (install /dev/stdin over an existing file fails on
+	// coreutils 9 / Ubuntu 26.04).
+	if !strings.Contains(got, "mktemp") || !strings.Contains(got, `mv "$tmp" `) {
+		t.Errorf("CredentialScript must stage to a temp then mv\n%s", got)
 	}
 }
 
