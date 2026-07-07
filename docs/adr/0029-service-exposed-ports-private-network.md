@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-25
+issue: "#141"
+---
+
 # A service can declare ports inforge opens on the host's private network only
 
 Until now a service could open a port only three ways, and every one of them is **public**:

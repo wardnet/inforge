@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-05-30
+issue: "#15"
+---
+
 # Resources are partitioned by environment then region; commands act on one environment
 
 Resource definitions live under `resources/<env>/<region>/<type>/`, and every inforge command takes

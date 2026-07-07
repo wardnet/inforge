@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-12
+issue: "#96"
+---
+
 # `service.host` references the compute name, not the specKey
 
 A service's `host:` field previously referenced the compute specKey: `host: bridge-01`

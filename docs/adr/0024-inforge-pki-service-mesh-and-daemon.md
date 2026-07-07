@@ -1,4 +1,12 @@
+---
+status: accepted
+date: 2026-06-13
+issue: "#111"
+---
+
 # PKI material is minted from cold-rooted trees in CI and delivered through the provider; a service host never holds a sign-capable key
+
+> _Note: the PKI model (two-tier, cold root, short-TTL leaves) still holds, but the delivery mechanism described below (provider/Infisical write + `inforge-bootstrap` fetch) was superseded — mesh leaf custody and delivery now run through the per-host mesh proxy ([ADR-0032](0032-east-west-service-mesh.md), [ADR-0035](0035-git-backed-per-host-secrets-delivery.md))._
 
 The Wardnet bridge is being split into three separately-deployed services — Tenant (global),
 DDNS (regional), and Tunneler (regional) — and every hop between them is secured by mTLS from

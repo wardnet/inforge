@@ -1,4 +1,12 @@
+---
+status: accepted
+date: 2026-06-09
+issue: "#77"
+---
+
 # Host ingress is nginx with typed per-listener routes (forward / tls-termination)
+
+> _Note: the "no host-level resource; realization is driven by ingress" decision was superseded by the standalone ingress tier of [ADR-0026](0026-ingress-tier-and-origin-app-serving.md) (and extended by [ADR-0027](0027-sni-preread-coexistence-and-health-probes.md))._
 
 Until now the host ingress proxy was **Caddy**, declared by a host-level `tls-termination` **resource**
 (its own `tls-termination/` YAML type), and a service's `ingress` entries were modelled around a single

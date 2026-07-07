@@ -1,6 +1,12 @@
+---
+status: superseded by ADR-0010
+date: 2026-05-30
+issue: "#15"
+---
+
 # VM secret bootstrap uses a centralized inforge key broker plus SOPS/age re-encryption
 
-> **Superseded by [ADR-0010](0010-runtime-secret-fetch.md).** The key broker, the one-time-token
+> **Superseded by [ADR-0010](../0010-runtime-secret-fetch.md).** The key broker, the one-time-token
 > escrow, the SOPS/age manifest re-encryption, and the `key-broker/` Worker are all removed; services
 > fetch their own secrets at runtime with a per-service identity. Kept for historical context.
 

@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-07
+issue: "#72"
+---
+
 # Resources are defined once per environment and instantiated into every region
 
 Amends [ADR-0001](0001-one-environment-env-region-layout.md).

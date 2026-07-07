@@ -1,4 +1,10 @@
-# 36. Self-hosted Postgres, and splitting `database` into cluster + logical database
+---
+status: accepted
+date: 2026-07-06
+issue: "#172"
+---
+
+# Self-hosted Postgres, and splitting `database` into cluster + logical database
 
 ## Context
 
@@ -146,7 +152,7 @@ future managed provider re-adds cleanly; git history preserves Neon for referenc
   mkfs/mount) — the first block storage inforge manages.
 - **New dependency:** `pulumi-random` (a standard Pulumi plugin) for stable per-service passwords.
 - **Descriptor / `inforge-agent` untouched.** Role minting is deploy-time on-host (Pulumi
-  `remote.NewCommand`), and consumers fetch per-service creds via the unchanged grant→Infisical→
+  `remote.NewCommand`), and consumers fetch per-service creds via the unchanged grant→git-secrets→
   agent path. The cluster host runs Postgres + backup timers as systemd units written at deploy; it
   runs no inforge-agent for Postgres.
 - **The cutover is a dump/restore**, executed by the operator against their deployment repo using

@@ -1,4 +1,12 @@
+---
+status: accepted
+date: 2026-06-12
+issue: "#96"
+---
+
 # inforge.yaml gains project-level provider defaults
+
+> _Note: the `neon`/`infisical` provider examples below are retired ([ADR-0035](0035-git-backed-per-host-secrets-delivery.md), [ADR-0036](0036-self-hosted-postgres-and-cluster-database-split.md)) — PostgreSQL is self-hosted and there is no secrets-store provider. The provider-defaults mechanism is unchanged._
 
 Every resource spec carried a required `provider:` field declaring which provider handles it
 (`provider: hetzner`, `provider: neon`). When a project uses exactly one compute provider and

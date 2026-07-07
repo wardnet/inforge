@@ -1,4 +1,12 @@
+---
+status: accepted
+date: 2026-06-11
+issue: "#91"
+---
+
 # App secrets live age-encrypted in git; inforge provisions them into the provider
+
+> _Note: the "write plaintext into the secrets provider; the host fetches it" delivery half was replaced by git-committed age secrets delivered per-host over SSH ([ADR-0035](0035-git-backed-per-host-secrets-delivery.md)). The git-encrypted-store half stands._
 
 Today a service's app secret reaches the provider one of two ways: an `${ENV}` source (the value is
 injected into the deploy process environment — one CI-secret-to-env line per secret, in the consumer's

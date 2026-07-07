@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-02
+issue: "#34"
+---
+
 # Declarative user provisioning: deploy user on compute, service user on service
 
 User provisioning — previously embedded in project-supplied cloud-init scripts — is now declared

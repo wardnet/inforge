@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-08
+issue: "#76"
+---
+
 # DNS is a per-(env, region) authority; records are derived, not authored
 
 Until now DNS was a per-record resource: a `DnsSpec` (`dns/*.yaml`) with a free-form `subdomain`,

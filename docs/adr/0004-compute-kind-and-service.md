@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-05-30
+issue: "#15"
+---
+
 # Compute is a host runtime (`kind`); services are workloads hosted on it
 
 We split "the host" from "what runs on it": a **compute** is a host runtime with a `kind` (`vm` now,

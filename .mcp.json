@@ -1,17 +1,32 @@
 {
+  "_meta": {
+    "agtk": {
+      "managed": [
+        "mcpServers"
+      ]
+    }
+  },
   "mcpServers": {
     "context7": {
-      "type": "stdio",
-      "command": "npx",
       "args": [
         "-y",
         "@upstash/context7-mcp",
         "--api-key",
-        "$CONTEXT7_KEY"
+        "${CONTEXT7_KEY}"
       ],
+      "command": "npx",
       "env": {
         "DATABASE_URL": "${CONTEXT7_KEY}"
       }
+    },
+    "serena": {
+      "args": [
+        "start-mcp-server",
+        "--context",
+        "claude-code",
+        "--project-from-cwd"
+      ],
+      "command": "serena"
     }
   }
 }

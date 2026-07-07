@@ -1,4 +1,12 @@
+---
+status: accepted
+date: 2026-06-07
+issue: "#73"
+---
+
 # Global resources and a direction-enforced cross-reference
+
+> _Note: `ref:database/*.connectionUrl` is gone — DB credentials flow through grants ([ADR-0025](0025-service-resource-permission-grants.md)); the Neon/Infisical references are retired ([ADR-0035](0035-git-backed-per-host-secrets-delivery.md), [ADR-0036](0036-self-hosted-postgres-and-cluster-database-split.md)); the global slice now realizes fully (see [ADR-0023](0023-global-placement-region.md))._
 
 Builds on [ADR-0012](0012-single-resource-definition-multi-region-instantiation.md) and
 [ADR-0011](0011-regions-yaml-region-and-provider-authority.md).

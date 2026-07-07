@@ -1,6 +1,12 @@
+---
+status: accepted
+date: 2026-05-30
+issue: "#15"
+---
+
 # Compute cpus/memory are resolved from the size table, not declared per compute
 
-> **Amended by [ADR-0009](./0009-provider-centric-config-region-realizations.md):** the size table no
+> **Amended by [ADR-0009](./archive/0009-provider-centric-config-region-realizations.md):** the size table no
 > longer carries `cpus`/`memory`. A size is now just a validated *name*; each provider maps that name
 > to a concrete SKU via its per-region realization (`providers.<name>.regions[…].serverTypes`). The
 > decision below to keep sizing out of the compute spec — declared as a `size` name, validated against

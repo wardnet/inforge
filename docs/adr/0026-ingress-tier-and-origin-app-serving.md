@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-17
+issue: "#126"
+---
+
 # Front-ends are origin-served by a standalone ingress tier, not a CDN edge
 
 Slice 1 (schema-only) modelled a front-end (static SPA) as an `app` resource attached to a `cdn`

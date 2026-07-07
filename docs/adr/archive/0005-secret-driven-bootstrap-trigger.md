@@ -1,6 +1,12 @@
+---
+status: superseded by ADR-0010
+date: 2026-05-30
+issue: "#15"
+---
+
 # Bootstrapping is triggered by secret values in the manifest, not an explicit flag
 
-> **Superseded by [ADR-0010](0010-runtime-secret-fetch.md).** Secrets are no longer baked into the
+> **Superseded by [ADR-0010](../0010-runtime-secret-fetch.md).** Secrets are no longer baked into the
 > manifest; services fetch their own secrets at runtime via `inforge-bootstrap`, so there is no
 > manifest-secret-driven bootstrap trigger. Kept for historical context.
 

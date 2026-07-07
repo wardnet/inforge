@@ -1,6 +1,12 @@
+---
+status: superseded by ADR-0011
+date: 2026-06-05
+issue: "#58"
+---
+
 # Provider config owns per-region realizations; abstraction tables stay cloud-agnostic
 
-> **Superseded by [ADR-0011](0011-regions-yaml-region-and-provider-authority.md).** This ADR put
+> **Superseded by [ADR-0011](../0011-regions-yaml-region-and-provider-authority.md).** This ADR put
 > provider config (credentials + realizations) under `providers.<name>` in `variables.yaml`, keeping
 > `regions.yaml` as a cloud-agnostic abstract-region → slug table. ADR-0011 moves all provider config
 > *into* `regions.yaml`, keyed per region, making it the single authority for which regions deploy and

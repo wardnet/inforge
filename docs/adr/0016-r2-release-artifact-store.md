@@ -1,3 +1,9 @@
+---
+status: accepted
+date: 2026-06-09
+issue: "#82"
+---
+
 # Releases are SHA-keyed artifacts in R2, fronted by a per-env manifest
 
 Until now `inforge release` packaged a service's local artifact directory into a gzip and SSH-pushed it

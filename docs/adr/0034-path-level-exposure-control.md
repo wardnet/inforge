@@ -1,7 +1,10 @@
-# 34. Path-level exposure control and gateway-world health addressing
+---
+status: accepted
+date: 2026-07-04
+issue: "#168"
+---
 
-Date: 2026-07-04
-Status: Accepted
+# Path-level exposure control and gateway-world health addressing
 
 > Refines ADR-0032's gateway authoring (`routes:` is replaced by a derived
 > routing table) and ADR-0027's health tier (probe paths become declared,

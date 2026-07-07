@@ -1,8 +1,10 @@
-# 35. Git-backed, per-host secrets delivery (retiring Infisical)
+---
+status: accepted
+date: 2026-07-06
+issue: "#171"
+---
 
-Date: 2026-07-06
-
-Status: Accepted
+# Git-backed, per-host secrets delivery (retiring Infisical)
 
 *Retires Infisical as inforge's runtime secrets backend (superseding the provider-fetch half of
 ADR-0010); reverses ADR-0033's pull decision for mesh leaf delivery now that its root cause
