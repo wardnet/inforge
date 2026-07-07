@@ -91,7 +91,7 @@
 
 **Where:** `.goreleaser.yml`, `.golangci.yml`
 
-**Summary:** goreleaser v2 builds three binaries (inforge CLI, pulumi-resource-neon, pulumi-resource-infisical) across linux/darwin/windows × amd64/arm64. Produces per-binary archives (so consumers download only what they need) plus raw uncompressed binaries. golangci-lint v2 enables `errcheck`, `govet`, `staticcheck` (which includes old `gosimple`), and `unused`; all linters must pass.
+**Summary:** goreleaser v2 builds two binaries (inforge CLI, inforge-agent) across linux/darwin/windows × amd64/arm64. The bundled Pulumi provider plugins were retired (Infisical by ADR-0035, Neon by ADR-0036), so no `pulumi-resource-*` binary is built. Produces per-binary archives (so consumers download only what they need) plus raw uncompressed binaries. golangci-lint v2 enables `errcheck`, `govet`, `staticcheck` (which includes old `gosimple`), and `unused`; all linters must pass.
 
 **Entry points:** `.goreleaser.yml`, `.golangci.yml`
 
@@ -101,11 +101,11 @@
 
 ### Provider Structure
 
-**Where:** `providers/` (neon, infisical, hetzner, cloudflare)
+**Where:** `providers/` (hetzner, cloudflare)
 
-**Summary:** Two providers have Pulumi resource plugins wired: `providers/neon/cmd/pulumi-resource-neon/` and `providers/infisical/cmd/pulumi-resource-infisical/` (binaries named exactly as Pulumi expects). Each has a `provider.go` (registers resources) and per-resource files (e.g., `neon_database.go`, `secrets_batch.go`). Hetzner and Cloudflare are provider SDK packages (not Pulumi plugins). Plugin installation is delegated to `inforge plugins install <name>` (not yet implemented in CLI).
+**Summary:** No provider has a custom Pulumi resource plugin anymore — the Neon (ADR-0036) and Infisical (ADR-0035) plugins were retired. Hetzner and Cloudflare are provider SDK packages (not Pulumi plugins). `inforge plugins install` downloads the standard published Pulumi plugins a project needs (e.g. `pulumi-random`) from their upstream releases.
 
-**Entry points:** per-provider `cmd/pulumi-resource-*/` directories
+**Entry points:** `providers/hetzner/`, `providers/cloudflare/` (Go SDK packages)
 
 **Tracked files:** (see per-provider directories for detailed hashes)
 

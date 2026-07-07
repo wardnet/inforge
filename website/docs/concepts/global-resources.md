@@ -45,14 +45,24 @@ regions:
   us-east-1:
     slug: use1
     providers:
-      neon: { apiKey: ${NEON_API_KEY} }
+      hetzner:
+        apiToken: ${HCLOUD_TOKEN}
+        location: ash
+        network_zone: us-east
+        serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+        images: {ubuntu-24.04: ubuntu-24.04}
 global:
   placementRegion: us-east-1    # required — must match a key under regions:
   providers:
-    # A global Neon database has no abstract region to map to a physical Neon
-    # region, so the global block gives it explicitly. (Regional blocks don't
-    # need this — their abstract region maps to a Neon region automatically.)
-    neon: { apiKey: ${NEON_API_KEY}, region: aws-us-east-2 }
+    # A global database-cluster is host-backed: it runs a self-hosted PostgreSQL
+    # engine on a global compute host, which realizes on Hetzner using the
+    # placementRegion's credentials and realization. No managed-DB apiKey exists.
+    hetzner:
+      apiToken: ${HCLOUD_TOKEN}
+      location: ash
+      network_zone: us-east
+      serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+      images: {ubuntu-24.04: ubuntu-24.04}
 ```
 
 `placementRegion` resolves provider-registration lookups only. It does not affect global resource

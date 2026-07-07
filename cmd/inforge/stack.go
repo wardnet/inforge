@@ -139,6 +139,31 @@ func setProviderDefaults(ctx context.Context, s auto.Stack, d types.ProviderDefa
 	return s.SetConfig(ctx, "provider_defaults", auto.ConfigValue{Value: string(b)})
 }
 
+// setBackups injects the Postgres backup destination (ADR-0036) into stack config so
+// program.Run can render each cluster host's backup timer without the project file:
+// the bucket name and the resolved R2 endpoint. Resolving the endpoint here (CLI-side)
+// validates CLOUDFLARE_ACCOUNT_ID up front, so a misconfiguration fails the command
+// rather than mid-apply on the host.
+//
+// It ALWAYS writes both keys (empty when unconfigured) rather than no-op'ing on an
+// absent block: stack config persists across runs, so removing the `backups:` block
+// must clear the previously-set values — otherwise program.Run keeps reading a stale
+// bucket and cannot be turned off. program.Run treats an empty bucket as unconfigured.
+func setBackups(ctx context.Context, s auto.Stack, b backupsConfig) error {
+	var bucket, endpoint string
+	if b.configured() {
+		var err error
+		bucket, endpoint, err = b.resolve()
+		if err != nil {
+			return fmt.Errorf("backups: %w", err)
+		}
+	}
+	if err := s.SetConfig(ctx, "backups_bucket", auto.ConfigValue{Value: bucket}); err != nil {
+		return err
+	}
+	return s.SetConfig(ctx, "backups_endpoint", auto.ConfigValue{Value: endpoint})
+}
+
 // ephemeralWorkspace builds a Pulumi LocalWorkspace bound to the project's
 // object-store backend, for enumerating stacks during `reap` (ListStacks) without
 // first selecting one. The inline program is attached so a stack selected from

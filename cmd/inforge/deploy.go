@@ -82,6 +82,10 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 		return fmt.Errorf("set provider defaults: %w", err)
 	}
 
+	if err := setBackups(ctx, s, projCfg.Backups); err != nil {
+		return fmt.Errorf("set backups config: %w", err)
+	}
+
 	// A single Printer renders the engine's event stream — per-resource lines plus
 	// an end-of-run summary (counts + failures) — replacing Pulumi's raw progress
 	// tree. ProgressStreams is explicitly discarded so the tree never appears

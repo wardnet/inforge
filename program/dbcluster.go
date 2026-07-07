@@ -83,9 +83,14 @@ func databasesOfCluster(res types.Resources, cluster string) []types.DatabaseSpe
 // each host's private IP for listen_addresses and the returned connection Host) and
 // BEFORE provisionServiceSecrets (which resolves grants against dbOut). The 5432-range
 // ports are opened to the private CIDR only by firewallPlanByHost.
-func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, dbOut map[string]types.DatabaseOutputs, gates map[string]pulumi.Resource, defaults types.ProviderDefaults, deployPrivateKey, env, region, slug string) error {
+//
+// It returns the per-host tail: the last remote command run on each cluster host,
+// keyed by canonical host specKey. The backup pass (provisionDatabaseBackups)
+// DependsOn it so its awscli apt install never races the Postgres apt install on the
+// same host, and so a backup timer is installed only after its cluster is up.
+func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, dbOut map[string]types.DatabaseOutputs, gates map[string]pulumi.Resource, defaults types.ProviderDefaults, deployPrivateKey, env, region, slug string) (map[string]pulumi.Resource, error) {
 	if len(res.DatabaseCluster) == 0 {
-		return nil
+		return nil, nil
 	}
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
@@ -107,23 +112,23 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 			// The managed DatabaseProvider seam is retained (types.DatabaseProvider) but
 			// no managed provider is registered — ADR-0036 retired Neon. Only self-hosted
 			// realizes here; a managed cluster is a configuration error until one re-adds.
-			return fmt.Errorf("database-cluster %q: provider %q is not available — ADR-0036 retired the managed database provider; use provider: %s", cluster.Name, effective, types.SelfHostedProvider)
+			return nil, fmt.Errorf("database-cluster %q: provider %q is not available — ADR-0036 retired the managed database provider; use provider: %s", cluster.Name, effective, types.SelfHostedProvider)
 		}
 		hostKey, ok := canonical[cluster.Host]
 		if !ok {
-			return fmt.Errorf("database-cluster %q: host %q does not resolve to a compute in this scope", cluster.Name, cluster.Host)
+			return nil, fmt.Errorf("database-cluster %q: host %q does not resolve to a compute in this scope", cluster.Name, cluster.Host)
 		}
 		host, ok := computeOut[hostKey]
 		if !ok {
-			return fmt.Errorf("database-cluster %q: host %q has no compute output", cluster.Name, cluster.Host)
+			return nil, fmt.Errorf("database-cluster %q: host %q has no compute output", cluster.Name, cluster.Host)
 		}
 		deployUser := deployUserByCompute[hostKey]
 		if !ctx.DryRun() {
 			if deployUser == "" {
-				return fmt.Errorf("database-cluster %q: host %q has no deploy_user; inforge needs one to SSH and install Postgres", cluster.Name, cluster.Host)
+				return nil, fmt.Errorf("database-cluster %q: host %q has no deploy_user; inforge needs one to SSH and install Postgres", cluster.Name, cluster.Host)
 			}
 			if deployPrivateKey == "" {
-				return fmt.Errorf("database-cluster %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", cluster.Name)
+				return nil, fmt.Errorf("database-cluster %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", cluster.Name)
 			}
 		}
 		port := ports[hostKey][cluster.Name]
@@ -131,7 +136,7 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 
 		gate, err := cloudInitGate(ctx, gates, hostKey, host, deployPrivateKey, env, slug)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 		name := naming.Resource(env, slug, "db", cluster.Name)
@@ -142,7 +147,7 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 		// is the cluster HOST's compute provider (the volume attaches to that server).
 		storage, err := reg.Storage(types.ResolveProvider(computeByName[cluster.Host].Provider, "compute", "", defaults))
 		if err != nil {
-			return fmt.Errorf("database-cluster %q: %w", cluster.Name, err)
+			return nil, fmt.Errorf("database-cluster %q: %w", cluster.Name, err)
 		}
 		vol, err := storage.CreateVolume(ctx, types.StorageRequest{
 			Name:        cluster.Name,
@@ -153,7 +158,7 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 			SizeGB:      clusterVolumeSizeGB(res, cluster.Name),
 		}, []pulumi.Resource{gate})
 		if err != nil {
-			return fmt.Errorf("database-cluster %q: create volume: %w", cluster.Name, err)
+			return nil, fmt.Errorf("database-cluster %q: create volume: %w", cluster.Name, err)
 		}
 
 		// 1) Install the version-pinned Postgres server package. Serialize with any
@@ -170,7 +175,7 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 			Triggers:   pulumi.Array{pulumi.String(install)},
 		}, pulumi.DependsOn(installDeps))
 		if err != nil {
-			return fmt.Errorf("database-cluster %q: install postgres: %w", cluster.Name, err)
+			return nil, fmt.Errorf("database-cluster %q: install postgres: %w", cluster.Name, err)
 		}
 
 		// 2) Format (only if unformatted) + mount the data volume; the device path is
@@ -189,7 +194,7 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 			Triggers:   pulumi.Array{mountScript},
 		}, pulumi.DependsOn(mountDeps))
 		if err != nil {
-			return fmt.Errorf("database-cluster %q: mount volume: %w", cluster.Name, err)
+			return nil, fmt.Errorf("database-cluster %q: mount volume: %w", cluster.Name, err)
 		}
 
 		// 3) initdb into the PGDATA on the mounted volume (idempotent — a populated
@@ -202,7 +207,7 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 			Triggers:   pulumi.Array{pulumi.String(initScript)},
 		}, pulumi.DependsOn([]pulumi.Resource{mountCmd}))
 		if err != nil {
-			return fmt.Errorf("database-cluster %q: initdb: %w", cluster.Name, err)
+			return nil, fmt.Errorf("database-cluster %q: initdb: %w", cluster.Name, err)
 		}
 
 		// 4) Write postgresql.conf/pg_hba.conf + install and (re)start the systemd unit;
@@ -223,7 +228,7 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 			Triggers:   pulumi.Array{applyScript},
 		}, pulumi.DependsOn([]pulumi.Resource{initCmd}))
 		if err != nil {
-			return fmt.Errorf("database-cluster %q: configure postgres: %w", cluster.Name, err)
+			return nil, fmt.Errorf("database-cluster %q: configure postgres: %w", cluster.Name, err)
 		}
 
 		// 5) Ensure each logical database + its NOLOGIN owner exist, chained after the
@@ -239,7 +244,7 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 				Triggers:   pulumi.Array{pulumi.String(dbScript)},
 			}, pulumi.DependsOn([]pulumi.Resource{lastDep}))
 			if err != nil {
-				return fmt.Errorf("database-cluster %q: database %q: %w", cluster.Name, db.Name, err)
+				return nil, fmt.Errorf("database-cluster %q: database %q: %w", cluster.Name, db.Name, err)
 			}
 			lastDep = dbCmd
 			dbOut[db.Name] = types.DatabaseOutputs{RoleProvisioner: &selfHostedRoleProvisioner{
@@ -255,7 +260,7 @@ func provisionDatabaseClusters(ctx *pulumi.Context, reg registry.ProviderRegistr
 		// cluster's install waits on it (serializing apt/fstab on the shared host).
 		hostLast[hostKey] = lastDep
 	}
-	return nil
+	return hostLast, nil
 }
 
 // selfHostedRoleProvisioner mints a scoped per-service Postgres role on the cluster

@@ -312,7 +312,7 @@ no caller code, manifest, or URL changes.
 ### Providers
 
 **Provider**:
-A named cloud/service integration (`hetzner`, `cloudflare`, `neon`) selected per resource by its
+A named cloud/service integration (`hetzner`, `cloudflare`, `self-hosted`) selected per resource by its
 `provider` field. Secrets delivery is **not** provider-selected (ADR-0035) — it is a fixed,
 intrinsic part of the toolkit, like the git-committed secret store itself. The `provider` field is optional when a project-level default is
 set for the resource's class in `inforge.yaml`'s `providers:` block; an explicit field always takes

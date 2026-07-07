@@ -51,6 +51,7 @@ func rootCmd() *cobra.Command {
 		newPkiCmd(&dir),
 		newServiceCmd(&cfg),
 		newEphemeralCmd(&cfg, &dir),
+		newDBCmd(&cfg),
 	)
 
 	return root

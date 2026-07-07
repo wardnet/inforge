@@ -24,9 +24,8 @@ multi-provider infrastructure model with built-in runtime secret delivery for se
 
 | Provider | Resources |
 |----------|-----------|
-| Hetzner Cloud | Network, Compute |
+| Hetzner Cloud | Network, Compute, self-hosted PostgreSQL (database cluster + database) |
 | Cloudflare | DNS |
-| Neon | Database (PostgreSQL) |
 
 ## Quick links
 

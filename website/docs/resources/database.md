@@ -68,6 +68,45 @@ grants:
 Consumer manifests are unchanged by the cluster/database split — a grant still targets the logical
 `database/<name>`. See [Service — Grants](./service#grants) for the full field set and mechanics.
 
+## Backups
+
+Each database is backed up on its **cluster host** (a self-hosted cluster is private-only, so backups
+can only run on the host). A per-database systemd timer runs `pg_dump -Fc | gzip` and uploads the
+archive to a dedicated Cloudflare R2 bucket, keyed
+`<env>/<region>/<cluster>/<database>/<timestamp>.dump.gz` (the region segment keeps a regional
+cluster's per-region backups apart). Roles are re-minted by `inforge deploy`, not captured in the
+dump, so a restore is **data-only**.
+
+The policy is authored per database:
+
+```yaml
+backup:
+  enabled: true    # default true — set false to opt a throwaway/derived database out
+  interval: 24h    # default 24h — the timer cadence, and therefore the RPO
+  keep: 7          # default 7  — newest N archives retained; older ones are pruned each run
+```
+
+- **`enabled`** (default `true`) — backups are **on by default**. Set `enabled: false` to opt a
+  throwaway or fully-derived database out.
+- **`interval`** (default `24h`) — a Go duration; the backup cadence. Your worst-case data loss
+  (**RPO**) equals this interval (point-in-time recovery is not yet available).
+- **`keep`** (default `7`) — how many of the newest archives to retain per database; each run prunes
+  older objects beyond this count.
+
+Backups require two pieces of project setup:
+
+1. A dedicated [`backups.bucket`](../configuration/inforge-yaml#backups) in `inforge.yaml`, distinct
+   from the state and artifacts buckets.
+2. A backup-scoped R2 credential in the reserved secret namespace —
+   `backups/r2_access_key_id` and `backups/r2_secret_access_key` (see
+   [`inforge secret --reserved`](../cli/secret#reserved-secrets---reserved)).
+
+Because backups default to enabled, `inforge deploy` **fails** if a database has backups enabled but no
+`backups.bucket` is configured (or the reserved credential is missing) — configure the bucket +
+credential, or set `backup.enabled: false`. `inforge validate` **warns** about the same condition, so
+CI catches it before the deploy touches any host. See the
+[Database backups runbook](../runbooks/database-backups) for setup and the disk-fill alert.
+
 ## Example
 
 ```yaml title="regional/database/main/manifest.yaml"

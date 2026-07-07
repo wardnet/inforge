@@ -16,6 +16,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 	"github.com/wardnet/inforge/internal/agent"
 	"github.com/wardnet/inforge/internal/app"
+	"github.com/wardnet/inforge/internal/dbbackup"
 	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/hostpaths"
 	"github.com/wardnet/inforge/internal/hostsecrets"
@@ -167,6 +168,16 @@ func Run(ctx *pulumi.Context) error {
 	}
 	ctx.Export("meshDeployDescriptor", pulumi.Any(meshDesc))
 
+	// The db deploy descriptor is the database sibling: one target per logical
+	// database (all clusters × all regions + global), the contract the
+	// `inforge db backup | list-backups | restore` commands resolve a database's
+	// cluster host, SSH user, TCP port, and R2 region segment from (ADR-0036).
+	dbDesc, err := buildDBDeployDescriptor(env, vars.BaseDomain, res, globalRes, regionTable)
+	if err != nil {
+		return err
+	}
+	ctx.Export("dbDeployDescriptor", pulumi.Any(dbDesc))
+
 	// Env-scoped Hetzner SSH keys (wardnet-<env>-key-{user,deploy}) carry no
 	// region slug, so every scope's compute provider would register the same URN.
 	// Share one cache across all registries this run builds so the keys register
@@ -260,6 +271,32 @@ func Run(ctx *pulumi.Context) error {
 		obsAuthB64 = pulumi.ToSecret(pulumi.String(base64.StdEncoding.EncodeToString([]byte(authRaw)))).(pulumi.StringOutput)
 	}
 
+	// Self-hosted Postgres backups (ADR-0036): the destination R2 bucket + endpoint are
+	// threaded from inforge.yaml (setBackups); the backup-scoped R2 credential is an
+	// inforge RESERVED secret (two keys mirroring the AWS_* chain), decrypted once here
+	// and marked secret so the on-host EnvironmentFile write is encrypted in Pulumi
+	// state. The credential is decrypted optimistically; whether its ABSENCE is fatal is
+	// decided per-scope in provisionDatabaseBackups, which knows if any database in that
+	// scope actually enables backups — so a bucket set fleet-wide never forces a
+	// credential onto a scope whose databases all opt out.
+	backupsBucket := cfg.Get("backups_bucket")
+	backupsEndpoint := cfg.Get("backups_endpoint")
+	var backupsAccessKey, backupsSecretKey pulumi.StringOutput
+	backupsCredsPresent := false
+	if backupsBucket != "" {
+		accessRaw, err := decryptReservedSecret(dir, srcEnv, dbbackup.AuthSecretNamespace, dbbackup.AccessKeyIDKey, ctx.DryRun())
+		if err != nil {
+			return err
+		}
+		secretRaw, err := decryptReservedSecret(dir, srcEnv, dbbackup.AuthSecretNamespace, dbbackup.SecretAccessKeyKey, ctx.DryRun())
+		if err != nil {
+			return err
+		}
+		backupsCredsPresent = accessRaw != "" && secretRaw != ""
+		backupsAccessKey = pulumi.ToSecret(pulumi.String(accessRaw)).(pulumi.StringOutput)
+		backupsSecretKey = pulumi.ToSecret(pulumi.String(secretRaw)).(pulumi.StringOutput)
+	}
+
 	// Post-process each scope through the host-level pipeline. The order within a
 	// scope is load-bearing: DNS records first (ACME HTTP-01 needs the A-record to
 	// exist), then app seeds + ingress (nginx/ACME), then service secrets, then the
@@ -307,7 +344,14 @@ func Run(ctx *pulumi.Context) error {
 		// network is attached (it needs the host's private IP) and before service
 		// secrets (grants resolve against databaseOutputs). The global slice runs first
 		// (scopes are global-first), so a regional grant on a global database resolves.
-		if err := provisionDatabaseClusters(ctx, sc.reg, sc.res, computeOutputs[sc.key], databaseOutputs[sc.key], gates, providerDefaults, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug); err != nil {
+		dbHostTails, err := provisionDatabaseClusters(ctx, sc.reg, sc.res, computeOutputs[sc.key], databaseOutputs[sc.key], gates, providerDefaults, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug)
+		if err != nil {
+			return err
+		}
+		// Per-database backup timers (ADR-0036) land on each cluster host after the
+		// cluster is up (DependsOn dbHostTails). No-op when no backups bucket is
+		// configured and every database opted out.
+		if err := provisionDatabaseBackups(ctx, sc.res, computeOutputs[sc.key], dbHostTails, backupsBucket, backupsEndpoint, backupsCredsPresent, backupsAccessKey, backupsSecretKey, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}

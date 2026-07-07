@@ -26,15 +26,14 @@ See [Installation](https://wardnet.github.io/inforge/getting-started/installatio
 
 ## Binaries
 
-This repository builds three statically-linked, fully self-contained binaries:
+This repository builds two statically-linked, fully self-contained binaries:
 
 | Binary | Purpose | Platforms |
 |--------|---------|-----------|
 | `inforge` | The CLI you invoke directly | linux amd64/arm64, darwin arm64 |
 | `inforge-agent` | On-host runtime agent — the systemd ExecStart for every service; decrypts its host-key-encrypted secrets at start, drops privilege, execs the service | linux amd64/arm64 |
-| `pulumi-resource-neon` | Pulumi provider plugin for Neon PostgreSQL | linux amd64/arm64 |
 
-The provider plugins are installed automatically by `inforge plugins install`, and `inforge-agent` is downloaded onto each host by `inforge deploy` (pinned to the deploying inforge version) — you never invoke either directly.
+`inforge-agent` is downloaded onto each host by `inforge deploy` (pinned to the deploying inforge version) — you never invoke it directly. inforge builds no provider plugins of its own; `inforge plugins install` fetches the standard published Pulumi plugins a project needs.
 
 ## In GitHub Actions
 

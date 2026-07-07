@@ -15,9 +15,9 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	smithy "github.com/aws/smithy-go"
+	"github.com/wardnet/inforge/internal/r2"
 )
 
 // artifactExt is the suffix every artifact object carries; the SHA is the key
@@ -43,30 +43,17 @@ type Store struct {
 
 // NewStore builds a Store against Cloudflare R2's S3-compatible API for bucket,
 // using accountID to form the endpoint and the standard AWS credential chain
-// (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) for auth. region=auto is R2's
-// pseudo-region; path-style addressing matches the state-backend translation.
+// (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) for auth. The R2 client wiring
+// (endpoint, path-style, checksum settings) is shared with the backups store
+// via internal/r2.
 func NewStore(ctx context.Context, bucket, accountID string) (*Store, error) {
 	if bucket == "" {
 		return nil, errors.New("release store: empty bucket")
 	}
-	if accountID == "" {
-		return nil, errors.New("release store: empty Cloudflare account ID (set CLOUDFLARE_ACCOUNT_ID)")
-	}
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion("auto"))
+	client, err := r2.NewClient(ctx, accountID)
 	if err != nil {
-		return nil, fmt.Errorf("release store: load AWS config: %w", err)
+		return nil, fmt.Errorf("release store: %w", err)
 	}
-	endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", accountID)
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(endpoint)
-		o.UsePathStyle = true
-		// aws-sdk-go-v2 defaults to adding CRC checksums on every request, which
-		// R2's S3 API does not fully accept (it surfaces as a 400 on the first
-		// PutObject). Only send/validate checksums when an operation explicitly
-		// requires them — the R2-compatible setting.
-		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
-		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
-	})
 	return &Store{s3: client, bucket: bucket}, nil
 }
 

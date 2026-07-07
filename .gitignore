@@ -1,7 +1,6 @@
 # Go build output
 /inforge
-/pulumi-resource-neon
-/pulumi-resource-infisical
+/inforge-agent
 *.exe
 *.test
 *.out

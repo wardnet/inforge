@@ -6,7 +6,7 @@
   `loader.LoadGlobalResources`, `loader.LoadVariables`, `secretstore.Load`, `pki.Load`, and any
   path that reads `resources/<env>/`. `srcEnv` selects *what* to deploy.
 - **Identity calls** use `env` (= `environment` stack config / slug): every cloud resource name
-  (`naming.Resource`), FQDN derivation, Neon/Hetzner tag, SPIFFE URI scope, and Pulumi
+  (`naming.Resource`), FQDN derivation, Hetzner tag, SPIFFE URI scope, and Pulumi
   stack output. `env` (the slug) determines *who* the deployment is.
 
 For a static env `srcEnv == env`, so the split is invisible. For an ephemeral env they differ

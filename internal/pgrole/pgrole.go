@@ -1,11 +1,11 @@
 // Package pgrole renders the Postgres SQL statements that provision a scoped
 // per-service database role and its ro/rw GRANTs (ADR-0025, ADR-0036). It is pure
 // and transport-neutral: it builds statement TEXT only, with no database driver and
-// no Pulumi/provider dependency. The same statements are executed two ways — the
-// (retiring) Neon provider runs them over pgx from the deploy machine, and the
-// self-hosted Postgres path renders them into an on-host `psql` invocation (a
-// private-only cluster is unreachable from the deploy machine, so role minting runs
-// on the host over local peer auth; see ADR-0036).
+// no Pulumi/provider dependency. The self-hosted Postgres path renders the statements
+// into an on-host `psql` invocation (a private-only cluster is unreachable from the
+// deploy machine, so role minting runs on the host over local peer auth; see
+// ADR-0036). The now-retired Neon provider ran the same text over pgx from the deploy
+// machine — the transport-neutrality is why the SQL lives here, apart from either.
 //
 // Identifiers are quoted with QuoteIdent and string literals with QuoteLiteral, so a
 // role/database name or a generated password composes safely into the statements.
