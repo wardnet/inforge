@@ -105,21 +105,23 @@ func TestInstallScript(t *testing.T) {
 		"apt.postgresql.org",
 		"postgresql-17",
 		"install ok installed", // idempotent guard
-		// Regression (v5 deploy): keyring is dearmored to a temp then atomically
-		// mv'd into place, and the repo-add is guarded on the KEYRING file — never a
-		// direct `curl | gpg --dearmor -o <final>` that leaves a partial keyring on a
-		// curl failure.
-		"if [ ! -f /usr/share/keyrings/pgdg.gpg ]",
-		"sudo mv /usr/share/keyrings/pgdg.gpg.tmp /usr/share/keyrings/pgdg.gpg",
+		// Regression (v5 deploy): the signing key is installed ARMORED (.asc) and
+		// referenced via signed-by — no `gpg --dearmor` (fails with no controlling
+		// tty). Guarded on the keyring file; downloaded to a temp then installed.
+		"if [ ! -f /usr/share/keyrings/pgdg.asc ]",
+		`sudo install -m 0644 "$asc" /usr/share/keyrings/pgdg.asc`,
+		"signed-by=/usr/share/keyrings/pgdg.asc",
 		"DPkg::Lock::Timeout=300",
+		// The index refresh retries a held lists lock (aptlock.UpdateCmd).
+		"apt-get update blocked",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("InstallScript missing %q", want)
 		}
 	}
-	// Must NOT pipe curl straight into a dearmor that writes the final keyring.
-	if strings.Contains(s, "| sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg\n") {
-		t.Error("keyring must not be written by a direct curl|gpg pipe (partial-keyring risk)")
+	// No gpg at all — the armored key is used directly.
+	if strings.Contains(s, "gpg --dearmor") {
+		t.Error("must not use gpg --dearmor (fails with no controlling tty; apt reads the .asc directly)")
 	}
 	// `apt-get update` must live in the install block, NOT be gated on pgdg.list —
 	// so a partial earlier run (pgdg.list written, update skipped) still refreshes.

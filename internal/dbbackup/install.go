@@ -1,6 +1,10 @@
 package dbbackup
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/wardnet/inforge/internal/aptlock"
+)
 
 // InstallScript renders the idempotent shell that installs the AWS CLI on a cluster
 // host, used by the backup timer to upload dumps to R2 (S3-compatible). It is a
@@ -11,10 +15,10 @@ func InstallScript() string {
 	return strings.Join([]string{
 		"set -e",
 		"if ! command -v aws >/dev/null 2>&1; then",
-		// DPkg::Lock::Timeout makes apt WAIT for the lock so a concurrent install on
-		// the same host (Postgres, otelcol, …) queues instead of failing with
-		// "Could not get lock".
-		"  sudo apt-get -o DPkg::Lock::Timeout=300 update",
+		// Refresh the index with a retry (a sibling install or the apt-daily timer may
+		// hold the lists lock — DPkg::Lock::Timeout does not cover `apt-get update`),
+		// then install; the install waits for the dpkg lock via DPkg::Lock::Timeout.
+		"  " + aptlock.UpdateCmd(),
 		"  sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y awscli",
 		"fi",
 	}, "\n")
