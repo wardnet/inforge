@@ -1,6 +1,9 @@
 package otelcol
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -92,10 +95,31 @@ func TestInstallScriptPinsVersionAndVerifies(t *testing.T) {
 	assert.Contains(t, s, ChecksumsAsset)
 	// Verifies the checksum and installs the local .deb keeping our config.
 	assert.Contains(t, s, "checksum mismatch")
-	assert.Contains(t, s, "apt-get install -y")
 	assert.Contains(t, s, "--force-confold")
 	// Idempotent skip when already at this version.
 	assert.Contains(t, s, "already installed")
+
+	// Regression (v5.0.1 deploy): the downloaded package MUST keep its .deb name —
+	// `apt-get install <file>` rejects a bare mktemp path with "Unsupported file".
+	assert.Contains(t, s, `deb="$tmpd/${asset}"`, "download target must keep the .deb filename")
+	assert.Contains(t, s, `apt-get -o DPkg::Lock::Timeout=300 install -y `, "apt must wait for the lock and install the .deb")
+	assert.Contains(t, s, `"$deb"`, "apt-get install target is the .deb-named file")
+	assert.NotContains(t, s, `-o "$tmp"`, "must not install a bare (non-.deb) mktemp file")
+}
+
+// TestInstallScriptParses runs the rendered install shell through `bash -n`.
+func TestInstallScriptParses(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	p := filepath.Join(t.TempDir(), "install.sh")
+	if err := os.WriteFile(p, []byte(InstallScript("0.155.0")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(bash, "-n", p).CombinedOutput(); err != nil {
+		t.Fatalf("bash -n failed: %v\n%s", err, out)
+	}
 }
 
 func TestCredentialScriptIsOwnedAndPrivate(t *testing.T) {

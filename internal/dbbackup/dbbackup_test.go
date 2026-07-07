@@ -240,7 +240,7 @@ func TestGeneratedShellParses(t *testing.T) {
 
 func TestInstallScriptIdempotent(t *testing.T) {
 	got := InstallScript()
-	for _, want := range []string{"command -v aws", "apt-get install -y awscli"} {
+	for _, want := range []string{"command -v aws", "apt-get -o DPkg::Lock::Timeout=300 install -y awscli"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("InstallScript missing %q\n---\n%s", want, got)
 		}

@@ -34,7 +34,12 @@ func writeFileScript(absPath, content, mode, owner string) string {
 	enc := base64Encode(content)
 	dir := parentDir(absPath)
 	lines := []string{
-		"sudo install -d -m 0755 " + shQuote(dir),
+		// `mkdir -p` (NOT `install -d -m 0755`): postgres config files live inside
+		// PGDATA, which initdb created 0700. `install -d -m 0755` re-modes an existing
+		// dir, flipping PGDATA to 0755 → the postmaster then refuses to start
+		// ("data directory … has invalid permissions"). mkdir -p only creates missing
+		// dirs and never touches an existing dir's mode.
+		"sudo mkdir -p " + shQuote(dir),
 		"printf %s " + shQuote(enc) + " | base64 -d | sudo install -m " + shQuote(mode) + " /dev/stdin " + shQuote(absPath),
 	}
 	if owner != "" {

@@ -66,7 +66,7 @@ func (h *HetznerMesh) Realize(
 	//    carries dependsOn (the host's cloud-init readiness gate).
 	install, err := remote.NewCommand(ctx, base+"-install", &remote.CommandArgs{
 		Connection: conn,
-		Create:     pulumi.String(nginx.InstallScript() + "\nsudo -E apt-get install -y openssl\n"),
+		Create:     pulumi.String(nginx.InstallScript() + "\nsudo -E apt-get -o DPkg::Lock::Timeout=300 install -y openssl\n"),
 	}, pulumi.DependsOn(dependsOn))
 	if err != nil {
 		return fmt.Errorf("mesh %q: install nginx: %w", hostKey, err)
@@ -112,10 +112,8 @@ func (h *HetznerMesh) Realize(
 		return fmt.Errorf("mesh %q: write mesh config: %w", hostKey, err)
 	}
 
-	// 4. Validate + (re)start the mesh unit after the config is in place. The seed
-	//    ExecStartPre guarantees valid material before nginx -t runs on start.
-	const reload = "sudo " + nginxBinPath + " -t -c " + meshpaths.ConfigPath +
-		" && sudo systemctl reload-or-restart " + meshpaths.UnitName
+	// 4. Start the unit FIRST, then validate + reload (see meshReloadCommand).
+	reload := meshReloadCommand()
 	if _, err := remote.NewCommand(ctx, base+"-reload", &remote.CommandArgs{
 		Connection: conn,
 		Create:     pulumi.String(reload),
@@ -130,6 +128,21 @@ func (h *HetznerMesh) Realize(
 // nginxBinPath is the nginx binary the north-south install provides, used to
 // validate the mesh config with its own -c before the reload.
 const nginxBinPath = "/usr/sbin/nginx"
+
+// meshReloadCommand is the step-4 apply: start the mesh unit, then validate +
+// reload. It MUST `systemctl start` before the standalone `nginx -t`. The mesh
+// config references per-service leaf certs under the tmpfs RuntimeDir that ONLY
+// the unit's ExecStartPre seed creates — so a bare `nginx -t` before the unit has
+// ever started (a fresh host) fails with "cannot load certificate … No such file"
+// and the `&&`-guarded reload never runs, so the proxy never comes up. `systemctl
+// start` runs the ExecStartPre chain (project real material → seed placeholders →
+// validate) and starts nginx; it is a no-op on an already-running unit. The
+// following `nginx -t` then guards a config-change reload (certs now exist).
+func meshReloadCommand() string {
+	return "sudo systemctl start " + meshpaths.UnitName +
+		" && sudo " + nginxBinPath + " -t -c " + meshpaths.ConfigPath +
+		" && sudo systemctl reload-or-restart " + meshpaths.UnitName
+}
 
 // renderWriteScript builds the shell that writes the rendered mesh config. It
 // always renders inside an apply over the listen address and every target's IP

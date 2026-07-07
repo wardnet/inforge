@@ -11,8 +11,11 @@ func InstallScript() string {
 	return strings.Join([]string{
 		"set -e",
 		"if ! command -v aws >/dev/null 2>&1; then",
-		"  sudo apt-get update",
-		"  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y awscli",
+		// DPkg::Lock::Timeout makes apt WAIT for the lock so a concurrent install on
+		// the same host (Postgres, otelcol, …) queues instead of failing with
+		// "Could not get lock".
+		"  sudo apt-get -o DPkg::Lock::Timeout=300 update",
+		"  sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y awscli",
 		"fi",
 	}, "\n")
 }
