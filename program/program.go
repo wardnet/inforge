@@ -4,7 +4,9 @@
 package program
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -956,7 +958,7 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 		// a host/mesh-port change with no secret change); hashOut is the
 		// ADR-0035 plaintext-hash trigger for a secret value change. Either
 		// changing re-runs Create/Update, which re-issues reloadOrRestartScript.
-		Triggers: pulumi.Array{pulumi.String(descriptor), hashOut},
+		Triggers: pulumi.Array{pulumi.String(descriptor), safeTrigger(hashOut)},
 		// A Triggers change replaces the resource; with the engine's default
 		// create-before-delete the OLD resource's Delete script (recorded in
 		// state) would run AFTER the new Create and remove the freshly written
@@ -983,6 +985,26 @@ func secretsEnvMap(names []string, args []interface{}) (map[string]string, error
 		m[n] = v
 	}
 	return m, nil
+}
+
+// safeTrigger turns a possibly-secret, possibly-unknown string output into a
+// change-detector safe to use as a remote.Command `Triggers` element: it
+// SHA-256-hashes the resolved value and strips the secret marker.
+//
+// A secret value must NEVER go directly into `Triggers`. During `preview` a
+// secret wrapping an UNKNOWN value (e.g. a hash derived from a grant's
+// `random.RandomPassword`, which has no value yet) marshals to the Pulumi engine
+// error `malformed RPC secret: missing value for "triggers"`, aborting the whole
+// preview; and even a secret+known trigger would persist the payload in state.
+// Hashing first means the element never carries the secret bytes, and the hash is
+// one-way so exposing it leaks nothing; `pulumi.Unsecret` clears the taint the
+// input's secretness propagated so the trigger marshals as a plain (possibly
+// unknown) value.
+func safeTrigger(o pulumi.StringOutput) pulumi.Output {
+	return pulumi.Unsecret(o.ApplyT(func(s string) string {
+		sum := sha256.Sum256([]byte(s))
+		return hex.EncodeToString(sum[:])
+	}))
 }
 
 // reloadOrRestartScript renders the systemctl step that applies a changed
