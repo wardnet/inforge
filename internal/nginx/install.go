@@ -31,10 +31,19 @@ case "${ID}" in
 esac
 
 # Official nginx.org signing key + mainline apt repository (mainline carries the
-# nginx-module-acme package, which needs nginx >= 1.29.1).
+# nginx-module-acme package, which needs nginx >= 1.29.1). Download then dearmor to
+# a UNIQUE temp in the keyrings dir and atomically mv into place: writing the final
+# keyring directly would leave a partial file if curl dies mid-stream (the guard
+# then treats it as valid forever), and a host that runs BOTH the ingress and the
+# mesh nginx install concurrently would otherwise have the two dearmor writes race
+# the same path. The atomic mv makes the last writer win with a complete keyring.
 if [ ! -f /usr/share/keyrings/nginx-archive-keyring.gpg ]; then
-  curl -fsSL https://nginx.org/keys/nginx_signing.key \
-    | sudo gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
+  asc=$(mktemp)
+  curl -fsSL https://nginx.org/keys/nginx_signing.key -o "$asc"
+  tmpkey=$(sudo mktemp /usr/share/keyrings/nginx-archive-keyring.gpg.XXXXXX)
+  sudo gpg --dearmor -o "$tmpkey" "$asc"
+  sudo mv "$tmpkey" /usr/share/keyrings/nginx-archive-keyring.gpg
+  rm -f "$asc"
 fi
 echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/${ID} ${VERSION_CODENAME} nginx" \
   | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null

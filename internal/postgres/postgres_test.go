@@ -1,6 +1,9 @@
 package postgres
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -102,13 +105,76 @@ func TestInstallScript(t *testing.T) {
 		"apt.postgresql.org",
 		"postgresql-17",
 		"install ok installed", // idempotent guard
+		// Regression (v5 deploy): keyring is dearmored to a temp then atomically
+		// mv'd into place, and the repo-add is guarded on the KEYRING file — never a
+		// direct `curl | gpg --dearmor -o <final>` that leaves a partial keyring on a
+		// curl failure.
+		"if [ ! -f /usr/share/keyrings/pgdg.gpg ]",
+		"sudo mv /usr/share/keyrings/pgdg.gpg.tmp /usr/share/keyrings/pgdg.gpg",
+		"DPkg::Lock::Timeout=300",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("InstallScript missing %q", want)
 		}
 	}
+	// Must NOT pipe curl straight into a dearmor that writes the final keyring.
+	if strings.Contains(s, "| sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg\n") {
+		t.Error("keyring must not be written by a direct curl|gpg pipe (partial-keyring risk)")
+	}
+	// `apt-get update` must live in the install block, NOT be gated on pgdg.list —
+	// so a partial earlier run (pgdg.list written, update skipped) still refreshes.
+	if strings.Contains(s, "if [ ! -f /etc/apt/sources.list.d/pgdg.list ]") {
+		t.Error("apt-get update must not be gated on the pgdg.list repo file")
+	}
 	if !strings.Contains(InstallScript(""), "postgresql-"+DefaultVersion) {
 		t.Error("empty version must default")
+	}
+}
+
+// TestApplyScriptDoesNotChmodPGDATA guards the fix for the v5 deploy failure where
+// writing postgresql.conf into PGDATA ran `install -d -m 0755 <PGDATA>`, flipping
+// the data dir off 0700 so the postmaster refused to start. The parent dir must be
+// ensured with `mkdir -p` (which never re-modes an existing dir).
+func TestApplyScriptDoesNotChmodPGDATA(t *testing.T) {
+	s, err := ApplyScript(validCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(s, "sudo mkdir -p") {
+		t.Errorf("ApplyScript must ensure the parent dir with mkdir -p\n%s", s)
+	}
+	if strings.Contains(s, "install -d -m 0755") {
+		t.Errorf("ApplyScript must not `install -d -m 0755` a config parent — it re-modes PGDATA to 0755\n%s", s)
+	}
+}
+
+// TestInstallAndApplyParse runs the rendered install/apply/mount/init shells
+// through `bash -n`.
+func TestInstallAndApplyParse(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	apply, err := ApplyScript(validCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scripts := map[string]string{
+		"install.sh": InstallScript("17"),
+		"apply.sh":   apply,
+		"mount.sh":   MountScript("/dev/sdb", "core"),
+		"init.sh":    InitClusterScript("core", "17"),
+	}
+	for name, script := range scripts {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), name)
+			if err := os.WriteFile(p, []byte(script), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command(bash, "-n", p).CombinedOutput(); err != nil {
+				t.Fatalf("bash -n failed: %v\n%s", err, out)
+			}
+		})
 	}
 }
 

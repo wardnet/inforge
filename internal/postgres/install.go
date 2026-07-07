@@ -18,19 +18,30 @@ func InstallScript(version string) string {
 		// Suppress the package's default 'main' cluster before install.
 		"sudo install -d -m 0755 /etc/postgresql-common",
 		`printf 'create_main_cluster = false\n' | sudo tee /etc/postgresql-common/createcluster.conf >/dev/null`,
-		// PGDG apt repo (added once).
-		"if [ ! -f /etc/apt/sources.list.d/pgdg.list ]; then",
+		// PGDG signing key. Download then dearmor to a temp and atomically mv into
+		// place — piping `curl | gpg --dearmor` would write an EMPTY keyring on a
+		// curl failure (gpg exits 0 on empty stdin), and the presence guard would then
+		// treat that partial keyring as valid forever, breaking every future apt
+		// update. Guard on the KEYRING file (set -e aborts before the mv on any
+		// download/dearmor failure, so the guard only trips on a complete keyring).
+		"if [ ! -f /usr/share/keyrings/pgdg.gpg ]; then",
 		"  sudo install -d -m 0755 /usr/share/keyrings",
-		"  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg",
-		"  . /etc/os-release",
-		`  echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null`,
-		// DPkg::Lock::Timeout makes apt WAIT for the lock so a concurrent install on
-		// the same host (otelcol, awscli, nginx, …) queues instead of failing with
-		// "Could not get lock /var/lib/apt/lists/lock".
-		"  sudo apt-get -o DPkg::Lock::Timeout=300 update",
+		"  asc=$(mktemp)",
+		`  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o "$asc"`,
+		`  sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg.tmp "$asc"`,
+		"  sudo mv /usr/share/keyrings/pgdg.gpg.tmp /usr/share/keyrings/pgdg.gpg",
+		`  rm -f "$asc"`,
 		"fi",
-		// Install the server package only when not already installed.
+		". /etc/os-release",
+		`echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null`,
+		// Install the server package only when absent, refreshing the index FIRST —
+		// inside the install block, NOT gated on the repo file — so a partial earlier
+		// run that wrote pgdg.list but never updated still installs (otherwise
+		// `apt-get install postgresql-N` fails "Unable to locate package" against a
+		// stale index). DPkg::Lock::Timeout waits for the apt lock so a concurrent
+		// install queues instead of failing with "Could not get lock".
 		fmt.Sprintf(`if ! dpkg-query -W -f='${Status}' postgresql-%s 2>/dev/null | grep -q "install ok installed"; then`, ver),
+		"  sudo apt-get -o DPkg::Lock::Timeout=300 update",
 		fmt.Sprintf(`  sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y postgresql-%s`, ver),
 		"fi",
 	}, "\n")
