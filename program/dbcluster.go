@@ -315,7 +315,10 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 		Create:     mintScript,
 		Update:     mintScript,
 		Delete:     pulumi.String(dropScript),
-		Triggers:   pulumi.Array{mintScript},
+		// mintScript embeds the role's random password (secret + unknown at preview);
+		// a raw secret in Triggers breaks preview with "malformed RPC secret".
+		// safeTrigger hashes + unsecrets it (see program.go).
+		Triggers: pulumi.Array{safeTrigger(mintScript)},
 	}, pulumi.DependsOn(mintDeps))
 	if err != nil {
 		return types.DBRoleFields{}, fmt.Errorf("db role %q: mint role: %w", roleName, err)

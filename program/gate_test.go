@@ -26,6 +26,11 @@ type capturedCommand struct {
 	create string
 	user   string
 	deps   []string
+	// triggersSecret records whether the command's `triggers` input carried any
+	// secret. A secret must never reach Triggers: a secret+unknown trigger marshals
+	// to the engine error `malformed RPC secret: missing value for "triggers"` at
+	// preview (see safeTrigger).
+	triggersSecret bool
 }
 
 // commandMocks is a Pulumi mock monitor that records every command.remote keyed
@@ -62,6 +67,9 @@ func (m *commandMocks) NewResource(args pulumi.MockResourceArgs) (string, resour
 				}
 			}
 		}
+		if v, ok := args.Inputs["triggers"]; ok {
+			c.triggersSecret = v.ContainsSecrets()
+		}
 		if args.RegisterRPC != nil {
 			c.deps = args.RegisterRPC.GetDependencies()
 		}
@@ -69,8 +77,18 @@ func (m *commandMocks) NewResource(args pulumi.MockResourceArgs) (string, resour
 		m.captured[args.Name] = c
 		m.mu.Unlock()
 	}
-	return args.Name + "-id", resource.PropertyMap{}, nil
+	// A host-pubkey read must yield a real SSH key so the downstream secrets-write
+	// (age-encrypts the blob to it) resolves instead of erroring on an empty key.
+	outputs := resource.PropertyMap{}
+	if strings.HasSuffix(args.Name, "-hostkey") {
+		outputs["stdout"] = resource.NewStringProperty(testHostPubKey)
+	}
+	return args.Name + "-id", outputs, nil
 }
+
+// testHostPubKey is a valid ssh-ed25519 public key used as a mock host-key read
+// output, so the secrets-write path (which age-encrypts to it) resolves in tests.
+const testHostPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIImjg7x3zYiZglXWqq+8A9DmqBG+tbjdAzWjT2Pp1X8n"
 
 // dependsOn reports whether the command named cmd lists a dependency whose URN
 // resolves to the command named dep (URNs end with "::"+name).
