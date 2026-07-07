@@ -89,9 +89,16 @@ func CredentialScript(authB64 string) string {
 func WriteFileScript(absPath, content, mode, owner string) string {
 	enc := base64Encode(content)
 	dir := parentDir(absPath)
+	// Stage to a temp then atomic mv: `install /dev/stdin <existing-file>` fails on
+	// coreutils 9 (Ubuntu 26.04) — "install: No such file or directory" — when the
+	// target already exists (the collector config/credential on a re-deploy). The mv
+	// also makes the write atomic; the temp is 0600 by mktemp and moded before the mv.
 	return strings.Join([]string{
 		fmt.Sprintf("sudo install -d -m 0755 %s", shQuote(dir)),
-		fmt.Sprintf(`printf %%s %s | base64 -d | sudo install -m %s /dev/stdin %s`, shQuote(enc), shQuote(mode), shQuote(absPath)),
-		fmt.Sprintf("sudo chown %s %s", shQuote(owner), shQuote(absPath)),
+		fmt.Sprintf(`tmp=$(sudo mktemp %s)`, shQuote(dir+"/.inforge-write.XXXXXX")),
+		fmt.Sprintf(`printf %%s %s | base64 -d | sudo tee "$tmp" >/dev/null`, shQuote(enc)),
+		fmt.Sprintf(`sudo chmod %s "$tmp"`, shQuote(mode)),
+		fmt.Sprintf(`sudo chown %s "$tmp"`, shQuote(owner)),
+		fmt.Sprintf(`sudo mv "$tmp" %s`, shQuote(absPath)),
 	}, "\n")
 }

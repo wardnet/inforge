@@ -1,21 +1,35 @@
 package dbbackup
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/wardnet/inforge/internal/aptlock"
+)
 
 // InstallScript renders the idempotent shell that installs the AWS CLI on a cluster
 // host, used by the backup timer to upload dumps to R2 (S3-compatible). It is a
-// no-op when `aws` is already on PATH, so it only runs apt on the first deploy;
-// serialized after the Postgres apt install by the caller so co-located apt runs
-// never race the dpkg lock.
+// no-op when `aws` is already on PATH.
+//
+// It installs the official AWS CLI **v2** bundle, NOT the `awscli` apt package: that
+// package was dropped from Ubuntu 24.04 (noble) — `apt-get install awscli` fails
+// "Package 'awscli' has no installation candidate" — and v2 is the current,
+// supported release. The bundle is a self-contained installer (extracted with
+// unzip, the only apt dependency); `aws/install --update` is idempotent.
 func InstallScript() string {
 	return strings.Join([]string{
 		"set -e",
 		"if ! command -v aws >/dev/null 2>&1; then",
-		// DPkg::Lock::Timeout makes apt WAIT for the lock so a concurrent install on
-		// the same host (Postgres, otelcol, …) queues instead of failing with
-		// "Could not get lock".
-		"  sudo apt-get -o DPkg::Lock::Timeout=300 update",
-		"  sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y awscli",
+		"  if ! command -v unzip >/dev/null 2>&1; then",
+		// Refresh the index with a retry (a sibling install or the apt-daily timer may
+		// hold the lists lock — DPkg::Lock::Timeout does not cover `apt-get update`).
+		"    " + aptlock.UpdateCmd(),
+		"    sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y unzip",
+		"  fi",
+		"  _awsd=$(mktemp -d)",
+		`  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "$_awsd/awscliv2.zip"`,
+		`  unzip -q "$_awsd/awscliv2.zip" -d "$_awsd"`,
+		`  sudo "$_awsd/aws/install" --update`,
+		`  rm -rf "$_awsd"`,
 		"fi",
 	}, "\n")
 }

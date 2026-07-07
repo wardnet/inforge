@@ -198,8 +198,13 @@ func TestCredentialScript(t *testing.T) {
 	if !strings.Contains(got, CredentialPath) {
 		t.Errorf("CredentialScript missing target path\n%s", got)
 	}
-	if !strings.Contains(got, "-m '0600'") {
+	if !strings.Contains(got, "chmod '0600'") {
 		t.Errorf("CredentialScript must write 0600\n%s", got)
+	}
+	// Written via temp + atomic mv (install /dev/stdin over an existing file fails on
+	// coreutils 9 / Ubuntu 26.04).
+	if !strings.Contains(got, "mktemp") || !strings.Contains(got, `mv "$tmp" `) {
+		t.Errorf("CredentialScript must stage to a temp then mv\n%s", got)
 	}
 }
 
@@ -240,9 +245,19 @@ func TestGeneratedShellParses(t *testing.T) {
 
 func TestInstallScriptIdempotent(t *testing.T) {
 	got := InstallScript()
-	for _, want := range []string{"command -v aws", "apt-get -o DPkg::Lock::Timeout=300 install -y awscli"} {
+	// Installs the AWS CLI v2 bundle (the `awscli` apt package was dropped from
+	// Ubuntu 24.04), guarded on `aws` already being present.
+	for _, want := range []string{
+		"command -v aws",
+		"awscli-exe-linux-$(uname -m).zip",
+		`sudo "$_awsd/aws/install" --update`,
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("InstallScript missing %q\n---\n%s", want, got)
 		}
+	}
+	// Must NOT use the removed apt package.
+	if strings.Contains(got, "install -y awscli") {
+		t.Error("must not `apt-get install awscli` — the package is gone from Ubuntu 24.04")
 	}
 }
