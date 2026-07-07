@@ -13,9 +13,11 @@ import (
 // service folder, drop the payload, restart the unit, off the shared payload path.
 func TestServiceApplyScript(t *testing.T) {
 	got := serviceApplyScript(service.DeployTarget{Folder: "/srv/wardnet/api", Unit: "wardnet-api.service"})
-	want := "sudo tar -xzf /tmp/inforge-payload.tgz -C /srv/wardnet/api && " +
+	// Folder and unit (both name-derived) are single-quoted via remote.Quote, matching
+	// the app path — no raw interpolation of a caller-supplied value into the shell.
+	want := "sudo tar -xzf /tmp/inforge-payload.tgz -C '/srv/wardnet/api' && " +
 		"rm -f /tmp/inforge-payload.tgz && " +
-		"sudo systemctl restart wardnet-api.service"
+		"sudo systemctl restart 'wardnet-api.service'"
 	assert.Equal(t, want, got)
 }
 
@@ -40,11 +42,14 @@ func TestAppReleaseScript(t *testing.T) {
 	assert.Contains(t, got, "sudo mkdir -p '/srv/wardnet/app/my/abc123'")
 	assert.Contains(t, got, "sudo tar -xzf /tmp/inforge-payload.tgz -C '/srv/wardnet/app/my/abc123'")
 	assert.Contains(t, got, "sudo mv -T '/srv/wardnet/app/my/.current.tmp' '/srv/wardnet/app/my/current'")
-	assert.Contains(t, got, "sudo nginx -t && sudo systemctl reload nginx")
+	assert.Contains(t, got, "sudo nginx -t")
+	assert.Contains(t, got, "sudo systemctl reload nginx")
 	assert.Contains(t, got, "xargs -r sudo rm -rf")
-	// The swap must precede the reload, which must precede the GC.
-	assert.Less(t, idx(got, "mv -T"), idx(got, "nginx -t"))
-	assert.Less(t, idx(got, "nginx -t"), idx(got, "rm -rf"))
+	// Validate (nginx -t) BEFORE the swap, so a config error can't leave `current`
+	// swapped without a reload; the swap precedes the reload, which precedes the GC.
+	assert.Less(t, idx(got, "nginx -t"), idx(got, "mv -T"))
+	assert.Less(t, idx(got, "mv -T"), idx(got, "reload nginx"))
+	assert.Less(t, idx(got, "reload nginx"), idx(got, "rm -rf"))
 }
 
 // TestAppRollbackScript: rollback asserts the bundle is present, swaps + reloads,
@@ -53,7 +58,11 @@ func TestAppRollbackScript(t *testing.T) {
 	got := appRollbackScript(iapp.DeployTarget{App: "my"}, "abc123")
 	assert.Contains(t, got, "test -d '/srv/wardnet/app/my/abc123'")
 	assert.Contains(t, got, "sudo mv -T '/srv/wardnet/app/my/.current.tmp' '/srv/wardnet/app/my/current'")
-	assert.Contains(t, got, "sudo nginx -t && sudo systemctl reload nginx")
+	assert.Contains(t, got, "sudo nginx -t")
+	assert.Contains(t, got, "sudo systemctl reload nginx")
+	// Validate before the swap here too.
+	assert.Less(t, idx(got, "nginx -t"), idx(got, "mv -T"))
+	assert.Less(t, idx(got, "mv -T"), idx(got, "reload nginx"))
 	assert.NotContains(t, got, "tar -xzf")
 	assert.NotContains(t, got, "mkdir")
 }
