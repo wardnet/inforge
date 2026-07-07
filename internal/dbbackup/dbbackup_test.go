@@ -240,9 +240,19 @@ func TestGeneratedShellParses(t *testing.T) {
 
 func TestInstallScriptIdempotent(t *testing.T) {
 	got := InstallScript()
-	for _, want := range []string{"command -v aws", "apt-get -o DPkg::Lock::Timeout=300 install -y awscli"} {
+	// Installs the AWS CLI v2 bundle (the `awscli` apt package was dropped from
+	// Ubuntu 24.04), guarded on `aws` already being present.
+	for _, want := range []string{
+		"command -v aws",
+		"awscli-exe-linux-$(uname -m).zip",
+		`sudo "$_awsd/aws/install" --update`,
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("InstallScript missing %q\n---\n%s", want, got)
 		}
+	}
+	// Must NOT use the removed apt package.
+	if strings.Contains(got, "install -y awscli") {
+		t.Error("must not `apt-get install awscli` — the package is gone from Ubuntu 24.04")
 	}
 }
