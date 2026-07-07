@@ -4,8 +4,8 @@
 // pg_hba.conf, and the on-host `psql` that creates the cluster's databases/owner and
 // mints per-service roles. Like internal/otelcol and internal/nginx it is pure —
 // deploy-side only, with no Pulumi/provider dependency; the program wires it to
-// hosts. Role SQL text comes from internal/pgrole (shared with the retiring Neon
-// provider); this package owns the on-host transport (psql over local peer auth),
+// hosts. Role SQL text comes from internal/pgrole (extracted from the now-retired
+// Neon provider); this package owns the on-host transport (psql over local peer auth),
 // which a private-only cluster requires because it is unreachable from the deploy
 // machine.
 package postgres

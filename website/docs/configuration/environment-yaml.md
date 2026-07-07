@@ -20,7 +20,6 @@ config:
   # Provider credentials (typically set via env vars, not committed here)
   hcloud:token: ""                    # set via HCLOUD_TOKEN
   cloudflare:apiToken: ""             # set via CLOUDFLARE_API_TOKEN
-  neon:apiKey: ""                     # set via NEON_API_KEY
 ```
 
 ## inforge-specific config keys

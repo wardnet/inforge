@@ -26,14 +26,16 @@ regions:                       # required — one entry per region this env depl
         images: {ubuntu-24.04: ubuntu-24.04}
       cloudflare:
         apiToken: ${CLOUDFLARE_API_TOKEN}
-      neon:
-        apiKey: ${NEON_API_KEY}
 
 global:                        # optional — region-less slot (no slug)
   placementRegion: us-east-1   # required when global: is present — must match a key under regions:
   providers:                   # provider config for resources/<env>/global/
-    neon:
-      apiKey: ${NEON_API_KEY}
+    hetzner:
+      apiToken: ${HCLOUD_TOKEN}
+      location: ash
+      network_zone: us-east
+      serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+      images: {ubuntu-24.04: ubuntu-24.04}
 ```
 
 ## Fields
@@ -112,12 +114,14 @@ regions:
         images: {ubuntu-24.04: ubuntu-24.04}
       cloudflare:
         apiToken: ${CLOUDFLARE_API_TOKEN}
-      neon:
-        apiKey: ${NEON_API_KEY}
 
 global:
   placementRegion: eu-central-1
   providers:
-    neon:
-      apiKey: ${NEON_API_KEY}
+    hetzner:
+      apiToken: ${HCLOUD_TOKEN}
+      location: nbg1
+      network_zone: eu-central
+      serverTypes: {SMALL: cx23, MEDIUM: cx33, LARGE: cx43}
+      images: {ubuntu-24.04: ubuntu-24.04}
 ```

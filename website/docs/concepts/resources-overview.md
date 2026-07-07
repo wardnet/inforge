@@ -40,7 +40,7 @@ Every resource manifest has these required fields:
 |-------|------|-------------|
 | `name` | string | Resource name. Should match the folder name by convention. |
 | `container` | string | Logical grouping label (e.g. `bridge`, `ingress`). Used in URNs and tags. |
-| `provider` | string | Provider name (`hetzner`, `cloudflare`, `neon`). Optional when a project-level default is set in `inforge.yaml`; an explicit value always takes precedence. A **service** has no `provider` — it is host-managed. |
+| `provider` | string | Provider name (`hetzner`, `cloudflare`). Optional when a project-level default is set in `inforge.yaml`; an explicit value always takes precedence. A **service** has no `provider` — it is host-managed. |
 
 :::info Container vs container runtime
 `container` is a grouping label, **not** a Docker/OCI container. Do not confuse it with

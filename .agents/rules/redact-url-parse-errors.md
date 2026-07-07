@@ -4,8 +4,8 @@
 verbatim — including any password in the userinfo component. Wrapping such an error
 directly with `%w` or `%v` will leak connection credentials into deploy logs, crash
 reporters, and Pulumi state. Always unwrap with `errors.As(err, &ue)` and emit only
-`ue.Err` (the parse reason), explicitly noting that the URL was redacted. The pattern
-lives in `redactParseErr` in `providers/neon/cmd/pulumi-resource-neon/resources/neon_role.go`.
+`ue.Err` (the parse reason), explicitly noting that the URL was redacted (see the
+Example below).
 
 ## Applies to
 

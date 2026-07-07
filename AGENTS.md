@@ -1,9 +1,10 @@
 # inforge — agent guide
 
 Inforge is a Go toolchain that turns declarative infrastructure definitions into real deployments
-via Pulumi and GitHub Actions. This repository builds three statically-linked binaries: the `inforge`
-CLI, the `inforge-agent` on-host runtime agent (every service's systemd ExecStart), and one
-Pulumi provider plugin (`pulumi-resource-neon`).
+via Pulumi and GitHub Actions. This repository builds two statically-linked binaries: the `inforge`
+CLI and the `inforge-agent` on-host runtime agent (every service's systemd ExecStart). It builds no
+Pulumi provider plugins of its own — the standard published plugins a project needs are fetched by
+`inforge plugins install`.
 
 ## Commands
 
@@ -13,7 +14,7 @@ go test -race ./...            # run tests (race detector on, as CI does)
 golangci-lint run ./...        # lint — must be clean before a PR
 go run ./cmd/inforge           # run the CLI locally
 
-# Release build dry-run (produces dist/ — four binaries × os/arch):
+# Release build dry-run (produces dist/ — two binaries × os/arch):
 go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 ```
 
@@ -26,7 +27,9 @@ internal/agent/                             # agent core (descriptor, fetch, dec
 internal/pki/                                      # PKI store (pki.enc.yaml read/write), x509 helpers, leaf minting, ScopeGlobal const
 internal/meshcert/                                 # deploy/renew orchestration: decrypt intermediate, mint leaf, compute trust set
 internal/validate/                                 # inforge validate — structural checks incl. credential-free PKI pass
-providers/neon/cmd/pulumi-resource-neon/           # Pulumi provider plugin — Neon
+internal/postgres/                                 # self-hosted Postgres render pkg (install/config/role/paths) — ADR-0036
+internal/dbbackup/                                 # on-host per-database backup + restore renderers, R2 delivery — ADR-0036
+providers/{hetzner,cloudflare}/                    # cloud provider Go SDK packages (NOT Pulumi plugins)
 .goreleaser.yml                                    # build/release config (v2 schema)
 .golangci.yml                                      # lint config (v2 schema)
 .github/workflows/{ci,release}.yml                 # CI on PRs to main; release on v* tags
@@ -35,9 +38,10 @@ providers/neon/cmd/pulumi-resource-neon/           # Pulumi provider plugin — 
 
 - Module path: `github.com/wardnet/inforge`. Go directive: `go 1.25.8` (floored by the Pulumi SDK;
   CI/release build on Go 1.26).
-- The two `pulumi-resource-*` binaries are Pulumi plugins, **not** user commands. They are installed
-  automatically by `inforge plugins install`, which downloads only the providers a project needs from
-  the matching GitHub release. Users never invoke them directly.
+- `inforge` builds no Pulumi provider plugins of its own. `inforge plugins install` downloads the
+  standard published Pulumi plugins a project needs (e.g. `pulumi-random`) from their upstream
+  releases; the Hetzner and Cloudflare integrations are Go SDK packages under `providers/`, not
+  plugins. (The bundled Neon and Infisical plugins were retired by ADR-0036 and ADR-0035.)
 
 ## Resource naming convention
 
@@ -182,9 +186,10 @@ over `{FIELD}` placeholders. A grant *creates/issues* a credential (DB user, min
 a `ref:` (which only reads an existing output) and from mesh `pki:` membership (intrinsic identity).
 
 Landing in dependency order: slice A = grant core + schema + credential-free validation (#123);
-**slice B (this code) = the Database Grantable** — `Database.Grant` mints a scoped per-service Postgres
-role via the `neon:resources:NeonRole` plugin resource (Neon role API + pgx `GRANT`s as the DB owner,
-CGO-free), and the credential-bearing `DatabaseOutputs.ConnectionURL` is **removed** (`ref:database/*`
+**slice B = the Database Grantable** — `Database.Grant` mints a scoped per-service Postgres role on the
+cluster host (ADR-0036 self-hosted minting: `postgres.MintRoleScript` run over `remote.NewCommand`
+local peer auth, CGO-free — the retired Neon path minted it via a `neon:resources:NeonRole` plugin
+resource), and the credential-bearing `DatabaseOutputs.ConnectionURL` is **removed** (`ref:database/*`
 is now rejected — DB credentials flow only through grants). slice C = the PKI resource Grantable
 (sidecar + `inforge pki generate` + file projection); `PKIResource.Grant` stays a stub.
 

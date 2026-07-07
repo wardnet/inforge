@@ -11,9 +11,8 @@ implemented.
 - [Toolkit](./internal/CONTEXT.md) — the declarative-infrastructure domain: resources, regions,
   sizes, services, manifests, and the VM bootstrap/deployment model. Resources are folder-based
   (`regional/<type>/<name>/manifest.yaml`; sidecars alongside). Lives in `internal/`, with the
-  Pulumi program in `program/` and the CLI in `cmd/inforge/`.
-- **Neon provider** (`providers/neon/`) — Pulumi plugin (`pulumi-resource-neon`) provisioning Neon
-  Postgres. *Stub — no resolved domain yet; CONTEXT.md added when implemented.*
+  Pulumi program in `program/` and the CLI in `cmd/inforge/`. PostgreSQL is self-hosted on
+  inforge-provisioned compute (ADR-0036); the managed Neon provider was retired.
 
 ## Relationships
 

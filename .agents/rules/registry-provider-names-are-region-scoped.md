@@ -16,7 +16,7 @@ across the scopes a single program run builds.
 `internal/registry/registry.go` — `hetznerProv()` and `cfProv()`. When adding any new
 singleton provider resource to the registry (a `*.NewProvider(r.ctx, name, …)` call memoised via a
 `sync.Once`), the `name` must be region-scoped the same way. Per-resource registrations that already
-carry a unique name (the neon `ctx.RegisterResource` calls) are not affected.
+carry a unique name (e.g. the self-hosted database `remote.NewCommand` calls) are not affected.
 
 ## Why
 
