@@ -37,20 +37,27 @@ func InstallScript(version string) string {
 		fmt.Sprintf(`asset="%s_${ver}_linux_${arch}.deb"`, Package),
 		fmt.Sprintf("base=%s", shQuote(base)),
 		fmt.Sprintf("sums_name=%s", shQuote(ChecksumsAsset)),
-		"tmp=$(mktemp)",
-		"sums=$(mktemp)",
-		`trap 'rm -f "$tmp" "$sums"' EXIT`,
-		`curl -fsSL "${base}/${asset}" -o "$tmp"`,
+		// Download into a temp DIR keeping the asset's real ".deb" filename:
+		// `apt-get install <file>` rejects any path that does not end in .deb
+		// ("E: Unsupported file … given on commandline"), so a bare `mktemp` name fails.
+		"tmpd=$(mktemp -d)",
+		`trap 'rm -rf "$tmpd"' EXIT`,
+		`deb="$tmpd/${asset}"`,
+		`sums="$tmpd/${sums_name}"`,
+		`curl -fsSL "${base}/${asset}" -o "$deb"`,
 		`curl -fsSL "${base}/${sums_name}" -o "$sums"`,
 		// Pull the expected sha256 for exactly this asset; an absent line is fatal.
 		`want=$(awk -v f="$asset" '$2==f {print $1}' "$sums")`,
 		`[ -n "$want" ] || { echo "no checksum for $asset in release" >&2; exit 1; }`,
-		`got=$(sha256sum "$tmp" | awk '{print $1}')`,
+		`got=$(sha256sum "$deb" | awk '{print $1}')`,
 		`[ "$want" = "$got" ] || { echo "checksum mismatch for $asset" >&2; exit 1; }`,
-		// Install the local .deb. --force-confold keeps the config file inforge owns
-		// across a package upgrade; noninteractive avoids any conffile prompt.
-		`sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ` +
-			`-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$tmp"`,
+		// Install the local .deb. DPkg::Lock::Timeout makes apt WAIT for the dpkg/apt
+		// lock so a concurrent install on the same host (Postgres, awscli, nginx, …)
+		// queues instead of failing with "Could not get lock". --force-confold keeps
+		// the config file inforge owns across a package upgrade; noninteractive avoids
+		// any conffile prompt.
+		`sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y ` +
+			`-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$deb"`,
 	}, "\n")
 }
 

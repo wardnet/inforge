@@ -66,7 +66,7 @@ func (h *HetznerMesh) Realize(
 	//    carries dependsOn (the host's cloud-init readiness gate).
 	install, err := remote.NewCommand(ctx, base+"-install", &remote.CommandArgs{
 		Connection: conn,
-		Create:     pulumi.String(nginx.InstallScript() + "\nsudo -E apt-get install -y openssl\n"),
+		Create:     pulumi.String(nginx.InstallScript() + "\nsudo -E apt-get -o DPkg::Lock::Timeout=300 install -y openssl\n"),
 	}, pulumi.DependsOn(dependsOn))
 	if err != nil {
 		return fmt.Errorf("mesh %q: install nginx: %w", hostKey, err)

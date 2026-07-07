@@ -19,14 +19,14 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 # update BEFORE any install (the apt-order fix).
-sudo -E apt-get update
-sudo -E apt-get install -y curl gnupg2 ca-certificates lsb-release
+sudo -E apt-get -o DPkg::Lock::Timeout=300 update
+sudo -E apt-get -o DPkg::Lock::Timeout=300 install -y curl gnupg2 ca-certificates lsb-release
 
 # Identify the distro for the nginx.org repository path and keyring package.
 . /etc/os-release
 case "${ID}" in
-  debian) sudo -E apt-get install -y debian-archive-keyring ;;
-  ubuntu) sudo -E apt-get install -y ubuntu-keyring ;;
+  debian) sudo -E apt-get -o DPkg::Lock::Timeout=300 install -y debian-archive-keyring ;;
+  ubuntu) sudo -E apt-get -o DPkg::Lock::Timeout=300 install -y ubuntu-keyring ;;
   *) echo "unsupported distro for nginx.org packages: ${ID}" >&2; exit 1 ;;
 esac
 
@@ -39,8 +39,8 @@ fi
 echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/${ID} ${VERSION_CODENAME} nginx" \
   | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null
 
-sudo -E apt-get update
-sudo -E apt-get install -y nginx nginx-module-acme
+sudo -E apt-get -o DPkg::Lock::Timeout=300 update
+sudo -E apt-get -o DPkg::Lock::Timeout=300 install -y nginx nginx-module-acme
 
 # ACME state (account key + issued certs) must survive reloads.
 sudo install -d -m 0700 -o nginx -g nginx ` + acmeStatePath + `

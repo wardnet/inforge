@@ -24,11 +24,14 @@ func InstallScript(version string) string {
 		"  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg",
 		"  . /etc/os-release",
 		`  echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null`,
-		"  sudo apt-get update",
+		// DPkg::Lock::Timeout makes apt WAIT for the lock so a concurrent install on
+		// the same host (otelcol, awscli, nginx, …) queues instead of failing with
+		// "Could not get lock /var/lib/apt/lists/lock".
+		"  sudo apt-get -o DPkg::Lock::Timeout=300 update",
 		"fi",
 		// Install the server package only when not already installed.
 		fmt.Sprintf(`if ! dpkg-query -W -f='${Status}' postgresql-%s 2>/dev/null | grep -q "install ok installed"; then`, ver),
-		fmt.Sprintf(`  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-%s`, ver),
+		fmt.Sprintf(`  sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y postgresql-%s`, ver),
 		"fi",
 	}, "\n")
 }
