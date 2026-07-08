@@ -30,6 +30,11 @@ wardnet-cloud service emits, grouped by the `service_name` label Grafana Cloud p
 `service.name` resource attribute. Its "Per Service" section filters on a `Service` variable and
 breaks traffic down by `http_response_status_code` and `http_route`.
 
+The **Database** metrics carry `db_cluster_name`, `postgresql_database_name`, and `region` as queryable
+series labels (not just on `target_info`): the host collector's Postgres pipeline promotes those
+resource attributes to datapoint attributes so per-cluster, per-database, and per-region drill-down
+works in queries and custom dashboards.
+
 ## Custom dashboards
 
 Anything the built-ins don't cover is authored in the Grafana UI and committed to the repo as an

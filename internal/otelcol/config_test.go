@@ -189,6 +189,40 @@ func TestRenderPostgresTargets(t *testing.T) {
 	assert.Contains(t, out, "hostmetrics")
 }
 
+func TestRenderPostgresPromotesLabels(t *testing.T) {
+	pg := []PostgresTarget{{
+		Cluster: "pg-regional", Port: 5432, Username: "u",
+		PasswordFile: "/f", Databases: []string{"tenants"},
+	}}
+	out, err := Render("https://otlp.example/v1", fullAttrs(), pg)
+	require.NoError(t, err)
+
+	// The transform processor promotes cluster/database/region from resource to
+	// datapoint attributes so they become Prometheus series labels (ADR-0038 slice 4).
+	assert.Contains(t, out, "transform/db-labels")
+	for _, want := range []string{
+		`set(attributes["db.cluster.name"], resource.attributes["db.cluster.name"])`,
+		`set(attributes["postgresql.database.name"], resource.attributes["postgresql.database.name"])`,
+		`set(attributes["region"], resource.attributes["region"])`,
+	} {
+		assert.Contains(t, out, want)
+	}
+
+	// It is wired into the DB pipeline after the resource processor and before batch —
+	// order matters: it reads the resource attrs the resource processor sets.
+	var cfg map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(out), &cfg))
+	svc := cfg["service"].(map[string]any)
+	pipes := svc["pipelines"].(map[string]any)
+	db := pipes["metrics/db-pg-regional"].(map[string]any)
+	procs := db["processors"].([]any)
+	got := make([]string, len(procs))
+	for i, p := range procs {
+		got[i] = p.(string)
+	}
+	assert.Equal(t, []string{"resource/db-pg-regional", "transform/db-labels", "batch"}, got)
+}
+
 func TestRenderPostgresTargetValidation(t *testing.T) {
 	_, err := Render("https://otlp.example/v1", fullAttrs(), []PostgresTarget{
 		{Cluster: "c", Port: 5432, Username: "u", PasswordFile: "/f", Databases: []string{"d"}},
@@ -213,5 +247,7 @@ func TestRenderNoPostgresIsHostOnly(t *testing.T) {
 	b, err := Render("https://otlp.example/v1", fullAttrs(), []PostgresTarget{})
 	require.NoError(t, err)
 	assert.Equal(t, a, b, "nil and empty pg must render identically")
+	// With no pg targets there is nothing to promote, so the transform processor is absent.
+	assert.NotContains(t, a, "transform/db-labels")
 	assert.NotContains(t, a, "postgresql")
 }
