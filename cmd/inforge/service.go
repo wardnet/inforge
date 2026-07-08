@@ -55,10 +55,12 @@ func runServiceRestart(ctx context.Context, configPath, env, svc, stackConfigPat
 	if err != nil {
 		return err
 	}
-	sshKeyPath, err = resolveSSHKey(sshKeyPath)
+	var cleanupKey func()
+	sshKeyPath, cleanupKey, err = resolveSSHKey(sshKeyPath)
 	if err != nil {
 		return err
 	}
+	defer cleanupKey()
 
 	fmt.Printf("restarting %s on %d host(s) (env: %s)\n", svc, len(targets), env)
 	for _, t := range targets {

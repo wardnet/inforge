@@ -220,9 +220,11 @@ func replicateReleases(ctx context.Context, s auto.Stack, projCfg projectConfig,
 	svcByName := groupBy(svcTargets, func(t service.DeployTarget) string { return t.Service })
 	appByName := groupBy(appTargets, func(t iapp.DeployTarget) string { return t.App })
 
-	if sshKeyPath, err = resolveSSHKey(sshKeyPath); err != nil {
+	sshKeyPath, cleanupKey, err := resolveSSHKey(sshKeyPath)
+	if err != nil {
 		return err
 	}
+	defer cleanupKey()
 
 	fmt.Printf("\nreplicating source releases (%d service(s), %d app(s)) onto %q:\n", len(services), len(sw.apps), slug)
 	var failures []string

@@ -139,10 +139,11 @@ func newDBBackupCmd(configPath *string) *cobra.Command {
 }
 
 func runDBBackup(ctx context.Context, configPath, env, database, cluster, region, stackConfigPath, sshKeyPath string) error {
-	key, err := resolveSSHKey(sshKeyPath)
+	key, cleanupKey, err := resolveSSHKey(sshKeyPath)
 	if err != nil {
 		return err
 	}
+	defer cleanupKey()
 	projCfg, err := loadProjectConfig(configPath)
 	if err != nil {
 		return err
@@ -369,10 +370,11 @@ func runDBRestore(ctx context.Context, configPath, env, database, fromKey, fromD
 		return nil
 	}
 
-	sshKey, err := resolveSSHKey(sshKeyPath)
+	sshKey, cleanupKey, err := resolveSSHKey(sshKeyPath)
 	if err != nil {
 		return err
 	}
+	defer cleanupKey()
 	cfg := dbbackup.RestoreConfig{Port: target.Port, Database: target.Database}
 	account := dbAccount(target)
 
