@@ -7,8 +7,12 @@ import (
 )
 
 // ServiceName is the OTel service.name stamped on host metrics. It is fixed (host
-// metrics are one logical "service" per fleet) and distinct from any app service;
-// correlation with app telemetry is on host.id, not service.name.
+// metrics are one logical "service"/Prometheus job per fleet) and distinct from any
+// app service; correlation with app telemetry is on host.id, not service.name. Each
+// host's identity within that job rides on service.instance.id (== HostID, see
+// Attributes), which is what the Prometheus/OTel translation surfaces as the
+// `instance` label — without it every host would collide under one job with no
+// per-target label, forcing a target_info join just to tell hosts apart.
 const ServiceName = "wardnet-host-metrics"
 
 // CollectionInterval is how often the hostmetrics receiver scrapes.
@@ -52,9 +56,15 @@ func Render(endpoint string, attrs Attributes) (string, error) {
 		scrapers[s] = map[string]any{}
 	}
 
-	// service.name is always present; the rest are appended only when non-empty so a
+	// service.name is fixed fleet-wide (one logical "job"); service.instance.id is
+	// the per-host identity Prometheus/OTel translation maps onto the `instance`
+	// label, so hosts stay distinguishable on that label without a target_info join.
+	// Both are always present; the rest are appended only when non-empty so a
 	// missing attribute is omitted rather than stamped blank.
-	resourceAttrs := []map[string]any{upsert("service.name", ServiceName)}
+	resourceAttrs := []map[string]any{
+		upsert("service.name", ServiceName),
+		upsert("service.instance.id", attrs.HostID),
+	}
 	for _, kv := range [][2]string{
 		{"host.id", attrs.HostID},
 		{"host.type", attrs.MachineType},
