@@ -40,6 +40,7 @@ func TestRenderParsesAndCarriesAttributes(t *testing.T) {
 	// Every resource attribute is present, including the shared ADR-0030 set.
 	for _, want := range []string{
 		"service.name", ServiceName,
+		"service.instance.id", "wardnet-prd-use1-vm-bridge-01",
 		"host.id", "wardnet-prd-use1-vm-bridge-01",
 		"host.type", "cx23",
 		"cloud.provider", "hetzner",
@@ -65,8 +66,9 @@ func TestRenderOmitsEmptyAttributes(t *testing.T) {
 	for _, absent := range []string{"cloud.provider", "cloud.region", "cloud.availability_zone", "host.type"} {
 		assert.NotContains(t, out, absent, "an empty attribute must be omitted")
 	}
-	// service.name is always stamped.
+	// service.name and service.instance.id are always stamped.
 	assert.Contains(t, out, ServiceName)
+	assert.Contains(t, out, "service.instance.id")
 }
 
 func TestRenderIsDeterministic(t *testing.T) {
