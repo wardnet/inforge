@@ -116,6 +116,17 @@ func Render(endpoint string, attrs Attributes, pg []PostgresTarget) (string, err
 	for _, s := range hostScrapers {
 		scrapers[s] = map[string]any{}
 	}
+	// The `system` scraper adds system.uptime — the only host signal that survives a
+	// reboot cleanly (uptime drops to ~0), so `resets(system_uptime_seconds[…])`
+	// counts node restarts and it doubles as a per-node uptime stat. It is unaffected
+	// by collector restarts (re-read from /proc/uptime each scrape). system.uptime is
+	// enabled explicitly so it is on regardless of the receiver's default, and it is
+	// the scraper's only metric — no extra cardinality.
+	scrapers["system"] = map[string]any{
+		"metrics": map[string]any{
+			"system.uptime": map[string]any{"enabled": true},
+		},
+	}
 
 	// service.name is fixed fleet-wide (one logical "job"); service.instance.id is
 	// the per-host identity Prometheus/OTel translation maps onto the `instance`

@@ -55,6 +55,8 @@ func TestRenderParsesAndCarriesAttributes(t *testing.T) {
 	// The hostmetrics receiver is wired with the host scrapers and no `process`.
 	assert.Contains(t, out, "hostmetrics")
 	assert.NotContains(t, out, "process:")
+	// The system scraper is enabled for system.uptime (node-restart detection).
+	assert.Contains(t, out, "system.uptime")
 }
 
 func TestRenderOmitsEmptyAttributes(t *testing.T) {
