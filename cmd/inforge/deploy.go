@@ -170,32 +170,27 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 }
 
 // resolveDeployKeyFile resolves the SSH deploy key FILE the mesh baseline needs.
-// Precedence: an explicit --ssh-key path, then INFORGE_DEPLOY_KEY (also a path) —
-// both returned as-is with no cleanup. Otherwise it falls back to the deploy key
-// MATERIAL the Pulumi program itself reads (stack config deploy_private_key, then
-// INFORGE_DEPLOY_PRIVATE_KEY — the same order as program.Run), writing it to a
-// private temp file and returning a cleanup that removes it. When no key is
-// available at all it returns ("", nil, nil), leaving meshBaseline's resolveSSHKey
-// to emit the standard actionable error.
+// It defers to the shared resolveSSHKey (--ssh-key → INFORGE_DEPLOY_KEY →
+// INFORGE_DEPLOY_PRIVATE_KEY material), but — unlike the standalone commands — a
+// deploy can also read the stack-config `deploy_private_key`, program.Run's FIRST
+// material source. So it checks that between INFORGE_DEPLOY_KEY and the env material,
+// preserving program.Run's precedence (stack config beats the env var). The returned
+// cleanup is never nil; a caller can always `defer` it.
 func resolveDeployKeyFile(ctx context.Context, s auto.Stack, sshKeyPath string) (string, func(), error) {
+	// An explicit path (flag or INFORGE_DEPLOY_KEY) wins over any material source.
 	if sshKeyPath != "" || os.Getenv("INFORGE_DEPLOY_KEY") != "" {
-		return sshKeyPath, nil, nil
+		return resolveSSHKey(sshKeyPath)
 	}
-	var material string
-	if v, err := s.GetConfig(ctx, "deploy_private_key"); err == nil {
-		material = v.Value
+	// Deploy-only: the stack-config material, checked before the shared resolver's
+	// INFORGE_DEPLOY_PRIVATE_KEY fallback.
+	if v, err := s.GetConfig(ctx, "deploy_private_key"); err == nil && v.Value != "" {
+		path, werr := writeTempKeyFile(v.Value)
+		if werr != nil {
+			return "", func() {}, fmt.Errorf("materialize deploy key: %w", werr)
+		}
+		return path, func() { _ = os.Remove(path) }, nil
 	}
-	if material == "" {
-		material = os.Getenv("INFORGE_DEPLOY_PRIVATE_KEY")
-	}
-	if material == "" {
-		return "", nil, nil
-	}
-	path, err := writeTempKeyFile(material)
-	if err != nil {
-		return "", nil, fmt.Errorf("materialize deploy key: %w", err)
-	}
-	return path, func() { _ = os.Remove(path) }, nil
+	return resolveSSHKey(sshKeyPath)
 }
 
 // writeTempKeyFile writes SSH private-key material to a fresh 0600 temp file (its

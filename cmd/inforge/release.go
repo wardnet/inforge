@@ -238,10 +238,12 @@ func runReleaseApp(ctx context.Context, configPath, env, name, sha, bundleDir, s
 			fmt.Println("(dry-run: skipping rollback)")
 			return nil
 		}
-		sshKeyPath, err = resolveSSHKey(sshKeyPath)
+		var cleanupKey func()
+		sshKeyPath, cleanupKey, err = resolveSSHKey(sshKeyPath)
 		if err != nil {
 			return err
 		}
+		defer cleanupKey()
 		return deliverRelease(ctx, store, slug, env, sha, appDeliveryTargets(targets, sha, true), "", sshKeyPath)
 	}
 
@@ -284,10 +286,12 @@ func runReleaseApp(ctx context.Context, configPath, env, name, sha, bundleDir, s
 		return fmt.Errorf("bundle %s/%s.tar.gz not found in release store — pass --bundle <dir> to package and push it", slug, sha)
 	}
 
-	sshKeyPath, err = resolveSSHKey(sshKeyPath)
+	var cleanupKey func()
+	sshKeyPath, cleanupKey, err = resolveSSHKey(sshKeyPath)
 	if err != nil {
 		return err
 	}
+	defer cleanupKey()
 	payload, cleanup, err := downloadArtifact(ctx, store, slug, sha)
 	if err != nil {
 		return err

@@ -684,10 +684,11 @@ func newPkiRenewCmd(dir *string) *cobra.Command {
 // (scope "global"); a regional service gets one per region (the regional set
 // deploys to every region).
 func runPkiRenew(ctx context.Context, dir, env, sshKeyPath string) error {
-	key, err := resolveSSHKey(sshKeyPath)
+	key, cleanupKey, err := resolveSSHKey(sshKeyPath)
 	if err != nil {
 		return fmt.Errorf("pki renew: %w", err)
 	}
+	defer cleanupKey()
 	globalRes, err := loader.LoadGlobalResources(env, dir)
 	if err != nil {
 		return err

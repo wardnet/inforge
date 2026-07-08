@@ -28,10 +28,11 @@ import (
 // imperative SSH step alongside the imperative leaf-minting, run here only
 // after the Pulumi `up` this function is called from has already completed.
 func meshBaseline(ctx context.Context, dir, configEnv, identityEnv, sshKeyPath string, w io.Writer) error {
-	key, err := resolveSSHKey(sshKeyPath)
+	key, cleanupKey, err := resolveSSHKey(sshKeyPath)
 	if err != nil {
 		return fmt.Errorf("mesh baseline: %w", err)
 	}
+	defer cleanupKey()
 
 	globalRes, err := loader.LoadGlobalResources(configEnv, dir)
 	if err != nil {

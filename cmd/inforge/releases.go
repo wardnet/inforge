@@ -179,10 +179,12 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 		return nil
 	}
 
-	sshKeyPath, err = resolveSSHKey(sshKeyPath)
+	var cleanupKey func()
+	sshKeyPath, cleanupKey, err = resolveSSHKey(sshKeyPath)
 	if err != nil {
 		return err
 	}
+	defer cleanupKey()
 
 	// A mesh service's leaf.age must already be on the host before the unit
 	// restarts into it: the boot path decrypts+projects whatever leaf.age
@@ -309,14 +311,33 @@ func resolvePlatform(deployDir, svc, env string) (string, error) {
 	return platform, err
 }
 
-func resolveSSHKey(sshKeyPath string) (string, error) {
-	if sshKeyPath == "" {
-		sshKeyPath = os.Getenv("INFORGE_DEPLOY_KEY")
+// resolveSSHKey resolves the SSH deploy key FILE the SSH-pushing commands need
+// (pki renew, releases deploy, db, service, ephemeral, the deploy mesh baseline).
+// Precedence: an explicit --ssh-key, then INFORGE_DEPLOY_KEY (both file paths,
+// returned verbatim), then the deploy key MATERIAL in INFORGE_DEPLOY_PRIVATE_KEY —
+// the same secret the deploy program uses to provision every host over SSH —
+// materialized to a private 0600 temp file. So a workflow configured with just the
+// deploy key material (as the deploy job already sets) satisfies EVERY inforge
+// command that SSHes, without also exporting a separate INFORGE_DEPLOY_KEY path.
+//
+// The returned cleanup removes the temp file (a no-op when a path was supplied); it
+// is never nil, so a caller can always `defer cleanup()`.
+func resolveSSHKey(sshKeyPath string) (string, func(), error) {
+	noop := func() {}
+	if sshKeyPath != "" {
+		return sshKeyPath, noop, nil
 	}
-	if sshKeyPath == "" {
-		return "", fmt.Errorf("SSH deploy key required: pass --ssh-key or set INFORGE_DEPLOY_KEY")
+	if p := os.Getenv("INFORGE_DEPLOY_KEY"); p != "" {
+		return p, noop, nil
 	}
-	return sshKeyPath, nil
+	if material := os.Getenv("INFORGE_DEPLOY_PRIVATE_KEY"); material != "" {
+		p, err := writeTempKeyFile(material)
+		if err != nil {
+			return "", noop, fmt.Errorf("materialize deploy key: %w", err)
+		}
+		return p, func() { _ = os.Remove(p) }, nil
+	}
+	return "", noop, fmt.Errorf("SSH deploy key required: pass --ssh-key, or set INFORGE_DEPLOY_KEY (a path) or INFORGE_DEPLOY_PRIVATE_KEY (the key material)")
 }
 
 // newArtifactStore builds the release store from the project config's artifacts
