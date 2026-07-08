@@ -127,5 +127,21 @@ func pushHostSecrets(ctx context.Context, keyPath, account string, blob hostsecr
 			return fmt.Errorf("project %s before reload: %w", remotePath, err)
 		}
 	}
-	return sshRun(ctx, keyPath, account, "sudo systemctl reload-or-restart "+unit, w)
+	return sshRun(ctx, keyPath, account, reloadOrRestartCmd(unit), w)
+}
+
+// reloadOrRestartCmd builds the host command that reloads-or-restarts unit, but only
+// if the unit is installed. On a FRESH environment `inforge deploy` runs before any
+// `inforge releases deploy`, so an mtls_files: service's own systemd unit (installed
+// at release time) does not exist during the deploy-time mesh baseline — a bare
+// `reload-or-restart` would exit 5 ("Unit … not found") and abort the whole baseline.
+// The leaf.age is already on disk, so the service's first start reads it; there is
+// nothing to reload. The mesh proxy unit IS installed by the deploy, so its reload
+// runs normally. unit is an inforge-derived name (wardnet-<svc>.service), not user
+// input, so it needs no shell quoting.
+func reloadOrRestartCmd(unit string) string {
+	return fmt.Sprintf(
+		"if systemctl cat %[1]s >/dev/null 2>&1; then sudo systemctl reload-or-restart %[1]s; "+
+			"else echo \"inforge: %[1]s not installed yet — leaf.age staged, read on first start\"; fi",
+		unit)
 }
