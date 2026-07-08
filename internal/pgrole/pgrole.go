@@ -119,6 +119,28 @@ func MintRoleSQL(role, password, database, permission string) ([]string, error) 
 	return append(stmts, grants...), nil
 }
 
+// MintMonitorRoleSQL is the full statement list for the observability monitoring role
+// (ADR-0037): ensure the LOGIN role exists with password, grant it the built-in
+// `pg_monitor` role (read access to all statistics/monitoring views, incl.
+// pg_read_all_stats), and grant CONNECT on each database the collector scrapes. It is
+// deliberately READ-ONLY and distinct from MintRoleSQL: no schema/table grants, no
+// revoke-all — a monitoring role only reads stats views, never user data. It is run
+// (as a superuser, over local peer auth) once per cluster; the GRANTs are cluster-level
+// so it executes fine from the default `postgres` database. databases should be the
+// metrics-enabled set for the cluster.
+func MintMonitorRoleSQL(role, password string, databases []string) []string {
+	r := QuoteIdent(role)
+	stmts := []string{
+		CreateRoleLoginSQL(role, password),
+		// pg_monitor is a fixed predefined role name (not user input) — left unquoted.
+		fmt.Sprintf(`GRANT pg_monitor TO %s`, r),
+	}
+	for _, db := range databases {
+		stmts = append(stmts, fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`, QuoteIdent(db), r))
+	}
+	return stmts
+}
+
 // ReassignDropSQL returns the ordered cleanup statements to run (as the owner or a
 // superuser) before dropping role: reassign objects it owns to owner, then drop the
 // privileges it holds. It is used at role teardown.

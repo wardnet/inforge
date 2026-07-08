@@ -395,7 +395,7 @@ source. The grain is create-and-destroy (Hetzner bills a server until it is dele
 - **Network segregation** is a structural invariant — never peer Networks or share one across envs;
   see `.agents/rules/ephemeral-network-segregation.md`.
 
-## Observability (ADR-0030, ADR-0031)
+## Observability (ADR-0030, ADR-0031, ADR-0037)
 
 Two coupled pieces give Grafana Cloud cloud/host context. Both stamp the **same**
 resource-attribute set so VM metrics and app telemetry correlate on `host.id`.
@@ -431,6 +431,21 @@ resource-attribute set so VM metrics and app telemetry correlate on `host.id`.
   credential is base64'd, `pulumi.ToSecret`-wrapped (encrypted in state), written `0600` owned by
   the collector user, and referenced from the config via the collector's `${file:…}` provider
   (never inlined). The config stamps the ADR-0030 attribute set + `host.id`.
+- **PostgreSQL database metrics (ADR-0037).** On a cluster host, `provisionObservability` adds a
+  `postgresql` receiver per co-located self-hosted cluster (`otelcol.Render(endpoint, attrs,
+  []otelcol.PostgresTarget)`), scraping the local instance at `127.0.0.1:<ClusterPort>` as a
+  per-cluster **`pg_monitor` monitoring role** minted DIRECTLY at deploy (`random.RandomPassword` +
+  `postgres.MintMonitorRoleScript` over local peer auth, `DependsOn` `dbHostTails`) — an
+  inforge-internal observability credential, NOT a grant (documented exception to
+  `db-credentials-flow-only-through-grants`, like the OTLP credential/mesh leaves). The role gets
+  `pg_monitor` + `CONNECT` on each scraped database and nothing else; its password is written `0600`
+  owned by the collector user at `otelcol.MonitorPasswordPath(cluster)` and read via `${file:…}`. Each
+  cluster gets its own metrics pipeline stamping a distinct job `service.name="wardnet-db-metrics"`,
+  `service.instance.id=host.id` (per-node), and `db.cluster.name` (per-cluster) atop the shared
+  ADR-0030 identity — so metrics filter global → per-cluster → per-node (multi-node-ready). All
+  databases are scraped unless a database opts out with **`metrics: false`** (`DatabaseSpec.Metrics
+  *bool` / `MetricsEnabled()`); a cluster whose databases all opt out gets no receiver. Host-metrics
+  config is byte-identical when a host runs no cluster.
 
 ## East-west service mesh (ADR-0032)
 

@@ -306,3 +306,17 @@ func TestDropRoleScript(t *testing.T) {
 		}
 	}
 }
+
+func TestMintMonitorRoleScript(t *testing.T) {
+	s := MintMonitorRoleScript(5433, "wardnet-prd-use1-dbrole-pg-regional-otelmon", "pw", []string{"tenants"})
+	for _, want := range []string{
+		"sudo -u postgres psql -p 5433",
+		"ON_ERROR_STOP=1",
+		`GRANT pg_monitor TO "wardnet-prd-use1-dbrole-pg-regional-otelmon"`,
+		`GRANT CONNECT ON DATABASE "tenants"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("MintMonitorRoleScript missing %q\n%s", want, s)
+		}
+	}
+}

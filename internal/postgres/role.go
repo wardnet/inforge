@@ -72,6 +72,17 @@ func MintRoleScript(port int, role, password, database, permission string) (stri
 	return psqlScript(port, database, stmts), nil
 }
 
+// MintMonitorRoleScript renders shell that mints (create-or-update) the observability
+// monitoring LOGIN role with password, grants it the built-in pg_monitor role, and
+// grants CONNECT on each scraped database (ADR-0037). It runs on the host over local
+// peer auth from the default database — every statement is cluster-level. The password
+// appears in the rendered SQL (quoted), so the caller wraps the whole command as a
+// Pulumi secret. Teardown reuses DropRoleScript (the monitor role owns no objects, so
+// its DROP OWNED just revokes the pg_monitor membership + CONNECT grants).
+func MintMonitorRoleScript(port int, role, password string, databases []string) string {
+	return psqlScript(port, "", pgrole.MintMonitorRoleSQL(role, password, databases))
+}
+
 // DropRoleScript renders shell that reassigns the role's owned objects to owner, drops
 // its privileges, then drops the role — run at role teardown over local peer auth.
 func DropRoleScript(port int, role, owner string) string {

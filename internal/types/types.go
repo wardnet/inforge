@@ -191,6 +191,16 @@ type DatabaseSpec struct {
 	Owner     string       `yaml:"owner"`    // PostgreSQL role that owns the database (NOLOGIN)
 	SizeGB    int          `yaml:"size_gb"`  // declared size intent; sums into the cluster volume
 	Backup    BackupPolicy `yaml:"backup"`   // per-database backup policy (loader-defaulted)
+	// Metrics opts a database OUT of Postgres metrics collection (ADR-0037) when set to
+	// false. Nil or true = scraped by the cluster host's otelcol postgresql receiver;
+	// false excludes it (no per-database metrics, no CONNECT for the monitor role).
+	Metrics *bool `yaml:"metrics"`
+}
+
+// MetricsEnabled reports whether this database is scraped for Postgres metrics —
+// true unless explicitly opted out with `metrics: false` (ADR-0037).
+func (d DatabaseSpec) MetricsEnabled() bool {
+	return d.Metrics == nil || *d.Metrics
 }
 
 // BackupPolicy is a logical database's backup configuration (ADR-0036). Enabled is a

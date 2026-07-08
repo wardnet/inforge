@@ -31,6 +31,7 @@ cluster: pg              # required — database-cluster FK (SAME scope)
 database: app            # required — the logical database name
 owner: app               # required — PostgreSQL role that owns it (created NOLOGIN)
 size_gb: 5               # optional — declared size intent (default 0)
+metrics: true            # optional — Postgres metrics on by default (set false to opt out)
 backup:                  # optional — per-database backup policy
   enabled: true          #   default true (set false to opt a throwaway db out)
   interval: 24h          #   default 24h
@@ -47,6 +48,7 @@ backup:                  # optional — per-database backup policy
 | `database` | string | Yes | The logical PostgreSQL database name. |
 | `owner` | string | Yes | The owner role (created `NOLOGIN` — nothing logs in as it; per-service login roles are minted by grants). |
 | `size_gb` | integer | No | Declared size intent (default `0`). PostgreSQL has no per-database quota, so this sums into the cluster's derived [volume size](./database-cluster#self-hosted-realization) rather than being enforced. |
+| `metrics` | boolean | No | Whether this database is scraped for Postgres metrics (default `true`). inforge's per-host OTel collector adds a `postgresql` receiver per cluster (ADR-0037), exporting to the same Grafana Cloud endpoint as host metrics. Set `metrics: false` to opt a database out (no per-database metrics, and the cluster's monitoring role gets no `CONNECT` to it). |
 | `backup` | object | No | Backup policy — `enabled` (default `true`), `interval` (default `24h`), `keep` (default `7`). |
 
 ## Access
