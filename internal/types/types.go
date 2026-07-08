@@ -733,16 +733,23 @@ type EnvironmentVariables struct {
 	Observability ObservabilityConfig `yaml:"observability"`
 }
 
-// ObservabilityConfig is the optional env-level observability block (ADR-0031).
-// When OTLPEndpoint is set (and the matching auth secret exists in the env's
-// secrets.enc.yaml), inforge installs the host VM-metrics collector on every VM.
-// When it is empty, no collector is installed — the agent is always-on but gated
+// ObservabilityConfig is the optional env-level observability block (ADR-0031,
+// ADR-0038). When OTLPEndpoint is set (and the matching auth secret exists in the
+// env's secrets.enc.yaml), inforge installs the host VM-metrics collector on every
+// VM. When it is empty, no collector is installed — the agent is always-on but gated
 // on this config being present, so an env that has not set up Grafana Cloud gets
 // nothing. OTLPEndpoint is the non-secret OTLP/HTTP base URL; the Basic-auth
 // credential is NOT here — it lives in secrets.enc.yaml under the reserved
 // observability container (see otelcol.AuthSecretRef).
+//
+// GrafanaURL is the non-secret base URL of the Grafana instance inforge pushes
+// dashboards + alerts to (ADR-0038). When set (and the reserved grafana_token secret
+// exists), `inforge deploy` realizes the built-in dashboards for this env; empty
+// means no dashboards are managed. The service-account token is NOT here — it is the
+// reserved secret observability/grafana_token (see grafana.TokenKey).
 type ObservabilityConfig struct {
 	OTLPEndpoint string `yaml:"otlp_endpoint"`
+	GrafanaURL   string `yaml:"grafana_url"`
 }
 
 // Resources is the full set of resource specs for one region.

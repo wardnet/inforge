@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/dbbackup"
+	"github.com/wardnet/inforge/internal/grafana"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/otelcol"
 	"github.com/wardnet/inforge/internal/secretstore"
@@ -25,7 +26,9 @@ import (
 // when writing outside this set — almost always a typo, since nothing would read
 // the value — but does not hard-fail, so the set can grow without a CLI change.
 var knownReservedSecrets = map[string]map[string]bool{
-	otelcol.AuthSecretNamespace: {otelcol.AuthSecretKey: true},
+	// The reserved "observability" namespace holds both the OTLP Basic-auth
+	// credential (ADR-0031) and the Grafana service-account token (ADR-0038).
+	otelcol.AuthSecretNamespace: {otelcol.AuthSecretKey: true, grafana.TokenKey: true},
 	dbbackup.AuthSecretNamespace: {
 		dbbackup.AccessKeyIDKey:     true,
 		dbbackup.SecretAccessKeyKey: true,
