@@ -131,17 +131,22 @@ func pushHostSecrets(ctx context.Context, keyPath, account string, blob hostsecr
 }
 
 // reloadOrRestartCmd builds the host command that reloads-or-restarts unit, but only
-// if the unit is installed. On a FRESH environment `inforge deploy` runs before any
-// `inforge releases deploy`, so an mtls_files: service's own systemd unit (installed
-// at release time) does not exist during the deploy-time mesh baseline — a bare
-// `reload-or-restart` would exit 5 ("Unit … not found") and abort the whole baseline.
-// The leaf.age is already on disk, so the service's first start reads it; there is
-// nothing to reload. The mesh proxy unit IS installed by the deploy, so its reload
+// when the unit is currently RUNNING. The mesh baseline's job is to stage fresh
+// leaf.age and signal a live service to re-read it; a service that is not running
+// needs no signal — its next start reads the staged leaf.
+//
+// The guard is `is-active`, NOT `systemctl cat` (mere existence): on a fresh env
+// `inforge deploy` installs an mtls_files: service's unit (ExecStart = inforge-agent)
+// but the workload is only delivered later by `inforge releases deploy`, so the unit
+// EXISTS yet cannot start — a plain `reload-or-restart` would try to start it and the
+// agent, finding no released artifact, exits non-zero ("control process exited with
+// error code"), aborting the whole baseline. `is-active` skips such a not-yet-running
+// unit (and an absent one). The mesh proxy IS running after the deploy, so its reload
 // runs normally. unit is an inforge-derived name (wardnet-<svc>.service), not user
 // input, so it needs no shell quoting.
 func reloadOrRestartCmd(unit string) string {
 	return fmt.Sprintf(
-		"if systemctl cat %[1]s >/dev/null 2>&1; then sudo systemctl reload-or-restart %[1]s; "+
-			"else echo \"inforge: %[1]s not installed yet — leaf.age staged, read on first start\"; fi",
+		"if systemctl is-active --quiet %[1]s; then sudo systemctl reload-or-restart %[1]s; "+
+			"else echo \"inforge: %[1]s not running — leaf.age staged, read on next start\"; fi",
 		unit)
 }
