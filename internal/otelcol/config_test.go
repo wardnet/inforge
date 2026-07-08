@@ -25,7 +25,7 @@ func fullAttrs() Attributes {
 }
 
 func TestRenderParsesAndCarriesAttributes(t *testing.T) {
-	out, err := Render("https://otlp.example/v1", fullAttrs())
+	out, err := Render("https://otlp.example/v1", fullAttrs(), nil)
 	require.NoError(t, err)
 
 	// It must be valid YAML.
@@ -55,11 +55,13 @@ func TestRenderParsesAndCarriesAttributes(t *testing.T) {
 	// The hostmetrics receiver is wired with the host scrapers and no `process`.
 	assert.Contains(t, out, "hostmetrics")
 	assert.NotContains(t, out, "process:")
+	// The system scraper is enabled for system.uptime (node-restart detection).
+	assert.Contains(t, out, "system.uptime")
 }
 
 func TestRenderOmitsEmptyAttributes(t *testing.T) {
 	// Only the required host id is set; the provider supplied nothing else.
-	out, err := Render("https://otlp.example/v1", Attributes{HostID: "node-1"})
+	out, err := Render("https://otlp.example/v1", Attributes{HostID: "node-1"}, nil)
 	require.NoError(t, err)
 
 	assert.Contains(t, out, "node-1")
@@ -72,19 +74,19 @@ func TestRenderOmitsEmptyAttributes(t *testing.T) {
 }
 
 func TestRenderIsDeterministic(t *testing.T) {
-	a, err := Render("https://otlp.example/v1", fullAttrs())
+	a, err := Render("https://otlp.example/v1", fullAttrs(), nil)
 	require.NoError(t, err)
-	b, err := Render("https://otlp.example/v1", fullAttrs())
+	b, err := Render("https://otlp.example/v1", fullAttrs(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, a, b, "render must be byte-stable for a stable resource graph")
 }
 
 func TestRenderRequiresEndpointAndHostID(t *testing.T) {
-	_, err := Render("", fullAttrs())
+	_, err := Render("", fullAttrs(), nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "endpoint")
 
-	_, err = Render("https://otlp.example/v1", Attributes{})
+	_, err = Render("https://otlp.example/v1", Attributes{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "host id")
 }
@@ -138,7 +140,7 @@ func TestCredentialScriptIsOwnedAndPrivate(t *testing.T) {
 }
 
 func TestApplyScriptEnablesAndRestarts(t *testing.T) {
-	cfg, err := Render("https://otlp.example/v1", fullAttrs())
+	cfg, err := Render("https://otlp.example/v1", fullAttrs(), nil)
 	require.NoError(t, err)
 	s := ApplyScript(cfg)
 	assert.Contains(t, s, ConfigPath)
@@ -147,4 +149,69 @@ func TestApplyScriptEnablesAndRestarts(t *testing.T) {
 	// The config body travels base64-encoded (decoded on the host), so the rendered
 	// bytes appear as their base64, not as plaintext.
 	assert.True(t, strings.Contains(s, base64Encode(cfg)))
+}
+
+func TestRenderPostgresTargets(t *testing.T) {
+	pg := []PostgresTarget{{
+		Cluster:      "pg-regional",
+		Port:         5432,
+		Username:     "wardnet-prd-use1-dbrole-pg-regional-otelmon",
+		PasswordFile: MonitorPasswordPath("pg-regional"),
+		Databases:    []string{"tenants", "audit"},
+	}}
+	out, err := Render("https://otlp.example/v1", fullAttrs(), pg)
+	require.NoError(t, err)
+
+	var cfg map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(out), &cfg))
+
+	// Receiver: local loopback, the monitor role, a file-provider password (never
+	// inlined), the scraped databases, and TLS disabled for the loopback hop.
+	for _, want := range []string{
+		"postgresql/pg-regional:",
+		"endpoint: 127.0.0.1:5432",
+		"username: wardnet-prd-use1-dbrole-pg-regional-otelmon",
+		"password: ${file:" + MonitorPasswordPath("pg-regional") + "}",
+		"- tenants",
+		"- audit",
+		"insecure: true",
+	} {
+		assert.Contains(t, out, want)
+	}
+	// A distinct DB job, per-node instance id, and the cluster grouping attribute — the
+	// three levels: global (job) / per-cluster (db.cluster.name) / per-node (instance).
+	assert.Contains(t, out, DBServiceName)
+	assert.Contains(t, out, "db.cluster.name")
+	assert.Contains(t, out, "service.instance.id")
+	// Its own metrics pipeline + resource processor; host metrics stay wired.
+	assert.Contains(t, out, "metrics/db-pg-regional:")
+	assert.Contains(t, out, "resource/db-pg-regional")
+	assert.Contains(t, out, "hostmetrics")
+}
+
+func TestRenderPostgresTargetValidation(t *testing.T) {
+	_, err := Render("https://otlp.example/v1", fullAttrs(), []PostgresTarget{
+		{Cluster: "c", Port: 5432, Username: "u", PasswordFile: "/f", Databases: []string{"d"}},
+	})
+	require.NoError(t, err)
+
+	for _, bad := range []PostgresTarget{
+		{Port: 5432, Username: "u", PasswordFile: "/f", Databases: []string{"d"}},
+		{Cluster: "c", Username: "u", PasswordFile: "/f", Databases: []string{"d"}},
+		{Cluster: "c", Port: 5432, PasswordFile: "/f", Databases: []string{"d"}},
+		{Cluster: "c", Port: 5432, Username: "u", Databases: []string{"d"}},
+		{Cluster: "c", Port: 5432, Username: "u", PasswordFile: "/f"},
+	} {
+		_, err := Render("https://otlp.example/v1", fullAttrs(), []PostgresTarget{bad})
+		assert.Error(t, err, "target %+v must be rejected", bad)
+	}
+}
+
+func TestRenderNoPostgresIsHostOnly(t *testing.T) {
+	a, err := Render("https://otlp.example/v1", fullAttrs(), nil)
+	require.NoError(t, err)
+	b, err := Render("https://otlp.example/v1", fullAttrs(), []PostgresTarget{})
+	require.NoError(t, err)
+	assert.Equal(t, a, b, "nil and empty pg must render identically")
+	assert.NotContains(t, a, "postgresql")
 }

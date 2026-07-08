@@ -44,6 +44,14 @@ const (
 	AuthSecretKey       = "otlp_auth"
 )
 
+// MonitorPasswordPath is the on-host file holding a Postgres cluster's monitoring
+// role password (ADR-0037), read by that cluster's postgresql receiver via the
+// collector's ${file:…} provider. Written 0600 owned by User, one per cluster (a
+// host may run several). cluster is an inforge-derived name, safe in a path.
+func MonitorPasswordPath(cluster string) string {
+	return "/etc/otelcol-contrib/pg-" + cluster
+}
+
 // DebAsset is the release asset filename for a version+arch, e.g.
 // "otelcol-contrib_0.155.0_linux_amd64.deb". version carries no leading "v".
 func DebAsset(version, arch string) string {

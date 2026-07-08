@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
+	"github.com/pulumi/pulumi-random/sdk/v4/go/random"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 	"github.com/wardnet/inforge/internal/agent"
@@ -29,6 +30,7 @@ import (
 	"github.com/wardnet/inforge/internal/meshplan"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/otelcol"
+	"github.com/wardnet/inforge/internal/postgres"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/registry"
 	iremote "github.com/wardnet/inforge/internal/remote"
@@ -364,7 +366,7 @@ func Run(ctx *pulumi.Context) error {
 		if err := provisionServices(ctx, sc.res, computeOutputs[sc.key], serviceSecrets, gates, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug, vars.BaseDomain, inforgeVersion); err != nil {
 			return err
 		}
-		if err := provisionObservability(ctx, sc.res, computeOutputs[sc.key], gates, vars.Observability, obsAuthB64, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
+		if err := provisionObservability(ctx, sc.res, computeOutputs[sc.key], gates, dbHostTails, vars.Observability, obsAuthB64, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
 			return err
 		}
 	}
@@ -622,11 +624,14 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 // authB64 is the base64 OTLP Basic-auth value, already marked secret by the caller;
 // the credential write is built inside an ApplyT over it so the secret is encrypted
 // in Pulumi state (never written as plaintext), mirroring deliverServiceSecrets.
-func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, obs types.ObservabilityConfig, authB64 pulumi.StringOutput, deployPrivateKey, env, slug string) error {
+func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, dbHostTails map[string]pulumi.Resource, obs types.ObservabilityConfig, authB64 pulumi.StringOutput, deployPrivateKey, env, slug string) error {
 	if obs.OTLPEndpoint == "" {
 		return nil
 	}
 	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
+	// Postgres cluster ports per host, single-sourced with the realization + firewall
+	// (ADR-0037); used to add a postgresql receiver per co-located cluster.
+	ports := clusterPortsByHost(res, naming.CanonicalComputeKeys(res.Compute))
 	for _, hostKey := range sortedKeys(computeOut) {
 		host := computeOut[hostKey]
 		deployUser := deployUserByCompute[hostKey]
@@ -656,6 +661,66 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 			return fmt.Errorf("observability: host %q: install collector: %w", hostKey, err)
 		}
 
+		// Postgres metrics (ADR-0037): one postgresql receiver per self-hosted cluster on
+		// this host, scraping the local instance as a per-cluster pg_monitor monitoring
+		// role. Mint the role over the cluster's local peer auth (DependsOn the cluster
+		// being up via dbHostTails), then hand the collector a target + the role's
+		// password file. A cluster whose databases all opted out (metrics: false) gets no
+		// receiver. The config command waits on every mint so the collector never restarts
+		// with a receiver whose role does not exist yet.
+		var pgTargets []otelcol.PostgresTarget
+		pgPasswords := []interface{}{}
+		configDeps := []pulumi.Resource{installCmd}
+		for _, cluster := range sortedKeys(ports[hostKey]) {
+			var dbNames []string
+			for _, d := range databasesOfCluster(res, cluster) {
+				if d.MetricsEnabled() {
+					dbNames = append(dbNames, d.Database)
+				}
+			}
+			if len(dbNames) == 0 {
+				continue
+			}
+			port := ports[hostKey][cluster]
+			roleName := naming.Resource(env, slug, "dbrole", cluster+"-otelmon")
+			pw, err := random.NewRandomPassword(ctx, roleName+"-password", &random.RandomPasswordArgs{
+				Length:  pulumi.Int(32),
+				Special: pulumi.Bool(false),
+			})
+			if err != nil {
+				return fmt.Errorf("observability: host %q cluster %q: monitor password: %w", hostKey, cluster, err)
+			}
+			mintScript := pw.Result.ApplyT(func(p string) string {
+				return postgres.MintMonitorRoleScript(port, roleName, p, dbNames)
+			}).(pulumi.StringOutput)
+			mintDeps := []pulumi.Resource{}
+			if tail := dbHostTails[hostKey]; tail != nil {
+				mintDeps = append(mintDeps, tail)
+			}
+			mintCmd, err := remote.NewCommand(ctx, roleName+"-mint", &remote.CommandArgs{
+				Connection: conn,
+				Create:     mintScript,
+				Update:     mintScript,
+				Triggers:   pulumi.Array{mintScript},
+				// The monitor role owns no objects, so DROP OWNED just revokes its
+				// pg_monitor membership + CONNECT grants; postgres.OSUser is the bootstrap
+				// superuser the REASSIGN targets (a no-op here).
+				Delete: pulumi.String(postgres.DropRoleScript(port, roleName, postgres.OSUser)),
+			}, pulumi.DependsOn(mintDeps))
+			if err != nil {
+				return fmt.Errorf("observability: host %q cluster %q: mint monitor role: %w", hostKey, cluster, err)
+			}
+			configDeps = append(configDeps, mintCmd)
+			pgTargets = append(pgTargets, otelcol.PostgresTarget{
+				Cluster:      cluster,
+				Port:         port,
+				Username:     roleName,
+				PasswordFile: otelcol.MonitorPasswordPath(cluster),
+				Databases:    dbNames,
+			})
+			pgPasswords = append(pgPasswords, pw.Result)
+		}
+
 		config, err := otelcol.Render(obs.OTLPEndpoint, otelcol.Attributes{
 			HostID:           naming.Resource(env, slug, "vm", hostKey),
 			CloudProvider:    host.CloudProvider,
@@ -664,23 +729,30 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 			MachineType:      host.MachineType,
 			Environment:      env,
 			RegionSlug:       slug,
-		})
+		}, pgTargets)
 		if err != nil {
 			return fmt.Errorf("observability: host %q: render config: %w", hostKey, err)
 		}
-		// The credential is secret; build the write+apply script inside an ApplyT over
-		// the secret so the whole command's Create is encrypted in state. Order: write
-		// the 0600 credential, then the config + enable + restart (a changed ${file:}
-		// credential is only re-read on start).
-		applyScript := authB64.ApplyT(func(b64 string) string {
-			return otelcol.CredentialScript(b64) + "\n" + otelcol.ApplyScript(config)
+		// The OTLP credential and each monitor-role password are secret; build the whole
+		// write+apply script inside an ApplyT over them so the command's Create is
+		// encrypted in state. Order: write the 0600 OTLP credential + each 0600 monitor
+		// password (owned by the collector user), then the config + enable + restart (a
+		// changed ${file:} value is only re-read on start).
+		applyInputs := append([]interface{}{authB64}, pgPasswords...)
+		applyScript := pulumi.All(applyInputs...).ApplyT(func(vals []interface{}) string {
+			parts := []string{otelcol.CredentialScript(vals[0].(string))}
+			for i, t := range pgTargets {
+				parts = append(parts, otelcol.WriteFileScript(t.PasswordFile, vals[i+1].(string), "0600", otelcol.User+":"+otelcol.User))
+			}
+			parts = append(parts, otelcol.ApplyScript(config))
+			return strings.Join(parts, "\n")
 		}).(pulumi.StringOutput)
 		if _, err := remote.NewCommand(ctx, name+"-config", &remote.CommandArgs{
 			Connection: conn,
 			Create:     applyScript,
 			Update:     applyScript,
 			Triggers:   pulumi.Array{applyScript},
-		}, pulumi.DependsOn([]pulumi.Resource{installCmd})); err != nil {
+		}, pulumi.DependsOn(configDeps)); err != nil {
 			return fmt.Errorf("observability: host %q: configure collector: %w", hostKey, err)
 		}
 	}

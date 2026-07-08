@@ -7,11 +7,11 @@ import (
 
 func TestQuoteIdent(t *testing.T) {
 	cases := map[string]string{
-		"app":          `"app"`,
-		`we"ird`:       `"we""ird"`,
-		"svc-tunnel":   `"svc-tunnel"`,
-		"a\x00b":       `"ab"`, // NUL stripped
-		`"; DROP --`:   `"""; DROP --"`,
+		"app":        `"app"`,
+		`we"ird`:     `"we""ird"`,
+		"svc-tunnel": `"svc-tunnel"`,
+		"a\x00b":     `"ab"`, // NUL stripped
+		`"; DROP --`: `"""; DROP --"`,
 	}
 	for in, want := range cases {
 		if got := QuoteIdent(in); got != want {
@@ -22,11 +22,11 @@ func TestQuoteIdent(t *testing.T) {
 
 func TestQuoteLiteral(t *testing.T) {
 	cases := map[string]string{
-		"hunter2":       `'hunter2'`,
-		"o'brien":       `'o''brien'`,
-		`back\slash`:    `'back\slash'`, // backslash literal (standard_conforming_strings)
-		"a\x00b":        `'ab'`,
-		"' OR 1=1 --":   `''' OR 1=1 --'`,
+		"hunter2":     `'hunter2'`,
+		"o'brien":     `'o''brien'`,
+		`back\slash`:  `'back\slash'`, // backslash literal (standard_conforming_strings)
+		"a\x00b":      `'ab'`,
+		"' OR 1=1 --": `''' OR 1=1 --'`,
 	}
 	for in, want := range cases {
 		if got := QuoteLiteral(in); got != want {
@@ -115,5 +115,28 @@ func TestReassignDropAndDrop(t *testing.T) {
 	}
 	if DropRoleSQL("svc") != `DROP ROLE IF EXISTS "svc"` {
 		t.Errorf("DropRoleSQL = %q", DropRoleSQL("svc"))
+	}
+}
+
+func TestMintMonitorRoleSQL(t *testing.T) {
+	stmts := MintMonitorRoleSQL("mon", "s3cret", []string{"tenants", "audit"})
+	joined := strings.Join(stmts, "\n")
+
+	// Idempotent LOGIN role with the password, pg_monitor membership, and CONNECT on
+	// each scraped database — and NOTHING else (no schema/table grants, no revoke-all).
+	for _, want := range []string{
+		`CREATE ROLE "mon" LOGIN PASSWORD 's3cret'`,
+		`GRANT pg_monitor TO "mon"`,
+		`GRANT CONNECT ON DATABASE "tenants" TO "mon"`,
+		`GRANT CONNECT ON DATABASE "audit" TO "mon"`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("MintMonitorRoleSQL missing %q\n%s", want, joined)
+		}
+	}
+	for _, absent := range []string{"REVOKE ALL", "ON SCHEMA public", "ON ALL TABLES"} {
+		if strings.Contains(joined, absent) {
+			t.Errorf("monitor role must be read-only; unexpected %q\n%s", absent, joined)
+		}
 	}
 }
