@@ -10,6 +10,7 @@ import (
 
 	"github.com/wardnet/inforge/internal/grafana"
 	"github.com/wardnet/inforge/internal/grafanadash"
+	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -49,26 +50,50 @@ func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.Obse
 		return fmt.Errorf("observability: grafana folder: %w", err)
 	}
 
-	// Built-in dashboards, generated from the metrics inforge owns. Custom (exported)
-	// dashboards and the Service dashboard land in later ADR-0038 slices.
+	newDashboard := func(name, body string) error {
+		if _, err := oss.NewDashboard(ctx, "grafana-dash-"+name, &oss.DashboardArgs{
+			ConfigJson: pulumi.String(body),
+			Folder:     folder.Uid,
+			Overwrite:  pulumi.Bool(true),
+		}, pulumi.Provider(prov)); err != nil {
+			return fmt.Errorf("observability: grafana dashboard %s: %w", name, err)
+		}
+		return nil
+	}
+
+	// Built-in dashboards, generated from the metrics inforge owns.
 	builtins := []struct {
 		kind   string
 		render func(env, uid string) (string, error)
 	}{
 		{"infrastructure", grafanadash.Infrastructure},
 		{"database", grafanadash.Database},
+		{"service", grafanadash.Service},
 	}
 	for _, b := range builtins {
 		body, err := b.render(env, grafana.DashboardUID(env, b.kind))
 		if err != nil {
 			return err
 		}
-		if _, err := oss.NewDashboard(ctx, "grafana-dash-"+b.kind, &oss.DashboardArgs{
-			ConfigJson: pulumi.String(body),
-			Folder:     folder.Uid,
-			Overwrite:  pulumi.Bool(true),
-		}, pulumi.Provider(prov)); err != nil {
-			return fmt.Errorf("observability: grafana dashboard %s: %w", b.kind, err)
+		if err := newDashboard(b.kind, body); err != nil {
+			return err
+		}
+	}
+
+	// Custom dashboards: Grafana-exported files committed under this env's
+	// observability/dashboards/ directory (read from the config-source env, ADR-0028).
+	// Each is normalized (parsed + env-prefixed uid) and pushed into the same folder.
+	custom, err := loader.LoadCustomDashboards(srcEnv, dir)
+	if err != nil {
+		return err
+	}
+	for _, c := range custom {
+		body, err := grafanadash.Custom(c.Name, grafana.DashboardUID(env, "custom-"+c.Name), c.Data, c.IsYAML)
+		if err != nil {
+			return err
+		}
+		if err := newDashboard("custom-"+c.Name, body); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -52,8 +52,9 @@ are [reserved secrets](/cli/secret) in `secrets.enc.yaml`, never committed here.
   (`inforge secret set <env> observability otlp_auth --reserved`). Empty ⇒ no collector.
 - `grafana_url` — the base URL of the Grafana instance inforge pushes the built-in
   dashboards (and, in later slices, alerts) to (ADR-0038). When set, `inforge deploy`
-  realizes this env's dashboards under an `inforge / <env>` folder, prefixed by env so
-  multiple environments can share one Grafana org. Its service-account token is the
+  realizes this env's [dashboards](/configuration/observability) under an
+  `inforge / <env>` folder, prefixed by env so multiple environments can share one
+  Grafana org. Its service-account token is the
   reserved secret `observability/grafana_token`
   (`inforge secret set <env> observability grafana_token --reserved`). A `grafana_url`
   set with no token fails the deploy. Empty ⇒ no dashboards are managed.
