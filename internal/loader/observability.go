@@ -7,6 +7,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/wardnet/inforge/internal/types"
+	"gopkg.in/yaml.v3"
 )
 
 // CustomDashboard is one Grafana-exported dashboard file discovered under an env's
@@ -75,4 +78,52 @@ func LoadCustomDashboards(env, dir string) ([]CustomDashboard, error) {
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// LoadNotifications reads <dir>/<env>/observability/notifications.yaml — the env's
+// contact points + notification profiles (ADR-0038 slice 3). A missing file is not
+// an error: an env may manage dashboards/alerts without custom routing.
+func LoadNotifications(env, dir string) (types.NotificationsSpec, error) {
+	var spec types.NotificationsSpec
+	path := filepath.Join(envDir(env, dir), "observability", "notifications.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return spec, nil
+		}
+		return spec, fmt.Errorf("loader: read notifications.yaml: %w", err)
+	}
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		return spec, fmt.Errorf("loader: parse notifications.yaml: %w", err)
+	}
+	return spec, nil
+}
+
+// LoadAlerts reads <dir>/<env>/observability/alerts.yaml — the env's custom alert
+// specs (ADR-0038 slice 3), alongside the generated built-ins. A missing file is
+// not an error. Free-text fields are trimmed.
+func LoadAlerts(env, dir string) (types.AlertsSpec, error) {
+	var spec types.AlertsSpec
+	path := filepath.Join(envDir(env, dir), "observability", "alerts.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return spec, nil
+		}
+		return spec, fmt.Errorf("loader: read alerts.yaml: %w", err)
+	}
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		return spec, fmt.Errorf("loader: parse alerts.yaml: %w", err)
+	}
+	for i := range spec.Alerts {
+		a := &spec.Alerts[i]
+		a.Name = strings.TrimSpace(a.Name)
+		a.Expr = strings.TrimSpace(a.Expr)
+		a.Condition = strings.TrimSpace(a.Condition)
+		a.For = strings.TrimSpace(a.For)
+		a.Severity = strings.TrimSpace(a.Severity)
+		a.Profile = strings.TrimSpace(a.Profile)
+		a.Summary = strings.TrimSpace(a.Summary)
+	}
+	return spec, nil
 }

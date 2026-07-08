@@ -423,6 +423,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 	}
 	globalBase := filepath.Join(base, "global")
 	checkVariables(r, vars, filepath.Join(base, "variables.yaml"))
+	checkObservability(r, dir, env, vars.Observability)
 	checkRegionsFile(r, regionTable, global, filepath.Join(base, "regions.yaml"))
 
 	// Validate the global slice in a GLOBAL-ONLY context (globalRefs nil): its FK

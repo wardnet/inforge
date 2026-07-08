@@ -48,3 +48,51 @@ func TestLoadCustomDashboardsSlugCollision(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "slug")
 }
+
+func writeObs(t *testing.T, dir, file, body string) {
+	t.Helper()
+	root := filepath.Join(dir, "prd", "observability")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, file), []byte(body), 0o644))
+}
+
+func TestLoadNotifications(t *testing.T) {
+	dir := t.TempDir()
+	writeObs(t, dir, "notifications.yaml", `
+contact_points:
+  pd-high: { pagerduty: { key_secret: pagerduty_key, severity: critical } }
+  team-email: { email: { addresses: [ops@x.io] } }
+profiles:
+  prod:
+    critical: { contact_point: pd-high }
+    warning:  { muted: true }
+`)
+	got, err := LoadNotifications("prd", dir)
+	require.NoError(t, err)
+	require.Contains(t, got.ContactPoints, "pd-high")
+	assert.Equal(t, "pagerduty_key", got.ContactPoints["pd-high"].PagerDuty.KeySecret)
+	assert.Equal(t, "pd-high", got.Profiles["prod"]["critical"].ContactPoint)
+	assert.True(t, got.Profiles["prod"]["warning"].Muted)
+}
+
+func TestLoadNotificationsMissing(t *testing.T) {
+	got, err := LoadNotifications("prd", t.TempDir())
+	require.NoError(t, err)
+	assert.Empty(t, got.ContactPoints)
+}
+
+func TestLoadAlertsTrims(t *testing.T) {
+	dir := t.TempDir()
+	writeObs(t, dir, "alerts.yaml", `
+alerts:
+  - name: "  drop  "
+    expr: "  sum(x)  "
+    condition: "< 1"
+    severity: warning
+`)
+	got, err := LoadAlerts("prd", dir)
+	require.NoError(t, err)
+	require.Len(t, got.Alerts, 1)
+	assert.Equal(t, "drop", got.Alerts[0].Name)
+	assert.Equal(t, "sum(x)", got.Alerts[0].Expr)
+}

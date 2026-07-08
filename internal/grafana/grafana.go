@@ -27,3 +27,12 @@ func FolderTitle(env string) string { return "inforge / " + env }
 // DashboardUID names one managed dashboard, prefixed by env and a stable kind slug
 // ("infrastructure", "database", "service", or a custom dashboard's name).
 func DashboardUID(env, kind string) string { return "inforge-" + env + "-" + kind }
+
+// ContactPointName names one env-scoped Grafana contact point, prefixed by env so
+// multiple inforge envs sharing one org never collide (ADR-0038 slice 3). The name
+// is what an alert rule's NotificationSettings.ContactPoint references.
+func ContactPointName(env, name string) string { return "inforge-" + env + "-" + name }
+
+// AlertGroupName names one env-scoped Grafana alert rule group (kind is "builtin"
+// or "custom"). Env-prefixed for the same shared-org reason as dashboards.
+func AlertGroupName(env, kind string) string { return "inforge-" + env + "-" + kind }

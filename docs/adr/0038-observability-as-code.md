@@ -54,16 +54,21 @@ as every other resource.
   http error-rate / latency; a traffic-drop alert is inherently custom (only the author
   knows a service's baseline).
 
-- **Notification routing is a user-defined "profile", decoupled from env lifecycle.** A
-  **profile** maps `severity → contact point + urgency` (e.g. `prod`: critical→PagerDuty
-  high, warning→PagerDuty low; `staging`: warning→muted; `silent`: all→none). Each alert
-  carries a profile (the env sets a default — prd→`prod` — overridable per alert), and
-  the generated notification policy routes on `profile` then `severity`. This inverts the
-  org-singleton problem: the policy is *derived* from profiles, not hand-owned. Because
-  the Grafana notification policy and contact points are **one org-wide resource** that a
-  per-env stack cannot co-own, they are applied by a **dedicated, env-decoupled
-  `inforge observability sync`** (its own org-scoped stack) — so destroying prd never
-  tears down the routing staging relies on.
+- **Notification routing is per-env, via per-rule notification settings — no org-level
+  resources.** *(Revised in slice 3, superseding the org-decoupled-`sync` design this ADR
+  originally described.)* An env authors first-class **contact points** (reusable named
+  destinations — PagerDuty/email/webhook, secrets as reserved secrets) and **profiles**
+  (per-team routing tables mapping `severity → contact point` | `muted: true`) in
+  `resources/<env>/observability/notifications.yaml`. Each alert carries a `severity` and
+  a `profile` (the env sets a `default_profile`, overridable per alert); the routing is
+  materialized on the rule itself via Grafana's **per-rule `NotificationSettings.contact_point`**,
+  so inforge never touches the org-singleton notification policy. Everything is
+  env-prefixed, created by the ordinary per-env `inforge deploy`. This retires the planned
+  `inforge observability sync` command and its org-scoped stack entirely: because no
+  resource is org-owned, destroying prd cannot tear down staging's routing. The trade-off
+  is that a `muted: true` route omits the alert for that env (it neither evaluates nor
+  notifies) rather than evaluating-but-silencing; a mute-timing-based silence can be added
+  later if visible-but-silent alerts are wanted.
 
 - **Config follows the reserved-secret precedent (ADR-0031).**
   `observability.grafana_url` is a non-secret field in `variables.yaml`; the Grafana
@@ -84,14 +89,16 @@ as every other resource.
 
 - Adds the `pulumiverse/grafana` provider dependency (the fifth provider, alongside
   hetzner/cloudflare/command/random); it stays `CGO_ENABLED=0`.
-- Org notifications (contact points + policy) live outside any env's stack, owned by
-  `inforge observability sync`; per-env deploys own only their prefixed dashboards +
-  alert rules. Ephemeral envs get prefixed dashboards/alerts that Pulumi auto-deletes on
-  `ephemeral down`.
+- Everything Grafana-side is per-env and env-prefixed (dashboards, alert rules, contact
+  points), owned by the ordinary `inforge deploy`; there are **no** org-level resources.
+  Ephemeral envs get prefixed dashboards/alerts/contact-points that Pulumi auto-deletes on
+  `ephemeral down`. Built-in dashboards and built-in alerts are each opt-out per env
+  (`observability.built_in_dashboards` / `built_in_alerts`).
 - Lands in four slices: ① provider + config + built-in Infrastructure/Database
   dashboards; ② built-in Service dashboard + custom (exported) dashboards; ③ alert spec
-  + built-ins + profiles + `observability sync`; ④ collector-side label promotion
-  (`db.cluster.name`, `postgresql.database.name`, `region`).
+  + built-in alerts + per-env contact points/profiles (per-rule notification settings, no
+  `observability sync`); ④ collector-side label promotion (`db.cluster.name`,
+  `postgresql.database.name`, `region`).
 - The label-promotion slice re-touches ADR-0037's `internal/otelcol` and must be
   live-verified on a Postgres host (a resource-vs-datapoint attribute mistake is
   invisible until queried in Grafana).
