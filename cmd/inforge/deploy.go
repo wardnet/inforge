@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/events"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/spf13/cobra"
@@ -142,7 +143,23 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 	if v, cfgErr := s.GetConfig(ctx, cfgKeySourceEnvironment); cfgErr == nil && v.Value != "" {
 		configEnv = v.Value
 	}
-	baseErr := meshBaseline(ctx, dir, configEnv, stackName, sshKeyPath, humanW)
+
+	// The mesh baseline SSHes into each host and so needs the deploy key as a FILE,
+	// but a CI deploy normally supplies only the key MATERIAL — the very same
+	// deploy_private_key / INFORGE_DEPLOY_PRIVATE_KEY the `up` above just used to
+	// provision every host over SSH. Materialize that to a private temp file so a
+	// deploy configured with a single deploy key succeeds without ALSO exporting
+	// INFORGE_DEPLOY_KEY (a path). --ssh-key / INFORGE_DEPLOY_KEY still win.
+	meshKey, cleanupKey, keyErr := resolveDeployKeyFile(ctx, s, sshKeyPath)
+	if cleanupKey != nil {
+		defer cleanupKey()
+	}
+	var baseErr error
+	if keyErr != nil {
+		baseErr = fmt.Errorf("mesh baseline: %w", keyErr)
+	} else {
+		baseErr = meshBaseline(ctx, dir, configEnv, stackName, meshKey, humanW)
+	}
 
 	if jsonMode {
 		if err := printChangeSummaryJSON(stackName, p.Changes(), p.Failures()); err != nil {
@@ -150,6 +167,58 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 		}
 	}
 	return baseErr
+}
+
+// resolveDeployKeyFile resolves the SSH deploy key FILE the mesh baseline needs.
+// Precedence: an explicit --ssh-key path, then INFORGE_DEPLOY_KEY (also a path) —
+// both returned as-is with no cleanup. Otherwise it falls back to the deploy key
+// MATERIAL the Pulumi program itself reads (stack config deploy_private_key, then
+// INFORGE_DEPLOY_PRIVATE_KEY — the same order as program.Run), writing it to a
+// private temp file and returning a cleanup that removes it. When no key is
+// available at all it returns ("", nil, nil), leaving meshBaseline's resolveSSHKey
+// to emit the standard actionable error.
+func resolveDeployKeyFile(ctx context.Context, s auto.Stack, sshKeyPath string) (string, func(), error) {
+	if sshKeyPath != "" || os.Getenv("INFORGE_DEPLOY_KEY") != "" {
+		return sshKeyPath, nil, nil
+	}
+	var material string
+	if v, err := s.GetConfig(ctx, "deploy_private_key"); err == nil {
+		material = v.Value
+	}
+	if material == "" {
+		material = os.Getenv("INFORGE_DEPLOY_PRIVATE_KEY")
+	}
+	if material == "" {
+		return "", nil, nil
+	}
+	path, err := writeTempKeyFile(material)
+	if err != nil {
+		return "", nil, fmt.Errorf("materialize deploy key: %w", err)
+	}
+	return path, func() { _ = os.Remove(path) }, nil
+}
+
+// writeTempKeyFile writes SSH private-key material to a fresh 0600 temp file (its
+// path is returned) so the CLI can hand `ssh -i` a file. A trailing newline is
+// ensured — OpenSSH rejects a key file that lacks one.
+func writeTempKeyFile(material string) (string, error) {
+	if !strings.HasSuffix(material, "\n") {
+		material += "\n"
+	}
+	f, err := os.CreateTemp("", "inforge-deploy-key-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	if err := f.Chmod(0o600); err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	if _, err := f.WriteString(material); err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 // streamEngineRun renders a Pulumi engine event stream through the shared Printer
