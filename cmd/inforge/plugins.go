@@ -36,6 +36,9 @@ func newPluginsCmd() *cobra.Command {
 				{"cloudflare", "6.17.0", "pulumi/pulumi-cloudflare"},
 				// pulumi-random backs stable per-service database passwords (ADR-0036).
 				{"random", "4.16.8", "pulumi/pulumi-random"},
+				// pulumiverse/grafana pushes dashboards + alerts (ADR-0038). Note the
+				// pulumiverse org publishes the same asset layout as pulumi/*.
+				{"grafana", "1.0.0", "pulumiverse/pulumi-grafana"},
 			} {
 				fmt.Printf("installing pulumi-resource-%s v%s...\n", p.name, p.version)
 				if err := installPulumiPlugin(ctx, p.name, p.version, p.repo); err != nil {

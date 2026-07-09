@@ -275,6 +275,14 @@ func Run(ctx *pulumi.Context) error {
 		obsAuthB64 = pulumi.ToSecret(pulumi.String(base64.StdEncoding.EncodeToString([]byte(authRaw)))).(pulumi.StringOutput)
 	}
 
+	// Env-level Grafana dashboards (ADR-0038): when grafana_url is configured, this env's
+	// built-in dashboards are pushed via the pulumiverse/grafana provider. Org-global, so
+	// realized ONCE here (not per scope) and env-prefixed. A no-op when grafana_url is empty.
+	hasDatabase := len(res.DatabaseCluster) > 0 || len(globalRes.DatabaseCluster) > 0
+	if err := realizeGrafana(ctx, dir, srcEnv, env, vars.Observability, hasDatabase, ctx.DryRun()); err != nil {
+		return err
+	}
+
 	// Self-hosted Postgres backups (ADR-0036): the destination R2 bucket + endpoint are
 	// threaded from inforge.yaml (setBackups); the backup-scoped R2 credential is an
 	// inforge RESERVED secret (two keys mirroring the AWS_* chain), decrypted once here

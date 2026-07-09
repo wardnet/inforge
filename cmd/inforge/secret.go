@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/dbbackup"
+	"github.com/wardnet/inforge/internal/grafana"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/otelcol"
 	"github.com/wardnet/inforge/internal/secretstore"
@@ -25,7 +26,11 @@ import (
 // when writing outside this set — almost always a typo, since nothing would read
 // the value — but does not hard-fail, so the set can grow without a CLI change.
 var knownReservedSecrets = map[string]map[string]bool{
-	otelcol.AuthSecretNamespace: {otelcol.AuthSecretKey: true},
+	// The reserved "observability" namespace holds the OTLP Basic-auth credential
+	// (ADR-0031), the Grafana service-account token, and user-named contact-point
+	// secrets like a PagerDuty integration key (ADR-0038). The "*" wildcard lets the
+	// latter use arbitrary keys without a spurious "unknown reserved secret" warning.
+	otelcol.AuthSecretNamespace: {otelcol.AuthSecretKey: true, grafana.TokenKey: true, "*": true},
 	dbbackup.AuthSecretNamespace: {
 		dbbackup.AccessKeyIDKey:     true,
 		dbbackup.SecretAccessKeyKey: true,
@@ -136,7 +141,10 @@ func runSecretWrite(dir, env, name, key string, generate, reserved bool) error {
 	var siblings []types.ServiceSpec
 	if reserved {
 		container = name
-		if !knownReservedSecrets[container][key] {
+		// A namespace with the "*" wildcard accepts arbitrary keys (the observability
+		// namespace also holds user-named contact-point secrets, ADR-0038), so only
+		// warn on an unknown key when the namespace does not opt into wildcards.
+		if !knownReservedSecrets[container]["*"] && !knownReservedSecrets[container][key] {
 			fmt.Fprintf(os.Stderr, "warning: %s/%s is not a reserved secret inforge consumes — check the namespace and KEY, or nothing will read this value\n", container, key)
 		}
 	} else {

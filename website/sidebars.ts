@@ -95,6 +95,7 @@ const sidebars: SidebarsConfig = {
         'configuration/environment-yaml',
         'configuration/variables-yaml',
         'configuration/regions-yaml',
+        'configuration/observability',
       ],
     },
     {
