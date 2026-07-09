@@ -113,23 +113,34 @@ routing tables), authored in `resources/<env>/observability/notifications.yaml`:
 
 ```yaml title="resources/prd/observability/notifications.yaml"
 contact_points:
-  pagerduty-high: { pagerduty: { key_secret: pagerduty_key, severity: critical } }
-  pagerduty-low:  { pagerduty: { key_secret: pagerduty_key, severity: warning } }
-  pd-billing:     { pagerduty: { key_secret: pd_billing_key } }
-  infra-email:    { email: { addresses: [infra@wardnet.io] } }
-  slack-alerts:   { webhook: { url: https://hooks.slack.com/… } }
+  oncall-critical: { oncall: { url_secret: oncall_url } }     # Grafana IRM / OnCall
+  oncall-billing:  { oncall: { url_secret: oncall_billing_url } }
+  infra-email:     { email: { addresses: [infra@wardnet.io] } }
+  slack-alerts:    { webhook: { url: https://hooks.slack.com/… } }
 
 profiles:
   prod:                          # the default team (variables.yaml default_profile: prod)
-    critical: { contact_point: pagerduty-high }
-    warning:  { contact_point: pagerduty-low }
+    critical: { contact_point: oncall-critical }
+    warning:  { contact_point: oncall-critical }
     info:     { contact_point: infra-email }
   billing:                       # a per-team profile
-    critical: { contact_point: pd-billing }
-    warning:  { contact_point: pd-billing }
+    critical: { contact_point: oncall-billing }
+    warning:  { contact_point: oncall-billing }
   staging:
     warning:  { muted: true }    # explicitly silence — inforge omits the alert
 ```
+
+Three integration types are supported:
+
+- **`oncall`** — a [Grafana IRM / OnCall](https://grafana.com/docs/grafana-cloud/alerting-and-irm/irm/)
+  integration. This is the recommended destination for paging: because the alert rules are
+  Grafana-managed and IRM lives in the same stack, the native OnCall integration carries alert
+  grouping and auto-resolve that a raw webhook can't. `url_secret` names the reserved secret holding
+  the OnCall integration's **inbound URL** (a capability credential — never inline it). You create the
+  integration, escalation chain, and on-call schedule in Grafana IRM; inforge only references the URL.
+- **`email`** — one or more addresses.
+- **`webhook`** — POSTs to any URL (Slack/Teams/Discord incoming webhooks, or a custom endpoint) —
+  the escape hatch for destinations that aren't IRM.
 
 Routing per alert: `profile` (or `default_profile`) → `profiles[profile][severity]` → the named
 contact point, applied on the rule itself (Grafana per-rule notification settings). There is **no**
@@ -138,8 +149,8 @@ org-level notification policy — each env owns only its own env-prefixed rules 
 - A profile **must** route every `(profile, severity)` an alert can resolve to — a critical alert
   can never be silently unrouted. Use `muted: true` to say "don't notify" explicitly; that route's
   alerts are omitted for the env.
-- `key_secret` names a [reserved secret](/cli/secret) under the observability namespace — e.g.
-  `inforge secret set prd observability pagerduty_key --reserved`. Several contact points may share
-  one key.
+- `url_secret` names a [reserved secret](/cli/secret) under the observability namespace — e.g.
+  `inforge secret set prd observability oncall_url --reserved`. Several contact points may share one
+  secret.
 - The `default_profile` must define at least `critical` and `warning`, because the built-in alerts
   use those severities. `inforge validate` enforces all of this.

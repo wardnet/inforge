@@ -60,18 +60,18 @@ func TestLoadNotifications(t *testing.T) {
 	dir := t.TempDir()
 	writeObs(t, dir, "notifications.yaml", `
 contact_points:
-  pd-high: { pagerduty: { key_secret: pagerduty_key, severity: critical } }
+  oncall-high: { oncall: { url_secret: oncall_url } }
   team-email: { email: { addresses: [ops@x.io] } }
 profiles:
   prod:
-    critical: { contact_point: pd-high }
+    critical: { contact_point: oncall-high }
     warning:  { muted: true }
 `)
 	got, err := LoadNotifications("prd", dir)
 	require.NoError(t, err)
-	require.Contains(t, got.ContactPoints, "pd-high")
-	assert.Equal(t, "pagerduty_key", got.ContactPoints["pd-high"].PagerDuty.KeySecret)
-	assert.Equal(t, "pd-high", got.Profiles["prod"]["critical"].ContactPoint)
+	require.Contains(t, got.ContactPoints, "oncall-high")
+	assert.Equal(t, "oncall_url", got.ContactPoints["oncall-high"].OnCall.URLSecret)
+	assert.Equal(t, "oncall-high", got.Profiles["prod"]["critical"].ContactPoint)
 	assert.True(t, got.Profiles["prod"]["warning"].Muted)
 }
 

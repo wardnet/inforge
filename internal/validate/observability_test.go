@@ -31,12 +31,12 @@ func obsCfg(profile string) types.ObservabilityConfig {
 
 const goodNotif = `
 contact_points:
-  pd-high: { pagerduty: { key_secret: pagerduty_key } }
-  pd-low:  { pagerduty: { key_secret: pagerduty_key } }
+  oncall-high: { oncall: { url_secret: oncall_url } }
+  oncall-low:  { oncall: { url_secret: oncall_url } }
 profiles:
   prod:
-    critical: { contact_point: pd-high }
-    warning:  { contact_point: pd-low }
+    critical: { contact_point: oncall-high }
+    warning:  { contact_point: oncall-low }
 `
 
 func TestCheckObservabilityValid(t *testing.T) {
@@ -52,10 +52,10 @@ func TestCheckObservabilityDefaultProfileMissingRoute(t *testing.T) {
 	// prod routes critical but not warning — built-ins need both.
 	writeNotif(t, dir, `
 contact_points:
-  pd-high: { pagerduty: { key_secret: pagerduty_key } }
+  oncall-high: { oncall: { url_secret: oncall_url } }
 profiles:
   prod:
-    critical: { contact_point: pd-high }
+    critical: { contact_point: oncall-high }
 `)
 	r := &reporter{}
 	checkObservability(r, dir, "prd", obsCfg("prod"))
@@ -74,7 +74,7 @@ func TestCheckObservabilityContactPointTwoIntegrations(t *testing.T) {
 	dir := t.TempDir()
 	writeNotif(t, dir, `
 contact_points:
-  bad: { pagerduty: { key_secret: k }, email: { addresses: [a@x.io] } }
+  bad: { oncall: { url_secret: k }, email: { addresses: [a@x.io] } }
 profiles:
   prod:
     critical: { contact_point: bad }
@@ -89,11 +89,11 @@ func TestCheckObservabilityProfileUnknownContactPoint(t *testing.T) {
 	dir := t.TempDir()
 	writeNotif(t, dir, `
 contact_points:
-  pd-high: { pagerduty: { key_secret: k } }
+  oncall-high: { oncall: { url_secret: k } }
 profiles:
   prod:
     critical: { contact_point: ghost }
-    warning:  { contact_point: pd-high }
+    warning:  { contact_point: oncall-high }
 `)
 	r := &reporter{}
 	checkObservability(r, dir, "prd", obsCfg("prod"))
@@ -104,11 +104,11 @@ func TestCheckObservabilityProfileRouteBothSet(t *testing.T) {
 	dir := t.TempDir()
 	writeNotif(t, dir, `
 contact_points:
-  pd-high: { pagerduty: { key_secret: k } }
+  oncall-high: { oncall: { url_secret: k } }
 profiles:
   prod:
-    critical: { contact_point: pd-high, muted: true }
-    warning:  { contact_point: pd-high }
+    critical: { contact_point: oncall-high, muted: true }
+    warning:  { contact_point: oncall-high }
 `)
 	r := &reporter{}
 	checkObservability(r, dir, "prd", obsCfg("prod"))
@@ -150,10 +150,10 @@ func TestCheckObservabilityMutedIsValid(t *testing.T) {
 	dir := t.TempDir()
 	writeNotif(t, dir, `
 contact_points:
-  pd-high: { pagerduty: { key_secret: k } }
+  oncall-high: { oncall: { url_secret: k } }
 profiles:
   prod:
-    critical: { contact_point: pd-high }
+    critical: { contact_point: oncall-high }
     warning:  { muted: true }
 `)
 	r := &reporter{}

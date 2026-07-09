@@ -10,9 +10,6 @@ import (
 	"github.com/wardnet/inforge/internal/types"
 )
 
-// pagerDutySeverities are the urgencies a PagerDuty integration may declare.
-var pagerDutySeverities = map[string]bool{"critical": true, "error": true, "warning": true, "info": true}
-
 // checkObservability validates the env's alert + notification authoring
 // credential-free (ADR-0038 slice 3): contact-point shapes, profile routing
 // completeness, custom-alert specs, and the cross-file default_profile. It reads
@@ -43,13 +40,10 @@ func checkObservability(r *reporter, dir, env string, obs types.ObservabilityCon
 	for _, name := range sortedKeys(notif.ContactPoints) {
 		cp := notif.ContactPoints[name]
 		set := 0
-		if cp.PagerDuty != nil {
+		if cp.OnCall != nil {
 			set++
-			if cp.PagerDuty.KeySecret == "" {
-				nerrs = append(nerrs, fmt.Sprintf("contact_points.%s.pagerduty: key_secret is required", name))
-			}
-			if s := cp.PagerDuty.Severity; s != "" && !pagerDutySeverities[s] {
-				nerrs = append(nerrs, fmt.Sprintf("contact_points.%s.pagerduty.severity %q: want critical|error|warning|info", name, s))
+			if cp.OnCall.URLSecret == "" {
+				nerrs = append(nerrs, fmt.Sprintf("contact_points.%s.oncall: url_secret is required", name))
 			}
 		}
 		if cp.Email != nil {
@@ -65,7 +59,7 @@ func checkObservability(r *reporter, dir, env string, obs types.ObservabilityCon
 			}
 		}
 		if set != 1 {
-			nerrs = append(nerrs, fmt.Sprintf("contact_points.%s: exactly one integration (pagerduty|email|webhook) must be set, found %d", name, set))
+			nerrs = append(nerrs, fmt.Sprintf("contact_points.%s: exactly one integration (oncall|email|webhook) must be set, found %d", name, set))
 		}
 	}
 

@@ -114,7 +114,7 @@ func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.Obse
 
 // realizeGrafanaAlerts creates this env's contact points and alert rule groups
 // (ADR-0038 slice 3). Contact points come from observability/notifications.yaml
-// (PagerDuty keys decrypted from the reserved observability namespace); rules are the
+// (OnCall URLs decrypted from the reserved observability namespace); rules are the
 // generated built-ins (opt-out, DB ones gated on a cluster existing) plus the env's
 // custom alerts. Each rule routes via its own NotificationSettings.ContactPoint —
 // resolved from the alert's profile + severity — so the org notification policy is
@@ -199,28 +199,23 @@ func realizeGrafanaAlerts(ctx *pulumi.Context, prov *grafanasdk.Provider, folder
 	return nil
 }
 
-// contactPointArgs builds the provider args for one contact point, decrypting a
-// PagerDuty integration key from the reserved observability namespace. A missing key
+// contactPointArgs builds the provider args for one contact point, decrypting an
+// OnCall integration URL from the reserved observability namespace. A missing URL
 // (with grafana_url set) is a hard misconfiguration outside preview.
 func contactPointArgs(name string, cp types.ContactPoint, dir, srcEnv string, dryRun bool) (*alerting.ContactPointArgs, error) {
 	args := &alerting.ContactPointArgs{}
 	switch {
-	case cp.PagerDuty != nil:
-		key, err := decryptReservedSecret(dir, srcEnv, grafana.ReservedNamespace, cp.PagerDuty.KeySecret, dryRun)
+	case cp.OnCall != nil:
+		url, err := decryptReservedSecret(dir, srcEnv, grafana.ReservedNamespace, cp.OnCall.URLSecret, dryRun)
 		if err != nil {
 			return nil, err
 		}
-		if key == "" && !dryRun {
-			return nil, fmt.Errorf("observability: contact point %q needs the reserved secret %s/%s — run `inforge secret set %s %s %s --reserved` and commit the store", name, grafana.ReservedNamespace, cp.PagerDuty.KeySecret, srcEnv, grafana.ReservedNamespace, cp.PagerDuty.KeySecret)
+		if url == "" && !dryRun {
+			return nil, fmt.Errorf("observability: contact point %q needs the reserved secret %s/%s — run `inforge secret set %s %s %s --reserved` and commit the store", name, grafana.ReservedNamespace, cp.OnCall.URLSecret, srcEnv, grafana.ReservedNamespace, cp.OnCall.URLSecret)
 		}
-		severity := cp.PagerDuty.Severity
-		if severity == "" {
-			severity = "critical"
-		}
-		args.Pagerduties = alerting.ContactPointPagerdutyArray{
-			alerting.ContactPointPagerdutyArgs{
-				IntegrationKey: pulumi.ToSecret(pulumi.String(key)).(pulumi.StringOutput),
-				Severity:       pulumi.String(severity),
+		args.Oncalls = alerting.ContactPointOncallArray{
+			alerting.ContactPointOncallArgs{
+				Url: pulumi.ToSecret(pulumi.String(url)).(pulumi.StringOutput),
 			},
 		}
 	case cp.Email != nil:
