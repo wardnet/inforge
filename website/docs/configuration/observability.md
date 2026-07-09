@@ -16,19 +16,26 @@ token); see [`variables.yaml` → observability](/configuration/variables-yaml#o
 ## Built-in dashboards
 
 inforge generates three dashboards from the metrics it owns. Every query is scoped to the environment
-by the `deployment_environment_name` label, and each dashboard has a template variable for the
-per-node / per-cluster / per-service drill-down.
+by the `deployment_environment_name` label, and each dashboard has template variables for the
+per-node / per-cluster / per-database / per-service drill-down.
 
 | Dashboard | Source metrics | Highlights |
 |---|---|---|
 | **Infrastructure** | host metrics (ADR-0031, `system_*`) | fleet CPU / memory / disk / network, per-node uptime and restarts |
-| **Database** | Postgres receiver metrics (ADR-0037, `postgresql_*`) | connections, transaction rate, DB size, checkpoints — per cluster |
+| **Database** | Postgres receiver metrics (ADR-0037, `postgresql_*`) | connections, transaction rate, DB size, checkpoints — fleet, per cluster, and per database |
 | **Service** | wardnet-cloud RED + domain metrics | request rate, 5xx error rate, and latency percentiles per service and route, plus the domain counters (DDNS networks provisioned, active tunnels, tenant tombstone sweeps) |
 
 The **Service** dashboard reads the RED histogram `http_server_request_duration_seconds_*` that every
 wardnet-cloud service emits, grouped by the `service_name` label Grafana Cloud promotes from the OTLP
 `service.name` resource attribute. Its "Per Service" section filters on a `Service` variable and
 breaks traffic down by `http_response_status_code` and `http_route`.
+
+The **Database** metrics carry `db_cluster_name`, `postgresql_database_name`, and `region` as queryable
+series labels (not just on `target_info`): the host collector's Postgres pipeline promotes those
+resource attributes to datapoint attributes so per-cluster, per-database, and per-region drill-down
+works in queries and custom dashboards. The built-in Database dashboard uses them directly — a
+`Cluster` variable selects clusters (`db_cluster_name`) and a chained `Database` variable narrows to
+databases within them (`postgresql_database_name`), feeding a "Per Cluster" and a "Per Database" section.
 
 ## Custom dashboards
 

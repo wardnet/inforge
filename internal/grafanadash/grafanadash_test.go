@@ -40,9 +40,15 @@ func TestDatabaseRenders(t *testing.T) {
 	assert.Equal(t, "inforge-stg-database", m["uid"])
 	assert.Equal(t, "Database Monitoring", m["title"])
 	assert.Contains(t, out, `deployment_environment_name=\"stg\"`)
-	for _, want := range []string{"Cluster Overview", "Per Cluster", "postgresql_backends", "postgresql_commits_total", `"label":"Cluster"`} {
+	for _, want := range []string{"Fleet Overview", "Per Cluster", "Per Database", "postgresql_backends", "postgresql_commits_total", `"label":"Cluster"`} {
 		assert.Contains(t, out, want)
 	}
+	// The drill-down groups by the slice-4 promoted labels, not the host instance,
+	// and offers a Database variable chained to the selected cluster.
+	for _, want := range []string{"db_cluster_name", "postgresql_database_name", `"label":"Database"`, `db_cluster_name=~\"$cluster\"`} {
+		assert.Contains(t, out, want)
+	}
+	assert.NotContains(t, out, `instance=~\"$instance\"`)
 }
 
 func TestEnvIsolation(t *testing.T) {
