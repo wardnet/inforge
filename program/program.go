@@ -278,7 +278,8 @@ func Run(ctx *pulumi.Context) error {
 	// Env-level Grafana dashboards (ADR-0038): when grafana_url is configured, this env's
 	// built-in dashboards are pushed via the pulumiverse/grafana provider. Org-global, so
 	// realized ONCE here (not per scope) and env-prefixed. A no-op when grafana_url is empty.
-	if err := realizeGrafana(ctx, dir, srcEnv, env, vars.Observability, ctx.DryRun()); err != nil {
+	hasDatabase := len(res.DatabaseCluster) > 0 || len(globalRes.DatabaseCluster) > 0
+	if err := realizeGrafana(ctx, dir, srcEnv, env, vars.Observability, hasDatabase, ctx.DryRun()); err != nil {
 		return err
 	}
 

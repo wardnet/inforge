@@ -750,6 +750,97 @@ type EnvironmentVariables struct {
 type ObservabilityConfig struct {
 	OTLPEndpoint string `yaml:"otlp_endpoint"`
 	GrafanaURL   string `yaml:"grafana_url"`
+
+	// BuiltInDashboards / BuiltInAlerts opt this env in or out of the generated
+	// dashboards (ADR-0038 slice 2) and alert rules (slice 3). Both default to true
+	// (a *bool distinguishes "unset" from an explicit false); use the accessors.
+	BuiltInDashboards *bool `yaml:"built_in_dashboards"`
+	BuiltInAlerts     *bool `yaml:"built_in_alerts"`
+
+	// DefaultProfile is the notification profile (defined in observability/
+	// notifications.yaml) that built-in alerts and any alert omitting `profile:`
+	// route through. Required once alerts are managed (built-in or custom).
+	DefaultProfile string `yaml:"default_profile"`
+}
+
+// DashboardsEnabled reports whether this env's built-in dashboards are managed
+// (default true; opt out with `built_in_dashboards: false`).
+func (o ObservabilityConfig) DashboardsEnabled() bool {
+	return o.BuiltInDashboards == nil || *o.BuiltInDashboards
+}
+
+// AlertsEnabled reports whether this env's built-in alert rules are managed
+// (default true; opt out with `built_in_alerts: false`).
+func (o ObservabilityConfig) AlertsEnabled() bool {
+	return o.BuiltInAlerts == nil || *o.BuiltInAlerts
+}
+
+// NotificationsSpec is the parsed observability/notifications.yaml (ADR-0038
+// slice 3): the env's reusable contact points and the profiles (per-team routing
+// tables) that map an alert's severity to one of them.
+type NotificationsSpec struct {
+	ContactPoints map[string]ContactPoint `yaml:"contact_points"`
+	Profiles      map[string]Profile      `yaml:"profiles"`
+}
+
+// ContactPoint is one named notification destination. Exactly one integration is
+// set. Secret-bearing integrations (PagerDuty) reference a reserved-secret key
+// under the observability namespace rather than inlining the secret.
+type ContactPoint struct {
+	PagerDuty *PagerDutyIntegration `yaml:"pagerduty,omitempty"`
+	Email     *EmailIntegration     `yaml:"email,omitempty"`
+	Webhook   *WebhookIntegration   `yaml:"webhook,omitempty"`
+}
+
+// PagerDutyIntegration routes to PagerDuty. KeySecret names the reserved-secret
+// key (observability/<KeySecret>) holding the integration/routing key; Severity is
+// the PagerDuty urgency (critical|error|warning|info), defaulting to critical.
+type PagerDutyIntegration struct {
+	KeySecret string `yaml:"key_secret"`
+	Severity  string `yaml:"severity,omitempty"`
+}
+
+// EmailIntegration routes to one or more email addresses.
+type EmailIntegration struct {
+	Addresses []string `yaml:"addresses"`
+}
+
+// WebhookIntegration POSTs to a URL (e.g. a Slack incoming webhook).
+type WebhookIntegration struct {
+	URL string `yaml:"url"`
+}
+
+// Profile is a routing table: severity (critical|warning|info) -> where its alerts
+// go. Every severity an alert can resolve to must be present.
+type Profile map[string]ProfileRoute
+
+// ProfileRoute is one severity's destination: exactly one of ContactPoint (a name
+// in the same file's contact_points) or Muted (suppress — inforge omits the alert).
+type ProfileRoute struct {
+	ContactPoint string `yaml:"contact_point,omitempty"`
+	Muted        bool   `yaml:"muted,omitempty"`
+}
+
+// AlertsSpec is the parsed observability/alerts.yaml (ADR-0038 slice 3): the env's
+// custom alert rules, alongside the generated built-ins.
+type AlertsSpec struct {
+	Alerts []AlertSpec `yaml:"alerts"`
+}
+
+// AlertSpec is the simplified alert authoring shape (ADR-0038). expr is any PromQL
+// returning an instant/range vector; condition is a threshold ("> 90", "< 0.01",
+// operators > < >= <=) applied to each series' reduced value. Profile empty ⇒ the
+// env's default_profile. Summary/Labels flow to the notification (Summary may use
+// {{ $labels.x }} / {{ $value }}).
+type AlertSpec struct {
+	Name      string            `yaml:"name"`
+	Expr      string            `yaml:"expr"`
+	Condition string            `yaml:"condition"`
+	For       string            `yaml:"for,omitempty"`
+	Severity  string            `yaml:"severity"`
+	Profile   string            `yaml:"profile,omitempty"`
+	Summary   string            `yaml:"summary,omitempty"`
+	Labels    map[string]string `yaml:"labels,omitempty"`
 }
 
 // Resources is the full set of resource specs for one region.

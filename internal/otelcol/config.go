@@ -155,11 +155,34 @@ func Render(endpoint string, attrs Attributes, pg []PostgresTarget) (string, err
 		},
 	}
 
+	// A shared transform processor promotes the cluster/database/region identity from
+	// RESOURCE attributes to DATAPOINT attributes on the DB metrics (ADR-0038 slice 4).
+	// In the OTel→Prometheus translation a resource attribute lands only on target_info,
+	// not on the metric series — so `sum by (db_cluster_name)` and a per-database filter
+	// need these as datapoint attributes to become real series labels. db.cluster.name
+	// and region are stamped by the resource processor below; postgresql.database.name is
+	// stamped per-database by the receiver. `set` with a missing source is a no-op, so a
+	// metric that carries no database attribute is left untouched.
+	if len(pg) > 0 {
+		processors["transform/db-labels"] = map[string]any{
+			"metric_statements": []map[string]any{{
+				"context": "datapoint",
+				"statements": []string{
+					`set(attributes["db.cluster.name"], resource.attributes["db.cluster.name"])`,
+					`set(attributes["postgresql.database.name"], resource.attributes["postgresql.database.name"])`,
+					`set(attributes["region"], resource.attributes["region"])`,
+				},
+			}},
+		}
+	}
+
 	// One postgresql receiver + metrics pipeline per cluster. Each carries its own
 	// resource processor: the DB job name, the per-node instance id, and the cluster
 	// name — so metrics filter global (job) → per-cluster (db.cluster.name) → per-node
-	// (service.instance.id). Per-database drill-down is free (the receiver stamps
-	// postgresql.database.name itself).
+	// (service.instance.id). The shared transform/db-labels processor then promotes the
+	// cluster/database/region attributes to series labels for per-cluster/-database
+	// drill-down; it runs after the resource processor (which sets the resource attrs it
+	// reads) and before batch.
 	for _, t := range pg {
 		if err := t.validate(); err != nil {
 			return "", err
@@ -184,7 +207,7 @@ func Render(endpoint string, attrs Attributes, pg []PostgresTarget) (string, err
 		processors[procName] = map[string]any{"attributes": dbResourceAttrs}
 		pipelines[pipeName] = map[string]any{
 			"receivers":  []string{recName},
-			"processors": []string{procName, "batch"},
+			"processors": []string{procName, "transform/db-labels", "batch"},
 			"exporters":  []string{"otlphttp"},
 		}
 	}
