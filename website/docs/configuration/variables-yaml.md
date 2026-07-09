@@ -52,11 +52,20 @@ are [reserved secrets](/cli/secret) in `secrets.enc.yaml`, never committed here.
   (`inforge secret set <env> observability otlp_auth --reserved`). Empty ⇒ no collector.
 - `grafana_url` — the base URL of the Grafana instance inforge pushes the built-in
   dashboards (and, in later slices, alerts) to (ADR-0038). When set, `inforge deploy`
-  realizes this env's dashboards under an `inforge / <env>` folder, prefixed by env so
-  multiple environments can share one Grafana org. Its service-account token is the
+  realizes this env's [dashboards](/configuration/observability) under an
+  `inforge / <env>` folder, prefixed by env so multiple environments can share one
+  Grafana org. Its service-account token is the
   reserved secret `observability/grafana_token`
   (`inforge secret set <env> observability grafana_token --reserved`). A `grafana_url`
   set with no token fails the deploy. Empty ⇒ no dashboards are managed.
+- `built_in_dashboards` — whether inforge manages the generated Infrastructure/Database/
+  Service [dashboards](/configuration/observability) for this env. Default `true`; set
+  `false` to opt out (custom dashboards are unaffected).
+- `built_in_alerts` — whether inforge manages the generated [alert rules](/configuration/observability#alerts)
+  for this env. Default `true`; set `false` to opt out (custom alerts are unaffected).
+- `default_profile` — the notification [profile](/configuration/observability#notifications)
+  (from `observability/notifications.yaml`) that built-in alerts and any alert omitting
+  `profile:` route through. Required once alerts are managed.
 
 ## Example
 
@@ -68,4 +77,7 @@ ssh:
 observability:
   otlp_endpoint: https://otlp-gateway-prod-eu-west-2.grafana.net/otlp
   grafana_url: https://wardnet.grafana.net
+  default_profile: prod          # notification profile for built-in + un-profiled alerts
+  # built_in_dashboards: false   # opt out of the generated dashboards
+  # built_in_alerts: false       # opt out of the generated alert rules
 ```

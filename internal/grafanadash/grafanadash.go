@@ -123,9 +123,18 @@ func ts(title string, g map[string]any, tgts []map[string]any, unit string) map[
 	}
 }
 
-// queryVar is a label_values template variable (multi-select, defaults to All).
+// queryVar is a label_values template variable (multi-select, defaults to All)
+// whose variable name matches the Prometheus label it enumerates.
 func queryVar(name, label, metric, matcher string) map[string]any {
-	q := fmt.Sprintf("label_values(%s{%s}, %s)", metric, matcher, name)
+	return queryVarOn(name, label, name, metric, matcher)
+}
+
+// queryVarOn is queryVar for the case where the variable name differs from the
+// Prometheus label it enumerates (e.g. a var named "cluster" extracting the
+// promoted "db_cluster_name" label). matcher may reference an earlier variable
+// (e.g. db_cluster_name=~"$cluster") to chain one selector to another.
+func queryVarOn(name, label, promLabel, metric, matcher string) map[string]any {
+	q := fmt.Sprintf("label_values(%s{%s}, %s)", metric, matcher, promLabel)
 	return map[string]any{
 		"name": name, "type": "query", "label": label, "datasource": ds(),
 		"query": map[string]any{"query": q, "refId": name + "Var"}, "definition": q,
