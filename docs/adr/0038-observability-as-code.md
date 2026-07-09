@@ -57,7 +57,7 @@ as every other resource.
 - **Notification routing is per-env, via per-rule notification settings — no org-level
   resources.** *(Revised in slice 3, superseding the org-decoupled-`sync` design this ADR
   originally described.)* An env authors first-class **contact points** (reusable named
-  destinations — PagerDuty/email/webhook, secrets as reserved secrets) and **profiles**
+  destinations — Grafana IRM/OnCall, email, or webhook; secrets as reserved secrets) and **profiles**
   (per-team routing tables mapping `severity → contact point` | `muted: true`) in
   `resources/<env>/observability/notifications.yaml`. Each alert carries a `severity` and
   a `profile` (the env sets a `default_profile`, overridable per alert); the routing is
@@ -72,7 +72,7 @@ as every other resource.
 
 - **Config follows the reserved-secret precedent (ADR-0031).**
   `observability.grafana_url` is a non-secret field in `variables.yaml`; the Grafana
-  service-account token and contact-point secrets (the PagerDuty integration key) are
+  service-account token and contact-point secrets (the Grafana OnCall integration URL) are
   **reserved secrets** (`observability/grafana_token`, …) in `secrets.enc.yaml`, written
   `--reserved` and read via `decryptReservedSecret` — never a service-container secret
   (`.agents/rules/reserved-secrets-live-outside-container-namespace.md`).

@@ -28,7 +28,7 @@ import (
 var knownReservedSecrets = map[string]map[string]bool{
 	// The reserved "observability" namespace holds the OTLP Basic-auth credential
 	// (ADR-0031), the Grafana service-account token, and user-named contact-point
-	// secrets like a PagerDuty integration key (ADR-0038). The "*" wildcard lets the
+	// secrets like a Grafana OnCall integration URL (ADR-0038). The "*" wildcard lets the
 	// latter use arbitrary keys without a spurious "unknown reserved secret" warning.
 	otelcol.AuthSecretNamespace: {otelcol.AuthSecretKey: true, grafana.TokenKey: true, "*": true},
 	dbbackup.AuthSecretNamespace: {

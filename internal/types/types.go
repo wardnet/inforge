@@ -784,20 +784,23 @@ type NotificationsSpec struct {
 }
 
 // ContactPoint is one named notification destination. Exactly one integration is
-// set. Secret-bearing integrations (PagerDuty) reference a reserved-secret key
-// under the observability namespace rather than inlining the secret.
+// set. Secret-bearing integrations (OnCall) reference a reserved-secret key under
+// the observability namespace rather than inlining the secret.
 type ContactPoint struct {
-	PagerDuty *PagerDutyIntegration `yaml:"pagerduty,omitempty"`
-	Email     *EmailIntegration     `yaml:"email,omitempty"`
-	Webhook   *WebhookIntegration   `yaml:"webhook,omitempty"`
+	OnCall  *OnCallIntegration  `yaml:"oncall,omitempty"`
+	Email   *EmailIntegration   `yaml:"email,omitempty"`
+	Webhook *WebhookIntegration `yaml:"webhook,omitempty"`
 }
 
-// PagerDutyIntegration routes to PagerDuty. KeySecret names the reserved-secret
-// key (observability/<KeySecret>) holding the integration/routing key; Severity is
-// the PagerDuty urgency (critical|error|warning|info), defaulting to critical.
-type PagerDutyIntegration struct {
-	KeySecret string `yaml:"key_secret"`
-	Severity  string `yaml:"severity,omitempty"`
+// OnCallIntegration routes to a Grafana IRM / OnCall integration — the idiomatic
+// path when the alert rules are Grafana-managed and IRM lives in the same stack
+// (native OnCall payloads: alert grouping + auto-resolve, unlike a raw webhook).
+// URLSecret names the reserved-secret key (observability/<URLSecret>) holding the
+// integration's inbound URL, which is a capability credential and so is never
+// inlined in the manifest. Escalation chains and on-call schedules are managed in
+// Grafana IRM; inforge only references the integration URL.
+type OnCallIntegration struct {
+	URLSecret string `yaml:"url_secret"`
 }
 
 // EmailIntegration routes to one or more email addresses.
