@@ -87,6 +87,38 @@ func TestBuildDeployDescriptorSkipsUnresolvedIngress(t *testing.T) {
 	assert.Empty(t, desc.Targets)
 }
 
+// TestBuildDeployDescriptorGlobalApp asserts a global app contributes exactly
+// one region-less target, distinct from any regional app of the same shape —
+// the regression this guards is a global app silently missing from
+// appDeployDescriptor entirely.
+func TestBuildDeployDescriptorGlobalApp(t *testing.T) {
+	regional := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "edge", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
+		App:     []types.AppSpec{{Name: "dashboard", Ingress: "web", Subdomain: "my"}},
+	}
+	global := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "core", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "admin-web", Host: "core"}},
+		App:     []types.AppSpec{{Name: "admin", Ingress: "admin-web", Subdomain: "admin"}},
+	}
+	table := regions.Table{"us-east-1": {Slug: "use1"}}
+
+	desc, err := BuildDeployDescriptor("prd", "wardnet.network", regional, global, table, "")
+	require.NoError(t, err)
+	require.Len(t, desc.Targets, 2)
+
+	byName := map[string]DeployTarget{}
+	for _, tgt := range desc.Targets {
+		byName[tgt.App] = tgt
+	}
+	admin := byName["admin"]
+	assert.Equal(t, "core.vm.prd.wardnet.network", admin.IngressHostDNS, "global app's ingress host DNS carries no region segment")
+	assert.Equal(t, "admin.wardnet.network", admin.FQDN, "global app FQDN carries no region segment")
+	assert.Equal(t, "global", admin.Scope, "a global target's Scope is pki.ScopeGlobal")
+	assert.Equal(t, "us-east-1", byName["dashboard"].Scope, "a regional target's Scope is its abstract region name")
+}
+
 // TestPaths pins the on-host path scheme apps and the release path agree on.
 func TestPaths(t *testing.T) {
 	assert.Equal(t, "/srv/wardnet/app/my", Folder("my"))

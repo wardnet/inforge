@@ -2,7 +2,6 @@ package meshplan
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/pki"
@@ -43,12 +42,6 @@ type DeployDescriptor struct {
 func BuildDeployDescriptor(env, baseDomain string, regional, global types.Resources, table regions.Table) (DeployDescriptor, error) {
 	desc := DeployDescriptor{Environment: env}
 
-	regionNames := make([]string, 0, len(table))
-	for region := range table {
-		regionNames = append(regionNames, region)
-	}
-	sort.Strings(regionNames)
-
 	appendScope := func(res types.Resources, scope, slug string) {
 		canonical := naming.CanonicalComputeKeys(res.Compute)
 		deployUsers := naming.DeployUsersByHost(res.Compute)
@@ -73,7 +66,7 @@ func BuildDeployDescriptor(env, baseDomain string, regional, global types.Resour
 		}
 	}
 
-	for _, region := range regionNames {
+	for _, region := range table.SortedNames() {
 		slug, err := table.Slug(region)
 		if err != nil {
 			return DeployDescriptor{}, fmt.Errorf("region %q: %w", region, err)

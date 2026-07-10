@@ -199,6 +199,45 @@ func TestBuildDeployDescriptorSSHUser(t *testing.T) {
 	assert.Equal(t, "deploy", byName["worker"].SSHUser, "falls back to deploy when the host declares none")
 }
 
+// TestBuildDeployDescriptorGlobalService asserts a global service contributes
+// exactly one region-less target (no region segment in its host DNS),
+// regardless of how many regions the table lists — the regression this guards
+// is a global service silently missing from deployDescriptor entirely.
+func TestBuildDeployDescriptorGlobalService(t *testing.T) {
+	regional := types.Resources{
+		Service: []types.ServiceSpec{
+			{Name: "api", Host: "bridge-01", Type: "raw"},
+		},
+	}
+	global := types.Resources{
+		Service: []types.ServiceSpec{
+			{Name: "tenants", Host: "core-01", Type: "raw"},
+		},
+	}
+	table := regions.Table{
+		"us-east-1":    {Slug: "use1"},
+		"eu-central-1": {Slug: "euc1"},
+	}
+
+	desc, err := BuildDeployDescriptor("prd", "example.com", regional, global, table)
+	require.NoError(t, err)
+	// One regional service x two regions, plus one global service once.
+	require.Len(t, desc.Targets, 3)
+
+	byName := map[string][]DeployTarget{}
+	for _, tgt := range desc.Targets {
+		byName[tgt.Service] = append(byName[tgt.Service], tgt)
+	}
+	require.Len(t, byName["api"], 2)
+	require.Len(t, byName["tenants"], 1)
+	assert.Equal(t, "core.vm.prd.example.com", byName["tenants"][0].HostDNS, "global service host DNS carries no region segment")
+	assert.Equal(t, "tenants", byName["tenants"][0].Service)
+	assert.Equal(t, "global", byName["tenants"][0].Scope, "a global target's Scope is pki.ScopeGlobal")
+	for _, tgt := range byName["api"] {
+		assert.Contains(t, []string{"us-east-1", "eu-central-1"}, tgt.Scope, "a regional target's Scope is its abstract region name")
+	}
+}
+
 func TestDeployDescriptorMarshal(t *testing.T) {
 	desc := DeployDescriptor{
 		Environment: "prd",

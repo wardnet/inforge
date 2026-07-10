@@ -25,6 +25,19 @@ func TestDefaultTableValidate(t *testing.T) {
 	assert.Error(t, tbl.Validate("eu-central-9"))
 }
 
+func TestTableSortedNames(t *testing.T) {
+	tbl := Table{
+		"us-east-1":    {Slug: "use1"},
+		"ap-east-1":    {Slug: "ape1"},
+		"eu-central-1": {Slug: "euc1"},
+	}
+	assert.Equal(t, []string{"ap-east-1", "eu-central-1", "us-east-1"}, tbl.SortedNames())
+}
+
+func TestTableSortedNamesEmpty(t *testing.T) {
+	assert.Empty(t, Table{}.SortedNames())
+}
+
 func TestDefaultTableIsACopy(t *testing.T) {
 	a := DefaultTable()
 	a["us-east-1"] = AbstractRegion{Slug: "mutated"}

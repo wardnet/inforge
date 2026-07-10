@@ -7,10 +7,10 @@ package service
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/wardnet/inforge/internal/hostpaths"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/types"
 	"gopkg.in/yaml.v3"
@@ -145,6 +145,12 @@ type DeployTarget struct {
 	// literally named the same. Falls back to "deploy" when the host declares no
 	// deploy_user.
 	SSHUser string `yaml:"ssh_user" json:"ssh_user"`
+	// Scope is the service's mesh scope: its region name, or pki.ScopeGlobal for
+	// a global service. Mirrors meshplan.DeployTarget.Scope; a consumer resolving
+	// targets by bare service name can use it to detect a same-named service
+	// declared in both the regional and global resource sets (which validation
+	// rejects, but this is a cheap belt-and-suspenders signal).
+	Scope string `yaml:"scope" json:"scope"`
 }
 
 // defaultSSHUser is the connect-as account used when a service's host declares
@@ -159,65 +165,57 @@ type DeployDescriptor struct {
 }
 
 // BuildDeployDescriptor derives the deploy descriptor for an environment from
-// its regional resource set, instantiated into every region in the table, plus
-// its global resource set, instantiated once region-less. Each regional service
+// the regional resource set (instantiated into every region in the table) plus
+// the region-less global resource set (instantiated once, under pki.ScopeGlobal
+// naming — mirrors meshplan.BuildDeployDescriptor). Each regional service
 // expands into one DeployTarget per region — the region slug makes each
 // target's host DNS distinct — so a single-region environment is unchanged
-// while a multi-region one fans a service out across every region's host. A
-// global service expands into exactly one DeployTarget, with no region slug.
-// Regions are iterated in sorted order so the targets are stable across runs. A
-// service's host DNS is the domain of the DNS record pointing at its host compute
+// while a multi-region one fans a service out across every region's host; each
+// global service contributes exactly one region-less target. Regions are
+// iterated in sorted order so the targets are stable across runs. A service's
+// host DNS is the domain of the DNS record pointing at its host compute
 // instance; if the host has no DNS record, the compute name is used as the
 // subdomain.
-func BuildDeployDescriptor(env, baseDomain string, res, globalRes types.Resources, table regions.Table) (DeployDescriptor, error) {
+func BuildDeployDescriptor(env, baseDomain string, regional, global types.Resources, table regions.Table) (DeployDescriptor, error) {
 	desc := DeployDescriptor{Environment: env}
-	regionNames := make([]string, 0, len(table))
-	for region := range table {
-		regionNames = append(regionNames, region)
-	}
-	sort.Strings(regionNames)
 
-	// appendScope mirrors internal/meshplan.BuildDeployDescriptor and
-	// program.buildDBDeployDescriptor's identical regional+global closure
-	// shape: derive canonical/deployUsers fresh per scope (regional or
-	// global) and append one DeployTarget per service, closing over desc/
-	// env/baseDomain instead of threading them through a free function.
-	appendScope := func(scopeRes types.Resources, slug string) {
-		canonical := naming.CanonicalComputeKeys(scopeRes.Compute)
-		deployUsers := naming.DeployUsersByHost(scopeRes.Compute)
-		for _, svc := range scopeRes.Service {
+	// canonical/deployUsers are computed once per resource set (not once per
+	// region) — each is a pure derivation of that set's Compute list, so
+	// recomputing it inside the per-region loop below would just rebuild the
+	// same maps once per region for no benefit.
+	appendScope := func(res types.Resources, canonical map[string]string, deployUsers map[string]string, slug, scope string) {
+		for _, svc := range res.Service {
+			hostDNS := hostDNS(svc.Host, env, baseDomain, slug)
 			sshUser := deployUsers[canonical[svc.Host]]
 			if sshUser == "" {
 				sshUser = defaultSSHUser
 			}
 			desc.Targets = append(desc.Targets, DeployTarget{
 				Service: svc.Name,
-				HostDNS: hostDNS(svc.Host, env, baseDomain, slug),
+				HostDNS: hostDNS,
 				Folder:  Folder(svc.Name),
 				Unit:    UnitName(svc.Name),
 				User:    svc.User,
 				SSHUser: sshUser,
+				Scope:   scope,
 			})
 		}
 	}
 
-	for _, region := range regionNames {
+	regionalCanonical := naming.CanonicalComputeKeys(regional.Compute)
+	regionalDeployUsers := naming.DeployUsersByHost(regional.Compute)
+	for _, region := range table.SortedNames() {
 		slug, err := table.Slug(region)
 		if err != nil {
 			return DeployDescriptor{}, fmt.Errorf("region %q: %w", region, err)
 		}
-		appendScope(res, slug)
+		appendScope(regional, regionalCanonical, regionalDeployUsers, slug, region)
 	}
-
-	// The global slice is instantiated once, region-less (slug ""), mirroring
-	// program.go's global scope (see its "global before regions" comment) — a
-	// global service's host DNS is env-scoped only, with no <slug> segment (see
-	// naming.HostFQDN/RecordFQDN). Without this, a container: global service
-	// (e.g. tenants) never lands in the descriptor at all, even though the full
-	// `inforge deploy` apply realizes it — only the separate `inforge releases
-	// push`/`releases deploy` path (which resolves a service purely from this
-	// descriptor) was affected.
-	appendScope(globalRes, "")
+	// The global slice is region-less: empty slug drops the region segment from
+	// the host FQDN, matching the global host's DNS record.
+	globalCanonical := naming.CanonicalComputeKeys(global.Compute)
+	globalDeployUsers := naming.DeployUsersByHost(global.Compute)
+	appendScope(global, globalCanonical, globalDeployUsers, "", pki.ScopeGlobal)
 
 	return desc, nil
 }

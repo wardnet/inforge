@@ -284,7 +284,11 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
   swaps; `BundleDir` = `<folder>/<sha>`; `SwapCurrentScript`/`GCReleasesScript` are the atomic-swap +
   GC contract, see rule `.agents/rules/use-atomic-current-swap-for-app-releases.md`) + the **app deploy
   descriptor** (`app.BuildDeployDescriptor` → exported as the `appDeployDescriptor` stack output:
-  `{app, ingress_host_dns, deploy_path, fqdn, spa, ssh_user}` per region), the contract slice D's
+  `{app, ingress_host_dns, deploy_path, fqdn, spa, ssh_user, scope}` — one target per region for a
+  regional app, plus one region-less target per global app (`scope` = the region name or
+  `pki.ScopeGlobal`, mirroring `service.DeployTarget`/`meshplan.DeployTarget`); `inforge validate`
+  rejects a service/app name declared in both scopes (`checkCrossScopeNames`), since the descriptor
+  resolves targets by bare name with no scope argument), the contract slice D's
   `inforge release app` resolves an app's ingress host/path/FQDN from.
 - **Slice D realization (`cmd/inforge/release.go`):** `inforge release app <env> <name>` delivers an
   app bundle to its ingress host and atomically swaps the served root. The **delivery-adapter seam**

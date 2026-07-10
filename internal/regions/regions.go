@@ -7,7 +7,10 @@
 // display names and the <slug> segment of derived DNS names.
 package regions
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // AbstractRegion is one entry in the region table: its slug, its DNS authority,
 // plus the per-region provider config. Providers maps a provider name (e.g.
@@ -78,4 +81,17 @@ func (t Table) Slug(abstractRegion string) (string, error) {
 func (t Table) Validate(abstractRegion string) error {
 	_, err := t.Slug(abstractRegion)
 	return err
+}
+
+// SortedNames returns the table's abstract region names in sorted order — the
+// single home for the map-then-sort dance every per-region deploy-descriptor
+// builder (service, app, meshplan, db) otherwise has to hand-roll, so a region
+// iterates in a stable, deterministic order across every consumer.
+func (t Table) SortedNames() []string {
+	names := make([]string, 0, len(t))
+	for region := range t {
+		names = append(names, region)
+	}
+	sort.Strings(names)
+	return names
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/deployment"
 	"github.com/wardnet/inforge/internal/loader"
+	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/release"
 	"github.com/wardnet/inforge/internal/service"
 )
@@ -416,7 +417,33 @@ func resolveDeployTargets(ctx context.Context, projCfg projectConfig, env, platf
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("service %q not found in deployDescriptor for env %q — is it defined as a ServiceSpec in the infra resources?", svc, env)
 	}
+	// A legitimate match is either N regional targets (one per region, distinct
+	// region Scopes) or exactly one global target (Scope == pki.ScopeGlobal) —
+	// never both. `inforge validate` rejects a service name declared in both
+	// scopes (checkCrossScopeNames), so this should be unreachable; it's a
+	// defensive check against deploying to two unrelated hosts under one name
+	// should that guard ever be bypassed (e.g. a stale stack from before the
+	// validation existed).
+	if hasMixedScope(targets, func(t service.DeployTarget) string { return t.Scope }, pki.ScopeGlobal) {
+		return nil, fmt.Errorf("service %q matches both a global and a regional target in deployDescriptor for env %q — this is a service-name collision across scopes; rename one of the two ServiceSpecs (run `inforge validate` to locate them)", svc, env)
+	}
 	return targets, nil
+}
+
+// hasMixedScope reports whether targets contains both a globalScope entry and
+// a non-global one — the signature of a same-named service/app declared in
+// both the regional and global resource sets. Shared by the service and app
+// deploy-target resolvers (resolveDeployTargets / resolveAppDeployTargets).
+func hasMixedScope[T any](targets []T, scopeOf func(T) string, globalScope string) bool {
+	hasGlobal, hasRegional := false, false
+	for _, t := range targets {
+		if scopeOf(t) == globalScope {
+			hasGlobal = true
+		} else {
+			hasRegional = true
+		}
+	}
+	return hasGlobal && hasRegional
 }
 
 // mintReleasedServiceLeaf mints a fresh leaf for the released service and
