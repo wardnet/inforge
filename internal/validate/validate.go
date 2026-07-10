@@ -93,7 +93,7 @@ func readFolders[T any](dir string) ([]fileOf[T], []string, error) {
 		}
 		folder := filepath.Join(dir, e.Name())
 		manifest := filepath.Join(folder, "manifest.yaml")
-		b, err := os.ReadFile(manifest)
+		b, err := os.ReadFile(manifest) // #nosec G304 -- dir is the operator-supplied --dir CLI flag; e.Name() is a directory entry from that same trusted tree
 		f := fileOf[T]{path: manifest}
 		if os.IsNotExist(err) {
 			f.parseErr = fmt.Errorf("resource folder %q has no manifest.yaml", folder)

@@ -435,7 +435,7 @@ func sortDBTargets(targets []dbbackup.DeployTarget) {
 // file, so the on-the-fly gzip matches the backup format; nothing is buffered to
 // disk or fully into memory.
 func streamGzippedFile(ctx context.Context, keyPath, account, remotePath, localPath string) error {
-	f, err := os.Open(localPath)
+	f, err := os.Open(localPath) // #nosec G304 -- localPath is the operator-supplied --from-dump CLI path, already validated with os.Stat before use
 	if err != nil {
 		return err
 	}

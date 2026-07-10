@@ -51,7 +51,7 @@ func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha st
 		if payloadFile != "" {
 			fmt.Printf("uploading to %s...\n", t.host)
 			scpArgs := append(append([]string{}, sshArgs...), payloadFile, account+":"+remotePayloadPath)
-			if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil {
+			if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil { // #nosec G204 -- scp binary hardcoded; account/host come from the deploy descriptor's resolved targets and remotePayloadPath is a hardcoded constant
 				return fmt.Errorf("upload payload to %s: %w\n%s", t.host, err, out)
 			}
 		}
@@ -61,7 +61,7 @@ func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha st
 			fmt.Printf("applying %s on %s...\n", sha, t.host)
 		}
 		sshRunArgs := append(append([]string{}, sshArgs...), account, t.applyScript)
-		if out, err := exec.CommandContext(ctx, "ssh", sshRunArgs...).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "ssh", sshRunArgs...).CombinedOutput(); err != nil { // #nosec G204 -- ssh binary hardcoded; applyScript is built internally by serviceApplyScript/appApplyScript from quoted config values, and account is from the resolved deploy target
 			return fmt.Errorf("remote deploy to %s: %w\n%s", t.host, err, out)
 		}
 		if err := store.SetDeployment(ctx, slug, env, t.host, sha, time.Now()); err != nil {
@@ -321,7 +321,7 @@ func pushAppBundle(ctx context.Context, store *release.Store, slug, sha, bundleD
 	}
 	defer cleanup()
 
-	f, err := os.Open(payload)
+	f, err := os.Open(payload) // #nosec G304 -- payload is an internally generated os.CreateTemp() name
 	if err != nil {
 		return fmt.Errorf("open payload: %w", err)
 	}

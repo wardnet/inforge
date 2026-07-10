@@ -82,7 +82,7 @@ func sshRestart(ctx context.Context, target service.DeployTarget, sshKeyPath str
 	}
 	account := fmt.Sprintf("%s@%s", sshUser, target.HostDNS)
 	sshArgs := []string{"-i", sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes", account, restartCommand(target.Unit)}
-	if out, err := exec.CommandContext(ctx, "ssh", sshArgs...).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "ssh", sshArgs...).CombinedOutput(); err != nil { // #nosec G204 -- ssh binary hardcoded; account/unit come from the deploy descriptor's resolved DeployTarget (Pulumi stack output), and the remote command is shell-quoted via remote.Quote
 		return fmt.Errorf("restart %s on %s: %w\n%s", target.Unit, target.HostDNS, err, out)
 	}
 	return nil

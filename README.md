@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/wardnet/inforge/actions/workflows/ci.yml/badge.svg)](https://github.com/wardnet/inforge/actions/workflows/ci.yml)
 [![Release](https://github.com/wardnet/inforge/actions/workflows/release.yml/badge.svg)](https://github.com/wardnet/inforge/actions/workflows/release.yml)
+[![codecov](https://codecov.io/gh/wardnet/inforge/graph/badge.svg)](https://codecov.io/gh/wardnet/inforge)
+[![Semgrep](https://img.shields.io/badge/semgrep-scanned-1B2733?logo=semgrep)](https://semgrep.dev/orgs/wardnet/findings?repo=wardnet/inforge)
 [![Docs](https://img.shields.io/badge/docs-wardnet.github.io%2Finforge-blue)](https://wardnet.github.io/inforge/)
 
 **inforge** turns declarative YAML resource definitions into real cloud deployments using Pulumi and GitHub Actions. It enforces an opinionated multi-region, multi-provider infrastructure model with built-in runtime secret delivery for services.

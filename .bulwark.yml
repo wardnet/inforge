@@ -1,0 +1,4 @@
+# typescript is disabled entirely: website/ is a Docusaurus docs site, not
+# application code — out of scope for scanning/coverage (see AGENTS.md).
+typescript:
+  enabled: false

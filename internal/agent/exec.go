@@ -45,7 +45,7 @@ func dropAndExec(execPath string, uid, gid int, envv []string) error {
 		return fmt.Errorf("privilege drop verification failed: gid is %d, want %d", got, gid)
 	}
 
-	if err := syscall.Exec(execPath, []string{execPath}, envv); err != nil {
+	if err := syscall.Exec(execPath, []string{execPath}, envv); err != nil { // #nosec G204 -- execPath is desc.Exec from the root-owned, inforge-written descriptor.yaml validated by ParseDescriptor (ADR-0035); not user or network input, and this runs only after an irrevocable privilege drop
 		return fmt.Errorf("exec %s: %w", execPath, err)
 	}
 	// syscall.Exec only returns on error; reaching here means it did not replace
