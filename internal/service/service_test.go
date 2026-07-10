@@ -22,6 +22,19 @@ func TestUnit(t *testing.T) {
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
 }
 
+// TestUnitConditionPathExists guards the gap between provisioning (which
+// enables the unit for boot-persistence) and a service's first-ever release:
+// without this condition, a freshly provisioned host's first boot
+// auto-starts every enabled unit regardless of whether any payload was ever
+// delivered, crash-looping forever (StartLimitIntervalSec=0 disables the
+// rate limit) until someone runs `inforge releases deploy`. A failed
+// Condition is not a failure exit, so Restart= never engages — systemd just
+// skips the start silently until ExecPath exists.
+func TestUnitConditionPathExists(t *testing.T) {
+	unit := Unit(types.ServiceSpec{Name: "api"})
+	assert.Contains(t, unit, "ConditionPathExists=/srv/wardnet/api/run", "must match ExecPath so systemd skips starting until the payload is delivered")
+}
+
 // TestUnitRunsAsRoot guards that the unit never sets User=: the unit runs as
 // root and the agent drops privilege to the service user itself.
 func TestUnitRunsAsRoot(t *testing.T) {
