@@ -14,6 +14,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// maxPluginBinarySize bounds how much a single plugin binary download/extraction
+// may write to disk. A generous cap well above any real Pulumi provider binary
+// (tens of MB), but enough to stop a compromised or MITM'd release asset from
+// exhausting disk space via an unbounded copy.
+const maxPluginBinarySize = 500 << 20 // 500 MiB
+
 func newPluginsCmd() *cobra.Command {
 	plugins := &cobra.Command{
 		Use:   "plugins",
@@ -83,7 +89,7 @@ func pulumiPluginDir(name, ver string) (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(home, ".pulumi", "plugins", fmt.Sprintf("resource-%s-v%s", name, ver))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -104,14 +110,17 @@ func downloadBinary(ctx context.Context, url, dst string, mode os.FileMode) erro
 			resp.StatusCode, url, runtime.GOOS, runtime.GOARCH)
 	}
 
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode) // #nosec G304 -- dst is an internally generated temp path from the sole caller (selfUpdate), not user input
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(f, resp.Body)
+	n, copyErr := io.CopyN(f, resp.Body, maxPluginBinarySize+1)
 	closeErr := f.Close()
-	if copyErr != nil {
+	if copyErr != nil && copyErr != io.EOF {
 		return copyErr
+	}
+	if n > maxPluginBinarySize {
+		return fmt.Errorf("response body exceeds %d bytes, refusing to write %s", maxPluginBinarySize, dst)
 	}
 	return closeErr
 }
@@ -150,14 +159,17 @@ func downloadAndExtractTarGz(ctx context.Context, url, dir, binaryName string) e
 			continue
 		}
 		dst := filepath.Join(dir, binaryName)
-		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) // #nosec G304,G302 -- dst is from os.UserHomeDir()+hardcoded plugin dir/binaryName, not external input; binary must be executable and dst is not world-writable
 		if err != nil {
 			return err
 		}
-		_, copyErr := io.Copy(f, tr)
+		n, copyErr := io.CopyN(f, tr, maxPluginBinarySize+1)
 		closeErr := f.Close()
-		if copyErr != nil {
+		if copyErr != nil && copyErr != io.EOF {
 			return copyErr
+		}
+		if n > maxPluginBinarySize {
+			return fmt.Errorf("archive entry %q exceeds %d bytes, refusing to extract", hdr.Name, maxPluginBinarySize)
 		}
 		return closeErr
 	}

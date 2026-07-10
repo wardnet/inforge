@@ -83,7 +83,7 @@ func runReleasesPush(ctx context.Context, configPath, env, svc, sha, deployDir s
 	}
 	defer cleanup()
 
-	f, err := os.Open(payload)
+	f, err := os.Open(payload) // #nosec G304 -- payload is an internally generated os.CreateTemp() name
 	if err != nil {
 		return fmt.Errorf("open payload: %w", err)
 	}
@@ -335,7 +335,7 @@ func resolveSSHKey(sshKeyPath string) (string, func(), error) {
 		if err != nil {
 			return "", noop, fmt.Errorf("materialize deploy key: %w", err)
 		}
-		return p, func() { _ = os.Remove(p) }, nil
+		return p, func() { _ = os.Remove(p) }, nil // #nosec G703 -- p is f.Name() from writeTempKeyFile's os.CreateTemp(), an internally generated path; material is key content, never a path
 	}
 	return "", noop, fmt.Errorf("SSH deploy key required: pass --ssh-key, or set INFORGE_DEPLOY_KEY (a path) or INFORGE_DEPLOY_PRIVATE_KEY (the key material)")
 }
@@ -366,7 +366,7 @@ func packageDir(ctx context.Context, dir string) (string, func(), error) {
 	payload := f.Name()
 	_ = f.Close()
 	cleanup := func() { _ = os.Remove(payload) }
-	if out, err := exec.CommandContext(ctx, "tar", "-czf", payload, "-C", dir, ".").CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "tar", "-czf", payload, "-C", dir, ".").CombinedOutput(); err != nil { // #nosec G204 -- tar binary hardcoded; payload is from os.CreateTemp and dir is the internally-resolved local artifact/build directory
 		cleanup()
 		return "", func() {}, fmt.Errorf("package artifact: %w\n%s", err, out)
 	}

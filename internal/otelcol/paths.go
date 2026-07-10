@@ -25,7 +25,7 @@ const (
 	// CredentialPath holds the base64 OTLP Basic-auth value (0600, owned by User),
 	// referenced from the rendered config via the collector's ${file:…} provider so
 	// the secret never appears in the config itself.
-	CredentialPath = "/etc/otelcol-contrib/otlp-auth"
+	CredentialPath = "/etc/otelcol-contrib/otlp-auth" // #nosec G101 -- a file path constant, not a credential value
 	// DefaultVersion is the otelcol-contrib release installed when an env does not
 	// pin one. Bump deliberately (a new .deb is downloaded + apt-installed on next
 	// deploy).
@@ -41,7 +41,7 @@ const (
 // inforge base64-encodes it at deploy and writes the result to CredentialPath.
 const (
 	AuthSecretNamespace = "observability"
-	AuthSecretKey       = "otlp_auth"
+	AuthSecretKey       = "otlp_auth" // #nosec G101 -- a lookup key name, not a credential value
 )
 
 // MonitorPasswordPath is the on-host file holding a Postgres cluster's monitoring

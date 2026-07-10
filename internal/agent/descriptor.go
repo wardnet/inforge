@@ -110,7 +110,7 @@ type Deployment struct {
 
 // LoadDescriptor reads and parses the descriptor at path.
 func LoadDescriptor(path string) (Descriptor, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path is built from the deploy-tool-controlled on-host service dir and a fixed filename
 	if err != nil {
 		return Descriptor{}, fmt.Errorf("read descriptor: %w", err)
 	}

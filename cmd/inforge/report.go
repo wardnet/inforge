@@ -23,13 +23,19 @@ func writeReport(command, stackName string, p *output.Printer, reportPath string
 	if reportPath == "" {
 		reportPath = filepath.Join(os.TempDir(), fmt.Sprintf("inforge-%s-%s.md", command, stackName))
 	}
-	if err := os.WriteFile(reportPath, []byte(md), 0o644); err != nil {
+	// reportPath defaults to a fixed os.TempDir() name and is otherwise the
+	// operator-supplied --report flag; 0644 is intentional, this file is meant to
+	// be read by other tools/steps afterward (see doc comment above).
+	if err := os.WriteFile(reportPath, []byte(md), 0o644); err != nil { // #nosec G306 -- 0644 is intentional; this file is meant to be read by other tools/steps afterward
 		_, _ = fmt.Fprintf(os.Stderr, "warning: could not write report to %s: %v\n", reportPath, err)
 		return
 	}
 	_, _ = fmt.Fprintf(os.Stderr, "report: %s\n", reportPath)
 
 	if summary := os.Getenv("GITHUB_STEP_SUMMARY"); summary != "" {
+		// #nosec G304,G703,G302 -- summary path is set by the trusted CI runner via
+		// $GITHUB_STEP_SUMMARY, not attacker input; 0644 matches other steps appending
+		// to the same shared summary file.
 		f, err := os.OpenFile(summary, os.O_APPEND|os.O_WRONLY, 0o644)
 		if err != nil {
 			return
