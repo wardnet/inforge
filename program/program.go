@@ -148,7 +148,7 @@ func Run(ctx *pulumi.Context) error {
 		return err
 	}
 
-	desc, err := service.BuildDeployDescriptor(env, vars.BaseDomain, res, regionTable)
+	desc, err := service.BuildDeployDescriptor(env, vars.BaseDomain, res, globalRes, regionTable)
 	if err != nil {
 		return err
 	}
@@ -157,7 +157,7 @@ func Run(ctx *pulumi.Context) error {
 	// The app deploy descriptor mirrors the service one: it is the contract the app
 	// release path (slice D) resolves an app's ingress host, deploy path, FQDN, and
 	// SPA flag from. Derived purely from resolved resources, exported once.
-	appDesc, err := app.BuildDeployDescriptor(env, vars.BaseDomain, res, regionTable, ephemeralSlug)
+	appDesc, err := app.BuildDeployDescriptor(env, vars.BaseDomain, res, globalRes, regionTable, ephemeralSlug)
 	if err != nil {
 		return err
 	}

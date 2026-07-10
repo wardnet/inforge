@@ -159,15 +159,17 @@ type DeployDescriptor struct {
 }
 
 // BuildDeployDescriptor derives the deploy descriptor for an environment from
-// its single shared resource set, instantiated into every region in the table.
-// Each service expands into one DeployTarget per region — the region slug makes
-// each target's host DNS distinct — so a single-region environment is unchanged
-// while a multi-region one fans a service out across every region's host.
+// its regional resource set, instantiated into every region in the table, plus
+// its global resource set, instantiated once region-less. Each regional service
+// expands into one DeployTarget per region — the region slug makes each
+// target's host DNS distinct — so a single-region environment is unchanged
+// while a multi-region one fans a service out across every region's host. A
+// global service expands into exactly one DeployTarget, with no region slug.
 // Regions are iterated in sorted order so the targets are stable across runs. A
 // service's host DNS is the domain of the DNS record pointing at its host compute
 // instance; if the host has no DNS record, the compute name is used as the
 // subdomain.
-func BuildDeployDescriptor(env, baseDomain string, res types.Resources, table regions.Table) (DeployDescriptor, error) {
+func BuildDeployDescriptor(env, baseDomain string, res, globalRes types.Resources, table regions.Table) (DeployDescriptor, error) {
 	desc := DeployDescriptor{Environment: env}
 	regionNames := make([]string, 0, len(table))
 	for region := range table {
@@ -182,23 +184,43 @@ func BuildDeployDescriptor(env, baseDomain string, res types.Resources, table re
 		if err != nil {
 			return DeployDescriptor{}, fmt.Errorf("region %q: %w", region, err)
 		}
-		for _, svc := range res.Service {
-			hostDNS := hostDNS(svc.Host, env, baseDomain, slug)
-			sshUser := deployUsers[canonical[svc.Host]]
-			if sshUser == "" {
-				sshUser = defaultSSHUser
-			}
-			desc.Targets = append(desc.Targets, DeployTarget{
-				Service: svc.Name,
-				HostDNS: hostDNS,
-				Folder:  Folder(svc.Name),
-				Unit:    UnitName(svc.Name),
-				User:    svc.User,
-				SSHUser: sshUser,
-			})
-		}
+		appendServiceTargets(&desc, res.Service, canonical, deployUsers, env, baseDomain, slug)
 	}
+
+	// The global slice is instantiated once, region-less (slug ""), mirroring
+	// program.go's global scope (see its "global before regions" comment) — a
+	// global service's host DNS is env-scoped only, with no <slug> segment (see
+	// naming.HostFQDN/RecordFQDN). Without this, a container: global service
+	// (e.g. tenants) never lands in the descriptor at all, even though the full
+	// `inforge deploy` apply realizes it — only the separate `inforge releases
+	// push`/`releases deploy` path (which resolves a service purely from this
+	// descriptor) was affected.
+	globalCanonical := naming.CanonicalComputeKeys(globalRes.Compute)
+	globalDeployUsers := naming.DeployUsersByHost(globalRes.Compute)
+	appendServiceTargets(&desc, globalRes.Service, globalCanonical, globalDeployUsers, env, baseDomain, "")
+
 	return desc, nil
+}
+
+// appendServiceTargets appends one DeployTarget per service in services to
+// desc, resolving each service's SSH user via canonical/deployUsers and its
+// host DNS via hostDNS(..., slug) — slug is a region slug for a regional
+// scope, or "" for the region-less global scope.
+func appendServiceTargets(desc *DeployDescriptor, services []types.ServiceSpec, canonical, deployUsers map[string]string, env, baseDomain, slug string) {
+	for _, svc := range services {
+		sshUser := deployUsers[canonical[svc.Host]]
+		if sshUser == "" {
+			sshUser = defaultSSHUser
+		}
+		desc.Targets = append(desc.Targets, DeployTarget{
+			Service: svc.Name,
+			HostDNS: hostDNS(svc.Host, env, baseDomain, slug),
+			Folder:  Folder(svc.Name),
+			Unit:    UnitName(svc.Name),
+			User:    svc.User,
+			SSHUser: sshUser,
+		})
+	}
 }
 
 // hostDNS computes the fully-qualified SSH/cloud-init domain for a host compute
