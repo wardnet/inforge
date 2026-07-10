@@ -173,7 +173,13 @@ func provisionDatabaseBackups(ctx *pulumi.Context, res types.Resources, computeO
 				Update:     pulumi.String(applyScript),
 				Delete:     pulumi.String(removeScript),
 				Triggers:   pulumi.Array{pulumi.String(applyScript)},
-			}, pulumi.DependsOn([]pulumi.Resource{credCmd})); err != nil {
+				// DeleteBeforeReplace: the default create-before-delete order
+				// would install the new timer then immediately tear it down
+				// via the old resource's Delete (same cluster/database
+				// identity), silently leaving backups untimered after a
+				// "successful" apply — see program.go's provisionService for
+				// the full incident writeup of this bug class.
+			}, pulumi.DependsOn([]pulumi.Resource{credCmd}), pulumi.DeleteBeforeReplace(true)); err != nil {
 				return fmt.Errorf("backups: database %q: install timer: %w", it.database, err)
 			}
 		}
