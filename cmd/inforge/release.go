@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,23 +36,23 @@ type deliveryTarget struct {
 	sshUser     string // connect-as account (the host's deploy_user)
 	applyScript string // remote shell run after the payload is uploaded
 	describe    string // human label for the apply step (folder+unit / bundle path)
+	arch        string // detected CPU arch (services) or "" (apps — architecture-agnostic)
+	payloadFile string // local path scp'd to this target; "" skips the upload (app rollback)
 }
 
 // deliverRelease is the shared release orchestrator both the service and app
 // release paths drive (the delivery-adapter seam): for each resolved target it
-// uploads payloadFile over scp — skipped when payloadFile is empty, which is how
-// an app rollback re-points an already-delivered bundle without re-fetching it —
-// runs the target's apply script over ssh, then records the delivered SHA in the
-// per-env manifest under slug. Keeping download-once + scp + manifest record here
-// means the service and app adapters differ only in their resolved targets and
-// apply scripts, not in the transport.
-func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha string, targets []deliveryTarget, payloadFile, sshKeyPath string) error {
-	sshArgs := []string{"-i", sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"}
+// uploads its own payloadFile over scp — skipped when empty, which is how an
+// app rollback re-points an already-delivered bundle without re-fetching it, and
+// how a mixed-arch service fleet delivers a DIFFERENT payload to different
+// targets in one call — runs the target's apply script over ssh, then records
+// the delivered SHA (and arch) in the per-env manifest under slug.
+func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha string, targets []deliveryTarget, sshKeyPath string) error {
 	for _, t := range targets {
 		account := fmt.Sprintf("%s@%s", t.sshUser, t.host)
-		if payloadFile != "" {
+		if t.payloadFile != "" {
 			fmt.Printf("uploading to %s...\n", t.host)
-			scpArgs := append(append([]string{}, sshArgs...), payloadFile, account+":"+remotePayloadPath)
+			scpArgs := append(append([]string{}, sshArgs(sshKeyPath)...), t.payloadFile, account+":"+remotePayloadPath)
 			if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil { // #nosec G204 -- scp binary hardcoded; account/host come from the deploy descriptor's resolved targets and remotePayloadPath is a hardcoded constant
 				return fmt.Errorf("upload payload to %s: %w\n%s", t.host, err, out)
 			}
@@ -61,15 +62,105 @@ func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha st
 		} else {
 			fmt.Printf("applying %s on %s...\n", sha, t.host)
 		}
-		sshRunArgs := append(append([]string{}, sshArgs...), account, t.applyScript)
+		sshRunArgs := append(append([]string{}, sshArgs(sshKeyPath)...), account, t.applyScript)
 		if out, err := exec.CommandContext(ctx, "ssh", sshRunArgs...).CombinedOutput(); err != nil { // #nosec G204 -- ssh binary hardcoded; applyScript is built internally by serviceApplyScript/appApplyScript from quoted config values, and account is from the resolved deploy target
 			return fmt.Errorf("remote deploy to %s: %w\n%s", t.host, err, out)
 		}
-		if err := store.SetDeployment(ctx, slug, env, t.host, sha, time.Now()); err != nil {
+		if err := store.SetDeployment(ctx, slug, env, t.host, sha, t.arch, time.Now()); err != nil {
 			return fmt.Errorf("record manifest entry for %s: %w", t.host, err)
 		}
 	}
 	return nil
+}
+
+// probeHostArch detects host's CPU architecture over SSH (`uname -m`, mapped
+// via mapUnameArch to the same amd64/arm64 vocabulary release artifacts are
+// pushed under) — modeled directly on sshReadHostPubKey (sshpush.go): the same
+// exec.CommandContext(ctx, "ssh", args...).Output() + trim idiom, reusing the
+// shared sshArgs helper rather than introducing a second SSH-transport pattern.
+func probeHostArch(ctx context.Context, host, sshUser, sshKeyPath string) (string, error) {
+	account := fmt.Sprintf("%s@%s", sshUser, host)
+	args := append(append([]string{}, sshArgs(sshKeyPath)...), account, "uname -m")
+	out, err := exec.CommandContext(ctx, "ssh", args...).Output() // #nosec G204 -- ssh binary hardcoded; account/keyPath are the resolved deploy target / operator-supplied key, the same trust boundary as sshReadHostPubKey
+	if err != nil {
+		return "", fmt.Errorf("probe arch on %s: %w", host, err)
+	}
+	return mapUnameArch(strings.TrimSpace(string(out)))
+}
+
+// archResolution is the outcome of probing a set of targets: which arch each
+// host was detected as, and the sorted set of distinct archs actually needed.
+type archResolution struct {
+	archOf   map[string]string // HostDNS -> probed arch
+	archList []string          // sorted distinct archs across every target
+}
+
+// probeAndVerifyArch probes every target's host architecture (once per host,
+// via probeHostArch) and verifies EVERY distinct arch actually needed has
+// already been pushed for (svc, sha) — collecting ALL missing archs into one
+// error (naming the host(s), the detected arch, and the exact R2 key, with a
+// hint to push it) before returning, so a fleet missing two archs is fully
+// diagnosable in one run. This is safe to call for a dry-run: it never
+// downloads anything.
+func probeAndVerifyArch(ctx context.Context, store *release.Store, svc, sha string, targets []service.DeployTarget, sshKeyPath string) (archResolution, error) {
+	archOf := map[string]string{}
+	hostsByArch := map[string][]string{} // arch -> HostDNS list, for the error message
+	for _, t := range targets {
+		arch, err := probeHostArch(ctx, t.HostDNS, t.SSHUser, sshKeyPath)
+		if err != nil {
+			return archResolution{}, fmt.Errorf("detect arch for %s: %w", t.HostDNS, err)
+		}
+		archOf[t.HostDNS] = arch
+		hostsByArch[arch] = append(hostsByArch[arch], t.HostDNS)
+	}
+
+	archList := make([]string, 0, len(hostsByArch))
+	for arch := range hostsByArch {
+		archList = append(archList, arch)
+	}
+	sort.Strings(archList)
+
+	var missing []string
+	for _, arch := range archList {
+		exists, err := store.ArtifactExists(ctx, svc, sha, arch)
+		if err != nil {
+			return archResolution{}, err
+		}
+		if !exists {
+			missing = append(missing, fmt.Sprintf(
+				"host(s) %s detected as %s — looked for %s (run `inforge releases push --arch %s` first)",
+				strings.Join(hostsByArch[arch], ", "), arch, release.ArtifactKey(svc, sha, arch), arch))
+		}
+	}
+	if len(missing) > 0 {
+		return archResolution{}, fmt.Errorf("artifact %s/%s missing for %d arch(es):\n  %s", svc, sha, len(missing), strings.Join(missing, "\n  "))
+	}
+	return archResolution{archOf: archOf, archList: archList}, nil
+}
+
+// downloadArchPayloads downloads each distinct needed arch's artifact exactly
+// once (never once per host) and builds the ready-to-deliver targets from a
+// prior probeAndVerifyArch result. The returned cleanup func releases every
+// downloaded temp file; call it exactly once, even on error (it is safe to
+// call with partial downloads).
+func downloadArchPayloads(ctx context.Context, store *release.Store, svc, sha string, targets []service.DeployTarget, res archResolution) ([]deliveryTarget, func(), error) {
+	payloadOf := map[string]string{}
+	var cleanups []func()
+	cleanup := func() {
+		for _, c := range cleanups {
+			c()
+		}
+	}
+	for _, arch := range res.archList {
+		payload, archCleanup, err := downloadArtifact(ctx, store, svc, sha, arch)
+		if err != nil {
+			cleanup()
+			return nil, func() {}, err
+		}
+		cleanups = append(cleanups, archCleanup)
+		payloadOf[arch] = payload
+	}
+	return serviceDeliveryTargets(targets, res.archOf, payloadOf), cleanup, nil
 }
 
 // serviceApplyScript is adapter #1: the remote command that applies a service
@@ -86,15 +177,22 @@ func serviceApplyScript(t service.DeployTarget) string {
 
 // serviceDeliveryTargets adapts resolved service deploy targets to the shared
 // orchestrator's targets. SSHUser is always set by BuildDeployDescriptor (it
-// defaults to "deploy"), so it is used directly.
-func serviceDeliveryTargets(targets []service.DeployTarget) []deliveryTarget {
+// defaults to "deploy"), so it is used directly. archOf maps HostDNS -> the
+// arch probeHostArch detected for that host; payloadOf maps arch -> the ONE
+// downloaded payload file for that arch (populated once per distinct arch
+// actually needed, not once per host) — so a mixed-arch fleet delivers the
+// correct binary to each target in a single deliverRelease call.
+func serviceDeliveryTargets(targets []service.DeployTarget, archOf, payloadOf map[string]string) []deliveryTarget {
 	out := make([]deliveryTarget, 0, len(targets))
 	for _, t := range targets {
+		arch := archOf[t.HostDNS]
 		out = append(out, deliveryTarget{
 			host:        t.HostDNS,
 			sshUser:     t.SSHUser,
 			applyScript: serviceApplyScript(t),
 			describe:    fmt.Sprintf("extracting to %s and restarting %s", t.Folder, t.Unit),
+			arch:        arch,
+			payloadFile: payloadOf[arch],
 		})
 	}
 	return out
@@ -138,18 +236,22 @@ func appRollbackScript(t iapp.DeployTarget, sha string) string {
 // appDeliveryTargets adapts resolved app deploy targets to the orchestrator's
 // targets, choosing the fresh-release or rollback apply script. SSHUser is always
 // set by BuildDeployDescriptor (it defaults to "deploy"), so it is used directly.
-func appDeliveryTargets(targets []iapp.DeployTarget, sha string, rollback bool) []deliveryTarget {
+// Apps are architecture-agnostic (arch always ""); payload is the one
+// downloaded bundle to scp to every target — "" for rollback, which never
+// uploads (the bundle is already on the host).
+func appDeliveryTargets(targets []iapp.DeployTarget, sha, payload string, rollback bool) []deliveryTarget {
 	out := make([]deliveryTarget, 0, len(targets))
 	for _, t := range targets {
-		script, verb := appReleaseScript(t, sha), "releasing"
+		script, verb, pf := appReleaseScript(t, sha), "releasing", payload
 		if rollback {
-			script, verb = appRollbackScript(t, sha), "rolling back"
+			script, verb, pf = appRollbackScript(t, sha), "rolling back", ""
 		}
 		out = append(out, deliveryTarget{
 			host:        t.IngressHostDNS,
 			sshUser:     t.SSHUser,
 			applyScript: script,
 			describe:    fmt.Sprintf("%s %s", verb, iapp.BundleDir(t.App, sha)),
+			payloadFile: pf,
 		})
 	}
 	return out
@@ -245,7 +347,7 @@ func runReleaseApp(ctx context.Context, configPath, env, name, sha, bundleDir, s
 			return err
 		}
 		defer cleanupKey()
-		return deliverRelease(ctx, store, slug, env, sha, appDeliveryTargets(targets, sha, true), "", sshKeyPath)
+		return deliverRelease(ctx, store, slug, env, sha, appDeliveryTargets(targets, sha, "", true), sshKeyPath)
 	}
 
 	fmt.Printf("releasing %s @ %s → %d host(s) (env: %s)\n", name, sha, len(targets), env)
@@ -260,7 +362,7 @@ func runReleaseApp(ctx context.Context, configPath, env, name, sha, bundleDir, s
 			fmt.Printf("(dry-run: would package + push %s then deliver, skipping)\n", bundleDir)
 			return nil
 		}
-		exists, err := store.ArtifactExists(ctx, slug, sha)
+		exists, err := store.ArtifactExists(ctx, slug, sha, release.NoArch)
 		if err != nil {
 			return err
 		}
@@ -279,7 +381,7 @@ func runReleaseApp(ctx context.Context, configPath, env, name, sha, bundleDir, s
 		}
 	}
 
-	exists, err := store.ArtifactExists(ctx, slug, sha)
+	exists, err := store.ArtifactExists(ctx, slug, sha, release.NoArch)
 	if err != nil {
 		return err
 	}
@@ -293,13 +395,13 @@ func runReleaseApp(ctx context.Context, configPath, env, name, sha, bundleDir, s
 		return err
 	}
 	defer cleanupKey()
-	payload, cleanup, err := downloadArtifact(ctx, store, slug, sha)
+	payload, cleanup, err := downloadArtifact(ctx, store, slug, sha, release.NoArch)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	return deliverRelease(ctx, store, slug, env, sha, appDeliveryTargets(targets, sha, false), payload, sshKeyPath)
+	return deliverRelease(ctx, store, slug, env, sha, appDeliveryTargets(targets, sha, payload, false), sshKeyPath)
 }
 
 // pushAppBundle packages a local SPA build directory and uploads it to the store
@@ -329,7 +431,7 @@ func pushAppBundle(ctx context.Context, store *release.Store, slug, sha, bundleD
 	defer func() { _ = f.Close() }()
 
 	fmt.Printf("uploading %s/%s.tar.gz...\n", slug, sha)
-	if err := store.PutArtifact(ctx, slug, sha, f); err != nil {
+	if err := store.PutArtifact(ctx, slug, sha, release.NoArch, f); err != nil {
 		return err
 	}
 	deleted, err := store.Prune(ctx, slug, keep)

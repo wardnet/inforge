@@ -39,7 +39,7 @@ func newReleasesCmd(configPath, dir *string) *cobra.Command {
 // --- releases push ------------------------------------------------------------
 
 func newReleasesPushCmd(configPath *string) *cobra.Command {
-	var svc, sha, deployDir string
+	var svc, sha, arch, deployDir string
 	cmd := &cobra.Command{
 		Use:           "push <env>",
 		Short:         "Package a service artifact and upload it to the release store",
@@ -47,17 +47,21 @@ func newReleasesPushCmd(configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runReleasesPush(cmd.Context(), *configPath, args[0], svc, sha, deployDir)
+			return runReleasesPush(cmd.Context(), *configPath, args[0], svc, sha, arch, deployDir)
 		},
 	}
 	cmd.Flags().StringVarP(&svc, "service", "s", "", "service name to push (required)")
 	cmd.Flags().StringVar(&sha, "sha", "", "artifact SHA key (default: $GITHUB_SHA)")
+	cmd.Flags().StringVar(&arch, "arch", "", "CPU architecture this artifact was built for: amd64 or arm64 (required)")
 	cmd.Flags().StringVar(&deployDir, "deploy-dir", "./deployments", "path to the deployments directory")
-	mustRequire(cmd, "service")
+	mustRequire(cmd, "service", "arch")
 	return cmd
 }
 
-func runReleasesPush(ctx context.Context, configPath, env, svc, sha, deployDir string) error {
+func runReleasesPush(ctx context.Context, configPath, env, svc, sha, arch, deployDir string) error {
+	if err := validateArchFlag(arch); err != nil {
+		return err
+	}
 	sha, err := resolveSHA(sha)
 	if err != nil {
 		return err
@@ -90,8 +94,8 @@ func runReleasesPush(ctx context.Context, configPath, env, svc, sha, deployDir s
 	}
 	defer func() { _ = f.Close() }()
 
-	fmt.Printf("uploading %s/%s.tar.gz...\n", svc, sha)
-	if err := store.PutArtifact(ctx, svc, sha, f); err != nil {
+	fmt.Printf("uploading %s...\n", release.ArtifactKey(svc, sha, arch))
+	if err := store.PutArtifact(ctx, svc, sha, arch, f); err != nil {
 		return err
 	}
 
@@ -104,7 +108,7 @@ func runReleasesPush(ctx context.Context, configPath, env, svc, sha, deployDir s
 	if len(deleted) > 0 {
 		fmt.Printf("pruned %d old artifact(s): %s\n", len(deleted), strings.Join(deleted, ", "))
 	}
-	fmt.Printf("pushed %s @ %s\n", svc, sha)
+	fmt.Printf("pushed %s @ %s (%s)\n", svc, sha, arch)
 	return nil
 }
 
@@ -163,29 +167,31 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 	if err != nil {
 		return err
 	}
-	exists, err := store.ArtifactExists(ctx, svc, sha)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return fmt.Errorf("artifact %s/%s.tar.gz not found in release store — run `inforge releases push` first", svc, sha)
-	}
 
-	fmt.Printf("deploying %s @ %s → %d host(s) (env: %s)\n", svc, sha, len(targets), env)
-	for _, t := range targets {
-		fmt.Printf("  host: %s  folder: %s  unit: %s\n", t.HostDNS, t.Folder, t.Unit)
-	}
-	if dryRun {
-		fmt.Println("(dry-run: artifact present, skipping delivery)")
-		return nil
-	}
-
+	// The SSH key is resolved before the dry-run branch (a deliberate behavior
+	// change): probing each target's real architecture is the only way to
+	// verify this fleet has every arch it needs already pushed, and that
+	// verification is exactly what dry-run exists to do.
 	var cleanupKey func()
 	sshKeyPath, cleanupKey, err = resolveSSHKey(sshKeyPath)
 	if err != nil {
 		return err
 	}
 	defer cleanupKey()
+
+	archRes, err := probeAndVerifyArch(ctx, store, svc, sha, targets, sshKeyPath)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("deploying %s @ %s → %d host(s) across %d arch(es) (env: %s)\n", svc, sha, len(targets), len(archRes.archList), env)
+	for _, t := range targets {
+		fmt.Printf("  host: %s  arch: %s  folder: %s  unit: %s\n", t.HostDNS, archRes.archOf[t.HostDNS], t.Folder, t.Unit)
+	}
+	if dryRun {
+		fmt.Println("(dry-run: artifact present for every detected arch, skipping delivery)")
+		return nil
+	}
 
 	// A mesh service's leaf.age must already be on the host before the unit
 	// restarts into it: the boot path decrypts+projects whatever leaf.age
@@ -198,13 +204,13 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 		return err
 	}
 
-	payload, cleanup, err := downloadArtifact(ctx, store, svc, sha)
+	deliveryTargets, cleanupPayloads, err := downloadArchPayloads(ctx, store, svc, sha, targets, archRes)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	defer cleanupPayloads()
 
-	if err := deliverRelease(ctx, store, svc, env, sha, serviceDeliveryTargets(targets), payload, sshKeyPath); err != nil {
+	if err := deliverRelease(ctx, store, svc, env, sha, deliveryTargets, sshKeyPath); err != nil {
 		return err
 	}
 	fmt.Printf("deployed %s @ %s\n", svc, sha)
@@ -254,14 +260,18 @@ func runReleasesList(ctx context.Context, configPath, env, svc string) error {
 	}
 	sort.Strings(hosts)
 
-	fmt.Printf("%-45s  %-12s  %s\n", "HOST", "SHA", "DEPLOYED")
+	fmt.Printf("%-45s  %-12s  %-6s  %s\n", "HOST", "SHA", "ARCH", "DEPLOYED")
 	for _, h := range hosts {
 		d := m.Deployments[h]
 		sha := d.SHA
 		if len(sha) > 12 {
 			sha = sha[:12]
 		}
-		fmt.Printf("%-45s  %-12s  %s\n", h, sha, d.DeployedAt.Format(time.RFC3339))
+		arch := d.Arch
+		if arch == "" {
+			arch = "-" // app deployment, or a manifest entry predating arch-awareness
+		}
+		fmt.Printf("%-45s  %-12s  %-6s  %s\n", h, sha, arch, d.DeployedAt.Format(time.RFC3339))
 	}
 	return nil
 }
@@ -374,10 +384,11 @@ func packageDir(ctx context.Context, dir string) (string, func(), error) {
 	return payload, cleanup, nil
 }
 
-// downloadArtifact streams (svc, sha) from the store into a temp file, returning
-// its path and a cleanup func.
-func downloadArtifact(ctx context.Context, store *release.Store, svc, sha string) (string, func(), error) {
-	rc, err := store.GetArtifact(ctx, svc, sha)
+// downloadArtifact streams (svc, sha, arch) from the store into a temp file,
+// returning its path and a cleanup func. Pass release.NoArch for an
+// architecture-agnostic (app) artifact.
+func downloadArtifact(ctx context.Context, store *release.Store, svc, sha, arch string) (string, func(), error) {
+	rc, err := store.GetArtifact(ctx, svc, sha, arch)
 	if err != nil {
 		return "", func() {}, err
 	}

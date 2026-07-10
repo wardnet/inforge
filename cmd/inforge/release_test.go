@@ -23,16 +23,25 @@ func TestServiceApplyScript(t *testing.T) {
 
 // TestServiceDeliveryTargets: the SSHUser the descriptor resolved (always set —
 // BuildDeployDescriptor defaults it to "deploy") is passed through, and the apply
-// step's human label carries the folder + unit for operator visibility.
+// step's human label carries the folder + unit for operator visibility. Each
+// target's arch and payload come from the probed-arch/downloaded-payload maps,
+// keyed by host and by arch respectively — h1 and h2 are different archs here,
+// so they must resolve to different payload files.
 func TestServiceDeliveryTargets(t *testing.T) {
+	archOf := map[string]string{"h1": "amd64", "h2": "arm64"}
+	payloadOf := map[string]string{"amd64": "/tmp/amd64.tgz", "arm64": "/tmp/arm64.tgz"}
 	dts := serviceDeliveryTargets([]service.DeployTarget{
 		{HostDNS: "h1", Folder: "/srv/wardnet/api", Unit: "wardnet-api.service", SSHUser: "deploy"},
 		{HostDNS: "h2", Folder: "/srv/wardnet/api", Unit: "u", SSHUser: "ops"},
-	})
+	}, archOf, payloadOf)
 	assert.Equal(t, "deploy", dts[0].sshUser)
 	assert.Equal(t, "ops", dts[1].sshUser)
 	assert.Equal(t, "h1", dts[0].host)
 	assert.Equal(t, "extracting to /srv/wardnet/api and restarting wardnet-api.service", dts[0].describe)
+	assert.Equal(t, "amd64", dts[0].arch)
+	assert.Equal(t, "/tmp/amd64.tgz", dts[0].payloadFile)
+	assert.Equal(t, "arm64", dts[1].arch)
+	assert.Equal(t, "/tmp/arm64.tgz", dts[1].payloadFile)
 }
 
 // TestAppReleaseScript pins adapter #2's fresh-release command: extract the bundle
@@ -67,20 +76,25 @@ func TestAppRollbackScript(t *testing.T) {
 	assert.NotContains(t, got, "mkdir")
 }
 
-// TestAppDeliveryTargets: fresh vs rollback choose the right apply script, and the
-// SSH user defaults to "deploy".
+// TestAppDeliveryTargets: fresh vs rollback choose the right apply script, the
+// SSH user defaults to "deploy", apps are always architecture-agnostic (arch
+// ""), and rollback never carries a payload (no upload — the bundle is
+// already on the host) regardless of what's passed in.
 func TestAppDeliveryTargets(t *testing.T) {
 	targets := []iapp.DeployTarget{{App: "my", IngressHostDNS: "edge.example.com"}}
 
-	fresh := appDeliveryTargets(targets, "abc123", false)
+	fresh := appDeliveryTargets(targets, "abc123", "/tmp/bundle.tgz", false)
 	assert.Equal(t, "edge.example.com", fresh[0].host)
 	assert.Contains(t, fresh[0].applyScript, "tar -xzf")
 	assert.Equal(t, "releasing /srv/wardnet/app/my/abc123", fresh[0].describe)
+	assert.Empty(t, fresh[0].arch)
+	assert.Equal(t, "/tmp/bundle.tgz", fresh[0].payloadFile)
 
-	roll := appDeliveryTargets(targets, "abc123", true)
+	roll := appDeliveryTargets(targets, "abc123", "/tmp/bundle.tgz", true)
 	assert.Contains(t, roll[0].applyScript, "test -d")
 	assert.NotContains(t, roll[0].applyScript, "tar -xzf")
 	assert.Equal(t, "rolling back /srv/wardnet/app/my/abc123", roll[0].describe)
+	assert.Empty(t, roll[0].payloadFile, "rollback never uploads, regardless of the payload passed in")
 }
 
 // TestAppArtifactSlug: apps are namespaced under app/ so they never collide with a

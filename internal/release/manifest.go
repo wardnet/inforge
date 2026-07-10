@@ -28,7 +28,15 @@ type Manifest struct {
 
 // Deployment is one host's currently-deployed artifact.
 type Deployment struct {
-	SHA        string    `yaml:"sha"`
+	SHA string `yaml:"sha"`
+	// Arch is the detected CPU architecture of the host this SHA was
+	// delivered to (amd64/arm64), recorded for operator visibility in
+	// `releases list`. It is informational only — never read back to decide
+	// what to fetch; the live SSH probe at each deploy is the source of
+	// truth, since a host's underlying instance could change between
+	// deploys. Empty for app deployments (architecture-agnostic) and for any
+	// manifest entry written before arch-awareness existed.
+	Arch       string    `yaml:"arch,omitempty"`
 	DeployedAt time.Time `yaml:"deployedAt"`
 }
 
@@ -85,13 +93,13 @@ func (s *Store) LoadManifest(ctx context.Context, service, env string) (Manifest
 // (service, env) manifest, using an If-Match compare-and-swap so a concurrent
 // writer cannot silently clobber a different host's entry. On a 412 it refetches
 // and retries, bounded by manifestCASAttempts.
-func (s *Store) SetDeployment(ctx context.Context, service, env, host, sha string, now time.Time) error {
+func (s *Store) SetDeployment(ctx context.Context, service, env, host, sha, arch string, now time.Time) error {
 	for attempt := 0; attempt < manifestCASAttempts; attempt++ {
 		m, etag, exists, err := s.LoadManifest(ctx, service, env)
 		if err != nil {
 			return err
 		}
-		m.Deployments[host] = Deployment{SHA: sha, DeployedAt: now.UTC()}
+		m.Deployments[host] = Deployment{SHA: sha, Arch: arch, DeployedAt: now.UTC()}
 		body, err := yaml.Marshal(m)
 		if err != nil {
 			return fmt.Errorf("marshal manifest %s/%s: %w", service, env, err)
