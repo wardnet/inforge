@@ -131,26 +131,26 @@ func RuntimeDir(name string) string {
 // payload (the host DNS name), the folder to extract it into, the unit to
 // restart, and the optional no-login system user the service runs as.
 type DeployTarget struct {
-	Service string `yaml:"service"  json:"service"`
-	HostDNS string `yaml:"host_dns" json:"host_dns"`
-	Folder  string `yaml:"folder"   json:"folder"`
-	Unit    string `yaml:"unit"     json:"unit"`
+	Service string `yaml:"service"  json:"service"  pulumi:"service"`
+	HostDNS string `yaml:"host_dns" json:"host_dns" pulumi:"hostDns"`
+	Folder  string `yaml:"folder"   json:"folder"   pulumi:"folder"`
+	Unit    string `yaml:"unit"     json:"unit"     pulumi:"unit"`
 	// User is the no-login system user the service runs as. Empty when the
 	// service spec declares no user. inforge deploy creates this user when
 	// provisioning the unit.
-	User string `yaml:"user,omitempty" json:"user,omitempty"`
+	User string `yaml:"user,omitempty" json:"user,omitempty" pulumi:"user"`
 	// SSHUser is the account inforge connects as over SSH to deliver the payload
 	// — the host's deploy_user. It is DISTINCT from User (the no-login account
 	// the service process runs as): they coincide only when the deploy user is
 	// literally named the same. Falls back to "deploy" when the host declares no
 	// deploy_user.
-	SSHUser string `yaml:"ssh_user" json:"ssh_user"`
+	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"sshUser"`
 	// Scope is the service's mesh scope: its region name, or pki.ScopeGlobal for
 	// a global service. Mirrors meshplan.DeployTarget.Scope; a consumer resolving
 	// targets by bare service name can use it to detect a same-named service
 	// declared in both the regional and global resource sets (which validation
 	// rejects, but this is a cheap belt-and-suspenders signal).
-	Scope string `yaml:"scope" json:"scope"`
+	Scope string `yaml:"scope" json:"scope" pulumi:"scope"`
 }
 
 // defaultSSHUser is the connect-as account used when a service's host declares
@@ -159,9 +159,18 @@ const defaultSSHUser = "deploy"
 
 // DeployDescriptor is the per-environment set of deploy targets, derived purely
 // from resolved resources.
+//
+// Every field MUST carry a `pulumi:"..."` struct tag in addition to yaml/json:
+// this type is exported as a Pulumi stack output via ctx.Export(name,
+// pulumi.Any(desc)), and the Go SDK's reflection-based struct marshaler
+// (marshalInputOptionsImpl, go/pulumi/rpc.go) silently DROPS any field with no
+// `pulumi` tag — yaml/json tags alone produce an empty {} export. This bit
+// wardnet-infrastructure in production: deployDescriptor/appDeployDescriptor/
+// meshDeployDescriptor/dbDeployDescriptor all exported as {}, so `inforge
+// releases deploy` could never resolve ANY service (not just global ones).
 type DeployDescriptor struct {
-	Environment string         `yaml:"environment" json:"environment"`
-	Targets     []DeployTarget `yaml:"targets"     json:"targets"`
+	Environment string         `yaml:"environment" json:"environment" pulumi:"environment"`
+	Targets     []DeployTarget `yaml:"targets"     json:"targets"     pulumi:"targets"`
 }
 
 // BuildDeployDescriptor derives the deploy descriptor for an environment from

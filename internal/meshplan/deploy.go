@@ -21,18 +21,22 @@ const defaultSSHUser = "deploy"
 type DeployTarget struct {
 	// Host is the canonical compute key (e.g. "bridge-01") — the same key the
 	// per-host provider path (/<hostKey>) and ServicesByHost grouping use.
-	Host    string `yaml:"host" json:"host"`
-	HostDNS string `yaml:"host_dns" json:"host_dns"`
-	SSHUser string `yaml:"ssh_user" json:"ssh_user"`
+	Host    string `yaml:"host" json:"host" pulumi:"host"`
+	HostDNS string `yaml:"host_dns" json:"host_dns" pulumi:"hostDns"`
+	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"sshUser"`
 	// Scope is the host's mesh scope: its region name, or pki.ScopeGlobal.
-	Scope string `yaml:"scope" json:"scope"`
+	Scope string `yaml:"scope" json:"scope" pulumi:"scope"`
 }
 
 // DeployDescriptor is the `meshDeployDescriptor` stack output (the mesh sibling
 // of deployDescriptor / appDeployDescriptor).
+//
+// See service.DeployDescriptor's doc comment: every field here MUST also carry
+// a `pulumi:"..."` tag — this type is exported via ctx.Export(pulumi.Any(...)),
+// and the Go SDK's struct marshaler drops any field lacking that tag.
 type DeployDescriptor struct {
-	Environment string         `yaml:"environment" json:"environment"`
-	Targets     []DeployTarget `yaml:"targets" json:"targets"`
+	Environment string         `yaml:"environment" json:"environment" pulumi:"environment"`
+	Targets     []DeployTarget `yaml:"targets" json:"targets" pulumi:"targets"`
 }
 
 // BuildDeployDescriptor derives the mesh deploy descriptor: one target per mesh

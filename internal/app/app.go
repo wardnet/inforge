@@ -132,17 +132,17 @@ const PlaceholderIndexHTML = `<!doctype html>
 // bundle is delivered into, the public FQDN it is served on, whether it is a SPA,
 // and the account inforge connects as over SSH (the ingress host's deploy user).
 type DeployTarget struct {
-	App            string `yaml:"app"              json:"app"`
-	IngressHostDNS string `yaml:"ingress_host_dns" json:"ingress_host_dns"`
-	DeployPath     string `yaml:"deploy_path"      json:"deploy_path"`
-	FQDN           string `yaml:"fqdn"             json:"fqdn"`
-	Spa            bool   `yaml:"spa"              json:"spa"`
+	App            string `yaml:"app"              json:"app"              pulumi:"app"`
+	IngressHostDNS string `yaml:"ingress_host_dns" json:"ingress_host_dns" pulumi:"ingressHostDns"`
+	DeployPath     string `yaml:"deploy_path"      json:"deploy_path"      pulumi:"deployPath"`
+	FQDN           string `yaml:"fqdn"             json:"fqdn"             pulumi:"fqdn"`
+	Spa            bool   `yaml:"spa"              json:"spa"              pulumi:"spa"`
 	// SSHUser is the account inforge connects as over SSH to deliver the bundle —
 	// the ingress host's deploy_user. Falls back to the historical "deploy".
-	SSHUser string `yaml:"ssh_user" json:"ssh_user"`
+	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"sshUser"`
 	// Scope is the app's mesh scope: its region name, or pki.ScopeGlobal for a
 	// global app. Mirrors service.DeployTarget.Scope / meshplan.DeployTarget.Scope.
-	Scope string `yaml:"scope" json:"scope"`
+	Scope string `yaml:"scope" json:"scope" pulumi:"scope"`
 }
 
 // defaultSSHUser is the connect-as account used when an ingress host declares no
@@ -151,9 +151,13 @@ const defaultSSHUser = "deploy"
 
 // DeployDescriptor is the per-environment set of app deploy targets, derived
 // purely from resolved resources (mirrors service.DeployDescriptor).
+//
+// See service.DeployDescriptor's doc comment: every field here MUST also carry
+// a `pulumi:"..."` tag — this type is exported via ctx.Export(pulumi.Any(...)),
+// and the Go SDK's struct marshaler drops any field lacking that tag.
 type DeployDescriptor struct {
-	Environment string         `yaml:"environment" json:"environment"`
-	Targets     []DeployTarget `yaml:"targets"     json:"targets"`
+	Environment string         `yaml:"environment" json:"environment" pulumi:"environment"`
+	Targets     []DeployTarget `yaml:"targets"     json:"targets"     pulumi:"targets"`
 }
 
 // BuildDeployDescriptor derives the app deploy descriptor for an environment from
