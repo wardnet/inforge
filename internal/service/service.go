@@ -132,7 +132,7 @@ func RuntimeDir(name string) string {
 // restart, and the optional no-login system user the service runs as.
 type DeployTarget struct {
 	Service string `yaml:"service"  json:"service"  pulumi:"service"`
-	HostDNS string `yaml:"host_dns" json:"host_dns" pulumi:"hostDns"`
+	HostDNS string `yaml:"host_dns" json:"host_dns" pulumi:"host_dns"`
 	Folder  string `yaml:"folder"   json:"folder"   pulumi:"folder"`
 	Unit    string `yaml:"unit"     json:"unit"     pulumi:"unit"`
 	// User is the no-login system user the service runs as. Empty when the
@@ -144,7 +144,7 @@ type DeployTarget struct {
 	// the service process runs as): they coincide only when the deploy user is
 	// literally named the same. Falls back to "deploy" when the host declares no
 	// deploy_user.
-	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"sshUser"`
+	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"ssh_user"`
 	// Scope is the service's mesh scope: its region name, or pki.ScopeGlobal for
 	// a global service. Mirrors meshplan.DeployTarget.Scope; a consumer resolving
 	// targets by bare service name can use it to detect a same-named service

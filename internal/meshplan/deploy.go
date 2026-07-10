@@ -22,8 +22,8 @@ type DeployTarget struct {
 	// Host is the canonical compute key (e.g. "bridge-01") — the same key the
 	// per-host provider path (/<hostKey>) and ServicesByHost grouping use.
 	Host    string `yaml:"host" json:"host" pulumi:"host"`
-	HostDNS string `yaml:"host_dns" json:"host_dns" pulumi:"hostDns"`
-	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"sshUser"`
+	HostDNS string `yaml:"host_dns" json:"host_dns" pulumi:"host_dns"`
+	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"ssh_user"`
 	// Scope is the host's mesh scope: its region name, or pki.ScopeGlobal.
 	Scope string `yaml:"scope" json:"scope" pulumi:"scope"`
 }
