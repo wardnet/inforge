@@ -47,10 +47,19 @@ jobs:
         run: go build ./...
 
       - name: go test
-        run: go test -race ./...
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: coverage-out
+          path: coverage.out
+          retention-days: 1
 
   bulwark:
     name: bulwark
+    needs: build-test  # fail fast: bulwark coverage runs go test itself and would fail the same
+                        # way build-test just did, but only after installing gosec/govulncheck/
+                        # semgrep first — no point paying that cost on a build we already know is broken
     runs-on: ubuntu-latest
     permissions:
       contents: write       # bulwark coverage caches baselines on the bulwark-state branch
@@ -65,4 +74,14 @@ jobs:
           go-version: "1.26"
           cache: true
 
-      - uses: wardnet/bulwark@v1
+      # build-test's own `go test -race -coverprofile=coverage.out ./...` is the
+      # only place tests run — downloading its output here instead of having
+      # bulwark coverage execute the suite a second time under --tests=run.
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: coverage-out
+
+      - uses: wardnet/bulwark@feature/pr-summary-collapsed-details
+        with:
+          tests-mode: skip
+          go-report: coverage.out
