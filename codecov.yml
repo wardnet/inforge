@@ -1,0 +1,11 @@
+# Codecov is upload-only here: bulwark's own PR comment already reports both
+# aggregate and patch coverage (see wardnet/bulwark's `bulwark coverage`), so
+# Codecov's own PR comment and status checks would just be duplicate noise —
+# disabled below. This file keeps Codecov as a historical dashboard/badge
+# only; the actual coverage gate is bulwark's own `PR Gate` check.
+comment: false
+
+coverage:
+  status:
+    project: false
+    patch: false
