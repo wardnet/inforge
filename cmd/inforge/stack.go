@@ -60,7 +60,7 @@ func setupGitBranchBackend(ctx context.Context, branch string) (stateDir string,
 	}
 
 	dir := ".pulumi-state"
-	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+	if mkErr := os.MkdirAll(dir, 0o750); mkErr != nil {
 		return "", nil, fmt.Errorf("create state dir: %w", mkErr)
 	}
 	absDir, absErr := filepath.Abs(dir)
@@ -69,14 +69,14 @@ func setupGitBranchBackend(ctx context.Context, branch string) (stateDir string,
 	}
 
 	// Fetch the remote branch; log but don't fail — it may not exist on first run.
-	if err := exec.Command("git", "fetch", "origin", branch).Run(); err != nil {
+	if err := exec.Command("git", "fetch", "origin", branch).Run(); err != nil { // #nosec G204 -- branch is from the local inforge.yaml git-branch backend config (operator-controlled), defaulted to "pulumi-state" if unset
 		fmt.Fprintf(os.Stderr, "warning: git fetch origin %s: %v (branch may not exist yet)\n", branch, err)
 	}
 
 	// Extract the branch tree into absDir via git archive.
-	archiveOut, archErr := exec.Command("git", "archive", "--format=tar", "origin/"+branch).Output()
+	archiveOut, archErr := exec.Command("git", "archive", "--format=tar", "origin/"+branch).Output() // #nosec G204 -- branch is from the local inforge.yaml git-branch backend config (operator-controlled)
 	if archErr == nil && len(archiveOut) > 0 {
-		tarCmd := exec.Command("tar", "-x", "-C", absDir)
+		tarCmd := exec.Command("tar", "-x", "-C", absDir) // #nosec G204 -- absDir is filepath.Abs of the hardcoded ".pulumi-state" directory, not external input
 		tarCmd.Stdin = bytes.NewReader(archiveOut)
 		if tarErr := tarCmd.Run(); tarErr != nil {
 			return "", nil, fmt.Errorf("extract state archive: %w", tarErr)
@@ -95,7 +95,7 @@ func setupGitBranchBackend(ctx context.Context, branch string) (stateDir string,
 			{[]string{"git", "push", "origin", "HEAD:" + branch}},
 		}
 		for _, step := range steps {
-			if out, cerr := exec.CommandContext(ctx, step.args[0], step.args[1:]...).CombinedOutput(); cerr != nil {
+			if out, cerr := exec.CommandContext(ctx, step.args[0], step.args[1:]...).CombinedOutput(); cerr != nil { // #nosec G204 -- steps are a hardcoded literal git add/commit/push sequence; the only variable, branch, is from the local backend config
 				return fmt.Errorf("%s: %w\n%s", strings.Join(step.args, " "), cerr, out)
 			}
 		}

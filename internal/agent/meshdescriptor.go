@@ -47,7 +47,7 @@ func (d MeshDescriptor) Files() map[string]string {
 
 // LoadMeshDescriptor reads and parses the mesh descriptor at path.
 func LoadMeshDescriptor(path string) (MeshDescriptor, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path is built from the deploy-tool-controlled on-host directory and a fixed filename
 	if err != nil {
 		return MeshDescriptor{}, fmt.Errorf("read mesh descriptor: %w", err)
 	}

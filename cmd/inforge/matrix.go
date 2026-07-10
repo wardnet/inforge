@@ -19,7 +19,7 @@ func newMatrixCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			out, err := exec.Command("git", "diff", "--name-only", base+"..."+head).Output()
+			out, err := exec.Command("git", "diff", "--name-only", base+"..."+head).Output() // #nosec G204 -- git binary hardcoded; base/head are operator/CI-supplied --base/--head flags, passed as a single non-shell-interpreted arg
 			if err != nil {
 				return fmt.Errorf("git diff: %w", err)
 			}

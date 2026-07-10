@@ -75,7 +75,7 @@ func substituteEnvVars(v any, lenient bool) (any, error) {
 func loadVariables(env, dir string, lenient bool) (types.EnvironmentVariables, error) {
 	var vars types.EnvironmentVariables
 	path := filepath.Join(envDir(env, dir), "variables.yaml")
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
 	if err != nil {
 		return vars, fmt.Errorf("read variables: %w", err)
 	}
@@ -123,7 +123,7 @@ func LoadVariablesLenient(env, dir string) (types.EnvironmentVariables, error) {
 // table and nil global.
 func loadRegionTable(env, dir string, substitute bool) (regions.Table, *regions.Global, error) {
 	path := filepath.Join(envDir(env, dir), "regions.yaml")
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
 	if os.IsNotExist(err) {
 		return regions.Table{}, nil, nil
 	}
@@ -182,7 +182,7 @@ func LoadRegionTableRaw(env, dir string) (regions.Table, *regions.Global, error)
 // cpus/memory payload (a provider maps a size name to a concrete SKU).
 func LoadSizeTable(env, dir string) (sizes.Table, error) {
 	path := filepath.Join(envDir(env, dir), "sizes.yaml")
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
 	if os.IsNotExist(err) {
 		return sizes.DefaultTable(), nil
 	}
@@ -223,7 +223,7 @@ func loadTypeFromFolders[T any](dir string) ([]T, []string, error) {
 		}
 		folder := filepath.Join(dir, e.Name())
 		manifest := filepath.Join(folder, "manifest.yaml")
-		b, err := os.ReadFile(manifest)
+		b, err := os.ReadFile(manifest) // #nosec G304 -- folder derives from operator-supplied --dir tree
 		if os.IsNotExist(err) {
 			// Accumulate all missing-manifest errors so the caller sees every
 			// broken folder at once, not just the first one.
@@ -251,7 +251,7 @@ func loadTypeFromFolders[T any](dir string) ([]T, []string, error) {
 // contract). Returns an error on malformed YAML.
 func LoadEnvironmentFile(folder string) (map[string]string, error) {
 	path := filepath.Join(folder, "environment.yaml")
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- folder derives from operator-supplied --dir tree
 	if os.IsNotExist(err) {
 		return nil, nil
 	}

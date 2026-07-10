@@ -83,7 +83,7 @@ func projectFiles(files, secrets map[string]string, dir string, uid, gid int) (p
 
 // differs reports whether dest is absent or holds content other than want.
 func differs(dest string, want []byte) (bool, error) {
-	existing, err := os.ReadFile(dest)
+	existing, err := os.ReadFile(dest) // #nosec G304 -- dir is the deploy-tool-controlled RuntimeDir arg; key is a fixed meshpaths provider key
 	if err != nil {
 		if os.IsNotExist(err) {
 			return true, nil

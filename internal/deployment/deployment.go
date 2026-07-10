@@ -50,7 +50,7 @@ type EnvConfig struct {
 func LoadConfig(dir string) (Config, error) {
 	var cfg Config
 	path := filepath.Join(dir, "inforge.yaml")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- dir is the operator-supplied --deploy-dir flag
 	if err != nil {
 		if os.IsNotExist(err) {
 			return cfg, fmt.Errorf("deployment config not found: %s — run from the repo root or pass --deploy-dir", path)
@@ -73,7 +73,7 @@ func LoadConfig(dir string) (Config, error) {
 func LoadServiceDescriptor(dir, name string) (ServiceDescriptor, error) {
 	var desc ServiceDescriptor
 	path := filepath.Join(dir, name+".yaml")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- dir/name derive from operator-supplied --deploy-dir/--service flags
 	if err != nil {
 		if os.IsNotExist(err) {
 			return desc, fmt.Errorf("service descriptor not found: %s", path)

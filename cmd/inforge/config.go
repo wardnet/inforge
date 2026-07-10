@@ -198,7 +198,7 @@ type stackConfig struct {
 
 func loadProjectConfig(path string) (projectConfig, error) {
 	var cfg projectConfig
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the operator-supplied --config CLI flag, not attacker input
 	if err != nil {
 		if os.IsNotExist(err) {
 			return cfg, fmt.Errorf("inforge.yaml not found — run from the repo root or pass --config")
@@ -268,7 +268,7 @@ func (c projectConfig) validateBuckets() error {
 
 func loadStackConfig(path string) (stackConfig, error) {
 	var cfg stackConfig
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is an operator-supplied --stack-config flag or a locally derived default filename
 	if err != nil {
 		if os.IsNotExist(err) {
 			return cfg, fmt.Errorf("stack config not found: %s", path)

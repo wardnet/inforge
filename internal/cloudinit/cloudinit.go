@@ -43,7 +43,7 @@ func (v Vars) placeholders() *strings.Replacer {
 // Assemble reads the template at absolutePath, substitutes the cloud-init
 // placeholders, and appends the inforge-managed first-boot steps.
 func Assemble(absolutePath string, vars Vars) (string, error) {
-	template, err := os.ReadFile(absolutePath)
+	template, err := os.ReadFile(absolutePath) // #nosec G304 -- absolutePath comes from the operator-authored, schema-validated resource manifest
 	if err != nil {
 		return "", err
 	}

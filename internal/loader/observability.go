@@ -69,7 +69,7 @@ func LoadCustomDashboards(env, dir string) ([]CustomDashboard, error) {
 		}
 		seen[slug] = e.Name()
 
-		data, err := os.ReadFile(filepath.Join(root, e.Name()))
+		data, err := os.ReadFile(filepath.Join(root, e.Name())) // #nosec G304 -- root derives from operator-supplied --dir/env; e.Name() is an entry from that same directory
 		if err != nil {
 			return nil, fmt.Errorf("loader: read custom dashboard %q: %w", e.Name(), err)
 		}
@@ -86,7 +86,7 @@ func LoadCustomDashboards(env, dir string) ([]CustomDashboard, error) {
 func LoadNotifications(env, dir string) (types.NotificationsSpec, error) {
 	var spec types.NotificationsSpec
 	path := filepath.Join(envDir(env, dir), "observability", "notifications.yaml")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
 	if err != nil {
 		if os.IsNotExist(err) {
 			return spec, nil
@@ -105,7 +105,7 @@ func LoadNotifications(env, dir string) (types.NotificationsSpec, error) {
 func LoadAlerts(env, dir string) (types.AlertsSpec, error) {
 	var spec types.AlertsSpec
 	path := filepath.Join(envDir(env, dir), "observability", "alerts.yaml")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
 	if err != nil {
 		if os.IsNotExist(err) {
 			return spec, nil

@@ -152,7 +152,7 @@ func Path(dir, env string) string {
 // present store missing either recipient is corrupt, since nothing could have
 // encrypted its keys.
 func Load(path string) (*Store, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path derives from the operator's --dir flag and env argument
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
@@ -182,7 +182,7 @@ func (s *Store) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("encode pki store: %w", err)
 	}
-	if err := os.WriteFile(path, append([]byte(header), b...), 0o644); err != nil {
+	if err := os.WriteFile(path, append([]byte(header), b...), 0o600); err != nil {
 		return fmt.Errorf("write pki store: %w", err)
 	}
 	return nil

@@ -20,11 +20,11 @@ const defaultHostKeyPath = "/etc/ssh/ssh_host_ed25519_key"
 // so producer and consumer round-trip the same implementation. The plaintext
 // is returned to the caller and never written to disk.
 func DecryptSecretsBlob(path, hostKeyPath string) (hostsecrets.Blob, error) {
-	keyPEM, err := os.ReadFile(hostKeyPath)
+	keyPEM, err := os.ReadFile(hostKeyPath) // #nosec G304 -- hostKeyPath is the fixed defaultHostKeyPath constant
 	if err != nil {
 		return hostsecrets.Blob{}, fmt.Errorf("read host key: %w", err)
 	}
-	ciphertext, err := os.ReadFile(path)
+	ciphertext, err := os.ReadFile(path) // #nosec G304 -- path is built from the deploy-tool-controlled on-host service dir and a fixed filename
 	if err != nil {
 		return hostsecrets.Blob{}, fmt.Errorf("read secrets blob: %w", err)
 	}

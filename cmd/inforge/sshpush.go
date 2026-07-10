@@ -29,7 +29,7 @@ func sshArgs(keyPath string) []string {
 // encrypt to the SAME on-host identity that decrypts at boot/mesh-project).
 func sshReadHostPubKey(ctx context.Context, keyPath, account string) (string, error) {
 	args := append(append([]string{}, sshArgs(keyPath)...), account, "cat "+hostpaths.SSHHostPubKeyPath)
-	out, err := exec.CommandContext(ctx, "ssh", args...).Output()
+	out, err := exec.CommandContext(ctx, "ssh", args...).Output() // #nosec G204 -- ssh binary is hardcoded; keyPath is an operator-supplied CLI flag/env path and account/remote-command are built from resolved deploy targets, not external input
 	if err != nil {
 		return "", fmt.Errorf("ssh %s: read host public key: %w", account, err)
 	}
@@ -60,7 +60,7 @@ func sshWriteFileFrom(ctx context.Context, keyPath, account, remotePath string, 
 	// suffix is not raced.
 	remoteCmd := fmt.Sprintf("sudo install -D -m 0600 /dev/stdin %[1]s.tmp && sudo mv %[1]s.tmp %[1]s", remotePath)
 	args := append(append([]string{}, sshArgs(keyPath)...), account, remoteCmd)
-	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd := exec.CommandContext(ctx, "ssh", args...) // #nosec G204 -- ssh binary hardcoded; remotePath is an internally-fixed on-host secrets path passed by inforge callers, and account/keyPath are operator/config-derived
 	cmd.Stdin = r
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -73,7 +73,7 @@ func sshWriteFileFrom(ctx context.Context, keyPath, account, remotePath string, 
 // sshRun runs remoteCmd over SSH, streaming its stdout/stderr into w.
 func sshRun(ctx context.Context, keyPath, account, remoteCmd string, w io.Writer) error {
 	args := append(append([]string{}, sshArgs(keyPath)...), account, remoteCmd)
-	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd := exec.CommandContext(ctx, "ssh", args...) // #nosec G204 -- ssh binary hardcoded; remoteCmd is built by internal callers from fixed command templates (pki renew / mesh-project), never external input
 	cmd.Stdout, cmd.Stderr = w, w
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ssh %s: %s: %w", account, remoteCmd, err)
