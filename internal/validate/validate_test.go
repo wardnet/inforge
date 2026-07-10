@@ -219,6 +219,54 @@ func TestValidateResourcesIngressDuplicateName(t *testing.T) {
 	assert.Contains(t, err.Error(), "validation failed")
 }
 
+// TestCheckCrossScopeNamesRejectsServiceCollision: a service name declared in
+// both the regional and global scopes is rejected — deployDescriptor merges
+// both scopes by bare name (no scope discriminator in resolveDeployTargets),
+// so a collision would deploy to both targets from one `--service <name>`.
+func TestCheckCrossScopeNamesRejectsServiceCollision(t *testing.T) {
+	regional := types.Resources{Service: []types.ServiceSpec{{Name: "api"}}}
+	global := types.Resources{Service: []types.ServiceSpec{{Name: "api"}}}
+
+	r := &reporter{}
+	out := captureStdout(t, func() {
+		checkCrossScopeNames(r, regional, global, "regional", "global")
+	})
+	assert.True(t, r.failed)
+	assert.Contains(t, out, `service name "api" is declared in both the global scope and the regional scope`)
+}
+
+// TestCheckCrossScopeNamesRejectsAppCollision mirrors the service case for apps.
+func TestCheckCrossScopeNamesRejectsAppCollision(t *testing.T) {
+	regional := types.Resources{App: []types.AppSpec{{Name: "dashboard"}}}
+	global := types.Resources{App: []types.AppSpec{{Name: "dashboard"}}}
+
+	r := &reporter{}
+	out := captureStdout(t, func() {
+		checkCrossScopeNames(r, regional, global, "regional", "global")
+	})
+	assert.True(t, r.failed)
+	assert.Contains(t, out, `app name "dashboard" is declared in both the global scope and the regional scope`)
+}
+
+// TestCheckCrossScopeNamesAllowsDistinctNames: distinct names in each scope
+// (the common case) never trip the cross-scope check.
+func TestCheckCrossScopeNamesAllowsDistinctNames(t *testing.T) {
+	regional := types.Resources{
+		Service: []types.ServiceSpec{{Name: "api"}},
+		App:     []types.AppSpec{{Name: "dashboard"}},
+	}
+	global := types.Resources{
+		Service: []types.ServiceSpec{{Name: "tenants"}},
+		App:     []types.AppSpec{{Name: "admin"}},
+	}
+
+	r := &reporter{}
+	captureStdout(t, func() {
+		checkCrossScopeNames(r, regional, global, "regional", "global")
+	})
+	assert.False(t, r.failed)
+}
+
 // TestCheckComputeGlobalNetworkRejected: a compute attaching to a global network
 // is recognized but rejected (cross-region networking not supported yet).
 func TestCheckComputeGlobalNetworkRejected(t *testing.T) {

@@ -12,10 +12,10 @@ package app
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/types"
 	"gopkg.in/yaml.v3"
@@ -132,14 +132,17 @@ const PlaceholderIndexHTML = `<!doctype html>
 // bundle is delivered into, the public FQDN it is served on, whether it is a SPA,
 // and the account inforge connects as over SSH (the ingress host's deploy user).
 type DeployTarget struct {
-	App            string `yaml:"app"              json:"app"`
-	IngressHostDNS string `yaml:"ingress_host_dns" json:"ingress_host_dns"`
-	DeployPath     string `yaml:"deploy_path"      json:"deploy_path"`
-	FQDN           string `yaml:"fqdn"             json:"fqdn"`
-	Spa            bool   `yaml:"spa"              json:"spa"`
+	App            string `yaml:"app"              json:"app"              pulumi:"app"`
+	IngressHostDNS string `yaml:"ingress_host_dns" json:"ingress_host_dns" pulumi:"ingressHostDns"`
+	DeployPath     string `yaml:"deploy_path"      json:"deploy_path"      pulumi:"deployPath"`
+	FQDN           string `yaml:"fqdn"             json:"fqdn"             pulumi:"fqdn"`
+	Spa            bool   `yaml:"spa"              json:"spa"              pulumi:"spa"`
 	// SSHUser is the account inforge connects as over SSH to deliver the bundle —
 	// the ingress host's deploy_user. Falls back to the historical "deploy".
-	SSHUser string `yaml:"ssh_user" json:"ssh_user"`
+	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"sshUser"`
+	// Scope is the app's mesh scope: its region name, or pki.ScopeGlobal for a
+	// global app. Mirrors service.DeployTarget.Scope / meshplan.DeployTarget.Scope.
+	Scope string `yaml:"scope" json:"scope" pulumi:"scope"`
 }
 
 // defaultSSHUser is the connect-as account used when an ingress host declares no
@@ -148,49 +151,41 @@ const defaultSSHUser = "deploy"
 
 // DeployDescriptor is the per-environment set of app deploy targets, derived
 // purely from resolved resources (mirrors service.DeployDescriptor).
+//
+// See service.DeployDescriptor's doc comment: every field here MUST also carry
+// a `pulumi:"..."` tag — this type is exported via ctx.Export(pulumi.Any(...)),
+// and the Go SDK's struct marshaler drops any field lacking that tag.
 type DeployDescriptor struct {
-	Environment string         `yaml:"environment" json:"environment"`
-	Targets     []DeployTarget `yaml:"targets"     json:"targets"`
+	Environment string         `yaml:"environment" json:"environment" pulumi:"environment"`
+	Targets     []DeployTarget `yaml:"targets"     json:"targets"     pulumi:"targets"`
 }
 
-// BuildDeployDescriptor derives the app deploy descriptor for an environment
-// from its regional resource set, instantiated into every region in the
-// table, plus its global resource set, instantiated once region-less. Each
-// regional app expands into one DeployTarget per region — the region slug
-// makes each target's FQDN and ingress host DNS distinct — so a single-region
-// environment is unchanged while a multi-region one fans an app across
-// regions. A global app expands into exactly one DeployTarget, with no
-// region slug. Regions are iterated in sorted order so the targets are
-// stable across runs. An app's ingress host DNS is the HostFQDN of the
-// compute its ingress references; an app whose ingress (or that ingress's
-// host) does not resolve is skipped — the realization side validates
-// resolution, so the skip is purely defensive.
+// BuildDeployDescriptor derives the app deploy descriptor for an environment from
+// the regional resource set (instantiated into every region in the table) plus
+// the region-less global resource set (instantiated once — mirrors
+// service.BuildDeployDescriptor / meshplan.BuildDeployDescriptor). Each regional
+// app expands into one DeployTarget per region — the region slug makes each
+// target's FQDN and ingress host DNS distinct — so a single-region environment
+// is unchanged while a multi-region one fans an app across regions; each global
+// app contributes exactly one region-less target. Regions are iterated in
+// sorted order so the targets are stable across runs. An app's ingress host DNS
+// is the HostFQDN of the compute its ingress references; an app whose ingress
+// (or that ingress's host) does not resolve is skipped — the realization side
+// validates resolution, so the skip is purely defensive.
 //
 // ephemeralSlug is the ADR-0028 ephemeral-env exception threaded into each app's
 // FQDN (see naming.AppFQDN): "" for a static env (unchanged URLs), the env's slug
 // identity for an ephemeral env so its app hostname never collides with the
 // source's. It does NOT affect the ingress host DNS, which is already env-scoped.
-func BuildDeployDescriptor(env, baseDomain string, res, globalRes types.Resources, table regions.Table, ephemeralSlug string) (DeployDescriptor, error) {
+func BuildDeployDescriptor(env, baseDomain string, regional, global types.Resources, table regions.Table, ephemeralSlug string) (DeployDescriptor, error) {
 	desc := DeployDescriptor{Environment: env}
-	regionNames := make([]string, 0, len(table))
-	for region := range table {
-		regionNames = append(regionNames, region)
-	}
-	sort.Strings(regionNames)
 
-	// appendScope mirrors internal/meshplan.BuildDeployDescriptor and
-	// program.buildDBDeployDescriptor's identical regional+global closure
-	// shape: derive ingressHostName/canonical/deployUsers fresh per scope
-	// (regional or global) and append one DeployTarget per app, closing over
-	// desc/env/baseDomain/ephemeralSlug instead of threading them through a
-	// free function. An app whose ingress host doesn't resolve is skipped —
-	// the realization side validates resolution, so the skip is purely
-	// defensive.
-	appendScope := func(scopeRes types.Resources, slug string) {
-		ingressHostName := ingressHostNamesByApp(scopeRes)
-		deployUsers := naming.DeployUsersByHost(scopeRes.Compute)
-		canonical := naming.CanonicalComputeKeys(scopeRes.Compute)
-		for _, a := range scopeRes.App {
+	// ingressHostName/deployUsers/canonical are computed once per resource set
+	// (not once per region) — each is a pure derivation of that set's
+	// App/Ingress/Compute lists, so recomputing it inside the per-region loop
+	// below would just rebuild the same maps once per region for no benefit.
+	appendScope := func(res types.Resources, ingressHostName map[string]string, canonical, deployUsers map[string]string, slug, scope string) {
+		for _, a := range res.App {
 			hostName, ok := ingressHostName[a.Name]
 			if !ok {
 				continue
@@ -206,25 +201,27 @@ func BuildDeployDescriptor(env, baseDomain string, res, globalRes types.Resource
 				FQDN:           naming.AppFQDN(a.Subdomain, slug, baseDomain, ephemeralSlug),
 				Spa:            a.Spa,
 				SSHUser:        sshUser,
+				Scope:          scope,
 			})
 		}
 	}
 
-	for _, region := range regionNames {
+	regionalIngressHostName := ingressHostNamesByApp(regional)
+	regionalDeployUsers := naming.DeployUsersByHost(regional.Compute)
+	regionalCanonical := naming.CanonicalComputeKeys(regional.Compute)
+	for _, region := range table.SortedNames() {
 		slug, err := table.Slug(region)
 		if err != nil {
 			return DeployDescriptor{}, fmt.Errorf("region %q: %w", region, err)
 		}
-		appendScope(res, slug)
+		appendScope(regional, regionalIngressHostName, regionalCanonical, regionalDeployUsers, slug, region)
 	}
-
-	// The global slice is instantiated once, region-less (slug ""), mirroring
-	// program.go's global scope (see its "global before regions" comment) — a
-	// global app's ingress host DNS and FQDN are env-scoped only, with no
-	// <slug> segment. Without this, a container: global app (e.g. the account
-	// SPA, whose ingress is itself global) never lands in the descriptor,
-	// even though `inforge deploy` fully realizes it.
-	appendScope(globalRes, "")
+	// The global slice is region-less: empty slug drops the region segment from
+	// the ingress host FQDN and app FQDN, matching the global host's DNS record.
+	globalIngressHostName := ingressHostNamesByApp(global)
+	globalDeployUsers := naming.DeployUsersByHost(global.Compute)
+	globalCanonical := naming.CanonicalComputeKeys(global.Compute)
+	appendScope(global, globalIngressHostName, globalCanonical, globalDeployUsers, "", pki.ScopeGlobal)
 
 	return desc, nil
 }

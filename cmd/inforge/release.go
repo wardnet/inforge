@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	iapp "github.com/wardnet/inforge/internal/app"
+	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/release"
 	"github.com/wardnet/inforge/internal/remote"
 	"github.com/wardnet/inforge/internal/service"
@@ -387,6 +388,12 @@ func resolveAppDeployTargets(ctx context.Context, projCfg projectConfig, env str
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("app %q not found in appDeployDescriptor for env %q — is it defined as an AppSpec in the infra resources?", name, env)
+	}
+	// See resolveDeployTargets's identical check: a mixed global+regional match
+	// signals a same-named app declared in both scopes, which `inforge validate`
+	// should already reject.
+	if hasMixedScope(targets, func(t iapp.DeployTarget) string { return t.Scope }, pki.ScopeGlobal) {
+		return nil, fmt.Errorf("app %q matches both a global and a regional target in appDeployDescriptor for env %q — this is an app-name collision across scopes; rename one of the two AppSpecs (run `inforge validate` to locate them)", name, env)
 	}
 	return targets, nil
 }

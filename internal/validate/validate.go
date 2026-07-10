@@ -392,8 +392,10 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 	// (regional→global is the one permitted call direction, ADR-0013). Loaded
 	// leniently: a malformed regional set fails its own pass with a precise per-file
 	// error, so here an error just yields an empty caller set rather than aborting.
+	// The same lenient load also feeds the cross-scope name check below.
+	regionalRes, regionalLoadErr := loader.LoadResources(env, dir)
 	regionalMeshServices := map[string]bool{}
-	if regionalRes, rerr := loader.LoadResources(env, dir); rerr == nil {
+	if regionalLoadErr == nil {
 		for _, s := range regionalRes.Service {
 			if s.Pki != "" {
 				regionalMeshServices[s.Name] = true
@@ -461,6 +463,18 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 		return err
 	}
 
+	// Per-scope name uniqueness (validateType, above) does not catch a name
+	// reused ACROSS scopes: deployDescriptor/appDeployDescriptor now merge
+	// regional and global targets into one flat list resolved by bare name
+	// (cmd/inforge/releases.go's resolveDeployTargets and its app equivalent
+	// take no scope argument), so a same-named service/app in both scopes would
+	// resolve to — and deploy — both targets from a single `--service <name>`
+	// invocation. Skipped when the regional set fails to load: its own
+	// validateResourceSet pass above already reports that failure precisely.
+	if regionalLoadErr == nil {
+		checkCrossScopeNames(r, regionalRes, globalRes, regionalBase, globalBase)
+	}
+
 	// Mesh PKI references: a global service's leaf comes from the global
 	// intermediate; a regional service's leaf, from each region's intermediate.
 	checkPKI(r, globalBase, regionalBase, regionTable, pkiStore)
@@ -481,6 +495,42 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 		return errors.New("validation failed")
 	}
 	return nil
+}
+
+// checkCrossScopeNames rejects a service or app name declared in BOTH the
+// regional and global resource sets. validateType (via validateResourceSet)
+// already rejects a duplicate name WITHIN one scope; this closes the
+// remaining gap across scopes, which matters specifically for service and app
+// because their deploy descriptors are resolved by bare name with no scope
+// discriminator (see the call site's comment in ValidateResources).
+func checkCrossScopeNames(r *reporter, regional, global types.Resources, regionalBase, globalBase string) {
+	regionalServices := map[string]bool{}
+	for _, s := range regional.Service {
+		regionalServices[s.Name] = true
+	}
+	for _, s := range global.Service {
+		if regionalServices[s.Name] {
+			r.fail(filepath.Join(globalBase, "service", s.Name), fmt.Sprintf(
+				"service name %q is declared in both the global scope and the regional scope (%s) — "+
+					"service names must be unique across the whole environment: deployDescriptor merges "+
+					"both scopes by bare name, so a collision would deploy to both targets from one "+
+					"`inforge releases deploy --service %s`",
+				s.Name, filepath.Join(regionalBase, "service", s.Name), s.Name))
+		}
+	}
+
+	regionalApps := map[string]bool{}
+	for _, a := range regional.App {
+		regionalApps[a.Name] = true
+	}
+	for _, a := range global.App {
+		if regionalApps[a.Name] {
+			r.fail(filepath.Join(globalBase, "app", a.Name), fmt.Sprintf(
+				"app name %q is declared in both the global scope and the regional scope (%s) — "+
+					"app names must be unique across the whole environment for the same reason as service names",
+				a.Name, filepath.Join(regionalBase, "app", a.Name)))
+		}
+	}
 }
 
 func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, siblingServices map[string]bool, encStore *secretstore.Store, defaults types.ProviderDefaults, backupsBucketConfigured bool) error {
