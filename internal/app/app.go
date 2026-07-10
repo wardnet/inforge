@@ -133,13 +133,13 @@ const PlaceholderIndexHTML = `<!doctype html>
 // and the account inforge connects as over SSH (the ingress host's deploy user).
 type DeployTarget struct {
 	App            string `yaml:"app"              json:"app"              pulumi:"app"`
-	IngressHostDNS string `yaml:"ingress_host_dns" json:"ingress_host_dns" pulumi:"ingressHostDns"`
-	DeployPath     string `yaml:"deploy_path"      json:"deploy_path"      pulumi:"deployPath"`
+	IngressHostDNS string `yaml:"ingress_host_dns" json:"ingress_host_dns" pulumi:"ingress_host_dns"`
+	DeployPath     string `yaml:"deploy_path"      json:"deploy_path"      pulumi:"deploy_path"`
 	FQDN           string `yaml:"fqdn"             json:"fqdn"             pulumi:"fqdn"`
 	Spa            bool   `yaml:"spa"              json:"spa"              pulumi:"spa"`
 	// SSHUser is the account inforge connects as over SSH to deliver the bundle —
 	// the ingress host's deploy_user. Falls back to the historical "deploy".
-	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"sshUser"`
+	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"ssh_user"`
 	// Scope is the app's mesh scope: its region name, or pki.ScopeGlobal for a
 	// global app. Mirrors service.DeployTarget.Scope / meshplan.DeployTarget.Scope.
 	Scope string `yaml:"scope" json:"scope" pulumi:"scope"`

@@ -20,17 +20,17 @@ type DeployTarget struct {
 	Database string `yaml:"database" json:"database" pulumi:"database"`
 	// HostDNS is the host's SSH/cloud-init DNS name; SSHUser is the account inforge
 	// connects as.
-	HostDNS string `yaml:"host_dns" json:"host_dns" pulumi:"hostDns"`
-	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"sshUser"`
+	HostDNS string `yaml:"host_dns" json:"host_dns" pulumi:"host_dns"`
+	SSHUser string `yaml:"ssh_user" json:"ssh_user" pulumi:"ssh_user"`
 	// Port is the cluster's TCP port on its host (postgres.ClusterPort), needed for
 	// the on-host pg_restore. RegionSlug is the R2 key's region segment (the region
 	// slug, or "global" for the global scope).
 	Port       int    `yaml:"port" json:"port" pulumi:"port"`
-	RegionSlug string `yaml:"region_slug" json:"region_slug" pulumi:"regionSlug"`
+	RegionSlug string `yaml:"region_slug" json:"region_slug" pulumi:"region_slug"`
 	// BackupEnabled reports whether this database has a backup timer (its
 	// `backup.enabled` is not explicitly false). `db backup` operates only on
 	// enabled targets; restore/list-backups ignore it.
-	BackupEnabled bool `yaml:"backup_enabled" json:"backup_enabled" pulumi:"backupEnabled"`
+	BackupEnabled bool `yaml:"backup_enabled" json:"backup_enabled" pulumi:"backup_enabled"`
 }
 
 // DeployDescriptor is the `dbDeployDescriptor` stack output (the database sibling
