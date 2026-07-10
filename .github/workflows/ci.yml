@@ -48,3 +48,21 @@ jobs:
 
       - name: go test
         run: go test -race ./...
+
+  bulwark:
+    name: bulwark
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # bulwark coverage caches baselines on the bulwark-state branch
+      pull-requests: write  # for the PR summary comment
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0    # bulwark coverage needs full history to resolve the PR's base commit
+
+      - uses: actions/setup-go@v6.5.0
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - uses: wardnet/bulwark@v1
