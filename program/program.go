@@ -615,7 +615,17 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 		Update:   pulumi.String(createScript),
 		Delete:   pulumi.String(serviceDeprovisionScript(svc)),
 		Triggers: pulumi.Array{pulumi.String(createScript)},
-	}, pulumi.DependsOn([]pulumi.Resource{gate})); err != nil {
+		// DeleteBeforeReplace (resource option below): if a replace is ever
+		// forced anyway (e.g. Connection changes because the host was
+		// recreated), Pulumi's default create-before-delete order would run
+		// this Delete SECOND — disabling and rm -f'ing the SAME unit path the
+		// Create step just installed, since both old and new target the
+		// identical host/unit name. That silently leaves the unit permanently
+		// missing despite a "successful" apply (confirmed in production
+		// against wardnet-infrastructure's tenants service). Matches the
+		// DeleteBeforeReplace already used by deliverServiceSecrets/
+		// deliverServiceDescriptor's remote.Command calls for the same reason.
+	}, pulumi.DependsOn([]pulumi.Resource{gate}), pulumi.DeleteBeforeReplace(true)); err != nil {
 		return fmt.Errorf("service %q: provision unit: %w", svc.Name, err)
 	}
 	return nil
@@ -714,7 +724,12 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 				// pg_monitor membership + CONNECT grants; postgres.OSUser is the bootstrap
 				// superuser the REASSIGN targets (a no-op here).
 				Delete: pulumi.String(postgres.DropRoleScript(port, roleName, postgres.OSUser)),
-			}, pulumi.DependsOn(mintDeps))
+				// DeleteBeforeReplace: same reasoning as provisionService's
+				// remote.Command — a forced replace with the default
+				// create-before-delete order would mint the role then
+				// immediately DROP it (same roleName, same host), silently
+				// leaving the monitor role missing after a "successful" apply.
+			}, pulumi.DependsOn(mintDeps), pulumi.DeleteBeforeReplace(true))
 			if err != nil {
 				return fmt.Errorf("observability: host %q cluster %q: mint monitor role: %w", hostKey, cluster, err)
 			}

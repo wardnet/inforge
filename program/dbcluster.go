@@ -319,7 +319,12 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 		// a raw secret in Triggers breaks preview with "malformed RPC secret".
 		// safeTrigger hashes + unsecrets it (see program.go).
 		Triggers: pulumi.Array{safeTrigger(mintScript)},
-	}, pulumi.DependsOn(mintDeps))
+		// DeleteBeforeReplace: the default create-before-delete order would
+		// mint the new role then immediately DROP it via the old resource's
+		// Delete (same roleName), silently leaving a service's granted DB
+		// credential missing after a "successful" apply — see program.go's
+		// provisionService for the full incident writeup of this bug class.
+	}, pulumi.DependsOn(mintDeps), pulumi.DeleteBeforeReplace(true))
 	if err != nil {
 		return types.DBRoleFields{}, fmt.Errorf("db role %q: mint role: %w", roleName, err)
 	}
