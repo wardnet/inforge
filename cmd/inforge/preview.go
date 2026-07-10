@@ -42,6 +42,15 @@ func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, for
 		return err
 	}
 
+	// Pin the inforge-agent download to this CLI build, same as deploy/ephemeral.
+	// program.Run reads inforge_version (stack config) / INFORGE_VERSION; without
+	// this, preview resolves "dev" and every service's provision-command script
+	// (which embeds the version) diffs against a real pinned deploy — a spurious
+	// "update" on every service resource, unrelated to any actual change.
+	if err := os.Setenv("INFORGE_VERSION", version); err != nil {
+		return fmt.Errorf("set INFORGE_VERSION: %w", err)
+	}
+
 	stackCfg, err := resolveStackConfig(stackConfigPath, stackName)
 	if err != nil {
 		return err
