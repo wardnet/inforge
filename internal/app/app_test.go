@@ -24,7 +24,7 @@ func TestBuildDeployDescriptor(t *testing.T) {
 	}
 	table := regions.Table{"us-east-1": {Slug: "use1"}}
 
-	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, table, "")
+	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, types.Resources{}, table, "")
 	require.NoError(t, err)
 	require.Len(t, desc.Targets, 1)
 	tg := desc.Targets[0]
@@ -36,6 +36,32 @@ func TestBuildDeployDescriptor(t *testing.T) {
 	assert.Equal(t, "ops", tg.SSHUser)
 }
 
+// TestBuildDeployDescriptorGlobal guards the bug this function was fixed
+// for: a container: global app whose ingress is itself global (e.g. the
+// account SPA behind the tenants ingress) must land in the descriptor with a
+// region-less ingress host DNS and FQDN.
+func TestBuildDeployDescriptorGlobal(t *testing.T) {
+	global := types.Resources{
+		Compute: []types.ComputeSpec{
+			{Name: "tenants", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "ops"}},
+		},
+		Ingress: []types.IngressSpec{{Name: "tenants", Host: "tenants"}},
+		App: []types.AppSpec{
+			{Name: "account", Ingress: "tenants", Subdomain: "account", Spa: true},
+		},
+	}
+	table := regions.Table{"us-east-1": {Slug: "use1"}}
+
+	desc, err := BuildDeployDescriptor("prd", "wardnet.network", types.Resources{}, global, table, "")
+	require.NoError(t, err)
+	require.Len(t, desc.Targets, 1)
+	tg := desc.Targets[0]
+	assert.Equal(t, "account", tg.App)
+	assert.Equal(t, "tenants.vm.prd.wardnet.network", tg.IngressHostDNS, "global ingress host DNS has no region slug segment")
+	assert.Equal(t, "account.wardnet.network", tg.FQDN, "global app FQDN has no region slug segment")
+	assert.Equal(t, "ops", tg.SSHUser)
+}
+
 // TestBuildDeployDescriptorDefaultSSHUser: an ingress host with no deploy_user
 // falls back to the historical "deploy" account.
 func TestBuildDeployDescriptorDefaultSSHUser(t *testing.T) {
@@ -44,7 +70,7 @@ func TestBuildDeployDescriptorDefaultSSHUser(t *testing.T) {
 		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
 		App:     []types.AppSpec{{Name: "my", Ingress: "web", Subdomain: "my"}},
 	}
-	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, regions.Table{"us-east-1": {Slug: "use1"}}, "")
+	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, types.Resources{}, regions.Table{"us-east-1": {Slug: "use1"}}, "")
 	require.NoError(t, err)
 	require.Len(t, desc.Targets, 1)
 	assert.Equal(t, "deploy", desc.Targets[0].SSHUser)
@@ -56,7 +82,7 @@ func TestBuildDeployDescriptorSkipsUnresolvedIngress(t *testing.T) {
 	res := types.Resources{
 		App: []types.AppSpec{{Name: "orphan", Ingress: "missing", Subdomain: "x"}},
 	}
-	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, regions.Table{"us-east-1": {Slug: "use1"}}, "")
+	desc, err := BuildDeployDescriptor("prd", "wardnet.network", res, types.Resources{}, regions.Table{"us-east-1": {Slug: "use1"}}, "")
 	require.NoError(t, err)
 	assert.Empty(t, desc.Targets)
 }

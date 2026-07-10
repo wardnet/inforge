@@ -71,7 +71,7 @@ func TestBuildDeployDescriptor(t *testing.T) {
 		},
 	}
 
-	desc, err := BuildDeployDescriptor("prd", "example.com", res, singleRegionTable())
+	desc, err := BuildDeployDescriptor("prd", "example.com", res, types.Resources{}, singleRegionTable())
 	require.NoError(t, err)
 	require.Len(t, desc.Targets, 2)
 
@@ -89,6 +89,46 @@ func TestBuildDeployDescriptor(t *testing.T) {
 	assert.Equal(t, "edge.vm.prd.use1.example.com", worker.HostDNS, "host DNS is derived from each service's own host compute")
 }
 
+// TestBuildDeployDescriptorGlobal guards the bug this function was fixed for:
+// a container: global service (e.g. tenants) must land in the descriptor
+// exactly once, with a region-less host DNS — `inforge releases push/deploy`
+// resolves a service purely from this descriptor, so a global service missing
+// here means it's undeployable via that path even though `inforge deploy`
+// fully realizes it.
+func TestBuildDeployDescriptorGlobal(t *testing.T) {
+	global := types.Resources{
+		Service: []types.ServiceSpec{
+			{Name: "tenants", Host: "tenants-01", Type: "raw"},
+		},
+	}
+	desc, err := BuildDeployDescriptor("prd", "example.com", types.Resources{}, global, singleRegionTable())
+	require.NoError(t, err)
+	require.Len(t, desc.Targets, 1)
+	assert.Equal(t, "tenants", desc.Targets[0].Service)
+	assert.Equal(t, "tenants.vm.prd.example.com", desc.Targets[0].HostDNS, "global host DNS has no region slug segment")
+}
+
+// TestBuildDeployDescriptorRegionalAndGlobal guards that regional and global
+// services coexist in one descriptor without interfering with each other.
+func TestBuildDeployDescriptorRegionalAndGlobal(t *testing.T) {
+	res := types.Resources{
+		Service: []types.ServiceSpec{{Name: "api", Host: "bridge-01", Type: "raw"}},
+	}
+	global := types.Resources{
+		Service: []types.ServiceSpec{{Name: "tenants", Host: "tenants-01", Type: "raw"}},
+	}
+	desc, err := BuildDeployDescriptor("prd", "example.com", res, global, singleRegionTable())
+	require.NoError(t, err)
+	require.Len(t, desc.Targets, 2)
+
+	byName := map[string]DeployTarget{}
+	for _, tgt := range desc.Targets {
+		byName[tgt.Service] = tgt
+	}
+	assert.Equal(t, "bridge.vm.prd.use1.example.com", byName["api"].HostDNS)
+	assert.Equal(t, "tenants.vm.prd.example.com", byName["tenants"].HostDNS)
+}
+
 // TestBuildDeployDescriptorMultiRegion asserts the shared resource set fans each
 // service out into one target per region, with region-specific host DNS, in
 // sorted region order.
@@ -103,7 +143,7 @@ func TestBuildDeployDescriptorMultiRegion(t *testing.T) {
 		"eu-central-1": {Slug: "euc1"},
 	}
 
-	desc, err := BuildDeployDescriptor("prd", "example.com", res, table)
+	desc, err := BuildDeployDescriptor("prd", "example.com", res, types.Resources{}, table)
 	require.NoError(t, err)
 	// One service × two regions -> two targets, sorted by region name.
 	require.Len(t, desc.Targets, 2)
@@ -127,7 +167,7 @@ func TestBuildDeployDescriptorPropagatesUser(t *testing.T) {
 			{Name: "worker", Host: "bridge-01", Type: "raw"},
 		},
 	}
-	desc, err := BuildDeployDescriptor("prd", "example.com", res, singleRegionTable())
+	desc, err := BuildDeployDescriptor("prd", "example.com", res, types.Resources{}, singleRegionTable())
 	require.NoError(t, err)
 	byName := map[string]DeployTarget{}
 	for _, tgt := range desc.Targets {
@@ -148,7 +188,7 @@ func TestBuildDeployDescriptorSSHUser(t *testing.T) {
 			{Name: "worker", Host: "edge-01", Type: "raw"}, // host declares none -> fallback
 		},
 	}
-	desc, err := BuildDeployDescriptor("prd", "example.com", res, singleRegionTable())
+	desc, err := BuildDeployDescriptor("prd", "example.com", res, types.Resources{}, singleRegionTable())
 	require.NoError(t, err)
 	byName := map[string]DeployTarget{}
 	for _, tgt := range desc.Targets {
