@@ -85,6 +85,8 @@ jobs:
         with:
           tests-mode: skip
           go-report: coverage.out
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+          semgrep-app-token: ${{ secrets.SEMGREP_APP_TOKEN }}
 
   # The single job the branch-protection ruleset actually requires. Individual
   # job names are an implementation detail that changes as CI evolves —
