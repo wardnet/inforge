@@ -177,14 +177,36 @@ func BuildDeployDescriptor(env, baseDomain string, res, globalRes types.Resource
 	}
 	sort.Strings(regionNames)
 
-	canonical := naming.CanonicalComputeKeys(res.Compute)
-	deployUsers := naming.DeployUsersByHost(res.Compute)
+	// appendScope mirrors internal/meshplan.BuildDeployDescriptor and
+	// program.buildDBDeployDescriptor's identical regional+global closure
+	// shape: derive canonical/deployUsers fresh per scope (regional or
+	// global) and append one DeployTarget per service, closing over desc/
+	// env/baseDomain instead of threading them through a free function.
+	appendScope := func(scopeRes types.Resources, slug string) {
+		canonical := naming.CanonicalComputeKeys(scopeRes.Compute)
+		deployUsers := naming.DeployUsersByHost(scopeRes.Compute)
+		for _, svc := range scopeRes.Service {
+			sshUser := deployUsers[canonical[svc.Host]]
+			if sshUser == "" {
+				sshUser = defaultSSHUser
+			}
+			desc.Targets = append(desc.Targets, DeployTarget{
+				Service: svc.Name,
+				HostDNS: hostDNS(svc.Host, env, baseDomain, slug),
+				Folder:  Folder(svc.Name),
+				Unit:    UnitName(svc.Name),
+				User:    svc.User,
+				SSHUser: sshUser,
+			})
+		}
+	}
+
 	for _, region := range regionNames {
 		slug, err := table.Slug(region)
 		if err != nil {
 			return DeployDescriptor{}, fmt.Errorf("region %q: %w", region, err)
 		}
-		appendServiceTargets(&desc, res.Service, canonical, deployUsers, env, baseDomain, slug)
+		appendScope(res, slug)
 	}
 
 	// The global slice is instantiated once, region-less (slug ""), mirroring
@@ -195,32 +217,9 @@ func BuildDeployDescriptor(env, baseDomain string, res, globalRes types.Resource
 	// `inforge deploy` apply realizes it — only the separate `inforge releases
 	// push`/`releases deploy` path (which resolves a service purely from this
 	// descriptor) was affected.
-	globalCanonical := naming.CanonicalComputeKeys(globalRes.Compute)
-	globalDeployUsers := naming.DeployUsersByHost(globalRes.Compute)
-	appendServiceTargets(&desc, globalRes.Service, globalCanonical, globalDeployUsers, env, baseDomain, "")
+	appendScope(globalRes, "")
 
 	return desc, nil
-}
-
-// appendServiceTargets appends one DeployTarget per service in services to
-// desc, resolving each service's SSH user via canonical/deployUsers and its
-// host DNS via hostDNS(..., slug) — slug is a region slug for a regional
-// scope, or "" for the region-less global scope.
-func appendServiceTargets(desc *DeployDescriptor, services []types.ServiceSpec, canonical, deployUsers map[string]string, env, baseDomain, slug string) {
-	for _, svc := range services {
-		sshUser := deployUsers[canonical[svc.Host]]
-		if sshUser == "" {
-			sshUser = defaultSSHUser
-		}
-		desc.Targets = append(desc.Targets, DeployTarget{
-			Service: svc.Name,
-			HostDNS: hostDNS(svc.Host, env, baseDomain, slug),
-			Folder:  Folder(svc.Name),
-			Unit:    UnitName(svc.Name),
-			User:    svc.User,
-			SSHUser: sshUser,
-		})
-	}
 }
 
 // hostDNS computes the fully-qualified SSH/cloud-init domain for a host compute
