@@ -81,7 +81,7 @@ jobs:
         with:
           name: coverage-out
 
-      - uses: wardnet/bulwark@feature/pr-summary-collapsed-details
+      - uses: wardnet/bulwark@v1
         with:
           tests-mode: skip
           go-report: coverage.out
