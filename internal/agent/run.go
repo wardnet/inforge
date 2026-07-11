@@ -106,6 +106,15 @@ func runMeshProject(dir string) error {
 // ExecStart). Without this step a reload after `inforge pki renew` would leave
 // the process serving its OLD cert until an unrelated full restart. Absent
 // leaf.age (not yet pushed) is a no-op, matching runMeshProject.
+//
+// It projects the descriptor's ENTIRE files: set, so it must resolve that set
+// against BOTH on-host blobs — exactly like runBoot — not against leaf.age alone.
+// A service's files: map can span the two artifacts: an mtls_files: service that
+// also holds a pki/* grant draws its leaf/bundle from the renew-owned leaf.age and
+// its granted PEMs from the deploy-owned secrets.age. Decrypting only leaf.age
+// here would leave every secrets.age-backed key unresolvable and fail the whole
+// atomic set ("mesh material ... not found or empty"), taking the renew push down
+// with it.
 func runProjectLeaf(dir string) error {
 	path := filepath.Join(dir, leafFile)
 	if _, err := os.Stat(path); err != nil {
@@ -122,9 +131,11 @@ func runProjectLeaf(dir string) error {
 	if err != nil {
 		return err
 	}
-	blob, err := DecryptSecretsBlob(path, defaultHostKeyPath)
+	// Merge secrets.age + leaf.age (mergeSecretsBlob already rejects a key claimed
+	// by both, so the two keysets stay provably disjoint).
+	blob, err := loadSecretsBlobs(dir)
 	if err != nil {
-		return fmt.Errorf("decrypt %s: %w", path, err)
+		return err
 	}
 	_, _, err = projectFiles(desc.Files, blob.Files, hostpaths.RuntimeDir(desc.Service), user.uid, user.gid)
 	return err
