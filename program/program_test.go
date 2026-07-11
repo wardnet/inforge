@@ -514,18 +514,31 @@ func TestAppProvisionScript(t *testing.T) {
 	assert.NotContains(t, script, "ln -sf", "must not force-overwrite an existing current symlink")
 }
 
-// TestServiceProvisionScriptEnablesNeverStarts guards the headline constraint:
-// provisioning writes + enables the unit but must NEVER start/restart it —
-// ExecStart=<folder>/run doesn't exist until release delivers code, so a start
-// here would fail the whole deploy.
-func TestServiceProvisionScriptEnablesNeverStarts(t *testing.T) {
+// TestServiceProvisionScriptEnablesAndStarts guards the corrected constraint:
+// provisioning writes, enables AND starts the unit (`enable --now`).
+//
+// This REVERSES the old "enables, never starts" rule, whose stated reason —
+// "ExecStart=<folder>/run doesn't exist until release delivers code, so a start here
+// would fail the whole deploy" — does not hold. The unit is enabled and
+// WantedBy=multi-user.target, so systemd ALREADY starts it unprompted on every
+// reboot; ConditionPathExists=<exec> is exactly what makes that a clean no-op (exit
+// 0, "condition failed") before any release. `enable --now` walks the same path, so
+// it cannot fail a deploy that a reboot would not also have failed.
+//
+// Enable-only was actively harmful: this script is also the CREATE half of a REPLACE
+// (its Triggers cover the agent version, so every inforge release replaces the
+// resource) whose DELETE half runs `disable --now`. Enabling without starting left a
+// previously-RUNNING service stopped — and it could not be rescued by the delivery
+// command's restart, because when only the agent version changes the descriptor is
+// unchanged and Pulumi skips delivery entirely. Provision must restore the state it
+// tore down. wardnet's tenants went down exactly this way on 5.5.1 → 5.5.2.
+func TestServiceProvisionScriptEnablesAndStarts(t *testing.T) {
 	script := serviceProvisionScript(types.ServiceSpec{Name: "api", User: "svc"}, "1.2.3")
 
 	assert.Contains(t, script, "systemctl daemon-reload")
-	assert.Contains(t, script, "systemctl enable 'wardnet-api.service'")
-	assert.NotContains(t, script, "systemctl start", "provisioning must not start the unit")
-	assert.NotContains(t, script, "systemctl restart", "provisioning must not restart the unit")
-	assert.NotContains(t, script, "enable --now", "enable must not start the unit")
+	assert.Contains(t, script, "systemctl enable --now 'wardnet-api.service'",
+		"a replaced unit was just `disable --now`'d; enabling without starting leaves it dead")
+	assert.NotContains(t, script, "systemctl restart", "provisioning starts the unit; restarting is delivery's job")
 
 	// Writes the unit file and creates the service folder + user.
 	assert.Contains(t, script, "/etc/systemd/system/wardnet-api.service")
