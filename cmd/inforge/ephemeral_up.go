@@ -283,11 +283,15 @@ func replicateService(ctx context.Context, store *release.Store, dir, srcEnv, sl
 
 	for _, sha := range slices.Sorted(maps.Keys(bySHA)) {
 		group := bySHA[sha]
-		payload, cleanup, err := downloadArtifact(ctx, store, svc.Name, sha)
+		archRes, err := probeAndVerifyArch(ctx, store, svc.Name, sha, group, sshKeyPath)
 		if err != nil {
 			return err
 		}
-		err = deliverRelease(ctx, store, svc.Name, slug, sha, serviceDeliveryTargets(group), payload, sshKeyPath)
+		deliveryTargets, cleanup, err := downloadArchPayloads(ctx, store, svc.Name, sha, group, archRes)
+		if err != nil {
+			return err
+		}
+		err = deliverRelease(ctx, store, svc.Name, slug, sha, deliveryTargets, sshKeyPath)
 		cleanup()
 		if err != nil {
 			return err
@@ -323,11 +327,11 @@ func replicateApp(ctx context.Context, store *release.Store, srcEnv, slug, sshKe
 
 	for _, sha := range slices.Sorted(maps.Keys(bySHA)) {
 		group := bySHA[sha]
-		payload, cleanup, err := downloadArtifact(ctx, store, artifactSlug, sha)
+		payload, cleanup, err := downloadArtifact(ctx, store, artifactSlug, sha, release.NoArch)
 		if err != nil {
 			return err
 		}
-		err = deliverRelease(ctx, store, artifactSlug, slug, sha, appDeliveryTargets(group, sha, false), payload, sshKeyPath)
+		err = deliverRelease(ctx, store, artifactSlug, slug, sha, appDeliveryTargets(group, sha, payload, false), sshKeyPath)
 		cleanup()
 		if err != nil {
 			return err

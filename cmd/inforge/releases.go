@@ -39,7 +39,7 @@ func newReleasesCmd(configPath, dir *string) *cobra.Command {
 // --- releases push ------------------------------------------------------------
 
 func newReleasesPushCmd(configPath *string) *cobra.Command {
-	var svc, sha, deployDir string
+	var svc, sha, arch, deployDir string
 	cmd := &cobra.Command{
 		Use:           "push <env>",
 		Short:         "Package a service artifact and upload it to the release store",
@@ -47,17 +47,21 @@ func newReleasesPushCmd(configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runReleasesPush(cmd.Context(), *configPath, args[0], svc, sha, deployDir)
+			return runReleasesPush(cmd.Context(), *configPath, args[0], svc, sha, arch, deployDir)
 		},
 	}
 	cmd.Flags().StringVarP(&svc, "service", "s", "", "service name to push (required)")
 	cmd.Flags().StringVar(&sha, "sha", "", "artifact SHA key (default: $GITHUB_SHA)")
+	cmd.Flags().StringVar(&arch, "arch", "", "CPU architecture this artifact was built for: amd64 or arm64 (required)")
 	cmd.Flags().StringVar(&deployDir, "deploy-dir", "./deployments", "path to the deployments directory")
-	mustRequire(cmd, "service")
+	mustRequire(cmd, "service", "arch")
 	return cmd
 }
 
-func runReleasesPush(ctx context.Context, configPath, env, svc, sha, deployDir string) error {
+func runReleasesPush(ctx context.Context, configPath, env, svc, sha, arch, deployDir string) error {
+	if err := validateArchFlag(arch); err != nil {
+		return err
+	}
 	sha, err := resolveSHA(sha)
 	if err != nil {
 		return err
@@ -90,8 +94,8 @@ func runReleasesPush(ctx context.Context, configPath, env, svc, sha, deployDir s
 	}
 	defer func() { _ = f.Close() }()
 
-	fmt.Printf("uploading %s/%s.tar.gz...\n", svc, sha)
-	if err := store.PutArtifact(ctx, svc, sha, f); err != nil {
+	fmt.Printf("uploading %s...\n", release.ArtifactKey(svc, sha, arch))
+	if err := store.PutArtifact(ctx, svc, sha, arch, f); err != nil {
 		return err
 	}
 
@@ -104,7 +108,7 @@ func runReleasesPush(ctx context.Context, configPath, env, svc, sha, deployDir s
 	if len(deleted) > 0 {
 		fmt.Printf("pruned %d old artifact(s): %s\n", len(deleted), strings.Join(deleted, ", "))
 	}
-	fmt.Printf("pushed %s @ %s\n", svc, sha)
+	fmt.Printf("pushed %s @ %s (%s)\n", svc, sha, arch)
 	return nil
 }
 
@@ -163,29 +167,40 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 	if err != nil {
 		return err
 	}
-	exists, err := store.ArtifactExists(ctx, svc, sha)
+
+	// A real deploy always needs the SSH key (delivery + the mesh leaf mint
+	// below both require it, regardless of this feature). A dry-run does NOT
+	// hard-require it: resolving it here first lets a dry-run get the FULL,
+	// accurate per-host architecture probe when a key is available, but
+	// degrades gracefully instead of failing when one isn't — preserving
+	// dry-run's original "just object-store credentials" usability for a CI
+	// stage with no SSH/network path to the fleet.
+	sshKeyPath, cleanupKey, sshErr := resolveSSHKey(sshKeyPath)
+	if sshErr == nil {
+		defer cleanupKey()
+	}
+	if dryRun && sshErr != nil {
+		return dryRunWithoutSSH(ctx, svc, sha, sshErr, func(ctx context.Context, arch string) (bool, error) {
+			return store.ArtifactExists(ctx, svc, sha, arch)
+		})
+	}
+	if sshErr != nil {
+		return sshErr
+	}
+
+	archRes, err := probeAndVerifyArch(ctx, store, svc, sha, targets, sshKeyPath)
 	if err != nil {
 		return err
 	}
-	if !exists {
-		return fmt.Errorf("artifact %s/%s.tar.gz not found in release store — run `inforge releases push` first", svc, sha)
-	}
 
-	fmt.Printf("deploying %s @ %s → %d host(s) (env: %s)\n", svc, sha, len(targets), env)
+	fmt.Printf("deploying %s @ %s → %d host(s) across %d arch(es) (env: %s)\n", svc, sha, len(targets), len(archRes.archList), env)
 	for _, t := range targets {
-		fmt.Printf("  host: %s  folder: %s  unit: %s\n", t.HostDNS, t.Folder, t.Unit)
+		fmt.Printf("  host: %s  arch: %s  folder: %s  unit: %s\n", t.HostDNS, archRes.archOf[t.HostDNS], t.Folder, t.Unit)
 	}
 	if dryRun {
-		fmt.Println("(dry-run: artifact present, skipping delivery)")
+		fmt.Println("(dry-run: artifact present for every detected arch, skipping delivery)")
 		return nil
 	}
-
-	var cleanupKey func()
-	sshKeyPath, cleanupKey, err = resolveSSHKey(sshKeyPath)
-	if err != nil {
-		return err
-	}
-	defer cleanupKey()
 
 	// A mesh service's leaf.age must already be on the host before the unit
 	// restarts into it: the boot path decrypts+projects whatever leaf.age
@@ -198,17 +213,56 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 		return err
 	}
 
-	payload, cleanup, err := downloadArtifact(ctx, store, svc, sha)
+	deliveryTargets, cleanupPayloads, err := downloadArchPayloads(ctx, store, svc, sha, targets, archRes)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	defer cleanupPayloads()
 
-	if err := deliverRelease(ctx, store, svc, env, sha, serviceDeliveryTargets(targets), payload, sshKeyPath); err != nil {
+	if err := deliverRelease(ctx, store, svc, env, sha, deliveryTargets, sshKeyPath); err != nil {
 		return err
 	}
 	fmt.Printf("deployed %s @ %s\n", svc, sha)
 	return nil
+}
+
+// dryRunWithoutSSH is `releases deploy --dry-run`'s fallback when no SSH key
+// is available (sshErr): it can't probe any host's real architecture, so it
+// can't do the full per-host verification a real deploy (or a dry-run WITH an
+// SSH key) gets. It falls back to the weaker check the pre-arch-aware dry-run
+// used to do — does SOME artifact exist for this (service, sha) at all, under
+// any known architecture — so a CI stage using --dry-run purely as a "did you
+// forget to push" gate with no SSH/network path to the fleet keeps working,
+// with a clear caveat that this is a reduced check.
+func dryRunWithoutSSH(ctx context.Context, svc, sha string, sshErr error, exists archArtifactChecker) error {
+	fmt.Printf("(dry-run: no SSH key available (%v) — skipping per-host architecture probe; checking object-store presence only)\n", sshErr)
+	found, err := anyArchPushed(ctx, svc, sha, exists)
+	if err != nil {
+		return err
+	}
+	if len(found) == 0 {
+		return fmt.Errorf("no artifact found for %s @ %s under any architecture — run `inforge releases push --arch <amd64|arm64>` first", svc, sha)
+	}
+	fmt.Printf("(dry-run: found %s; per-host architecture match is NOT verified without SSH access — resolve an SSH key for a full check)\n", strings.Join(found, ", "))
+	return nil
+}
+
+// anyArchPushed is dryRunWithoutSSH's pure half: it checks every supported
+// arch via exists and returns the R2 keys found present, in supportedArchs
+// order — the store dependency injected as a function so this scan logic is
+// unit testable without a live bucket.
+func anyArchPushed(ctx context.Context, svc, sha string, exists archArtifactChecker) ([]string, error) {
+	var found []string
+	for _, arch := range supportedArchs {
+		ok, err := exists(ctx, arch)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			found = append(found, release.ArtifactKey(svc, sha, arch))
+		}
+	}
+	return found, nil
 }
 
 // --- releases list ------------------------------------------------------------
@@ -254,16 +308,32 @@ func runReleasesList(ctx context.Context, configPath, env, svc string) error {
 	}
 	sort.Strings(hosts)
 
-	fmt.Printf("%-45s  %-12s  %s\n", "HOST", "SHA", "DEPLOYED")
+	fmt.Println(releaseListHeader())
 	for _, h := range hosts {
-		d := m.Deployments[h]
-		sha := d.SHA
-		if len(sha) > 12 {
-			sha = sha[:12]
-		}
-		fmt.Printf("%-45s  %-12s  %s\n", h, sha, d.DeployedAt.Format(time.RFC3339))
+		fmt.Println(formatReleaseListRow(h, m.Deployments[h]))
 	}
 	return nil
+}
+
+// releaseListHeader is the column header line for `releases list`'s table.
+func releaseListHeader() string {
+	return fmt.Sprintf("%-45s  %-12s  %-6s  %s", "HOST", "SHA", "ARCH", "DEPLOYED")
+}
+
+// formatReleaseListRow renders one `releases list` row: the SHA truncated to
+// 12 chars (matching `git rev-parse --short=12`-style display) and Arch
+// defaulted to "-" for an app deployment or a manifest entry predating
+// arch-awareness (empty Arch).
+func formatReleaseListRow(host string, d release.Deployment) string {
+	sha := d.SHA
+	if len(sha) > 12 {
+		sha = sha[:12]
+	}
+	arch := d.Arch
+	if arch == "" {
+		arch = "-"
+	}
+	return fmt.Sprintf("%-45s  %-12s  %-6s  %s", host, sha, arch, d.DeployedAt.Format(time.RFC3339))
 }
 
 // --- shared helpers -----------------------------------------------------------
@@ -374,10 +444,11 @@ func packageDir(ctx context.Context, dir string) (string, func(), error) {
 	return payload, cleanup, nil
 }
 
-// downloadArtifact streams (svc, sha) from the store into a temp file, returning
-// its path and a cleanup func.
-func downloadArtifact(ctx context.Context, store *release.Store, svc, sha string) (string, func(), error) {
-	rc, err := store.GetArtifact(ctx, svc, sha)
+// downloadArtifact streams (svc, sha, arch) from the store into a temp file,
+// returning its path and a cleanup func. Pass release.NoArch for an
+// architecture-agnostic (app) artifact.
+func downloadArtifact(ctx context.Context, store *release.Store, svc, sha, arch string) (string, func(), error) {
+	rc, err := store.GetArtifact(ctx, svc, sha, arch)
 	if err != nil {
 		return "", func() {}, err
 	}

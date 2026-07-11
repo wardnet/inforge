@@ -1305,12 +1305,7 @@ func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string
 func agentDownloadStep(inforgeVersion string) string {
 	return strings.Join([]string{
 		"ver=" + iremote.Quote(inforgeVersion),
-		"arch=$(uname -m)",
-		"case \"$arch\" in",
-		"  x86_64) arch=amd64 ;;",
-		"  aarch64) arch=arm64 ;;",
-		"  *) echo \"unsupported host arch: $arch\" >&2; exit 1 ;;",
-		"esac",
+		hostpaths.ArchDetectShell,
 		"asset=\"inforge-agent_${ver}_linux_${arch}\"",
 		"base=\"https://github.com/wardnet/inforge/releases/download/v${ver}\"",
 		"tmp=$(mktemp)",

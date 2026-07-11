@@ -300,6 +300,12 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
   packages + pushes a local SPA build first (app artifacts are namespaced under `app/<name>` in the
   store); `--rollback` re-points `current` at a SHA already on the host without re-fetching. The
   placeholder seed (`provisionApps`) now precedes the nginx reload via an explicit `DependsOn`.
+  Per ADR-0016's update: the **service** path is now architecture-aware — `deliverRelease`'s targets
+  each carry their own `arch`/`payloadFile` (apps always pass `arch: ""`, architecture-agnostic), and
+  `probeAndVerifyArch`/`downloadArchPayloads` (`release.go`, shared with the ephemeral replicate
+  path) probe each target host's real arch over SSH, verify every needed arch was pushed under
+  `<service>/<sha>-<arch>.tar.gz` before delivering to any host, and download each distinct arch
+  exactly once.
 - **SNI-preread coexistence + health tier (ADR-0027).** A `forward` (passthrough) route may now
   **share a listen port** with `tls-termination` routes/apps. When a port carries both (a "mixed"
   port), `nginx.Render` moves the public socket into `stream{}` with `ssl_preread`: a

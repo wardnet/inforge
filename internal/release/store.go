@@ -1,9 +1,13 @@
 // Package release implements the R2-backed release artifact store described in
-// ADR-0016: immutable, SHA-keyed artifacts at <service>/<SHA>.tar.gz and a
-// per-environment manifest (<service>/manifest.<env>.yaml) recording which SHA
-// each host runs. The store is the producer/consumer substrate for the
-// `inforge releases` commands — push uploads + prunes, deploy downloads + writes
-// the manifest, list reads it.
+// ADR-0016 (amended for per-architecture artifacts): immutable artifacts keyed
+// by SHA and, for services, CPU architecture — <service>/<SHA>-<arch>.tar.gz
+// (arch is "amd64" or "arm64", one object per pushed variant) — or, for
+// architecture-agnostic app bundles, the legacy unsuffixed
+// <service>/<SHA>.tar.gz (pass NoArch). A per-environment manifest
+// (<service>/manifest.<env>.yaml) records which SHA (and, for services, which
+// detected arch) each host runs. The store is the producer/consumer substrate
+// for the `inforge releases` commands — push uploads + prunes, deploy
+// downloads + writes the manifest, list reads it.
 package release
 
 import (
@@ -62,13 +66,59 @@ func newStoreWithAPI(api s3API, bucket string) *Store {
 	return &Store{s3: api, bucket: bucket}
 }
 
-// artifactKey is the object key for a service's artifact at a given SHA.
-func artifactKey(service, sha string) string {
-	return service + "/" + sha + artifactExt
+// NewStoreWithAPI is newStoreWithAPI, exported so unit tests in OTHER
+// packages (e.g. cmd/inforge) can wire their own minimal fake against a real
+// *Store without a live bucket — the same seam this package's own tests use.
+// A caller doesn't need to name the unexported s3API type: any value whose
+// method set satisfies it (PutObject/GetObject/HeadObject/ListObjectsV2/
+// DeleteObject, matching the AWS S3 client's signatures) can be passed here.
+func NewStoreWithAPI(api s3API, bucket string) *Store {
+	return newStoreWithAPI(api, bucket)
 }
 
+// NoArch is the arch to pass for artifacts that are not CPU-architecture
+// sensitive (static app bundles). It preserves the legacy
+// <service>/<sha>.tar.gz key format exactly — no suffix is appended.
+const NoArch = ""
+
+// SupportedArchs is the closed set of CPU architectures inforge builds
+// release artifacts for. It is the single source of truth artifactKey's
+// suffix and shaFromKey's suffix-stripping both rely on: shaFromKey matches
+// against this exact, known set rather than guessing "the text after the last
+// dash is an arch" — a --sha value is an unvalidated free-form string (it
+// need not be a git commit hash; a caller may pass any tag), so a naive
+// last-dash cut would misparse a dash-containing custom SHA (e.g.
+// "preview-42") on an unsuffixed (NoArch) key, desyncing it from the
+// manifest's pinned SHA and defeating Prune's live-deployment protection.
+// cmd/inforge's --arch flag validation reuses this list too, so a pushed
+// --arch value and a probed host arch are always directly comparable.
+var SupportedArchs = []string{"amd64", "arm64"}
+
+// artifactKey is the object key for a service's (or app's) artifact at a given
+// SHA and arch. arch == NoArch keeps the legacy unsuffixed form
+// <service>/<sha>.tar.gz; a non-empty arch appends "-<arch>" before the
+// extension: <service>/<sha>-<arch>.tar.gz. Two archs of the same SHA are
+// therefore two distinct objects, but are treated as ONE logical release
+// everywhere that matters — see shaFromKey/ListArtifacts/Prune below.
+func artifactKey(service, sha, arch string) string {
+	if arch == NoArch {
+		return service + "/" + sha + artifactExt
+	}
+	return service + "/" + sha + "-" + arch + artifactExt
+}
+
+// ArtifactKey is artifactKey, exported so callers outside this package (the
+// CLI's not-found/pre-flight error messages) can name the exact key they
+// looked for without re-deriving the suffix rule.
+func ArtifactKey(service, sha, arch string) string { return artifactKey(service, sha, arch) }
+
 // shaFromKey extracts the SHA stem from an artifact key, or "" if key is not an
-// artifact of service (e.g. a manifest).
+// artifact of service (e.g. a manifest). It strips a trailing "-<arch>" ONLY
+// when arch is exactly one of SupportedArchs — a closed-set match, not a
+// "cut at the last dash" guess — so an unsuffixed (app/legacy) key whose SHA
+// itself happens to contain a dash (e.g. a custom "preview-42" --sha tag) is
+// never misparsed. See SupportedArchs' doc comment for the incident this
+// guards against.
 func shaFromKey(service, key string) string {
 	prefix := service + "/"
 	if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, artifactExt) {
@@ -78,63 +128,87 @@ func shaFromKey(service, key string) string {
 	if stem == "" || strings.Contains(stem, "/") {
 		return ""
 	}
+	for _, arch := range SupportedArchs {
+		if suffix := "-" + arch; strings.HasSuffix(stem, suffix) {
+			stem = strings.TrimSuffix(stem, suffix)
+			break
+		}
+	}
 	return stem
 }
 
-// Artifact is one stored artifact: its SHA and the time R2 last wrote it (the
-// recency signal pruning orders on, since SHAs are not time-ordered).
+// Artifact is one stored logical release: its SHA and the time R2 last wrote
+// it (the recency signal pruning orders on, since SHAs are not time-ordered).
+// A SHA pushed under multiple archs coalesces into one Artifact — see
+// coalesceArtifacts.
 type Artifact struct {
 	SHA          string
 	LastModified int64 // unix seconds
 }
 
-// PutArtifact uploads body as the artifact for (service, sha), overwriting any
-// existing object at that key (re-pushing a SHA is idempotent).
-func (s *Store) PutArtifact(ctx context.Context, service, sha string, body io.Reader) error {
+// artifactObject is one raw object under service/ before arch-variant
+// coalescing. Prune needs the individual keys (to delete every arch variant of
+// a victim SHA); ListArtifacts needs the coalesced view built on top of it.
+type artifactObject struct {
+	Key          string
+	SHA          string
+	LastModified int64
+}
+
+// PutArtifact uploads body as the artifact for (service, sha, arch),
+// overwriting any existing object at that key (re-pushing a SHA+arch is
+// idempotent). Pass NoArch for an architecture-agnostic (app) artifact.
+func (s *Store) PutArtifact(ctx context.Context, service, sha, arch string, body io.Reader) error {
+	key := artifactKey(service, sha, arch)
 	_, err := s.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(artifactKey(service, sha)),
+		Key:    aws.String(key),
 		Body:   body,
 	})
 	if err != nil {
-		return fmt.Errorf("upload artifact %s/%s: %w", service, sha, err)
+		return fmt.Errorf("upload artifact %s: %w", key, err)
 	}
 	return nil
 }
 
-// ArtifactExists reports whether (service, sha) is present in the store.
-func (s *Store) ArtifactExists(ctx context.Context, service, sha string) (bool, error) {
+// ArtifactExists reports whether (service, sha, arch) is present in the store.
+func (s *Store) ArtifactExists(ctx context.Context, service, sha, arch string) (bool, error) {
+	key := artifactKey(service, sha, arch)
 	_, err := s.s3.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(artifactKey(service, sha)),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		if isNotFound(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("head artifact %s/%s: %w", service, sha, err)
+		return false, fmt.Errorf("head artifact %s: %w", key, err)
 	}
 	return true, nil
 }
 
-// GetArtifact returns a reader for (service, sha); the caller must Close it.
-func (s *Store) GetArtifact(ctx context.Context, service, sha string) (io.ReadCloser, error) {
+// GetArtifact returns a reader for (service, sha, arch); the caller must Close
+// it.
+func (s *Store) GetArtifact(ctx context.Context, service, sha, arch string) (io.ReadCloser, error) {
+	key := artifactKey(service, sha, arch)
 	out, err := s.s3.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(artifactKey(service, sha)),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		if isNotFound(err) {
-			return nil, fmt.Errorf("artifact %s/%s not found in release store — run `inforge releases push` first", service, sha)
+			return nil, fmt.Errorf("artifact %s not found in release store — run `inforge releases push` first", key)
 		}
-		return nil, fmt.Errorf("download artifact %s/%s: %w", service, sha, err)
+		return nil, fmt.Errorf("download artifact %s: %w", key, err)
 	}
 	return out.Body, nil
 }
 
-// ListArtifacts returns every artifact stored for service.
-func (s *Store) ListArtifacts(ctx context.Context, service string) ([]Artifact, error) {
-	var arts []Artifact
+// listArtifactObjects pages every artifact object (manifests filtered out via
+// shaFromKey returning "") for service, returning the raw per-key rows — one
+// per arch variant, before coalescing.
+func (s *Store) listArtifactObjects(ctx context.Context, service string) ([]artifactObject, error) {
+	var objs []artifactObject
 	var token *string
 	for {
 		out, err := s.s3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
@@ -146,7 +220,8 @@ func (s *Store) ListArtifacts(ctx context.Context, service string) ([]Artifact, 
 			return nil, fmt.Errorf("list artifacts for %s: %w", service, err)
 		}
 		for _, obj := range out.Contents {
-			sha := shaFromKey(service, aws.ToString(obj.Key))
+			key := aws.ToString(obj.Key)
+			sha := shaFromKey(service, key)
 			if sha == "" {
 				continue
 			}
@@ -154,42 +229,106 @@ func (s *Store) ListArtifacts(ctx context.Context, service string) ([]Artifact, 
 			if obj.LastModified != nil {
 				lm = obj.LastModified.Unix()
 			}
-			arts = append(arts, Artifact{SHA: sha, LastModified: lm})
+			objs = append(objs, artifactObject{Key: key, SHA: sha, LastModified: lm})
 		}
 		if out.IsTruncated == nil || !*out.IsTruncated {
 			break
 		}
 		token = out.NextContinuationToken
 	}
-	return arts, nil
+	return objs, nil
+}
+
+// coalesceArtifacts collapses every arch variant of a SHA into one Artifact —
+// LastModified is the max across variants, so pushing a second arch for an
+// already-pushed SHA refreshes that SHA's recency for prune ordering (a
+// service isn't "fully released" until every needed arch is pushed). Order is
+// first-seen, for deterministic output.
+func coalesceArtifacts(objs []artifactObject) []Artifact {
+	newest := map[string]int64{}
+	var order []string
+	for _, o := range objs {
+		if _, seen := newest[o.SHA]; !seen {
+			order = append(order, o.SHA)
+		}
+		if o.LastModified > newest[o.SHA] {
+			newest[o.SHA] = o.LastModified
+		}
+	}
+	arts := make([]Artifact, 0, len(order))
+	for _, sha := range order {
+		arts = append(arts, Artifact{SHA: sha, LastModified: newest[sha]})
+	}
+	return arts
+}
+
+// ListArtifacts returns one entry PER LOGICAL RELEASE (SHA) stored for
+// service: all arch variants of a SHA collapse into a single Artifact.
+func (s *Store) ListArtifacts(ctx context.Context, service string) ([]Artifact, error) {
+	objs, err := s.listArtifactObjects(ctx, service)
+	if err != nil {
+		return nil, err
+	}
+	return coalesceArtifacts(objs), nil
 }
 
 // Prune deletes the oldest unpinned artifacts of service beyond keep, never
-// touching a pinned (currently-live) SHA. It returns the SHAs it deleted. Delete
-// errors are aggregated and returned but do not stop the sweep; callers treat
-// them as non-fatal (the upload that triggered the prune already succeeded).
+// touching a pinned (currently-live) SHA. Victims are selected from the
+// coalesced (one-per-SHA) view, but every raw object of a victim SHA is
+// deleted — all its arch variants together, never leaving one orphaned. It
+// returns the SHAs it deleted. Delete errors are aggregated and returned but
+// do not stop the sweep; callers treat them as non-fatal (the upload that
+// triggered the prune already succeeded).
 func (s *Store) Prune(ctx context.Context, service string, keep int) ([]string, error) {
 	pinned, err := s.PinnedSHAs(ctx, service)
 	if err != nil {
 		return nil, fmt.Errorf("collect pinned SHAs for %s: %w", service, err)
 	}
-	arts, err := s.ListArtifacts(ctx, service)
+	objs, err := s.listArtifactObjects(ctx, service)
 	if err != nil {
 		return nil, err
 	}
-	victims := selectForPrune(arts, pinned, keep)
-
-	var deleted []string
-	var errs []error
+	victims := selectForPrune(coalesceArtifacts(objs), pinned, keep)
+	victimSet := make(map[string]bool, len(victims))
 	for _, sha := range victims {
-		if _, err := s.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
-			Bucket: aws.String(s.bucket),
-			Key:    aws.String(artifactKey(service, sha)),
-		}); err != nil {
-			errs = append(errs, fmt.Errorf("delete %s/%s: %w", service, sha, err))
+		victimSet[sha] = true
+	}
+
+	// A victim SHA may have more than one raw key (one per arch variant).
+	// variantCount tracks how many it has; deletedCount tracks how many were
+	// actually removed. A SHA is only reported in `deleted` once EVERY one of
+	// its variants is gone — if e.g. the amd64 key deletes but the arm64 key's
+	// DeleteObject fails, that SHA must NOT appear as cleanly pruned: the
+	// caller prints `deleted` as an unqualified success line, and a partial
+	// deletion silently reported as complete would leave a stray, orphaned
+	// object nobody knows to go clean up.
+	variantCount := map[string]int{}
+	for _, o := range objs {
+		if victimSet[o.SHA] {
+			variantCount[o.SHA]++
+		}
+	}
+
+	deletedCount := map[string]int{}
+	var errs []error
+	for _, o := range objs {
+		if !victimSet[o.SHA] {
 			continue
 		}
-		deleted = append(deleted, sha)
+		if _, err := s.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(o.Key),
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("delete %s: %w", o.Key, err))
+			continue
+		}
+		deletedCount[o.SHA]++
+	}
+	deleted := make([]string, 0, len(victims))
+	for _, sha := range victims { // preserve selectForPrune's order
+		if deletedCount[sha] == variantCount[sha] {
+			deleted = append(deleted, sha)
+		}
 	}
 	return deleted, errors.Join(errs...)
 }

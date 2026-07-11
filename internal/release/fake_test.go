@@ -35,11 +35,16 @@ type fakeObj struct {
 // manifest compare-and-swap can be tested, and assigns monotonically increasing
 // LastModified by write order so prune ordering is deterministic.
 type fakeS3 struct {
-	mu      sync.Mutex
-	objs    map[string]*fakeObj
-	seq     int
-	base    time.Time
-	putHook func(key string) // invoked at the start of each PutObject (race injection)
+	mu         sync.Mutex
+	objs       map[string]*fakeObj
+	seq        int
+	base       time.Time
+	putHook     func(key string)       // invoked at the start of each PutObject (race injection)
+	deleteHook  func(key string) error // invoked at the start of each DeleteObject; a non-nil error fails that delete without removing the object (partial-prune-failure injection)
+	putErrHook  func(key string) error // non-nil short-circuits PutObject with that error (non-404 failure injection)
+	headErrHook func(key string) error // non-nil short-circuits HeadObject with that error (non-404 failure injection)
+	getErrHook  func(key string) error // non-nil short-circuits GetObject with that error (non-404 failure injection)
+	listErrHook func() error           // non-nil short-circuits ListObjectsV2 with that error
 }
 
 func newFakeS3() *fakeS3 {
@@ -55,6 +60,11 @@ func (f *fakeS3) PutObject(_ context.Context, in *s3.PutObjectInput, _ ...func(*
 	key := aws.ToString(in.Key)
 	if f.putHook != nil {
 		f.putHook(key)
+	}
+	if f.putErrHook != nil {
+		if err := f.putErrHook(key); err != nil {
+			return nil, err
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -83,9 +93,15 @@ func (f *fakeS3) PutObject(_ context.Context, in *s3.PutObjectInput, _ ...func(*
 }
 
 func (f *fakeS3) GetObject(_ context.Context, in *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	key := aws.ToString(in.Key)
+	if f.getErrHook != nil {
+		if err := f.getErrHook(key); err != nil {
+			return nil, err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	o, ok := f.objs[aws.ToString(in.Key)]
+	o, ok := f.objs[key]
 	if !ok {
 		return nil, &fakeHTTPErr{code: 404, msg: "no such key"}
 	}
@@ -93,15 +109,26 @@ func (f *fakeS3) GetObject(_ context.Context, in *s3.GetObjectInput, _ ...func(*
 }
 
 func (f *fakeS3) HeadObject(_ context.Context, in *s3.HeadObjectInput, _ ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	key := aws.ToString(in.Key)
+	if f.headErrHook != nil {
+		if err := f.headErrHook(key); err != nil {
+			return nil, err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.objs[aws.ToString(in.Key)]; !ok {
+	if _, ok := f.objs[key]; !ok {
 		return nil, &fakeHTTPErr{code: 404, msg: "no such key"}
 	}
 	return &s3.HeadObjectOutput{}, nil
 }
 
 func (f *fakeS3) ListObjectsV2(_ context.Context, in *s3.ListObjectsV2Input, _ ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	if f.listErrHook != nil {
+		if err := f.listErrHook(); err != nil {
+			return nil, err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	prefix := aws.ToString(in.Prefix)
@@ -121,8 +148,14 @@ func (f *fakeS3) ListObjectsV2(_ context.Context, in *s3.ListObjectsV2Input, _ .
 }
 
 func (f *fakeS3) DeleteObject(_ context.Context, in *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	key := aws.ToString(in.Key)
+	if f.deleteHook != nil {
+		if err := f.deleteHook(key); err != nil {
+			return nil, err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.objs, aws.ToString(in.Key))
+	delete(f.objs, key)
 	return &s3.DeleteObjectOutput{}, nil
 }

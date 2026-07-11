@@ -11,11 +11,36 @@ import (
 )
 
 func TestShaFromKey(t *testing.T) {
-	assert.Equal(t, "abc123", shaFromKey("bridge", "bridge/abc123.tar.gz"))
+	assert.Equal(t, "abc123", shaFromKey("bridge", "bridge/abc123.tar.gz"), "unsuffixed (app/legacy) key")
+	assert.Equal(t, "abc123", shaFromKey("bridge", "bridge/abc123-amd64.tar.gz"), "amd64 arch suffix stripped")
+	assert.Equal(t, "abc123", shaFromKey("bridge", "bridge/abc123-arm64.tar.gz"), "arm64 arch suffix stripped")
 	assert.Equal(t, "", shaFromKey("bridge", "bridge/manifest.prd.yaml"), "manifest is not an artifact")
 	assert.Equal(t, "", shaFromKey("bridge", "other/abc123.tar.gz"), "wrong service prefix")
 	assert.Equal(t, "", shaFromKey("bridge", "bridge/sub/abc.tar.gz"), "nested key is not an artifact")
 	assert.Equal(t, "", shaFromKey("bridge", "bridge/.tar.gz"), "empty stem")
+}
+
+// TestShaFromKeyDashInCustomSHA guards the regression this incident actually
+// hit: --sha is an unvalidated free-form string (not necessarily a git commit
+// hash), so an app/legacy (NoArch, unsuffixed) key whose SHA itself contains a
+// dash — e.g. a "preview-42" tag — must round-trip verbatim. A naive
+// "cut at the last dash" parse would truncate it to "preview", desyncing it
+// from the manifest's pinned (untruncated) SHA and defeating Prune's
+// live-deployment protection.
+func TestShaFromKeyDashInCustomSHA(t *testing.T) {
+	assert.Equal(t, "preview-42", shaFromKey("myapp", "myapp/preview-42.tar.gz"),
+		"a dash-containing custom SHA on an unsuffixed key must not be truncated")
+	// A dash-containing SHA that is itself pushed under a real arch suffix
+	// still resolves correctly, since only a trailing "-<known arch>" is ever
+	// stripped, not just any trailing dash segment.
+	assert.Equal(t, "preview-42", shaFromKey("myapp", "myapp/preview-42-amd64.tar.gz"))
+}
+
+func TestArtifactKey(t *testing.T) {
+	assert.Equal(t, "bridge/abc.tar.gz", artifactKey("bridge", "abc", NoArch), "apps/legacy: no suffix")
+	assert.Equal(t, "bridge/abc-amd64.tar.gz", artifactKey("bridge", "abc", "amd64"))
+	assert.Equal(t, "bridge/abc-arm64.tar.gz", artifactKey("bridge", "abc", "arm64"))
+	assert.Equal(t, artifactKey("bridge", "abc", "amd64"), ArtifactKey("bridge", "abc", "amd64"), "exported wrapper matches")
 }
 
 func TestSelectForPrune(t *testing.T) {
@@ -53,25 +78,57 @@ func TestPutGetExistsArtifact(t *testing.T) {
 	ctx := context.Background()
 	s := newStoreWithAPI(newFakeS3(), "artifacts")
 
-	exists, err := s.ArtifactExists(ctx, "bridge", "sha1")
+	// Apps / architecture-agnostic path (NoArch): unsuffixed key.
+	exists, err := s.ArtifactExists(ctx, "bridge", "sha1", NoArch)
 	require.NoError(t, err)
 	assert.False(t, exists)
 
-	_, err = s.GetArtifact(ctx, "bridge", "sha1")
+	_, err = s.GetArtifact(ctx, "bridge", "sha1", NoArch)
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bridge/sha1.tar.gz not found")
 	assert.Contains(t, err.Error(), "run `inforge releases push` first")
 
-	require.NoError(t, s.PutArtifact(ctx, "bridge", "sha1", strings.NewReader("payload-bytes")))
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "sha1", NoArch, strings.NewReader("payload-bytes")))
 
-	exists, err = s.ArtifactExists(ctx, "bridge", "sha1")
+	exists, err = s.ArtifactExists(ctx, "bridge", "sha1", NoArch)
 	require.NoError(t, err)
 	assert.True(t, exists)
 
-	rc, err := s.GetArtifact(ctx, "bridge", "sha1")
+	rc, err := s.GetArtifact(ctx, "bridge", "sha1", NoArch)
 	require.NoError(t, err)
 	defer func() { _ = rc.Close() }()
 	got, _ := io.ReadAll(rc)
 	assert.Equal(t, "payload-bytes", string(got))
+
+	// Services: real arch, suffixed key, error message names the exact key.
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "sha2", "amd64", strings.NewReader("amd64-bytes")))
+	exists, err = s.ArtifactExists(ctx, "bridge", "sha2", "amd64")
+	require.NoError(t, err)
+	assert.True(t, exists)
+	exists, err = s.ArtifactExists(ctx, "bridge", "sha2", "arm64")
+	require.NoError(t, err)
+	assert.False(t, exists, "the amd64 push must not satisfy an arm64 lookup")
+
+	_, err = s.GetArtifact(ctx, "bridge", "sha2", "arm64")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bridge/sha2-arm64.tar.gz not found")
+}
+
+// TestListArtifactsCoalescesArchVariants asserts two arch variants of the same
+// SHA collapse into ONE logical release, with LastModified = the max across
+// variants (a service isn't "fully released" until every needed arch lands).
+func TestListArtifactsCoalescesArchVariants(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaC", "amd64", strings.NewReader("amd64")))
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaC", "arm64", strings.NewReader("arm64")))
+
+	arts, err := s.ListArtifacts(ctx, "bridge")
+	require.NoError(t, err)
+	require.Len(t, arts, 1, "both arch variants of shaC coalesce into one Artifact")
+	assert.Equal(t, "shaC", arts[0].SHA)
 }
 
 // TestPruneExemptsPinnedAcrossEnvs is the end-to-end retention check: a SHA live
@@ -83,11 +140,11 @@ func TestPruneExemptsPinnedAcrossEnvs(t *testing.T) {
 
 	// Upload oldest→newest so LastModified order is shaA < shaB < shaC < shaD.
 	for _, sha := range []string{"shaA", "shaB", "shaC", "shaD"} {
-		require.NoError(t, s.PutArtifact(ctx, "bridge", sha, strings.NewReader(sha)))
+		require.NoError(t, s.PutArtifact(ctx, "bridge", sha, NoArch, strings.NewReader(sha)))
 	}
 	// shaA is live in prd (oldest) and shaB is live in qa — both must be exempt.
-	require.NoError(t, s.SetDeployment(ctx, "bridge", "prd", "bridge-01", "shaA", testNow()))
-	require.NoError(t, s.SetDeployment(ctx, "bridge", "qa", "bridge-01", "shaB", testNow()))
+	require.NoError(t, s.SetDeployment(ctx, "bridge", "prd", "bridge-01", "shaA", "amd64", testNow()))
+	require.NoError(t, s.SetDeployment(ctx, "bridge", "qa", "bridge-01", "shaB", "amd64", testNow()))
 
 	// keep=1 unpinned history. Unpinned = {shaC, shaD}; newest (shaD) kept, shaC deleted.
 	deleted, err := s.Prune(ctx, "bridge", 1)
@@ -95,9 +152,143 @@ func TestPruneExemptsPinnedAcrossEnvs(t *testing.T) {
 	assert.Equal(t, []string{"shaC"}, deleted)
 
 	for _, sha := range []string{"shaA", "shaB", "shaD"} {
-		ok, _ := s.ArtifactExists(ctx, "bridge", sha)
+		ok, _ := s.ArtifactExists(ctx, "bridge", sha, NoArch)
 		assert.True(t, ok, "%s should survive prune", sha)
 	}
-	ok, _ := s.ArtifactExists(ctx, "bridge", "shaC")
+	ok, _ := s.ArtifactExists(ctx, "bridge", "shaC", NoArch)
 	assert.False(t, ok, "shaC should be pruned")
+}
+
+// TestPruneNeverDeletesPinnedDashSHA is the end-to-end guard for the
+// production bug this incident exposed: an app pinned under a dash-containing
+// custom SHA (e.g. "preview-42") must survive a prune exactly like any other
+// pinned SHA — a truncating shaFromKey would desync the parsed key SHA from
+// the manifest's pinned (untruncated) SHA and delete the live artifact.
+func TestPruneNeverDeletesPinnedDashSHA(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+
+	// Upload oldest→newest so LastModified order is old1 < old2 < preview-42.
+	require.NoError(t, s.PutArtifact(ctx, "myapp", "old1", NoArch, strings.NewReader("old1")))
+	require.NoError(t, s.PutArtifact(ctx, "myapp", "old2", NoArch, strings.NewReader("old2")))
+	require.NoError(t, s.PutArtifact(ctx, "myapp", "preview-42", NoArch, strings.NewReader("live")))
+	require.NoError(t, s.SetDeployment(ctx, "myapp", "prd", "edge-01", "preview-42", NoArch, testNow()))
+
+	// keep=1 unpinned history. Unpinned = {old1, old2}; newest (old2) kept,
+	// old1 deleted. preview-42 is pinned and must never be a candidate.
+	deleted, err := s.Prune(ctx, "myapp", 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"old1"}, deleted)
+
+	ok, err := s.ArtifactExists(ctx, "myapp", "preview-42", NoArch)
+	require.NoError(t, err)
+	assert.True(t, ok, "the pinned dash-containing SHA must survive prune")
+}
+
+// TestPruneDeletesEveryArchVariant asserts a victim SHA pushed under both archs
+// has BOTH keys deleted together — never leaving one arch variant orphaned.
+func TestPruneDeletesEveryArchVariant(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaOld", "amd64", strings.NewReader("old-amd64")))
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaOld", "arm64", strings.NewReader("old-arm64")))
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaNew", "amd64", strings.NewReader("new-amd64")))
+
+	deleted, err := s.Prune(ctx, "bridge", 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"shaOld"}, deleted)
+
+	amd64Exists, _ := s.ArtifactExists(ctx, "bridge", "shaOld", "amd64")
+	arm64Exists, _ := s.ArtifactExists(ctx, "bridge", "shaOld", "arm64")
+	assert.False(t, amd64Exists, "amd64 variant must be pruned")
+	assert.False(t, arm64Exists, "arm64 variant must be pruned too — never left orphaned")
+
+	newExists, _ := s.ArtifactExists(ctx, "bridge", "shaNew", "amd64")
+	assert.True(t, newExists, "shaNew is within the keep window")
+}
+
+// TestPrunePartialArchDeleteNotReportedAsDeleted asserts that when a victim
+// SHA has multiple arch variants and only SOME of them are successfully
+// deleted, that SHA does NOT appear in the returned `deleted` list — callers
+// print `deleted` as an unqualified success line, so a partially-deleted SHA
+// reported as fully pruned would hide a stray, orphaned object.
+func TestPrunePartialArchDeleteNotReportedAsDeleted(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaOld", "amd64", strings.NewReader("old-amd64")))
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaOld", "arm64", strings.NewReader("old-arm64")))
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaNew", "amd64", strings.NewReader("new-amd64")))
+
+	fake.deleteHook = func(key string) error {
+		if strings.Contains(key, "shaOld-arm64") {
+			return &fakeHTTPErr{code: 500, msg: "injected delete failure"}
+		}
+		return nil
+	}
+
+	deleted, err := s.Prune(ctx, "bridge", 1)
+	require.Error(t, err, "the injected delete failure must be surfaced")
+	assert.Empty(t, deleted, "shaOld must NOT be reported as deleted: its arm64 variant survived")
+
+	amd64Exists, _ := s.ArtifactExists(ctx, "bridge", "shaOld", "amd64")
+	arm64Exists, _ := s.ArtifactExists(ctx, "bridge", "shaOld", "arm64")
+	assert.False(t, amd64Exists, "amd64 variant was actually deleted")
+	assert.True(t, arm64Exists, "arm64 variant survived the injected failure — this is the orphan the fix guards against")
+}
+
+// TestPutArtifactNonNotFoundError: a transport failure that isn't a 404 must
+// be surfaced (wrapped with the exact key), not swallowed.
+func TestPutArtifactNonNotFoundError(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+	fake.putErrHook = func(string) error { return &fakeHTTPErr{code: 500, msg: "injected put failure"} }
+
+	err := s.PutArtifact(ctx, "bridge", "sha1", "amd64", strings.NewReader("x"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ArtifactKey("bridge", "sha1", "amd64"))
+}
+
+// TestArtifactExistsNonNotFoundError: a HeadObject failure that isn't a 404
+// must be returned as an error, not misreported as "does not exist".
+func TestArtifactExistsNonNotFoundError(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+	fake.headErrHook = func(string) error { return &fakeHTTPErr{code: 500, msg: "injected head failure"} }
+
+	_, err := s.ArtifactExists(ctx, "bridge", "sha1", "amd64")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ArtifactKey("bridge", "sha1", "amd64"))
+}
+
+// TestGetArtifactNonNotFoundError: a GetObject failure that isn't a 404 gets
+// the generic "download artifact" wrap, distinct from the not-found message.
+func TestGetArtifactNonNotFoundError(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+	fake.getErrHook = func(string) error { return &fakeHTTPErr{code: 500, msg: "injected get failure"} }
+
+	_, err := s.GetArtifact(ctx, "bridge", "sha1", "amd64")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "download artifact")
+	assert.NotContains(t, err.Error(), "not found in release store")
+}
+
+// TestListArtifactsPropagatesListError: a ListObjectsV2 failure surfaces
+// through ListArtifacts rather than being swallowed as an empty list.
+func TestListArtifactsPropagatesListError(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+	fake.listErrHook = func() error { return &fakeHTTPErr{code: 500, msg: "injected list failure"} }
+
+	_, err := s.ListArtifacts(ctx, "bridge")
+	require.Error(t, err)
 }

@@ -6,6 +6,8 @@ issue: "#82"
 
 # Releases are SHA-keyed artifacts in R2, fronted by a per-env manifest
 
+> _Note: service artifact keys are now additionally suffixed by CPU architecture ([ADR-0039](0039-architecture-aware-release-artifacts.md)); apps are unaffected._
+
 Until now `inforge release` packaged a service's local artifact directory into a gzip and SSH-pushed it
 straight onto the host (ADR-0007). There was no record of what was deployed and no way to roll back to a
 previously shipped build. We decided to make a released build a **first-class, immutable artifact stored
