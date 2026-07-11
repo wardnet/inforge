@@ -30,7 +30,7 @@ func resolveOut(t *testing.T, out pulumi.StringOutput) string {
 func pkiAll() types.AllOutputs {
 	return types.AllOutputs{
 		PKI: map[string]types.PKIMaterial{
-			"daemon-jwt": {Cert: "CERT-PEM", Key: "KEY-PEM"},
+			"daemon-jwt": {Cert: "CERT-PEM", Key: "KEY-PEM", Scope: "global"},
 		},
 	}
 }
@@ -82,6 +82,35 @@ func TestResolvePKIGrantsGlobalPrefix(t *testing.T) {
 
 	// A verify grant must never ship the signing key to the host.
 	assert.NotContains(t, blobFiles, "pki/daemon-jwt/key.pem")
+}
+
+// The store is env-scoped and keyed by bare name, so nothing about the lookup
+// enforces the scope boundary. A regional service must not silently receive a
+// global PKI's root key by naming it without the "global/" prefix — and two regions
+// must never share one regional PKI's root.
+func TestResolvePKIGrantsRejectsCrossScopeTarget(t *testing.T) {
+	// A regional service names a GLOBAL-scoped PKI without the global/ prefix.
+	svc := pkiSvc("rw", map[string]string{"X": "{KEY}"}, "pki/daemon-jwt")
+	_, _, err := resolvePKIGrants(nil, svc, pkiAll(), "prd", "us-east-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "may not cross scopes")
+
+	// The same PKI, correctly named as global/, resolves.
+	svc = pkiSvc("ro", map[string]string{"X": "{CERT}"}, "pki/global/daemon-jwt")
+	_, _, err = resolvePKIGrants(nil, svc, pkiAll(), "prd", "us-east-1")
+	require.NoError(t, err)
+
+	// A regional PKI is reachable only from its own region — never another's.
+	regional := types.AllOutputs{PKI: map[string]types.PKIMaterial{
+		"regional-ca": {Cert: "C", Key: "K", Scope: "us-east-1"},
+	}}
+	svc = pkiSvc("ro", map[string]string{"X": "{CERT}"}, "pki/regional-ca")
+	_, _, err = resolvePKIGrants(nil, svc, regional, "prd", "us-east-1")
+	require.NoError(t, err, "same-region grant resolves")
+
+	_, _, err = resolvePKIGrants(nil, svc, regional, "prd", "eu-central-1")
+	require.Error(t, err, "another region must not share this root")
+	assert.Contains(t, err.Error(), "may not cross scopes")
 }
 
 // A grant whose target has no material must fail the deploy. Silently skipping it

@@ -553,9 +553,16 @@ type AllOutputs struct {
 // Key is the sensitive half. It is delivered only to a `rw` (issue) grant's
 // consumer, and it leaves the deploy process only as part of the age-encrypted
 // payload of the target host's secrets.age.
+//
+// Scope is the single scope the root-only PKI serves ("global" or an abstract
+// region). It is carried here so the deploy can reject a grant whose consumer sits
+// in a different scope: the store is env-scoped and keyed by bare name, so without
+// this check a regional service would silently receive a global PKI's root key (or
+// two regions would share one root, which a per-region PKI resource must never do).
 type PKIMaterial struct {
-	Cert string
-	Key  string
+	Cert  string
+	Key   string
+	Scope string
 }
 
 // ResolveScoped looks up name in a region-keyed output map (Compute/Database),
@@ -565,9 +572,25 @@ type PKIMaterial struct {
 // error messages, and whether it was found. This is the single source of the
 // global/ redirect rule — both the Source DSL (ref:) and grant target resolution
 // MUST use it so they resolve a global resource identically (ADR-0025).
+// GlobalPrefix is the one allowed cross-scope reference form: a regional resource
+// names a global one as "global/<name>". It is the single source of that spelling
+// — ResolveScoped applies it to the region-keyed output maps, and StripGlobalPrefix
+// applies it to the env-scoped stores (the PKI store), which need the bare name but
+// no region redirect.
+const GlobalPrefix = "global/"
+
+// StripGlobalPrefix reduces a possibly cross-scope reference to the bare resource
+// name. Use it for an ENV-SCOPED store (one file per environment, region-independent
+// — e.g. pki.enc.yaml), where "global/" carries no lookup meaning and would only
+// corrupt the key. A region-keyed map must use ResolveScoped instead, which performs
+// the actual redirect. Both must agree on the spelling, so both come from here.
+func StripGlobalPrefix(name string) string {
+	return strings.TrimPrefix(name, GlobalPrefix)
+}
+
 func ResolveScoped[V any](m map[string]map[string]V, region, name string) (value V, resolvedRegion, bareName string, found bool) {
 	resolvedRegion, bareName = region, name
-	if rest, ok := strings.CutPrefix(name, "global/"); ok {
+	if rest, ok := strings.CutPrefix(name, GlobalPrefix); ok {
 		resolvedRegion, bareName = "global", rest
 	}
 	inner, ok := m[resolvedRegion]

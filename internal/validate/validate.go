@@ -2367,9 +2367,10 @@ func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
 			}
 		case "pki":
 			topology, found := ctx.pkiResources[name]
-			// The store is env-scoped, so the cross-scope "global/" prefix carries no
-			// lookup meaning for the material — strip it to reach the store's key.
-			bare := strings.TrimPrefix(name, "global/")
+			// The store is env-scoped, so the cross-scope prefix carries no lookup
+			// meaning for the material — strip it to reach the store's key (the same
+			// rule the deploy's pkiGrantTarget applies, single-sourced in types).
+			bare := types.StripGlobalPrefix(name)
 			switch {
 			case !found:
 				errs = append(errs, fmt.Sprintf("%s.resource: pki resource %q not found", label, name))

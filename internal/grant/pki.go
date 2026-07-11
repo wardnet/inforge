@@ -91,7 +91,14 @@ func (p PKIResource) Grant(_ *pulumi.Context, service string, perm Permission, _
 		if pem == "" {
 			return Fields{}, fmt.Errorf("service %q: the PKI resource publishes no %s material for permission %q", service, name, perm)
 		}
-		files[name] = FileMaterial{PEM: pulumi.String(pem).ToStringOutput()}
+		// Both fields are marked secret, so the root signing key can never be
+		// surfaced in plaintext by anything downstream (state, an Export, a
+		// diagnostic) — the same custody the Database grant gets from its provider
+		// outputs. The CERT is public, but marking it too keeps one rule for the
+		// whole grant rather than a per-field exception to reason about. Consumers
+		// must route any Output derived from these through safeTrigger before it can
+		// reach a remote.Command Triggers element.
+		files[name] = FileMaterial{PEM: pulumi.ToSecret(pulumi.String(pem)).(pulumi.StringOutput)}
 	}
 	return Fields{Files: files}, nil
 }

@@ -3,7 +3,6 @@ package program
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -22,18 +21,23 @@ const (
 	grantTypePKI      = "pki"
 )
 
-// globalPrefix is the one allowed cross-scope grant form: a regional service
-// names a global resource as "global/<name>". The PKI store is env-scoped (one
-// pki.enc.yaml per environment, region-independent), so the prefix carries no
-// lookup meaning for a PKI — it is stripped to reach the store's bare key. This
-// mirrors types.ResolveScoped's redirect for the region-keyed Compute/Database
-// maps, which a region-less store does not need.
-const globalPrefix = "global/"
-
-// pkiGrantTarget resolves a grant's resource name ("<name>" or "global/<name>")
-// to the bare key the env-scoped PKI store is keyed by.
+// pkiGrantTarget resolves a grant's resource name ("<name>" or "global/<name>") to
+// the bare key the env-scoped PKI store is keyed by. The store is one file per
+// environment (region-independent), so the cross-scope prefix carries no lookup
+// meaning here and is stripped — unlike the region-keyed Compute/Database maps,
+// where types.ResolveScoped redirects on it. Both spellings come from
+// types.GlobalPrefix so the validator and the deploy can never disagree.
 func pkiGrantTarget(name string) string {
-	return strings.TrimPrefix(name, globalPrefix)
+	return types.StripGlobalPrefix(name)
+}
+
+// pkiGrantScope is the scope a grant's target must serve: a regional service may
+// only reach a PKI scoped to its own region, or a global one via "global/<name>".
+func pkiGrantScope(resourceName, region string) string {
+	if strings.HasPrefix(resourceName, types.GlobalPrefix) || region == globalScope {
+		return pki.ScopeGlobal
+	}
+	return region
 }
 
 // decryptPKIGrantMaterial resolves the material of every root-only PKI resource
@@ -86,7 +90,7 @@ func decryptPKIGrantMaterial(res, globalRes types.Resources, dir, env string, dr
 	}
 
 	out := make(map[string]types.PKIMaterial, len(wanted))
-	for _, name := range sortedSet(wanted) {
+	for _, name := range sortedKeys(wanted) {
 		p, ok := store.Get(name)
 		if !ok {
 			return nil, fmt.Errorf("pki grant target %q has no material in %s — the PKI resource is declared but was never generated; run `inforge pki add %s %s --topology root-only` and commit the store", name, storePath, env, name)
@@ -101,20 +105,9 @@ func decryptPKIGrantMaterial(res, globalRes types.Resources, dir, env string, dr
 		if err != nil {
 			return nil, fmt.Errorf("decrypt root signing key for pki %q: %w", name, err)
 		}
-		out[name] = types.PKIMaterial{Cert: p.Root.Cert, Key: key}
+		out[name] = types.PKIMaterial{Cert: p.Root.Cert, Key: key, Scope: p.Scope}
 	}
 	return out, nil
-}
-
-// sortedSet returns the set's members in a deterministic order, so a failure
-// reports the same PKI first on every run.
-func sortedSet(set map[string]bool) []string {
-	names := make([]string, 0, len(set))
-	for n := range set {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // resolvePKIGrants materializes a service's pki/* grants into the two halves a
@@ -162,6 +155,15 @@ func resolvePKIGrants(ctx *pulumi.Context, svc types.ServiceSpec, all types.AllO
 		material, ok := all.PKI[target]
 		if !ok {
 			return nil, nil, fmt.Errorf("grant %q: pki %q not found in the environment's store", g.Resource, target)
+		}
+		// The store is env-scoped and keyed by bare name, so nothing about the lookup
+		// enforces the scope boundary — check it explicitly. Without this, a regional
+		// service granting a regional PKI would resolve whatever single entry carries
+		// that name (possibly a global CA), and two regions granting the same regional
+		// PKI resource would silently share one root key, which a per-region PKI must
+		// never do.
+		if want := pkiGrantScope(name, region); material.Scope != want {
+			return nil, nil, fmt.Errorf("grant %q: pki %q serves scope %q, but this service is in scope %q — a grant may not cross scopes (name a global PKI as %q)", g.Resource, target, material.Scope, want, types.GlobalPrefix+target)
 		}
 		fields, err := grant.PKIResource{Cert: material.Cert, Key: material.Key}.
 			Grant(ctx, svc.Name, grant.Permission(g.Permission), env, region)

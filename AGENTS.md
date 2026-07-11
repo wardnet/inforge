@@ -220,9 +220,19 @@ The deploy path mirrors the `vault:` path — decrypt once, up front, provider-n
 - **`blobFrom`** splits the single flat `pulumi.All` await back into `Blob.Env` + `Blob.Files` by
   position (env values first, then file PEMs). Both halves feed `Blob.Hash`, so rotating a granted PKI
   re-triggers the `secrets.age` write and the restart exactly like a changed secret value.
-- **The agent is untouched.** `Descriptor.Files` and `projectFiles` already existed for `mtls_files:`
-  (#109); a pki grant just populates them from the deploy-owned `secrets.age` instead of the
-  renew-owned `leaf.age`. **No descriptor version bump** — no field changed shape.
+- **The agent's descriptor contract is untouched.** `Descriptor.Files` and `projectFiles` already
+  existed for `mtls_files:` (#109); a pki grant just populates them from the deploy-owned `secrets.age`
+  instead of the renew-owned `leaf.age`. **No descriptor version bump** — no field changed shape.
+- **`projectFiles` now owns DIRECTORY ownership, not just file ownership** (`mkdirOwned`). A service's
+  projection root is systemd's `RuntimeDirectory=` at `0700` with no `User=`, i.e. `root:root` — so
+  chowning only the PEM left the service without the search bit on its own directory and it crash-looped
+  with `EACCES` on a key that was sitting right there. Slice C is the first time a *service* ever carried
+  `files:` in production (the only other consumer, `mtls_files:`, was not deployed), which is why this
+  surfaced here. See the rule `projected-dirs-owned-by-consuming-user`.
+- **Grants may not cross scopes.** The PKI store is env-scoped and keyed by bare name, so the lookup
+  itself enforces nothing: `resolvePKIGrants` checks `PKIMaterial.Scope` against the consumer's scope, so
+  a regional service cannot silently receive a global CA's root key, and two regions cannot share one
+  regional PKI's root.
 
 **Every grant must be materialized by exactly one resolver.** `resolvePKIGrants` rejects a grantable
 type that neither it nor `resolveDatabaseGrants` handles, rather than skipping it — a silently-skipped
