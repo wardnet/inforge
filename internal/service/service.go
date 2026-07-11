@@ -82,10 +82,21 @@ func LeafPath(name string) string {
 // PID. StartLimitIntervalSec=0 disables systemd's start-rate limit so a service
 // always recovers once the vault returns (the agent bounds its own retry
 // backoff per start, then exits non-zero to let Restart=on-failure loop).
+// ConditionPathExists= guards the gap between provisioning (which enables the
+// unit for boot-persistence, so a reboot of an already-released service comes
+// back up) and a service's first-ever release: without it, a freshly
+// provisioned host's very first boot auto-starts every enabled unit
+// (WantedBy=multi-user.target), and with no payload yet delivered that means
+// an immediate, permanent crash-loop (Restart=on-failure + the disabled rate
+// limit retry forever) until someone runs `inforge releases deploy`. A failed
+// Condition is not a failure exit, so Restart= never engages — systemd simply
+// skips the start silently, and the release path's own `systemctl restart`
+// re-evaluates the condition and starts normally once the exec path exists.
 const unitTemplate = `[Unit]
 Description=wardnet %s
 After=network.target
 StartLimitIntervalSec=0
+ConditionPathExists=%s
 
 [Service]
 Type=simple
@@ -112,7 +123,7 @@ func Unit(spec types.ServiceSpec) string {
 	if spec.Reload != "" {
 		reloadLine = "ExecReload=" + spec.Reload + "\n"
 	}
-	return fmt.Sprintf(unitTemplate, spec.Name, Folder(spec.Name), hostpaths.RuntimeSubdir(spec.Name), AgentBin, DescriptorDir(spec.Name), reloadLine)
+	return fmt.Sprintf(unitTemplate, spec.Name, ExecPath(spec.Name), Folder(spec.Name), hostpaths.RuntimeSubdir(spec.Name), AgentBin, DescriptorDir(spec.Name), reloadLine)
 }
 
 // RuntimeDir is the tmpfs directory the agent projects a service's mesh
