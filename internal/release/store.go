@@ -66,6 +66,16 @@ func newStoreWithAPI(api s3API, bucket string) *Store {
 	return &Store{s3: api, bucket: bucket}
 }
 
+// NewStoreWithAPI is newStoreWithAPI, exported so unit tests in OTHER
+// packages (e.g. cmd/inforge) can wire their own minimal fake against a real
+// *Store without a live bucket — the same seam this package's own tests use.
+// A caller doesn't need to name the unexported s3API type: any value whose
+// method set satisfies it (PutObject/GetObject/HeadObject/ListObjectsV2/
+// DeleteObject, matching the AWS S3 client's signatures) can be passed here.
+func NewStoreWithAPI(api s3API, bucket string) *Store {
+	return newStoreWithAPI(api, bucket)
+}
+
 // NoArch is the arch to pass for artifacts that are not CPU-architecture
 // sensitive (static app bundles). It preserves the legacy
 // <service>/<sha>.tar.gz key format exactly — no suffix is appended.

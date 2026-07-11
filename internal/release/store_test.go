@@ -240,3 +240,55 @@ func TestPrunePartialArchDeleteNotReportedAsDeleted(t *testing.T) {
 	assert.False(t, amd64Exists, "amd64 variant was actually deleted")
 	assert.True(t, arm64Exists, "arm64 variant survived the injected failure — this is the orphan the fix guards against")
 }
+
+// TestPutArtifactNonNotFoundError: a transport failure that isn't a 404 must
+// be surfaced (wrapped with the exact key), not swallowed.
+func TestPutArtifactNonNotFoundError(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+	fake.putErrHook = func(string) error { return &fakeHTTPErr{code: 500, msg: "injected put failure"} }
+
+	err := s.PutArtifact(ctx, "bridge", "sha1", "amd64", strings.NewReader("x"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ArtifactKey("bridge", "sha1", "amd64"))
+}
+
+// TestArtifactExistsNonNotFoundError: a HeadObject failure that isn't a 404
+// must be returned as an error, not misreported as "does not exist".
+func TestArtifactExistsNonNotFoundError(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+	fake.headErrHook = func(string) error { return &fakeHTTPErr{code: 500, msg: "injected head failure"} }
+
+	_, err := s.ArtifactExists(ctx, "bridge", "sha1", "amd64")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ArtifactKey("bridge", "sha1", "amd64"))
+}
+
+// TestGetArtifactNonNotFoundError: a GetObject failure that isn't a 404 gets
+// the generic "download artifact" wrap, distinct from the not-found message.
+func TestGetArtifactNonNotFoundError(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+	fake.getErrHook = func(string) error { return &fakeHTTPErr{code: 500, msg: "injected get failure"} }
+
+	_, err := s.GetArtifact(ctx, "bridge", "sha1", "amd64")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "download artifact")
+	assert.NotContains(t, err.Error(), "not found in release store")
+}
+
+// TestListArtifactsPropagatesListError: a ListObjectsV2 failure surfaces
+// through ListArtifacts rather than being swallowed as an empty list.
+func TestListArtifactsPropagatesListError(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+	fake.listErrHook = func() error { return &fakeHTTPErr{code: 500, msg: "injected list failure"} }
+
+	_, err := s.ListArtifacts(ctx, "bridge")
+	require.Error(t, err)
+}

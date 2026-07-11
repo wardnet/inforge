@@ -180,7 +180,9 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 		defer cleanupKey()
 	}
 	if dryRun && sshErr != nil {
-		return dryRunWithoutSSH(ctx, store, svc, sha, sshErr)
+		return dryRunWithoutSSH(ctx, svc, sha, sshErr, func(ctx context.Context, arch string) (bool, error) {
+			return store.ArtifactExists(ctx, svc, sha, arch)
+		})
 	}
 	if sshErr != nil {
 		return sshErr
@@ -232,23 +234,35 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 // any known architecture — so a CI stage using --dry-run purely as a "did you
 // forget to push" gate with no SSH/network path to the fleet keeps working,
 // with a clear caveat that this is a reduced check.
-func dryRunWithoutSSH(ctx context.Context, store *release.Store, svc, sha string, sshErr error) error {
+func dryRunWithoutSSH(ctx context.Context, svc, sha string, sshErr error, exists archArtifactChecker) error {
 	fmt.Printf("(dry-run: no SSH key available (%v) — skipping per-host architecture probe; checking object-store presence only)\n", sshErr)
-	var found []string
-	for _, arch := range supportedArchs {
-		exists, err := store.ArtifactExists(ctx, svc, sha, arch)
-		if err != nil {
-			return err
-		}
-		if exists {
-			found = append(found, release.ArtifactKey(svc, sha, arch))
-		}
+	found, err := anyArchPushed(ctx, svc, sha, exists)
+	if err != nil {
+		return err
 	}
 	if len(found) == 0 {
 		return fmt.Errorf("no artifact found for %s @ %s under any architecture — run `inforge releases push --arch <amd64|arm64>` first", svc, sha)
 	}
 	fmt.Printf("(dry-run: found %s; per-host architecture match is NOT verified without SSH access — resolve an SSH key for a full check)\n", strings.Join(found, ", "))
 	return nil
+}
+
+// anyArchPushed is dryRunWithoutSSH's pure half: it checks every supported
+// arch via exists and returns the R2 keys found present, in supportedArchs
+// order — the store dependency injected as a function so this scan logic is
+// unit testable without a live bucket.
+func anyArchPushed(ctx context.Context, svc, sha string, exists archArtifactChecker) ([]string, error) {
+	var found []string
+	for _, arch := range supportedArchs {
+		ok, err := exists(ctx, arch)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			found = append(found, release.ArtifactKey(svc, sha, arch))
+		}
+	}
+	return found, nil
 }
 
 // --- releases list ------------------------------------------------------------
@@ -294,20 +308,32 @@ func runReleasesList(ctx context.Context, configPath, env, svc string) error {
 	}
 	sort.Strings(hosts)
 
-	fmt.Printf("%-45s  %-12s  %-6s  %s\n", "HOST", "SHA", "ARCH", "DEPLOYED")
+	fmt.Println(releaseListHeader())
 	for _, h := range hosts {
-		d := m.Deployments[h]
-		sha := d.SHA
-		if len(sha) > 12 {
-			sha = sha[:12]
-		}
-		arch := d.Arch
-		if arch == "" {
-			arch = "-" // app deployment, or a manifest entry predating arch-awareness
-		}
-		fmt.Printf("%-45s  %-12s  %-6s  %s\n", h, sha, arch, d.DeployedAt.Format(time.RFC3339))
+		fmt.Println(formatReleaseListRow(h, m.Deployments[h]))
 	}
 	return nil
+}
+
+// releaseListHeader is the column header line for `releases list`'s table.
+func releaseListHeader() string {
+	return fmt.Sprintf("%-45s  %-12s  %-6s  %s", "HOST", "SHA", "ARCH", "DEPLOYED")
+}
+
+// formatReleaseListRow renders one `releases list` row: the SHA truncated to
+// 12 chars (matching `git rev-parse --short=12`-style display) and Arch
+// defaulted to "-" for an app deployment or a manifest entry predating
+// arch-awareness (empty Arch).
+func formatReleaseListRow(host string, d release.Deployment) string {
+	sha := d.SHA
+	if len(sha) > 12 {
+		sha = sha[:12]
+	}
+	arch := d.Arch
+	if arch == "" {
+		arch = "-"
+	}
+	return fmt.Sprintf("%-45s  %-12s  %-6s  %s", host, sha, arch, d.DeployedAt.Format(time.RFC3339))
 }
 
 // --- shared helpers -----------------------------------------------------------

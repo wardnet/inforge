@@ -81,6 +81,14 @@ func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha st
 	return nil
 }
 
+// runProbeSSH executes `ssh <args...>` and returns stdout — the exec boundary
+// probeHostArch calls through, factored into a swappable var so
+// probeTargetArchs' concurrency/error-aggregation logic is unit testable
+// against a fake SSH transport instead of a real host fleet.
+var runProbeSSH = func(ctx context.Context, args []string) ([]byte, error) {
+	return exec.CommandContext(ctx, "ssh", args...).Output() // #nosec G204 -- ssh binary hardcoded; args are built from the resolved deploy target / operator-supplied key, the same trust boundary as sshReadHostPubKey
+}
+
 // probeHostArch detects host's CPU architecture over SSH (`uname -m`, mapped
 // via mapUnameArch to the same amd64/arm64 vocabulary release artifacts are
 // pushed under) — modeled directly on sshReadHostPubKey (sshpush.go): the same
@@ -89,7 +97,7 @@ func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha st
 func probeHostArch(ctx context.Context, host, sshUser, sshKeyPath string) (string, error) {
 	account := fmt.Sprintf("%s@%s", sshUser, host)
 	args := append(append([]string{}, sshArgs(sshKeyPath)...), account, "uname -m")
-	out, err := exec.CommandContext(ctx, "ssh", args...).Output() // #nosec G204 -- ssh binary hardcoded; account/keyPath are the resolved deploy target / operator-supplied key, the same trust boundary as sshReadHostPubKey
+	out, err := runProbeSSH(ctx, args)
 	if err != nil {
 		return "", fmt.Errorf("probe arch on %s: %w", host, err)
 	}
@@ -103,16 +111,15 @@ type archResolution struct {
 	archList []string          // sorted distinct archs across every target
 }
 
-// probeAndVerifyArch probes every target's host architecture (once per host,
-// via probeHostArch) and verifies EVERY distinct arch actually needed has
-// already been pushed for (svc, sha) — collecting ALL missing archs into one
-// error (naming the host(s), the detected arch, and the exact R2 key, with a
-// hint to push it) before returning, so a fleet missing two archs is fully
-// diagnosable in one run. This is safe to call for a dry-run: it never
-// downloads anything.
-func probeAndVerifyArch(ctx context.Context, store *release.Store, svc, sha string, targets []service.DeployTarget, sshKeyPath string) (archResolution, error) {
-	archOf := map[string]string{}
-	hostsByArch := map[string][]string{} // arch -> HostDNS list, for the error message
+// probeTargetArchs probes every target's host architecture once per host, via
+// probeHostArch, bounded to maxConcurrentArchProbes concurrent SSH
+// connections. It returns the per-host result plus the reverse index
+// (arch -> hosts detected as it) verifyArchsPushed's error message needs.
+// This is the SSH-bound half of probeAndVerifyArch, kept separate so the
+// pure verification logic below is unit-testable without a real host fleet.
+func probeTargetArchs(ctx context.Context, targets []service.DeployTarget, sshKeyPath string) (archOf map[string]string, hostsByArch map[string][]string, err error) {
+	archOf = map[string]string{}
+	hostsByArch = map[string][]string{}
 	var mu sync.Mutex
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -131,9 +138,24 @@ func probeAndVerifyArch(ctx context.Context, store *release.Store, svc, sha stri
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return archResolution{}, err
+		return nil, nil, err
 	}
+	return archOf, hostsByArch, nil
+}
 
+// archArtifactChecker reports whether (svc, sha, arch) has already been
+// pushed to the release store — the store dependency verifyArchsPushed takes
+// as an injected function instead of a *release.Store, so it can be unit
+// tested against a stub without a live bucket.
+type archArtifactChecker func(ctx context.Context, arch string) (bool, error)
+
+// verifyArchsPushed is probeAndVerifyArch's pure half: given an already-probed
+// archOf/hostsByArch (see probeTargetArchs), it verifies EVERY distinct arch
+// actually needed has already been pushed for (svc, sha) via exists —
+// collecting ALL missing archs into one error (naming the host(s), the
+// detected arch, and the exact R2 key, with a hint to push it) before
+// returning, so a fleet missing two archs is fully diagnosable in one run.
+func verifyArchsPushed(ctx context.Context, svc, sha string, archOf map[string]string, hostsByArch map[string][]string, exists archArtifactChecker) (archResolution, error) {
 	archList := make([]string, 0, len(hostsByArch))
 	for arch := range hostsByArch {
 		archList = append(archList, arch)
@@ -142,11 +164,11 @@ func probeAndVerifyArch(ctx context.Context, store *release.Store, svc, sha stri
 
 	var missing []string
 	for _, arch := range archList {
-		exists, err := store.ArtifactExists(ctx, svc, sha, arch)
+		ok, err := exists(ctx, arch)
 		if err != nil {
 			return archResolution{}, err
 		}
-		if !exists {
+		if !ok {
 			missing = append(missing, fmt.Sprintf(
 				"host(s) %s detected as %s — looked for %s (run `inforge releases push --arch %s` first)",
 				strings.Join(hostsByArch[arch], ", "), arch, release.ArtifactKey(svc, sha, arch), arch))
@@ -158,12 +180,34 @@ func probeAndVerifyArch(ctx context.Context, store *release.Store, svc, sha stri
 	return archResolution{archOf: archOf, archList: archList}, nil
 }
 
-// downloadArchPayloads downloads each distinct needed arch's artifact exactly
-// once (never once per host) and builds the ready-to-deliver targets from a
-// prior probeAndVerifyArch result. The returned cleanup func releases every
+// probeAndVerifyArch probes every target's host architecture and verifies
+// EVERY distinct arch actually needed has already been pushed for (svc, sha)
+// — see probeTargetArchs and verifyArchsPushed for the split SSH/pure halves.
+// This is safe to call for a dry-run: it never downloads anything.
+func probeAndVerifyArch(ctx context.Context, store *release.Store, svc, sha string, targets []service.DeployTarget, sshKeyPath string) (archResolution, error) {
+	archOf, hostsByArch, err := probeTargetArchs(ctx, targets, sshKeyPath)
+	if err != nil {
+		return archResolution{}, err
+	}
+	return verifyArchsPushed(ctx, svc, sha, archOf, hostsByArch, func(ctx context.Context, arch string) (bool, error) {
+		return store.ArtifactExists(ctx, svc, sha, arch)
+	})
+}
+
+// archPayloadDownloader fetches (svc, sha, arch)'s artifact into a local temp
+// file, returning its path and a cleanup func — the store dependency
+// downloadArchPayloadsFrom takes as an injected function so its assembly
+// logic (once-per-arch download, cleanup composition, error unwind) is unit
+// testable without a real download.
+type archPayloadDownloader func(ctx context.Context, arch string) (string, func(), error)
+
+// downloadArchPayloadsFrom is downloadArchPayloads' pure half: it downloads
+// each distinct needed arch's artifact exactly once (never once per host) via
+// download and builds the ready-to-deliver targets from a prior
+// probeAndVerifyArch result. The returned cleanup func releases every
 // downloaded temp file; call it exactly once, even on error (it is safe to
 // call with partial downloads).
-func downloadArchPayloads(ctx context.Context, store *release.Store, svc, sha string, targets []service.DeployTarget, res archResolution) ([]deliveryTarget, func(), error) {
+func downloadArchPayloadsFrom(ctx context.Context, targets []service.DeployTarget, res archResolution, download archPayloadDownloader) ([]deliveryTarget, func(), error) {
 	payloadOf := map[string]string{}
 	var cleanups []func()
 	cleanup := func() {
@@ -172,7 +216,7 @@ func downloadArchPayloads(ctx context.Context, store *release.Store, svc, sha st
 		}
 	}
 	for _, arch := range res.archList {
-		payload, archCleanup, err := downloadArtifact(ctx, store, svc, sha, arch)
+		payload, archCleanup, err := download(ctx, arch)
 		if err != nil {
 			cleanup()
 			return nil, func() {}, err
@@ -181,6 +225,17 @@ func downloadArchPayloads(ctx context.Context, store *release.Store, svc, sha st
 		payloadOf[arch] = payload
 	}
 	return serviceDeliveryTargets(targets, res.archOf, payloadOf), cleanup, nil
+}
+
+// downloadArchPayloads downloads each distinct needed arch's artifact exactly
+// once (never once per host) and builds the ready-to-deliver targets from a
+// prior probeAndVerifyArch result. The returned cleanup func releases every
+// downloaded temp file; call it exactly once, even on error (it is safe to
+// call with partial downloads).
+func downloadArchPayloads(ctx context.Context, store *release.Store, svc, sha string, targets []service.DeployTarget, res archResolution) ([]deliveryTarget, func(), error) {
+	return downloadArchPayloadsFrom(ctx, targets, res, func(ctx context.Context, arch string) (string, func(), error) {
+		return downloadArtifact(ctx, store, svc, sha, arch)
+	})
 }
 
 // serviceApplyScript is adapter #1: the remote command that applies a service
