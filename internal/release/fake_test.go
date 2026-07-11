@@ -35,11 +35,12 @@ type fakeObj struct {
 // manifest compare-and-swap can be tested, and assigns monotonically increasing
 // LastModified by write order so prune ordering is deterministic.
 type fakeS3 struct {
-	mu      sync.Mutex
-	objs    map[string]*fakeObj
-	seq     int
-	base    time.Time
-	putHook func(key string) // invoked at the start of each PutObject (race injection)
+	mu         sync.Mutex
+	objs       map[string]*fakeObj
+	seq        int
+	base       time.Time
+	putHook    func(key string)       // invoked at the start of each PutObject (race injection)
+	deleteHook func(key string) error // invoked at the start of each DeleteObject; a non-nil error fails that delete without removing the object (partial-prune-failure injection)
 }
 
 func newFakeS3() *fakeS3 {
@@ -121,8 +122,14 @@ func (f *fakeS3) ListObjectsV2(_ context.Context, in *s3.ListObjectsV2Input, _ .
 }
 
 func (f *fakeS3) DeleteObject(_ context.Context, in *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	key := aws.ToString(in.Key)
+	if f.deleteHook != nil {
+		if err := f.deleteHook(key); err != nil {
+			return nil, err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.objs, aws.ToString(in.Key))
+	delete(f.objs, key)
 	return &s3.DeleteObjectOutput{}, nil
 }

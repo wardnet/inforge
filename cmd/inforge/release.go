@@ -7,15 +7,23 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
+
 	iapp "github.com/wardnet/inforge/internal/app"
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/release"
 	"github.com/wardnet/inforge/internal/remote"
 	"github.com/wardnet/inforge/internal/service"
 )
+
+// maxConcurrentArchProbes bounds how many hosts probeAndVerifyArch SSHes into
+// at once — a fleet-wide deploy shouldn't open unbounded concurrent SSH
+// connections.
+const maxConcurrentArchProbes = 8
 
 // release delivery — the workload-agnostic half of `inforge releases deploy`
 // (services) and `inforge release app` (front-ends). Both resolve targets from a
@@ -105,13 +113,25 @@ type archResolution struct {
 func probeAndVerifyArch(ctx context.Context, store *release.Store, svc, sha string, targets []service.DeployTarget, sshKeyPath string) (archResolution, error) {
 	archOf := map[string]string{}
 	hostsByArch := map[string][]string{} // arch -> HostDNS list, for the error message
+	var mu sync.Mutex
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(maxConcurrentArchProbes)
 	for _, t := range targets {
-		arch, err := probeHostArch(ctx, t.HostDNS, t.SSHUser, sshKeyPath)
-		if err != nil {
-			return archResolution{}, fmt.Errorf("detect arch for %s: %w", t.HostDNS, err)
-		}
-		archOf[t.HostDNS] = arch
-		hostsByArch[arch] = append(hostsByArch[arch], t.HostDNS)
+		g.Go(func() error {
+			arch, err := probeHostArch(gctx, t.HostDNS, t.SSHUser, sshKeyPath)
+			if err != nil {
+				return fmt.Errorf("detect arch for %s: %w", t.HostDNS, err)
+			}
+			mu.Lock()
+			archOf[t.HostDNS] = arch
+			hostsByArch[arch] = append(hostsByArch[arch], t.HostDNS)
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return archResolution{}, err
 	}
 
 	archList := make([]string, 0, len(hostsByArch))

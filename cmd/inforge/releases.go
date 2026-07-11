@@ -168,16 +168,23 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 		return err
 	}
 
-	// The SSH key is resolved before the dry-run branch (a deliberate behavior
-	// change): probing each target's real architecture is the only way to
-	// verify this fleet has every arch it needs already pushed, and that
-	// verification is exactly what dry-run exists to do.
-	var cleanupKey func()
-	sshKeyPath, cleanupKey, err = resolveSSHKey(sshKeyPath)
-	if err != nil {
-		return err
+	// A real deploy always needs the SSH key (delivery + the mesh leaf mint
+	// below both require it, regardless of this feature). A dry-run does NOT
+	// hard-require it: resolving it here first lets a dry-run get the FULL,
+	// accurate per-host architecture probe when a key is available, but
+	// degrades gracefully instead of failing when one isn't — preserving
+	// dry-run's original "just object-store credentials" usability for a CI
+	// stage with no SSH/network path to the fleet.
+	sshKeyPath, cleanupKey, sshErr := resolveSSHKey(sshKeyPath)
+	if sshErr == nil {
+		defer cleanupKey()
 	}
-	defer cleanupKey()
+	if dryRun && sshErr != nil {
+		return dryRunWithoutSSH(ctx, store, svc, sha, sshErr)
+	}
+	if sshErr != nil {
+		return sshErr
+	}
 
 	archRes, err := probeAndVerifyArch(ctx, store, svc, sha, targets, sshKeyPath)
 	if err != nil {
@@ -214,6 +221,33 @@ func runReleasesDeploy(ctx context.Context, configPath, dir, env, svc, sha, depl
 		return err
 	}
 	fmt.Printf("deployed %s @ %s\n", svc, sha)
+	return nil
+}
+
+// dryRunWithoutSSH is `releases deploy --dry-run`'s fallback when no SSH key
+// is available (sshErr): it can't probe any host's real architecture, so it
+// can't do the full per-host verification a real deploy (or a dry-run WITH an
+// SSH key) gets. It falls back to the weaker check the pre-arch-aware dry-run
+// used to do — does SOME artifact exist for this (service, sha) at all, under
+// any known architecture — so a CI stage using --dry-run purely as a "did you
+// forget to push" gate with no SSH/network path to the fleet keeps working,
+// with a clear caveat that this is a reduced check.
+func dryRunWithoutSSH(ctx context.Context, store *release.Store, svc, sha string, sshErr error) error {
+	fmt.Printf("(dry-run: no SSH key available (%v) — skipping per-host architecture probe; checking object-store presence only)\n", sshErr)
+	var found []string
+	for _, arch := range supportedArchs {
+		exists, err := store.ArtifactExists(ctx, svc, sha, arch)
+		if err != nil {
+			return err
+		}
+		if exists {
+			found = append(found, release.ArtifactKey(svc, sha, arch))
+		}
+	}
+	if len(found) == 0 {
+		return fmt.Errorf("no artifact found for %s @ %s under any architecture — run `inforge releases push --arch <amd64|arm64>` first", svc, sha)
+	}
+	fmt.Printf("(dry-run: found %s; per-host architecture match is NOT verified without SSH access — resolve an SSH key for a full check)\n", strings.Join(found, ", "))
 	return nil
 }
 

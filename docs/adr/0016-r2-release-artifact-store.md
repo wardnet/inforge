@@ -6,18 +6,7 @@ issue: "#82"
 
 # Releases are SHA-keyed artifacts in R2, fronted by a per-env manifest
 
-> **Update:** Service artifacts are now additionally keyed by CPU architecture —
-> `<service>/<SHA>-<arch>.tar.gz` (`arch` ∈ `amd64`/`arm64`) — after a production
-> incident where an ARM64 binary was delivered to an x86_64 host and crash-looped
-> silently. `inforge releases push` requires `--arch`; a service needing both
-> archs is pushed twice, once per arch. `inforge releases deploy` probes each
-> target host's real architecture over SSH (`uname -m`) before delivering, and
-> fails loudly — naming the host, detected arch, and the exact R2 key — if any
-> host's arch has no matching pushed artifact; there is no fallback to an
-> unsuffixed key. Pruning/listing still treat all arch variants of one SHA as
-> one logical release. App bundles (`inforge release app`) are
-> architecture-agnostic and unaffected — they keep the original unsuffixed
-> `<service>/<SHA>.tar.gz` key exactly as described below.
+> _Note: service artifact keys are now additionally suffixed by CPU architecture ([ADR-0039](0039-architecture-aware-release-artifacts.md)); apps are unaffected._
 
 Until now `inforge release` packaged a service's local artifact directory into a gzip and SSH-pushed it
 straight onto the host (ADR-0007). There was no record of what was deployed and no way to roll back to a

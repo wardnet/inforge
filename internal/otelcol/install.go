@@ -3,6 +3,8 @@ package otelcol
 import (
 	"fmt"
 	"strings"
+
+	"github.com/wardnet/inforge/internal/hostpaths"
 )
 
 // InstallScript renders the idempotent shell that installs the off-the-shelf
@@ -28,12 +30,7 @@ func InstallScript(version string) string {
 		`if [ "$(dpkg-query -W -f='${Version}' ` + Package + ` 2>/dev/null || true)" = "$ver" ]; then`,
 		fmt.Sprintf(`  echo "%s $ver already installed"; exit 0`, Package),
 		"fi",
-		"arch=$(uname -m)",
-		"case \"$arch\" in",
-		"  x86_64) arch=amd64 ;;",
-		"  aarch64) arch=arm64 ;;",
-		"  *) echo \"unsupported host arch: $arch\" >&2; exit 1 ;;",
-		"esac",
+		hostpaths.ArchDetectShell,
 		fmt.Sprintf(`asset="%s_${ver}_linux_${arch}.deb"`, Package),
 		fmt.Sprintf("base=%s", shQuote(base)),
 		fmt.Sprintf("sums_name=%s", shQuote(ChecksumsAsset)),

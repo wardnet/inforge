@@ -71,6 +71,19 @@ func newStoreWithAPI(api s3API, bucket string) *Store {
 // <service>/<sha>.tar.gz key format exactly — no suffix is appended.
 const NoArch = ""
 
+// SupportedArchs is the closed set of CPU architectures inforge builds
+// release artifacts for. It is the single source of truth artifactKey's
+// suffix and shaFromKey's suffix-stripping both rely on: shaFromKey matches
+// against this exact, known set rather than guessing "the text after the last
+// dash is an arch" — a --sha value is an unvalidated free-form string (it
+// need not be a git commit hash; a caller may pass any tag), so a naive
+// last-dash cut would misparse a dash-containing custom SHA (e.g.
+// "preview-42") on an unsuffixed (NoArch) key, desyncing it from the
+// manifest's pinned SHA and defeating Prune's live-deployment protection.
+// cmd/inforge's --arch flag validation reuses this list too, so a pushed
+// --arch value and a probed host arch are always directly comparable.
+var SupportedArchs = []string{"amd64", "arm64"}
+
 // artifactKey is the object key for a service's (or app's) artifact at a given
 // SHA and arch. arch == NoArch keeps the legacy unsuffixed form
 // <service>/<sha>.tar.gz; a non-empty arch appends "-<arch>" before the
@@ -90,10 +103,12 @@ func artifactKey(service, sha, arch string) string {
 func ArtifactKey(service, sha, arch string) string { return artifactKey(service, sha, arch) }
 
 // shaFromKey extracts the SHA stem from an artifact key, or "" if key is not an
-// artifact of service (e.g. a manifest). Git SHAs are lowercase hex and never
-// contain "-", so any "-" remaining after stripping the service/ prefix and
-// .tar.gz suffix marks an arch suffix — cutting at the LAST "-" recovers the
-// bare SHA for both suffixed (service) and unsuffixed (app/legacy) keys.
+// artifact of service (e.g. a manifest). It strips a trailing "-<arch>" ONLY
+// when arch is exactly one of SupportedArchs — a closed-set match, not a
+// "cut at the last dash" guess — so an unsuffixed (app/legacy) key whose SHA
+// itself happens to contain a dash (e.g. a custom "preview-42" --sha tag) is
+// never misparsed. See SupportedArchs' doc comment for the incident this
+// guards against.
 func shaFromKey(service, key string) string {
 	prefix := service + "/"
 	if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, artifactExt) {
@@ -103,8 +118,11 @@ func shaFromKey(service, key string) string {
 	if stem == "" || strings.Contains(stem, "/") {
 		return ""
 	}
-	if i := strings.LastIndex(stem, "-"); i != -1 {
-		stem = stem[:i]
+	for _, arch := range SupportedArchs {
+		if suffix := "-" + arch; strings.HasSuffix(stem, suffix) {
+			stem = strings.TrimSuffix(stem, suffix)
+			break
+		}
 	}
 	return stem
 }
@@ -266,7 +284,22 @@ func (s *Store) Prune(ctx context.Context, service string, keep int) ([]string, 
 		victimSet[sha] = true
 	}
 
-	deletedSet := map[string]bool{}
+	// A victim SHA may have more than one raw key (one per arch variant).
+	// variantCount tracks how many it has; deletedCount tracks how many were
+	// actually removed. A SHA is only reported in `deleted` once EVERY one of
+	// its variants is gone — if e.g. the amd64 key deletes but the arm64 key's
+	// DeleteObject fails, that SHA must NOT appear as cleanly pruned: the
+	// caller prints `deleted` as an unqualified success line, and a partial
+	// deletion silently reported as complete would leave a stray, orphaned
+	// object nobody knows to go clean up.
+	variantCount := map[string]int{}
+	for _, o := range objs {
+		if victimSet[o.SHA] {
+			variantCount[o.SHA]++
+		}
+	}
+
+	deletedCount := map[string]int{}
 	var errs []error
 	for _, o := range objs {
 		if !victimSet[o.SHA] {
@@ -279,11 +312,11 @@ func (s *Store) Prune(ctx context.Context, service string, keep int) ([]string, 
 			errs = append(errs, fmt.Errorf("delete %s: %w", o.Key, err))
 			continue
 		}
-		deletedSet[o.SHA] = true // a SHA counts as deleted once any of its variant keys is gone
+		deletedCount[o.SHA]++
 	}
-	deleted := make([]string, 0, len(deletedSet))
+	deleted := make([]string, 0, len(victims))
 	for _, sha := range victims { // preserve selectForPrune's order
-		if deletedSet[sha] {
+		if deletedCount[sha] == variantCount[sha] {
 			deleted = append(deleted, sha)
 		}
 	}

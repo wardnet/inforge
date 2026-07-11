@@ -20,6 +20,22 @@ func TestShaFromKey(t *testing.T) {
 	assert.Equal(t, "", shaFromKey("bridge", "bridge/.tar.gz"), "empty stem")
 }
 
+// TestShaFromKeyDashInCustomSHA guards the regression this incident actually
+// hit: --sha is an unvalidated free-form string (not necessarily a git commit
+// hash), so an app/legacy (NoArch, unsuffixed) key whose SHA itself contains a
+// dash — e.g. a "preview-42" tag — must round-trip verbatim. A naive
+// "cut at the last dash" parse would truncate it to "preview", desyncing it
+// from the manifest's pinned (untruncated) SHA and defeating Prune's
+// live-deployment protection.
+func TestShaFromKeyDashInCustomSHA(t *testing.T) {
+	assert.Equal(t, "preview-42", shaFromKey("myapp", "myapp/preview-42.tar.gz"),
+		"a dash-containing custom SHA on an unsuffixed key must not be truncated")
+	// A dash-containing SHA that is itself pushed under a real arch suffix
+	// still resolves correctly, since only a trailing "-<known arch>" is ever
+	// stripped, not just any trailing dash segment.
+	assert.Equal(t, "preview-42", shaFromKey("myapp", "myapp/preview-42-amd64.tar.gz"))
+}
+
 func TestArtifactKey(t *testing.T) {
 	assert.Equal(t, "bridge/abc.tar.gz", artifactKey("bridge", "abc", NoArch), "apps/legacy: no suffix")
 	assert.Equal(t, "bridge/abc-amd64.tar.gz", artifactKey("bridge", "abc", "amd64"))
@@ -143,6 +159,33 @@ func TestPruneExemptsPinnedAcrossEnvs(t *testing.T) {
 	assert.False(t, ok, "shaC should be pruned")
 }
 
+// TestPruneNeverDeletesPinnedDashSHA is the end-to-end guard for the
+// production bug this incident exposed: an app pinned under a dash-containing
+// custom SHA (e.g. "preview-42") must survive a prune exactly like any other
+// pinned SHA — a truncating shaFromKey would desync the parsed key SHA from
+// the manifest's pinned (untruncated) SHA and delete the live artifact.
+func TestPruneNeverDeletesPinnedDashSHA(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+
+	// Upload oldest→newest so LastModified order is old1 < old2 < preview-42.
+	require.NoError(t, s.PutArtifact(ctx, "myapp", "old1", NoArch, strings.NewReader("old1")))
+	require.NoError(t, s.PutArtifact(ctx, "myapp", "old2", NoArch, strings.NewReader("old2")))
+	require.NoError(t, s.PutArtifact(ctx, "myapp", "preview-42", NoArch, strings.NewReader("live")))
+	require.NoError(t, s.SetDeployment(ctx, "myapp", "prd", "edge-01", "preview-42", NoArch, testNow()))
+
+	// keep=1 unpinned history. Unpinned = {old1, old2}; newest (old2) kept,
+	// old1 deleted. preview-42 is pinned and must never be a candidate.
+	deleted, err := s.Prune(ctx, "myapp", 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"old1"}, deleted)
+
+	ok, err := s.ArtifactExists(ctx, "myapp", "preview-42", NoArch)
+	require.NoError(t, err)
+	assert.True(t, ok, "the pinned dash-containing SHA must survive prune")
+}
+
 // TestPruneDeletesEveryArchVariant asserts a victim SHA pushed under both archs
 // has BOTH keys deleted together — never leaving one arch variant orphaned.
 func TestPruneDeletesEveryArchVariant(t *testing.T) {
@@ -165,4 +208,35 @@ func TestPruneDeletesEveryArchVariant(t *testing.T) {
 
 	newExists, _ := s.ArtifactExists(ctx, "bridge", "shaNew", "amd64")
 	assert.True(t, newExists, "shaNew is within the keep window")
+}
+
+// TestPrunePartialArchDeleteNotReportedAsDeleted asserts that when a victim
+// SHA has multiple arch variants and only SOME of them are successfully
+// deleted, that SHA does NOT appear in the returned `deleted` list — callers
+// print `deleted` as an unqualified success line, so a partially-deleted SHA
+// reported as fully pruned would hide a stray, orphaned object.
+func TestPrunePartialArchDeleteNotReportedAsDeleted(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaOld", "amd64", strings.NewReader("old-amd64")))
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaOld", "arm64", strings.NewReader("old-arm64")))
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "shaNew", "amd64", strings.NewReader("new-amd64")))
+
+	fake.deleteHook = func(key string) error {
+		if strings.Contains(key, "shaOld-arm64") {
+			return &fakeHTTPErr{code: 500, msg: "injected delete failure"}
+		}
+		return nil
+	}
+
+	deleted, err := s.Prune(ctx, "bridge", 1)
+	require.Error(t, err, "the injected delete failure must be surfaced")
+	assert.Empty(t, deleted, "shaOld must NOT be reported as deleted: its arm64 variant survived")
+
+	amd64Exists, _ := s.ArtifactExists(ctx, "bridge", "shaOld", "amd64")
+	arm64Exists, _ := s.ArtifactExists(ctx, "bridge", "shaOld", "arm64")
+	assert.False(t, amd64Exists, "amd64 variant was actually deleted")
+	assert.True(t, arm64Exists, "arm64 variant survived the injected failure — this is the orphan the fix guards against")
 }

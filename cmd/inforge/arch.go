@@ -1,13 +1,20 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
 
-// validArch reports whether arch is one of the two CPU architectures inforge
-// builds for and can deliver artifacts to — the same values mapUnameArch
-// produces from a probed host, so a --arch value pushed at release time and a
-// probed host arch at deploy time are always directly comparable.
+	"github.com/wardnet/inforge/internal/release"
+)
+
+// supportedArchs re-exports release.SupportedArchs (the actual single source
+// of truth, since it's what artifactKey/shaFromKey encode) under a
+// package-local name for readability at call sites in this package.
+var supportedArchs = release.SupportedArchs
+
+// validArch reports whether arch is one of supportedArchs.
 func validArch(arch string) bool {
-	return arch == "amd64" || arch == "arm64"
+	return slices.Contains(supportedArchs, arch)
 }
 
 // validateArchFlag returns a clear error if arch is not a supported CPU

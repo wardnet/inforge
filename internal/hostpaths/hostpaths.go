@@ -34,3 +34,19 @@ const AgentBin = "/usr/local/bin/inforge-agent"
 // its own defaultHostKeyPath) is a distinct concern (agent-side decryption,
 // not deploy/push tooling) and is kept as a separate constant.
 const SSHHostPubKeyPath = "/etc/ssh/ssh_host_ed25519_key.pub"
+
+// ArchDetectShell is the shell fragment that maps a host's `uname -m` output to
+// the Go/goreleaser architecture name (x86_64->amd64, aarch64->arm64), leaving
+// the result in $arch and exiting the script with a clear error on any other
+// value. It is shared byte-for-byte by every host-side install script that
+// needs the host's own architecture (the inforge-agent self-install in
+// program.agentDownloadStep and the otelcol-contrib install in
+// otelcol.InstallScript) so the mapping can't drift between them. It mirrors —
+// but is independent of — cmd/inforge.mapUnameArch, the Go-side equivalent used
+// to compare an SSH-probed arch against a pushed release artifact's arch.
+const ArchDetectShell = `arch=$(uname -m)
+case "$arch" in
+  x86_64) arch=amd64 ;;
+  aarch64) arch=arm64 ;;
+  *) echo "unsupported host arch: $arch" >&2; exit 1 ;;
+esac`
