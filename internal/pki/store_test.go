@@ -80,21 +80,57 @@ func TestTrustBundle(t *testing.T) {
 	s := &pki.Store{RootRecipient: "age1root", Recipient: "age1ci"}
 	s.Set("wardnet-mesh", pki.PKI{
 		Topology: pki.TopologyTwoTier,
+		Root:     pki.Material{Cert: "ROOT-CERT", Key: "x"},
 		Intermediates: map[string]pki.Material{
 			"global":    {Cert: "GLOBAL-CERT", Key: "x"},
 			"us-east-1": {Cert: "USE1-CERT", Key: "x"},
 		},
 	})
 
+	// The scoped intermediates come first, then the root — nginx/OpenSSL needs a
+	// self-signed anchor to build the chain, so the root MUST be present or every
+	// mesh handshake fails.
 	bundle, err := s.TrustBundle("wardnet-mesh", []string{"global", "us-east-1"})
 	require.NoError(t, err)
-	assert.Equal(t, "GLOBAL-CERT\nUSE1-CERT\n", bundle)
+	assert.Equal(t, "GLOBAL-CERT\nUSE1-CERT\nROOT-CERT\n", bundle)
 
 	_, err = s.TrustBundle("wardnet-mesh", []string{"eu-central-1"})
 	require.ErrorContains(t, err, `no intermediate for scope "eu-central-1"`)
 
 	_, err = s.TrustBundle("absent", []string{"global"})
 	require.ErrorContains(t, err, "not found")
+}
+
+// TestTrustBundleRejectsMissingRoot: a two-tier PKI with intermediates but no
+// root cert would yield an anchor-less bundle nginx/OpenSSL can never build a
+// chain to — the exact defect the root was added to fix — so TrustBundle must
+// error rather than ship it silently.
+func TestTrustBundleRejectsMissingRoot(t *testing.T) {
+	s := &pki.Store{RootRecipient: "age1root", Recipient: "age1ci"}
+	s.Set("wardnet-mesh", pki.PKI{
+		Topology:      pki.TopologyTwoTier,
+		Intermediates: map[string]pki.Material{"global": {Cert: "GLOBAL-CERT", Key: "x"}},
+	})
+
+	_, err := s.TrustBundle("wardnet-mesh", []string{"global"})
+	require.ErrorContains(t, err, "no root certificate")
+}
+
+// TestTrustBundleIncludesPreviousRoots: mid dual-root overlap the bundle must
+// carry BOTH the active and the retained previous root, so a leaf signed under
+// either root still verifies during a root rotation.
+func TestTrustBundleIncludesPreviousRoots(t *testing.T) {
+	s := &pki.Store{RootRecipient: "age1root", Recipient: "age1ci"}
+	s.Set("wardnet-mesh", pki.PKI{
+		Topology:      pki.TopologyTwoTier,
+		Root:          pki.Material{Cert: "NEW-ROOT", Key: "x"},
+		PreviousRoots: []pki.Material{{Cert: "OLD-ROOT", Key: "x"}},
+		Intermediates: map[string]pki.Material{"global": {Cert: "GLOBAL-CERT", Key: "x"}},
+	})
+
+	bundle, err := s.TrustBundle("wardnet-mesh", []string{"global"})
+	require.NoError(t, err)
+	assert.Equal(t, "GLOBAL-CERT\nNEW-ROOT\nOLD-ROOT\n", bundle)
 }
 
 func TestRootCerts(t *testing.T) {

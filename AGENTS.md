@@ -95,9 +95,12 @@ An environment may host several meshes; a service names the one it joins.
 
 Deploy-time and renewal leaf minting is live. Key packages:
 
-- **`internal/pki`** — `GenerateLeaf` mints a non-CA Ed25519 leaf (90-day TTL, clamped to parent) with a
-  SPIFFE URI SAN; `SPIFFEID` builds `spiffe://<trustDomain>/<env>/<scope>/<service>`; `Store.TrustBundle`
-  concatenates plaintext intermediate certs for a set of scopes.
+- **`internal/pki`** — `GenerateLeaf` mints a non-CA Ed25519 leaf (90-day TTL, clamped to parent — an
+  expired parent is rejected, not silently over-clamped) with a SPIFFE URI SAN; `SPIFFEID` builds
+  `spiffe://<trustDomain>/<env>/<scope>/<service>`; `Store.TrustBundle` concatenates the scoped
+  intermediate certs **followed by the PKI root(s)** for a set of scopes — the root is required because
+  the bundle is consumed by nginx/OpenSSL, which only accepts a chain terminating in a self-signed
+  anchor (an intermediate-only bundle fails every mesh handshake).
 - **`internal/meshcert`** — orchestration layer; `IntermediateSigner` decrypts the scope intermediate
   with the CI identity (`INFORGE_SECRETS_KEY`); `MintLeaf` / `MintServiceLeaf` sign a leaf from it;
   `TrustSet` computes the peer-verification scope set (global service → all regions + global; regional

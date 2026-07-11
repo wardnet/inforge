@@ -335,8 +335,9 @@ func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, g
 // minted pull-access identity, never material), and under ADR-0035 the actual
 // leaf + trust-bundle content is delivered later, directly, by `inforge pki
 // renew`'s SSH push as leaf.age — a separate persistent artifact this deploy
-// pass does not write (see docs/adr/0035, refinement 1). So there is no host
-// key to read and nothing to encrypt here — a single static command suffices.
+// pass does not write (see docs/adr/0035, the "as-shipped mesh delivery"
+// amendment). So there is no host key to read and nothing to encrypt here — a
+// single static command suffices.
 func deliverMeshHost(ctx *pulumi.Context, hostKey string, host types.ComputeOutputs, services []string, deployUser, deployPrivateKey, env, slug string, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "mesh", hostKey)

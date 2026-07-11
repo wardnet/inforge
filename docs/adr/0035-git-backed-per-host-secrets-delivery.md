@@ -6,6 +6,11 @@ issue: "#171"
 
 # Git-backed, per-host secrets delivery (retiring Infisical)
 
+> _Note: the mesh proxy's per-host artifact shipped as `leaf.age` (not the `secrets.age` this body
+> describes), and `mesh-project` / the mesh `ExecStartPre` were retained as a purely local decrypt
+> rather than removed — see the "As-shipped mesh delivery" amendment at the end. The service path
+> shipped as described here._
+
 *Retires Infisical as inforge's runtime secrets backend (superseding the provider-fetch half of
 ADR-0010); reverses ADR-0033's pull decision for mesh leaf delivery now that its root cause
 (tmpfs-only persistence) no longer holds; extends ADR-0017's git-committed age store and
@@ -147,3 +152,34 @@ This does not change `inforge pki renew`'s standing invariant that it never runs
 (`.agents/rules/pki-renew-never-runs-pulumi.md`) — the new SSH push is an imperative step alongside
 the existing imperative leaf-minting, exactly like the deploy-time SSH trigger `meshBaseline` already
 performs.
+
+## Amendment (2026-07-11): as-shipped mesh delivery
+
+The **service** path shipped exactly as the body describes: a persistent per-service `secrets.age`
+under `/etc/wardnet/services/<svc>/`, hash-gated `remote.Command` write, reload-or-restart on the
+same trigger.
+
+The **mesh proxy** path diverged from the body's `secrets.age` sketch and shipped as follows. The
+reconciliation is recorded here rather than by rewriting the decision above (the log is immutable):
+
+- **The artifact is `leaf.age`, not `secrets.age`.** The mesh proxy has never received deploy-time
+  secret material — deploy only writes the secret-free on-host mesh descriptor. The leaf + trust
+  bundle content is delivered *later* by `inforge pki renew`'s SSH push as `leaf.age` at
+  `meshpaths.LeafPath` (single-sourced in `internal/meshpaths`), an aggregate of each co-located
+  service's leaf + one concatenated per-host trust bundle, age-encrypted to the host's own SSH host
+  key. There is no `/etc/wardnet/mesh/secrets.age`.
+- **`mesh-project` was NOT removed; it became a purely local decrypt.** nginx cannot decrypt age
+  itself, so the mesh unit's `ExecStartPre` runs `inforge-agent mesh-project <dir>`. Under this ADR
+  it is a *local* operation — decrypt whatever `leaf.age` already sits on disk and project each PEM
+  into the tmpfs `RuntimeDir` (owner nginx, `0400`) — with no network fetch, no retry loop, and no
+  timer. It is `-`-prefixed in the unit so an absent or corrupt `leaf.age` (first boot, before the
+  first push) never blocks the proxy start; the placeholder self-signed-cert seed fills the gap.
+- **The mesh `ExecStartPre` therefore does not "go away."** The body's claim was that persistence
+  makes the pre-step unnecessary; in practice the local decrypt-and-project step is still needed
+  (nginx reads PEMs, not age), so it stays — but it is a *local* decrypt, not the ADR-0033 *pull* it
+  replaced. The self-heal the body intends is preserved: a reboot's ordinary boot flow
+  (local decrypt → project → start) restores the proxy with no external dependency. What was removed
+  is the pull/poll/retry machinery and the on-host renewal timers, exactly as the body states.
+
+The `inforge-agent project` (service pull) subcommand and the per-service renewal timers were
+removed as described; `mesh-project` was retained in its local-decrypt form for the reason above.

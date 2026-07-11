@@ -37,9 +37,9 @@ func GenerateLeaf(parent *x509.Certificate, parentKey crypto.Signer, spiffeID *u
 		return "", "", err
 	}
 	now := time.Now()
-	notAfter := now.Add(leafValidity)
-	if notAfter.After(parent.NotAfter) {
-		notAfter = parent.NotAfter
+	notAfter, err := clampToParent(now, leafValidity, parent)
+	if err != nil {
+		return "", "", err
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,

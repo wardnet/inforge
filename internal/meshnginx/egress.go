@@ -85,6 +85,12 @@ func egressServer(e EgressCaller, bundlePath string) *crossplane.Directive {
 			dir("proxy_http_version", "1.1"),
 			dir("proxy_set_header", "Upgrade", "$http_upgrade"),
 			dir("proxy_set_header", "Connection", "$connection_upgrade"),
+			// Set Host to the callee's mesh SNI so the request the callee's ingress
+			// receives carries a Host matching its server_name/negotiated SNI. Without
+			// this, Host defaults to $proxy_host (the resolved <ip>:MTLSPort), which
+			// mismatches the SNI and, with ssl_verify_client on, can be rejected as a
+			// 421 Misdirected Request.
+			dir("proxy_set_header", "Host", "$mesh_sni"),
 			dir("proxy_ssl_certificate", e.LeafCertPath),
 			dir("proxy_ssl_certificate_key", e.LeafKeyPath),
 			dir("proxy_ssl_trusted_certificate", bundlePath),

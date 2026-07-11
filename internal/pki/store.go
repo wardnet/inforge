@@ -202,12 +202,20 @@ func (s *Store) Set(name string, p PKI) {
 	s.PKIs[name] = p
 }
 
-// TrustBundle returns the concatenated intermediate certificate PEMs for the
-// given scopes of a two-tier PKI — the trust anchors a mesh member verifies
-// peers against (per-scope bundle, not the root; ADR-0024 amendment). Certs are
-// plaintext in the store, so this needs no decryption. It errors if the PKI is
-// absent or any scope has no intermediate (the validator guarantees presence at
-// `inforge validate` time, but renew double-checks).
+// TrustBundle returns the certificate PEMs a mesh member verifies peers against:
+// the scoped intermediate(s) it should trust, followed by the PKI's root(s). The
+// root is included because the mesh trust anchor is consumed by nginx/OpenSSL
+// (ssl_client_certificate / proxy_ssl_trusted_certificate), and OpenSSL only
+// accepts a chain that terminates in a self-signed certificate — an
+// intermediate-only bundle fails every handshake (it does not set
+// X509_V_FLAG_PARTIAL_CHAIN). The intermediates still come first so the scope
+// filter is explicit, and the leaf's per-scope identity (its CN) remains the
+// authoritative admission key at the mesh proxy's $ssl_client_s_dn map; the root
+// only lets the chain build. RootCerts() yields the active root plus any retained
+// previous roots (dual-root overlap), so verification keeps working mid-rotation.
+// Certs are plaintext in the store, so this needs no decryption. It errors if the
+// PKI is absent, any scope has no intermediate, or the PKI has no root cert (the
+// validator guarantees presence at `inforge validate` time, but renew double-checks).
 func (s *Store) TrustBundle(pkiName string, scopes []string) (string, error) {
 	p, ok := s.Get(pkiName)
 	if !ok {
@@ -221,6 +229,22 @@ func (s *Store) TrustBundle(pkiName string, scopes []string) (string, error) {
 		}
 		b.WriteString(strings.TrimRight(m.Cert, "\n"))
 		b.WriteString("\n")
+	}
+	var rootWritten bool
+	for _, root := range p.RootCerts() {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		b.WriteString(strings.TrimRight(root, "\n"))
+		b.WriteString("\n")
+		rootWritten = true
+	}
+	// A bundle with no self-signed anchor is the exact defect this function was
+	// fixed for — nginx/OpenSSL cannot build a chain to it. Load validates
+	// topology and recipients but not root-cert presence, so fail loudly here
+	// rather than silently ship an anchor-less bundle that breaks every handshake.
+	if !rootWritten {
+		return "", fmt.Errorf("pki %q has no root certificate — a mesh trust bundle needs a self-signed anchor", pkiName)
 	}
 	return b.String(), nil
 }

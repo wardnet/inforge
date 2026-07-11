@@ -72,3 +72,17 @@ func TestGenerateLeaf(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, leaf.PublicKey, signer.Public())
 }
+
+// TestGenerateLeafRejectsExpiredParent: clamping a leaf's NotAfter down to an
+// already-expired parent would yield NotAfter <= NotBefore — a structurally
+// invalid cert x509.CreateCertificate does NOT reject. GenerateLeaf must fail
+// loudly instead so the operator knows to rotate/renew the intermediate first.
+func TestGenerateLeafRejectsExpiredParent(t *testing.T) {
+	_, interCert, interSigner := meshChain(t)
+	expired := *interCert
+	expired.NotAfter = time.Now().Add(-time.Hour)
+
+	_, _, err := pki.GenerateLeaf(&expired, interSigner, pki.SPIFFEID("wardnet.network", "prd", "us-east-1", "bridge"), "bridge")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not valid into the future")
+}
