@@ -16,7 +16,7 @@ func TestRenderDescriptorMeshFiles(t *testing.T) {
 	// advertises its own leaf/key/bundle (ADR-0033), independent of whether it
 	// also has env/grant secrets (ADR-0035: no more provider/bundle gate).
 	svc := types.ServiceSpec{Name: "bridge", Container: "bridge", Host: "bridge", Type: "raw", User: "bridge", Pki: "wardnet-mesh", MtlsFiles: true}
-	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "prd", "us-east-1", "use1", "wardnet.network", "bridge-01", 0)
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, nil, "prd", "us-east-1", "use1", "wardnet.network", "bridge-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))
@@ -29,7 +29,7 @@ func TestRenderDescriptorPlainMeshMemberNoFiles(t *testing.T) {
 	// A plain mesh member (pki: but no mtls_files) holds no cert material — the
 	// mesh proxy is the sole leaf custodian (ADR-0033).
 	svc := types.ServiceSpec{Name: "bridge", Container: "bridge", Host: "bridge", Type: "raw", User: "bridge", Pki: "wardnet-mesh"}
-	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "prd", "us-east-1", "use1", "wardnet.network", "bridge-01", 0)
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, nil, "prd", "us-east-1", "use1", "wardnet.network", "bridge-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))
@@ -39,7 +39,7 @@ func TestRenderDescriptorPlainMeshMemberNoFiles(t *testing.T) {
 
 func TestRenderDescriptorNoMeshNoFiles(t *testing.T) {
 	svc := types.ServiceSpec{Name: "plain", Container: "plain", Host: "plain", Type: "raw", User: "plain"}
-	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "prd", "us-east-1", "use1", "wardnet.network", svc.Name+"-01", 0)
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, nil, "prd", "us-east-1", "use1", "wardnet.network", svc.Name+"-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))

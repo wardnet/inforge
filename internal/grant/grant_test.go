@@ -2,6 +2,7 @@ package grant
 
 import (
 	"testing"
+	"time"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/assert"
@@ -90,10 +91,65 @@ func TestDatabaseGrantMapsFields(t *testing.T) {
 	assert.Empty(t, f.Files, "a database grant publishes no file fields")
 }
 
-func TestPKIResourceGrantStub(t *testing.T) {
-	_, err := PKIResource{}.Grant(nil, "daemon", PermissionRW, "prd", "global")
+// resolveOutput awaits a known StringOutput. Grant's file PEMs are plan-time
+// constants (lifted from the decrypted store), so they resolve immediately.
+func resolveOutput(t *testing.T, out pulumi.StringOutput) string {
+	t.Helper()
+	ch := make(chan string, 1)
+	out.ApplyT(func(s string) string { ch <- s; return s })
+	select {
+	case s := <-ch:
+		return s
+	case <-time.After(5 * time.Second):
+		t.Fatal("output did not resolve")
+		return ""
+	}
+}
+
+func TestPKIResourceGrantDeliversMaterialPerPermission(t *testing.T) {
+	p := PKIResource{Cert: "CERT-PEM", Key: "KEY-PEM"}
+
+	// ro (verify) delivers the trust anchor ONLY — never the signing key.
+	ro, err := p.Grant(nil, "ddns", PermissionRO, "prd", "us-east-1")
+	require.NoError(t, err)
+	assert.Empty(t, ro.Values, "a pki grant publishes no value fields")
+	require.Contains(t, ro.Files, FieldCert)
+	assert.NotContains(t, ro.Files, FieldKey, "a verify grant must never carry the root signing key")
+	assert.Equal(t, "CERT-PEM", resolveOutput(t, ro.Files[FieldCert].PEM))
+
+	// rw (issue) adds the signing key, and each field carries its OWN material.
+	rw, err := p.Grant(nil, "tenants", PermissionRW, "prd", "global")
+	require.NoError(t, err)
+	require.Contains(t, rw.Files, FieldCert)
+	require.Contains(t, rw.Files, FieldKey)
+	assert.Equal(t, "CERT-PEM", resolveOutput(t, rw.Files[FieldCert].PEM))
+	assert.Equal(t, "KEY-PEM", resolveOutput(t, rw.Files[FieldKey].PEM))
+}
+
+// A rw grant on a PKI with no signing key must fail the deploy, not deliver a
+// cert-only set — the consumer would otherwise crash-loop on the missing env var.
+func TestPKIResourceGrantRequiresMaterial(t *testing.T) {
+	_, err := PKIResource{Cert: "CERT-PEM"}.Grant(nil, "tenants", PermissionRW, "prd", "global")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "slice C")
+	assert.Contains(t, err.Error(), FieldKey)
+
+	// A ro grant on the same cert-only material is fine: KEY is not published.
+	_, err = PKIResource{Cert: "CERT-PEM"}.Grant(nil, "ddns", PermissionRO, "prd", "us-east-1")
+	require.NoError(t, err)
+
+	// No cert at all fails even for verify.
+	_, err = PKIResource{}.Grant(nil, "ddns", PermissionRO, "prd", "us-east-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), FieldCert)
+}
+
+// FileKey is the producer/consumer contract: the descriptor's files: value and the
+// blob's Files key are the same string, and it doubles as the on-host relative
+// path. It must never collide with the mesh material projected under "mtls/".
+func TestFileKey(t *testing.T) {
+	assert.Equal(t, "pki/daemon-jwt/cert.pem", FileKey("daemon-jwt", FieldCert))
+	assert.Equal(t, "pki/daemon-jwt/key.pem", FileKey("daemon-jwt", FieldKey))
+	assert.NotContains(t, FileKey("daemon-jwt", FieldCert), "mtls/")
 }
 
 func TestParseTemplateValid(t *testing.T) {

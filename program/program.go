@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"sort"
 	"strings"
@@ -144,6 +145,14 @@ func Run(ctx *pulumi.Context) error {
 	// provider-neutrally, then threaded to every region's secrets provisioning
 	// via AllOutputs. Nil unless some service declares a `vault:` secret.
 	encSecrets, err := decryptEncryptedSecrets(res, globalRes, dir, srcEnv, ctx.DryRun())
+	if err != nil {
+		return err
+	}
+
+	// Granted PKI material (ADR-0025 slice C) is resolved the same way: once, up
+	// front, from the env's committed pki.enc.yaml. Nil unless some service
+	// declares a `pki/*` grant.
+	pkiMaterial, err := decryptPKIGrantMaterial(res, globalRes, dir, srcEnv, ctx.DryRun())
 	if err != nil {
 		return err
 	}
@@ -366,7 +375,7 @@ func Run(ctx *pulumi.Context) error {
 		if err := provisionDatabaseBackups(ctx, sc.res, computeOutputs[sc.key], dbHostTails, backupsBucket, backupsEndpoint, backupsCredsPresent, backupsAccessKey, backupsSecretKey, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
 			return err
 		}
-		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets}
+		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets, PKI: pkiMaterial}
 		serviceSecrets, err := provisionServiceSecrets(ctx, sc.res, all, env, sc.key, sc.slug)
 		if err != nil {
 			return err
@@ -536,7 +545,7 @@ func attachPrivateNetworks(ctx *pulumi.Context, reg registry.ProviderRegistry, r
 // whole `pulumi up`. The unit is written, daemon-reloaded, and enabled (for
 // boot persistence); release performs the first real start with code present.
 // Connection details and the preview/up guard mirror realizeIngress.
-func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, serviceSecrets map[string]map[string]pulumi.StringOutput, gates map[string]pulumi.Resource, deployPrivateKey, env, region, slug, baseDomain, inforgeVersion string) error {
+func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, serviceSecrets map[string]serviceMaterial, gates map[string]pulumi.Resource, deployPrivateKey, env, region, slug, baseDomain, inforgeVersion string) error {
 	if len(res.Service) == 0 {
 		return nil
 	}
@@ -582,12 +591,12 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 			return err
 		}
 		// Every service gets a descriptor.yaml. A service with resolved env/grant
-		// secrets also gets a host-key-encrypted secrets.age (ADR-0035); a
-		// secret-less one gets a static descriptor with no env (mtls_files: still
-		// gets its files: entries in the descriptor — its leaf.age is delivered
-		// later by `inforge pki renew`, not here).
-		if secretEnv := serviceSecrets[svc.Name]; len(secretEnv) > 0 {
-			if err := deliverServiceSecrets(ctx, svc, host, secretEnv, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], gate); err != nil {
+		// secrets — or with pki-grant file material — also gets a host-key-encrypted
+		// secrets.age (ADR-0035); a service with neither gets a static descriptor
+		// with no env (mtls_files: still gets its files: entries in the descriptor —
+		// its leaf.age is delivered later by `inforge pki renew`, not here).
+		if material := serviceSecrets[svc.Name]; !material.empty() {
+			if err := deliverServiceSecrets(ctx, svc, host, material, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], gate); err != nil {
 				return err
 			}
 		} else {
@@ -853,17 +862,45 @@ func appProvisionScript(name string) string {
 	}, "\n")
 }
 
-// provisionServiceSecrets resolves each service's final env-var secrets set
-// (ADR-0035): environment.yaml refs (resolveRef) merged with database grant
-// outputs (resolveDatabaseGrants), keyed by env-var name, unresolved
-// (pulumi.StringOutput) until deliverServiceSecrets awaits them inside the
-// remote command's ApplyT. A service with neither yields no entry — it gets a
-// unit + a static secret-less descriptor (see deliverServiceDescriptor); an
-// mtls_files: true service with no env/grants also takes that path here (its
-// leaf.age is delivered later by `inforge pki renew`, not this pass) but still
-// gets its descriptor files: entries via renderDescriptor.
-func provisionServiceSecrets(ctx *pulumi.Context, res types.Resources, all types.AllOutputs, env, region, slug string) (map[string]map[string]pulumi.StringOutput, error) {
-	out := map[string]map[string]pulumi.StringOutput{}
+// serviceMaterial is everything a service's agent inputs carry beyond the static
+// deployment context: the resolved env-var secrets and the projected file
+// material. Both halves stay unresolved (pulumi.StringOutput) until
+// deliverServiceSecrets awaits them inside the remote command's ApplyT.
+//
+// The two are delivered by one mechanism but reach the service differently: an
+// Env value is injected into the exec'd child's environment, whereas a file's PEM
+// is written to the service's tmpfs RuntimeDir and only its PATH is injected (via
+// DescriptorFiles). That is why the descriptor's files: map is a separate,
+// plan-time-known field — it names keys, never content.
+type serviceMaterial struct {
+	// Env maps env-var name -> resolved secret value (environment.yaml refs +
+	// database grant outputs).
+	Env map[string]pulumi.StringOutput
+	// DescriptorFiles maps env-var name -> blob file key, the descriptor's files:
+	// map. Known at plan time.
+	DescriptorFiles map[string]string
+	// Files maps blob file key -> PEM content, the blob's Files map.
+	Files map[string]pulumi.StringOutput
+}
+
+// empty reports whether the service has nothing to deliver — no secrets.age is
+// written and it takes the static secret-less descriptor path.
+func (m serviceMaterial) empty() bool {
+	return len(m.Env) == 0 && len(m.Files) == 0
+}
+
+// provisionServiceSecrets resolves each service's agent material (ADR-0035):
+// environment.yaml refs (resolveRef) and database grant outputs
+// (resolveDatabaseGrants) as env-var secrets, plus pki grant material
+// (resolvePKIGrants) as projected files.
+//
+// A service with none of them yields no entry — it gets a unit + a static
+// secret-less descriptor (see deliverServiceDescriptor); an mtls_files: true
+// service with no env/grants also takes that path here (its leaf.age is delivered
+// later by `inforge pki renew`, not this pass) but still gets its descriptor
+// files: entries via renderDescriptor.
+func provisionServiceSecrets(ctx *pulumi.Context, res types.Resources, all types.AllOutputs, env, region, slug string) (map[string]serviceMaterial, error) {
+	out := map[string]serviceMaterial{}
 	for _, svc := range res.Service {
 		if len(svc.Environment) == 0 && len(svc.Grants) == 0 {
 			continue
@@ -880,11 +917,16 @@ func provisionServiceSecrets(ctx *pulumi.Context, res types.Resources, all types
 		if err != nil {
 			return nil, fmt.Errorf("service %q: resolve grants: %w", svc.Name, err)
 		}
-		for key, val := range grantSecrets {
-			resolved[key] = val
+		maps.Copy(resolved, grantSecrets)
+
+		descriptorFiles, blobFiles, err := resolvePKIGrants(ctx, svc, all, env, region)
+		if err != nil {
+			return nil, fmt.Errorf("service %q: resolve grants: %w", svc.Name, err)
 		}
-		if len(resolved) > 0 {
-			out[svc.Name] = resolved
+
+		m := serviceMaterial{Env: resolved, DescriptorFiles: descriptorFiles, Files: blobFiles}
+		if !m.empty() {
+			out[svc.Name] = m
 		}
 	}
 	return out, nil
@@ -903,10 +945,11 @@ func resolveDatabaseGrants(ctx *pulumi.Context, svc types.ServiceSpec, all types
 	for _, g := range svc.Grants {
 		typ, name, ok := strings.Cut(g.Resource, "/")
 		// Only value-field (database) grants are materialized here. File-field
-		// grants (pki/*, slice C) are projected via the descriptor files: path, not
-		// the secrets batch — their materialization is a separate seam, not this
-		// loop. Unknown types are already rejected by inforge validate.
-		if !ok || typ != "database" {
+		// grants (pki/*) are projected via the descriptor files: path, not the
+		// secrets batch — resolvePKIGrants owns that seam, and it rejects any grant
+		// type neither resolver materializes, so a new Grantable cannot silently
+		// reach a host as a missing env var.
+		if !ok || typ != grantTypeDatabase {
 			continue
 		}
 		// Resolve the target the same way ref: does (shared global/ redirect).
@@ -976,15 +1019,22 @@ func interpolateGrantOutput(tmpl string, values map[string]pulumi.StringOutput) 
 // await) and the host-key-encrypted secrets.age (0600, ADR-0035). It is a
 // two-phase output dependency: a command reads the host SSH public key
 // (Stdout), then a second command builds the final hostsecrets.Blob (env-var
-// name -> resolved plaintext) inside an ApplyT over the pubkey + every
-// resolved secret Output, hashes it (Blob.Hash — the change-detection input,
-// NOT the non-deterministic age ciphertext), age-encrypts it to the host key,
-// and writes both files. The reload-or-restart step rides in the SAME
+// name -> resolved plaintext, plus file key -> PEM) inside an ApplyT over the
+// pubkey + every resolved Output, hashes it (Blob.Hash — the change-detection
+// input, NOT the non-deterministic age ciphertext), age-encrypts it to the host
+// key, and writes both files. The reload-or-restart step rides in the SAME
 // command's script, so it only runs when Pulumi actually re-executes Create/
 // Update — i.e. only when the resolved plaintext hash (or the static
 // descriptor content) changed. Connection details and the preview/up guards
 // mirror provisionService.
-func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, secretEnv map[string]pulumi.StringOutput, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, meshEgressPort int, gate pulumi.Resource) error {
+//
+// The blob carries both halves of the material: Env values are injected into the
+// exec'd child's environment, while Files values are PEMs the agent projects into
+// the service's tmpfs RuntimeDir, handing the service only the PATH (the
+// descriptor's files: map). Both feed the hash, so rotating a granted PKI's
+// material re-writes secrets.age and restarts the service exactly like a changed
+// secret value.
+func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, material serviceMaterial, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, meshEgressPort int, gate pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
@@ -993,29 +1043,35 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 		return fmt.Errorf("service %q: read host key: %w", svc.Name, err)
 	}
 
-	// The descriptor names every env var the service expects (an identity
-	// map — the resolved value lives only in secrets.age, never here) and is
-	// fully static: no Output to await.
-	names := sortedKeys(secretEnv)
-	descriptor, err := renderDescriptor(svc, host, names, env, region, slug, baseDomain, computeKey, meshEgressPort)
+	// The descriptor names every env var the service expects (an identity map) and
+	// every file it projects (env var -> blob key) — the resolved value and the PEM
+	// live only in secrets.age, never here. It is fully static: no Output to await.
+	names := sortedKeys(material.Env)
+	fileKeys := sortedKeys(material.Files)
+	descriptor, err := renderDescriptor(svc, host, names, material.DescriptorFiles, env, region, slug, baseDomain, computeKey, meshEgressPort)
 	if err != nil {
 		return err
 	}
 
-	valueOuts := make([]any, len(names))
-	for i, n := range names {
-		valueOuts[i] = secretEnv[n]
+	// One flat await over both halves, env values first, then file PEMs — the same
+	// order blobFrom splits them back out in.
+	valueOuts := make([]any, 0, len(names)+len(fileKeys))
+	for _, n := range names {
+		valueOuts = append(valueOuts, material.Env[n])
+	}
+	for _, k := range fileKeys {
+		valueOuts = append(valueOuts, material.Files[k])
 	}
 
 	// The Triggers hash depends only on the resolved plaintext, never the host
 	// public key — so it stays stable across a host key rotation and only
 	// changes when a secret value actually moves.
-	hashOut := pulumi.All(valueOuts...).ApplyT(func(args []interface{}) (string, error) {
-		envMap, err := secretsEnvMap(names, args)
+	hashOut := pulumi.All(valueOuts...).ApplyT(func(args []any) (string, error) {
+		blob, err := blobFrom(names, fileKeys, args)
 		if err != nil {
 			return "", fmt.Errorf("service %q: %w", svc.Name, err)
 		}
-		hash, err := (hostsecrets.Blob{Env: envMap}).Hash()
+		hash, err := blob.Hash()
 		if err != nil {
 			return "", fmt.Errorf("service %q: hash secrets blob: %w", svc.Name, err)
 		}
@@ -1023,16 +1079,16 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 	}).(pulumi.StringOutput)
 
 	writeArgs := append([]any{hostKey.Stdout}, valueOuts...)
-	writeScript := pulumi.All(writeArgs...).ApplyT(func(args []interface{}) (string, error) {
+	writeScript := pulumi.All(writeArgs...).ApplyT(func(args []any) (string, error) {
 		pub, _ := args[0].(string)
 		if pub == "" {
 			return "", fmt.Errorf("service %q: empty host public key while building secrets.age", svc.Name)
 		}
-		envMap, err := secretsEnvMap(names, args[1:])
+		blob, err := blobFrom(names, fileKeys, args[1:])
 		if err != nil {
 			return "", fmt.Errorf("service %q: %w", svc.Name, err)
 		}
-		ct, err := hostsecrets.EncryptBlob(hostsecrets.Blob{Env: envMap}, pub)
+		ct, err := hostsecrets.EncryptBlob(blob, pub)
 		if err != nil {
 			return "", fmt.Errorf("service %q: encrypt secrets blob: %w", svc.Name, err)
 		}
@@ -1066,20 +1122,40 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 	return nil
 }
 
-// secretsEnvMap resolves the pulumi.All args (each a resolved secret value, in
-// the same order as names) into the plaintext env map a hostsecrets.Blob
-// carries. Every value must be non-empty — a 200 with a missing/empty
-// resolved secret must never reach the host.
-func secretsEnvMap(names []string, args []interface{}) (map[string]string, error) {
-	m := make(map[string]string, len(names))
+// blobFrom resolves the pulumi.All args into the plaintext hostsecrets.Blob the
+// host receives. args is the flat await deliverServiceSecrets built: the env
+// values in `names` order, then the file PEMs in `fileKeys` order — so the split
+// point is len(names) and the two slices must be the SAME ones used to build it.
+//
+// Every value must be non-empty: a missing or empty resolved secret must never
+// reach the host, and an empty PEM would project a zero-byte file the service
+// would fail to parse at startup.
+func blobFrom(names, fileKeys []string, args []any) (hostsecrets.Blob, error) {
+	if len(args) != len(names)+len(fileKeys) {
+		return hostsecrets.Blob{}, fmt.Errorf("resolved %d values for %d secrets and %d files while building secrets.age", len(args), len(names), len(fileKeys))
+	}
+	blob := hostsecrets.Blob{}
+	if len(names) > 0 {
+		blob.Env = make(map[string]string, len(names))
+	}
 	for i, n := range names {
 		v, _ := args[i].(string)
 		if v == "" {
-			return nil, fmt.Errorf("empty resolved value for secret %q while building secrets.age", n)
+			return hostsecrets.Blob{}, fmt.Errorf("empty resolved value for secret %q while building secrets.age", n)
 		}
-		m[n] = v
+		blob.Env[n] = v
 	}
-	return m, nil
+	if len(fileKeys) > 0 {
+		blob.Files = make(map[string]string, len(fileKeys))
+	}
+	for i, k := range fileKeys {
+		v, _ := args[len(names)+i].(string)
+		if v == "" {
+			return hostsecrets.Blob{}, fmt.Errorf("empty resolved PEM for file %q while building secrets.age", k)
+		}
+		blob.Files[k] = v
+	}
+	return blob, nil
 }
 
 // safeTrigger turns a possibly-secret, possibly-unknown string output into a
@@ -1163,7 +1239,7 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
-	descriptor, err := renderDescriptor(svc, host, nil, env, region, slug, baseDomain, computeKey, meshEgressPort)
+	descriptor, err := renderDescriptor(svc, host, nil, nil, env, region, slug, baseDomain, computeKey, meshEgressPort)
 	if err != nil {
 		return err
 	}
@@ -1183,12 +1259,14 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 // so the producer can never drift from the consumer's schema. secretNames is
 // the sorted set of env-var names the service expects (nil for a secret-less
 // service) — an identity map into d.Env; the resolved VALUES live only in the
-// host's secrets.age, decrypted at boot (ADR-0035), never here. The deployment
-// block (region/env/domain/fqdn/host) is derived from the deployment context
-// and is present for every service, secret-bearing or not. hostKey is the
-// service's resolved compute key ("<name>-<NN>", e.g. "bridge-01"); the host id
-// is its full VM resource name.
-func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, secretNames []string, env, region, slug, baseDomain, hostKey string, meshEgressPort int) (string, error) {
+// host's secrets.age, decrypted at boot (ADR-0035), never here. grantFiles is the
+// pki-grant file map (env-var -> blob file key, nil for a service with no pki
+// grant), merged into d.Files beside any mtls_files: material — it likewise names
+// only keys, never PEM content. The deployment block (region/env/domain/fqdn/host)
+// is derived from the deployment context and is present for every service,
+// secret-bearing or not. hostKey is the service's resolved compute key
+// ("<name>-<NN>", e.g. "bridge-01"); the host id is its full VM resource name.
+func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, secretNames []string, grantFiles map[string]string, env, region, slug, baseDomain, hostKey string, meshEgressPort int) (string, error) {
 	// The mesh scope (ADR-0032) is the region name, or the literal ScopeGlobal for
 	// the global slice — captured BEFORE region is blanked below, since the mesh
 	// identity/SNI segment is "global", not empty.
@@ -1238,6 +1316,18 @@ func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, secretNa
 	// env/grant secrets (there is no more "bundle" gate).
 	if svc.MtlsFiles {
 		d.Files = meshcert.DescriptorFiles()
+	}
+	// A pki/* grant's material rides the same files: projection (ADR-0025 slice C),
+	// delivered in the deploy-owned secrets.age rather than the renew-owned
+	// leaf.age. The two key namespaces are disjoint by construction ("mtls/" vs
+	// grant.FileKey's "pki/"), and validate.checkGrants rejects a grant output that
+	// collides with a meshcert.DescriptorFiles() env name — so the merge can
+	// neither overwrite mesh material nor be overwritten by it.
+	if len(grantFiles) > 0 {
+		if d.Files == nil {
+			d.Files = make(map[string]string, len(grantFiles))
+		}
+		maps.Copy(d.Files, grantFiles)
 	}
 	// A mesh member (any pki: service) gets the east-west endpoint contract
 	// (ADR-0032), independent of whether it has a secrets provider: INFORGE_MESH_URL

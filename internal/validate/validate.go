@@ -230,6 +230,15 @@ type regionContext struct {
 	// reaches its own region's PKI resources or a global/<name> one (the
 	// cross-region boundary, mirrored from databaseNames).
 	pkiResources map[string]string
+	// pkiGenerated is the set of PKI names that actually have root-only material in
+	// the environment's pki.enc.yaml, keyed by BARE name (the store is env-scoped,
+	// so a "global/" grant prefix is stripped before lookup). A PKI *resource*
+	// manifest only declares that a CA should exist; the material is generated
+	// separately by `inforge pki add --topology root-only`. A grant on a declared
+	// but never-generated PKI has nothing to deliver, so checkGrants rejects it —
+	// otherwise the deploy would write a descriptor missing the grant's env vars and
+	// the service would crash-loop on a required variable at startup.
+	pkiGenerated map[string]bool
 	// portUsersByHost maps a canonical INGRESS host specKey to, per listen port, the
 	// names of the services with a route on that port (where the ingress nginx
 	// holds the public port). It is the public-port collision oracle (e.g. a backend
@@ -432,7 +441,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 	// graph resolves only against global resources, so a global resource
 	// referencing a regional one fails as not-found — enforcing "global → global
 	// only". A global slice with resources but no global providers block is an error.
-	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil, regionalMeshServices, encStore, defaults, vo.backupsBucketConfigured); err != nil {
+	if err := validateResourceSet(r, schemaSet, globalBase, nil, sizeTable, nil, regionalMeshServices, encStore, pkiStore, defaults, vo.backupsBucketConfigured); err != nil {
 		return err
 	}
 	if global == nil && globalRes.HasAny() {
@@ -459,7 +468,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 	// graph, with the global outputs injected so a regional secrets `ref:` may
 	// resolve a global/<name> target. Provider availability is region-specific, so
 	// it is skipped here (available nil) and checked separately per region below.
-	if err := validateResourceSet(r, schemaSet, regionalBase, nil, sizeTable, buildGlobalRefs(globalRes), nil, encStore, defaults, vo.backupsBucketConfigured); err != nil {
+	if err := validateResourceSet(r, schemaSet, regionalBase, nil, sizeTable, buildGlobalRefs(globalRes), nil, encStore, pkiStore, defaults, vo.backupsBucketConfigured); err != nil {
 		return err
 	}
 
@@ -533,7 +542,7 @@ func checkCrossScopeNames(r *reporter, regional, global types.Resources, regiona
 	}
 }
 
-func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, siblingServices map[string]bool, encStore *secretstore.Store, defaults types.ProviderDefaults, backupsBucketConfigured bool) error {
+func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, siblingServices map[string]bool, encStore *secretstore.Store, pkiStore *pki.Store, defaults types.ProviderDefaults, backupsBucketConfigured bool) error {
 	networkFiles, _, err := readFolders[types.NetworkSpec](filepath.Join(base, "network"))
 	if err != nil {
 		return err
@@ -659,6 +668,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		ingressHealthPort:     map[string]int{},
 		ingressNamesByHost:    map[string][]string{},
 		pkiResources:          map[string]string{},
+		pkiGenerated:          pkiGeneratedNames(pkiStore),
 		serviceAllowsGateway:  map[string]bool{},
 		servicePkiByName:      map[string]string{},
 		serviceHostByName:        map[string]string{},
@@ -1867,6 +1877,23 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	return errs, warns
 }
 
+// pkiGeneratedNames returns the set of root-only PKIs that actually have material
+// in the environment's store, keyed by bare name. A nil store (absent or
+// unreadable — already reported by the caller) yields an empty set, so every pki
+// grant reports the same "never generated" error rather than silently passing.
+func pkiGeneratedNames(store *pki.Store) map[string]bool {
+	out := map[string]bool{}
+	if store == nil {
+		return out
+	}
+	for _, name := range store.Names() {
+		if p, ok := store.Get(name); ok && p.Topology == pki.TopologyRootOnly {
+			out[name] = true
+		}
+	}
+	return out
+}
+
 // checkPKIResource validates a PKI resource manifest's own shape (credential-free):
 // a PKI resource is the root-only standalone CA grants target, so a non-root-only
 // topology is rejected — the two-tier mesh PKI lives in pki.enc.yaml and is
@@ -2340,11 +2367,20 @@ func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
 			}
 		case "pki":
 			topology, found := ctx.pkiResources[name]
+			// The store is env-scoped, so the cross-scope "global/" prefix carries no
+			// lookup meaning for the material — strip it to reach the store's key.
+			bare := strings.TrimPrefix(name, "global/")
 			switch {
 			case !found:
 				errs = append(errs, fmt.Sprintf("%s.resource: pki resource %q not found", label, name))
 			case topology != pki.TopologyRootOnly:
 				errs = append(errs, fmt.Sprintf("%s.resource: pki resource %q has topology %q; a grant target must be %q", label, name, topology, pki.TopologyRootOnly))
+			case !ctx.pkiGenerated[bare]:
+				// The manifest declares the CA; the material is generated separately. A
+				// grant on a never-generated PKI has nothing to deliver — fail here, or
+				// the deploy writes a descriptor without the grant's env vars and the
+				// service crash-loops at startup on a variable it requires.
+				errs = append(errs, fmt.Sprintf("%s.resource: pki resource %q is declared but has no material in %s — generate it with `inforge pki add <env> %s --topology root-only` and commit the store", label, name, pki.FileName, bare))
 			default:
 				targetResolved = true
 			}
