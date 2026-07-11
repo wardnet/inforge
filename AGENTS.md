@@ -223,6 +223,13 @@ The deploy path mirrors the `vault:` path — decrypt once, up front, provider-n
 - **The agent's descriptor contract is untouched.** `Descriptor.Files` and `projectFiles` already
   existed for `mtls_files:` (#109); a pki grant just populates them from the deploy-owned `secrets.age`
   instead of the renew-owned `leaf.age`. **No descriptor version bump** — no field changed shape.
+- **A service's `files:` set can SPAN both on-host blobs, so every projector must resolve it against the
+  MERGED blob** (`loadSecretsBlobs`), never against one artifact alone. An `mtls_files:` service that also
+  holds a pki grant (tunneller) draws its leaf/bundle from the renew-owned `leaf.age` and its granted PEMs
+  from the deploy-owned `secrets.age`. `runProjectLeaf` decrypted only `leaf.age` and then projected the
+  whole set, so the renew push died on the first secrets.age-backed key (`mesh material
+  "pki/daemon-jwt/cert.pem" … not found or empty`) and took the mesh baseline — and the deploy — down with
+  it. `runBoot` was always correct; `runProjectLeaf` now matches it.
 - **`projectFiles` now owns DIRECTORY ownership, not just file ownership** (`mkdirOwned`). A service's
   projection root is systemd's `RuntimeDirectory=` at `0700` with no `User=`, i.e. `root:root` — so
   chowning only the PEM left the service without the search bit on its own directory and it crash-looped

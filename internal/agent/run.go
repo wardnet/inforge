@@ -106,7 +106,37 @@ func runMeshProject(dir string) error {
 // ExecStart). Without this step a reload after `inforge pki renew` would leave
 // the process serving its OLD cert until an unrelated full restart. Absent
 // leaf.age (not yet pushed) is a no-op, matching runMeshProject.
+//
+// It projects the descriptor's ENTIRE files: set, so it must resolve that set
+// against BOTH on-host blobs — exactly like runBoot — not against leaf.age alone.
+// A service's files: map can span the two artifacts: an mtls_files: service that
+// also holds a pki/* grant draws its leaf/bundle from the renew-owned leaf.age and
+// its granted PEMs from the deploy-owned secrets.age. Decrypting only leaf.age
+// here would leave every secrets.age-backed key unresolvable and fail the whole
+// atomic set ("mesh material ... not found or empty"), taking the renew push down
+// with it.
 func runProjectLeaf(dir string) error {
+	return projectLeaf(dir, hostEnv{
+		hostKeyPath: defaultHostKeyPath,
+		runtimeDir:  hostpaths.RuntimeDir,
+		lookupUser:  lookupUser,
+	})
+}
+
+// hostEnv is the set of real-host dependencies the projection path touches: the
+// SSH host key it decrypts with, the tmpfs RuntimeDir it writes into, and the
+// /etc/passwd lookup that resolves the service user. They are injected so
+// projectLeaf is drivable in a test — none of the three is reachable from a unit
+// test on a dev box or in CI (no /etc/ssh host key, no writable /run, and the
+// service user is not in /etc/passwd).
+type hostEnv struct {
+	hostKeyPath string
+	runtimeDir  func(service string) string
+	lookupUser  func(name string) (userInfo, error)
+}
+
+// projectLeaf is runProjectLeaf's testable core.
+func projectLeaf(dir string, host hostEnv) error {
 	path := filepath.Join(dir, leafFile)
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -118,15 +148,17 @@ func runProjectLeaf(dir string) error {
 	if err != nil {
 		return err
 	}
-	user, err := lookupUser(desc.User)
+	user, err := host.lookupUser(desc.User)
 	if err != nil {
 		return err
 	}
-	blob, err := DecryptSecretsBlob(path, defaultHostKeyPath)
+	// Merge secrets.age + leaf.age (mergeSecretsBlob already rejects a key claimed
+	// by both, so the two keysets stay provably disjoint).
+	blob, err := loadSecretsBlobs(dir, host.hostKeyPath)
 	if err != nil {
-		return fmt.Errorf("decrypt %s: %w", path, err)
+		return err
 	}
-	_, _, err = projectFiles(desc.Files, blob.Files, hostpaths.RuntimeDir(desc.Service), user.uid, user.gid)
+	_, _, err = projectFiles(desc.Files, blob.Files, host.runtimeDir(desc.Service), user.uid, user.gid)
 	return err
 }
 
@@ -141,7 +173,7 @@ func runBoot(dir string) error {
 	if err != nil {
 		return err
 	}
-	blob, err := loadSecretsBlobs(dir)
+	blob, err := loadSecretsBlobs(dir, defaultHostKeyPath)
 	if err != nil {
 		return err
 	}
@@ -172,7 +204,7 @@ func runBoot(dir string) error {
 // construction (deploy resolves env/grant values; renew resolves leaf/bundle
 // material), so a key present in both is a producer bug — rejected rather than
 // silently resolved one way.
-func loadSecretsBlobs(dir string) (hostsecrets.Blob, error) {
+func loadSecretsBlobs(dir, hostKeyPath string) (hostsecrets.Blob, error) {
 	var merged hostsecrets.Blob
 	for _, name := range []string{secretsFile, leafFile} {
 		path := filepath.Join(dir, name)
@@ -182,7 +214,7 @@ func loadSecretsBlobs(dir string) (hostsecrets.Blob, error) {
 			}
 			return hostsecrets.Blob{}, fmt.Errorf("stat %s: %w", path, err)
 		}
-		b, err := DecryptSecretsBlob(path, defaultHostKeyPath)
+		b, err := DecryptSecretsBlob(path, hostKeyPath)
 		if err != nil {
 			return hostsecrets.Blob{}, fmt.Errorf("decrypt %s: %w", path, err)
 		}
