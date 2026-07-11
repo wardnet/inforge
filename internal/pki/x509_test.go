@@ -78,6 +78,26 @@ func TestGenerateIntermediate(t *testing.T) {
 	assert.Equal(t, cert.PublicKey, signer.Public())
 }
 
+// TestGenerateIntermediateRejectsExpiredParent: the same expired-parent guard
+// GenerateLeaf has applies to a minted intermediate (both clamp through
+// clampToParent), so an expired root can't silently yield a NotAfter<=NotBefore
+// intermediate.
+func TestGenerateIntermediateRejectsExpiredParent(t *testing.T) {
+	rootCertPEM, rootKeyPEM, err := pki.GenerateRoot("wardnet-mesh root")
+	require.NoError(t, err)
+	rootCert, err := pki.ParseCertificate(rootCertPEM)
+	require.NoError(t, err)
+	rootSigner, err := pki.ParsePrivateKey(rootKeyPEM)
+	require.NoError(t, err)
+
+	expired := *rootCert
+	expired.NotAfter = time.Now().Add(-time.Minute)
+
+	_, _, err = pki.GenerateIntermediate(&expired, rootSigner, "wardnet-mesh global intermediate")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not valid into the future")
+}
+
 // verifyLeaf reports whether leaf chains to root through inter.
 func verifyLeaf(leaf, inter, root *x509.Certificate) error {
 	roots := x509.NewCertPool()

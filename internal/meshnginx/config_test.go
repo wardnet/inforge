@@ -69,6 +69,8 @@ func TestRenderIngress(t *testing.T) {
 		`if ($mesh_addr = "")`,
 		"return 502;",
 		"proxy_ssl_certificate /run/wardnet/mesh/tenants/leaf.crt;",
+		// The callee sees a Host matching the SNI it terminated (avoids a 421).
+		"proxy_set_header Host $mesh_sni;",
 		"proxy_ssl_name $mesh_sni;",
 		"proxy_ssl_verify on;",
 		"proxy_pass https://$mesh_addr;",

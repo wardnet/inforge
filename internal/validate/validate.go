@@ -130,25 +130,26 @@ type globalRefs struct {
 	databaseNames map[string]bool   // bare global database name -> true
 	computeKind   map[string]string // accepted global compute FK form -> kind
 	pkiTopology   map[string]string // bare global PKI resource name -> topology
-	// meshServices holds the bare names of global services that are mesh members
-	// (declare pki:). Seeded into the regional pass so a regional service's mesh
+	// meshServices maps each global mesh-member service (declares pki:) to its
+	// pki. Seeded into the regional pass so a regional service's mesh
 	// allowed_services that names a global service can be reported as the forbidden
 	// direction (a global service may only call other global services — a regional
-	// service cannot have a global caller).
-	meshServices map[string]bool
+	// service cannot have a global caller), and so a cross-scope caller's mesh can
+	// be compared against the callee's (a caller must join the callee's own mesh).
+	meshServices map[string]string
 }
 
 // buildGlobalRefs derives the cross-referenceable outputs from the loaded
 // global resource set (already default-normalised by the loader). Single-instance
 // computes are additionally keyed by their bare name, mirroring CanonicalComputeKeys.
 func buildGlobalRefs(global types.Resources) *globalRefs {
-	g := &globalRefs{databaseNames: map[string]bool{}, computeKind: map[string]string{}, pkiTopology: map[string]string{}, meshServices: map[string]bool{}}
+	g := &globalRefs{databaseNames: map[string]bool{}, computeKind: map[string]string{}, pkiTopology: map[string]string{}, meshServices: map[string]string{}}
 	for _, d := range global.Database {
 		g.databaseNames[d.Name] = true
 	}
 	for _, s := range global.Service {
 		if s.Pki != "" {
-			g.meshServices[s.Name] = true
+			g.meshServices[s.Name] = s.Pki
 		}
 	}
 	for _, c := range global.Compute {
@@ -329,6 +330,13 @@ type regionContext struct {
 	// message.
 	callerCandidates     map[string]bool
 	forbiddenCallerNames map[string]bool
+	// callerPki maps a CROSS-SCOPE caller name (a name in callerCandidates or
+	// forbiddenCallerNames) to the pki it joins, so checkMesh can require an
+	// allowed_services caller to be in the callee's own mesh even across scopes
+	// (a same-scope caller's pki is in servicePkiByName). A leaf from a different
+	// mesh cannot verify against this callee's trust bundle at runtime, so the
+	// author error is the early, clear form of that.
+	callerPki map[string]string
 	// encStore is the environment's committed encrypted secret store
 	// (resources/<env>/secrets.enc.yaml), nil when the file does not exist. A
 	// `vault:<KEY>` secret on a service must have a ciphertext under
@@ -403,11 +411,11 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 	// error, so here an error just yields an empty caller set rather than aborting.
 	// The same lenient load also feeds the cross-scope name check below.
 	regionalRes, regionalLoadErr := loader.LoadResources(env, dir)
-	regionalMeshServices := map[string]bool{}
+	regionalMeshServices := map[string]string{}
 	if regionalLoadErr == nil {
 		for _, s := range regionalRes.Service {
 			if s.Pki != "" {
-				regionalMeshServices[s.Name] = true
+				regionalMeshServices[s.Name] = s.Pki
 			}
 		}
 	}
@@ -542,7 +550,7 @@ func checkCrossScopeNames(r *reporter, regional, global types.Resources, regiona
 	}
 }
 
-func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, siblingServices map[string]bool, encStore *secretstore.Store, pkiStore *pki.Store, defaults types.ProviderDefaults, backupsBucketConfigured bool) error {
+func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, siblingServices map[string]string, encStore *secretstore.Store, pkiStore *pki.Store, defaults types.ProviderDefaults, backupsBucketConfigured bool) error {
 	networkFiles, _, err := readFolders[types.NetworkSpec](filepath.Join(base, "network"))
 	if err != nil {
 		return err
@@ -676,6 +684,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		meshServices:             map[string]bool{},
 		callerCandidates:         map[string]bool{},
 		forbiddenCallerNames:     map[string]bool{},
+		callerPki:                map[string]string{},
 		servicePublicPathsByName: map[string][]string{},
 		gatewayServiceTargets:    map[string]bool{},
 		encStore:                 encStore,
@@ -690,12 +699,14 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	// (a global gateway route may name a regional caller — regional→global). In the
 	// regional pass globalRefs.meshServices are the global services, which are the
 	// FORBIDDEN callers of a regional route (a global service may only call global).
-	for name := range siblingServices {
+	for name, callerPki := range siblingServices {
 		ctx.callerCandidates[name] = true
+		ctx.callerPki[name] = callerPki
 	}
 	if global != nil {
-		for name := range global.meshServices {
+		for name, callerPki := range global.meshServices {
 			ctx.forbiddenCallerNames[name] = true
+			ctx.callerPki[name] = callerPki
 		}
 	}
 	for _, f := range networkFiles {
@@ -2159,6 +2170,16 @@ func hostRunsEdgeNginx(backendHost string, ctx regionContext) bool {
 	return backendHost != "" && (len(ctx.ingressNamesByHost[backendHost]) > 0 || backendHost == ctx.gatewayHostKey)
 }
 
+// meshPkiOf returns the pki a resolved mesh caller joins, whether it is a
+// same-scope service (servicePkiByName) or a cross-scope caller (callerPki, seeded
+// from the sibling/global mesh-service maps). Returns "" for an unknown name.
+func meshPkiOf(name string, ctx regionContext) string {
+	if p := ctx.servicePkiByName[name]; p != "" {
+		return p
+	}
+	return ctx.callerPki[name]
+}
+
 // checkMesh validates a service's mesh: block (ADR-0032): the loopback Port it serves
 // peers on (a backend bind, collision-checked like a route target against the service's
 // own binds, other services on the host, and any public listen port nginx holds there),
@@ -2246,6 +2267,9 @@ func checkMesh(s types.ServiceSpec, backendHost string, ctx regionContext) []str
 	// forbiddenCallerNames names an existing cross-scope service in the wrong direction.
 	seenDep := map[string]bool{}
 	for _, dep := range m.AllowedServices {
+		// depPki is the mesh the caller joins (empty for a non-mesh/unknown name or
+		// the reserved gateway token, which the earlier cases handle).
+		depPki := meshPkiOf(dep, ctx)
 		switch {
 		case dep == "":
 			errs = append(errs, "mesh.allowed_services: has an empty entry")
@@ -2255,6 +2279,16 @@ func checkMesh(s types.ServiceSpec, backendHost string, ctx regionContext) []str
 			errs = append(errs, fmt.Sprintf("mesh.allowed_services: lists its own service %q; a service does not call itself", dep))
 		case seenDep[dep]:
 			errs = append(errs, fmt.Sprintf("mesh.allowed_services: lists service %q more than once", dep))
+		case (ctx.meshServices[dep] || ctx.callerCandidates[dep]) && s.Pki != "" && depPki != "" && depPki != s.Pki:
+			// The caller resolves to a real mesh member, but a DIFFERENT mesh than this
+			// callee. A leaf minted under another mesh's PKI cannot verify against this
+			// callee's trust bundle (each mesh has its own root), so admission would be
+			// impossible at runtime — reject it at authoring time with a clear message,
+			// mirroring checkGateway's same-pki requirement for its listed services.
+			// This is the load-bearing mesh-isolation guard: without it a callee could
+			// name a foreign-mesh caller and, on a host running both meshes, admission
+			// would rest on physical co-location.
+			errs = append(errs, fmt.Sprintf("mesh.allowed_services: caller %q joins mesh %q while this service joins %q — a mesh caller and callee must share one pki", dep, depPki, s.Pki))
 		case ctx.meshServices[dep] || ctx.callerCandidates[dep]:
 			// Resolves to a mesh member in a permitted direction. A SAME-scope caller
 			// dials this callee's mesh proxy at its host's PRIVATE IP (the callee's

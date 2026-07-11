@@ -793,6 +793,22 @@ func TestCheckMeshCrossNetworkCallerRejected(t *testing.T) {
 	assert.Contains(t, strings.Join(errs, "\n"), "must share a network")
 }
 
+// TestCheckMeshCrossPkiCallerRejected: an allowed_services caller that joins a
+// DIFFERENT mesh than this callee is rejected. A foreign-mesh leaf cannot verify
+// against this callee's trust bundle (each mesh has its own root), so admission
+// would be impossible at runtime; without this guard a callee could name a
+// foreign-mesh caller and, on a host running both meshes, admission would rest on
+// physical co-location. Mirrors TestCheckGatewayPkiMismatch.
+func TestCheckMeshCrossPkiCallerRejected(t *testing.T) {
+	c := meshCtx()
+	c.servicePkiByName["ddns"] = "other-mesh" // ddns now joins a different mesh
+	s := types.ServiceSpec{Name: "tenants", Host: "bridge", Type: "raw", User: "svc", Pki: "mesh",
+		Mesh: &types.MeshSpec{Port: 8080, InternalPaths: []string{"/x/**"}, AllowedServices: []string{"ddns"}}}
+	errs := checkMesh(s, "bridge-01", c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "must share one pki")
+}
+
 // TestCheckMeshEgressRangeRejected: a mesh.port in the reserved mesh egress
 // range would race the mesh proxy's loopback egress listeners.
 func TestCheckMeshEgressRangeRejected(t *testing.T) {
@@ -970,8 +986,27 @@ func TestCheckMeshAllowCrossScopeCaller(t *testing.T) {
 	c.meshServices = map[string]bool{}
 	c.serviceNamesInScope = map[string]bool{}
 	c.callerCandidates = map[string]bool{"ddns": true}
+	c.callerPki = map[string]string{"ddns": "mesh"} // same mesh as the callee — allowed
 	errs, _ := checkService(meshSvc(&types.MeshSpec{Port: 8080, AllowedServices: []string{"ddns"}}), c)
 	assert.Empty(t, errs)
+}
+
+// TestCheckMeshCrossScopeCrossPkiCallerRejected: the same-pki guard also covers a
+// CROSS-SCOPE caller — a regional caller in a different mesh than the global
+// callee is rejected via the callerPki map (its leaf could never verify against
+// the callee's trust bundle).
+func TestCheckMeshCrossScopeCrossPkiCallerRejected(t *testing.T) {
+	c := meshCtx()
+	c.meshServices = map[string]bool{}
+	c.serviceNamesInScope = map[string]bool{}
+	// A cross-scope caller is not a same-scope service (checkCrossScopeNames
+	// forbids a name in both scopes), so its pki resolves only via callerPki.
+	c.servicePkiByName = map[string]string{}
+	c.callerCandidates = map[string]bool{"ddns": true}
+	c.callerPki = map[string]string{"ddns": "other-mesh"} // different mesh than the callee
+	errs := checkMesh(meshSvc(&types.MeshSpec{Port: 8080, AllowedServices: []string{"ddns"}}), "bridge-01", c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "must share one pki")
 }
 
 // TestCheckMeshPortCollision: a mesh.port equal to another service's backend port on

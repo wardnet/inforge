@@ -43,6 +43,28 @@ const intermediateValidity = 5 * 365 * 24 * time.Hour
 // exceed the renew/reboot interval; 90 days gives a wide safety margin.
 const leafValidity = 90 * 24 * time.Hour
 
+// clampToParent computes a child certificate's NotAfter from a desired validity,
+// capped so the child never outlives parent. It ERRORS when parent has already
+// expired at the mint instant: a clamp against an expired parent would set
+// NotAfter to a time at or before NotBefore (now minus the skew margin), yielding
+// a structurally invalid cert that x509.CreateCertificate does NOT reject and
+// that every verifier then refuses. Failing the mint here turns a silent
+// bad-cert into a clear "parent expired" error (the remedy is to rotate/renew the
+// parent first). Both GenerateLeaf and intermediateTemplate clamp identically, so
+// the rule lives here once.
+func clampToParent(now time.Time, desired time.Duration, parent *x509.Certificate) (time.Time, error) {
+	if !parent.NotAfter.After(now) {
+		return time.Time{}, fmt.Errorf(
+			"parent certificate is not valid into the future (NotAfter %s, now %s); rotate or renew it before minting a child",
+			parent.NotAfter.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
+	}
+	notAfter := now.Add(desired)
+	if notAfter.After(parent.NotAfter) {
+		notAfter = parent.NotAfter
+	}
+	return notAfter, nil
+}
+
 // RootIdentityEnvVar names the environment variable that carries the offline
 // operator identity (AGE-SECRET-KEY-…) matching a two-tier PKI's rootRecipient.
 // `inforge pki init` prints that identity once; slice #106 reads it from here
@@ -152,9 +174,9 @@ func intermediateTemplate(parent *x509.Certificate, subject pkix.Name) (*x509.Ce
 		return nil, err
 	}
 	now := time.Now()
-	notAfter := now.Add(intermediateValidity)
-	if notAfter.After(parent.NotAfter) {
-		notAfter = parent.NotAfter
+	notAfter, err := clampToParent(now, intermediateValidity, parent)
+	if err != nil {
+		return nil, err
 	}
 	return &x509.Certificate{
 		SerialNumber:          serial,
