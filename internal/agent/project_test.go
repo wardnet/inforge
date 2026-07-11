@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,6 +69,56 @@ func TestProjectFilesDirMode(t *testing.T) {
 	info, err := os.Stat(dir)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+}
+
+// The service user must OWN every directory from the RuntimeDir down to its PEM,
+// not just the PEM. Those dirs are 0700, and the boot path's RuntimeDir is created
+// by systemd as root:root (the unit has no User= — the agent drops privilege
+// itself). If only the file is chowned, the service loses the SEARCH (+x) bit on
+// its own directory and open() fails with EACCES after the privilege drop — it
+// crash-loops on a key that is sitting right there. Nothing above the RuntimeDir is
+// touched: /run/wardnet is shared and stays root-owned.
+func TestOwnedDirChainCoversEveryLevelUpToBase(t *testing.T) {
+	base := "/run/wardnet/tenants"
+
+	// A nested grant key ("pki/daemon-jwt/key.pem") creates TWO levels below base;
+	// both, plus base itself, must be owned by the service user.
+	assert.Equal(t,
+		[]string{
+			"/run/wardnet/tenants/pki/daemon-jwt",
+			"/run/wardnet/tenants/pki",
+			"/run/wardnet/tenants",
+		},
+		ownedDirChain(base, "/run/wardnet/tenants/pki/daemon-jwt"))
+
+	// A flat key still chowns the RuntimeDir itself — the root:root 0700 case.
+	assert.Equal(t, []string{"/run/wardnet/tenants"}, ownedDirChain(base, base))
+
+	// The chain never escapes base: /run/wardnet must stay root-owned.
+	for _, p := range ownedDirChain(base, "/run/wardnet/tenants/mtls") {
+		assert.True(t, strings.HasPrefix(p, base), "chain must not walk above the RuntimeDir, got %s", p)
+	}
+}
+
+// The end-to-end shape: every directory created under the RuntimeDir is 0700 and
+// owned by the projecting uid, so a nested key is reachable after the privilege
+// drop. (Chowning to the current uid is a no-op the test user is allowed to make;
+// the ownership rule itself is pinned by TestOwnedDirChainCoversEveryLevelUpToBase.)
+func TestProjectFilesOwnsNestedDirs(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "run")
+	_, _, err := projectFiles(
+		map[string]string{"TENANTS_JWT_SIGNING_KEY_PATH": "pki/daemon-jwt/key.pem"},
+		map[string]string{"pki/daemon-jwt/key.pem": "KEY-PEM"}, dir, os.Getuid(), os.Getgid())
+	require.NoError(t, err)
+
+	for _, p := range []string{dir, filepath.Join(dir, "pki"), filepath.Join(dir, "pki/daemon-jwt")} {
+		info, err := os.Stat(p)
+		require.NoError(t, err, "directory %s must exist", p)
+		assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), "%s must be 0700", p)
+	}
+	info, err := os.Stat(filepath.Join(dir, "pki/daemon-jwt/key.pem"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o400), info.Mode().Perm(), "the PEM stays read-only to its owner")
 }
 
 // TestProjectFilesAtomicSet: when one file in a multi-file set fails, none of

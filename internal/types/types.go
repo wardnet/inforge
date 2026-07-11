@@ -345,15 +345,18 @@ type ExposedPort struct {
 // service pki: membership field): a Grant may target only a PKI resource, and
 // pki: membership may name only a mesh PKI. Like every resource it carries a scope
 // from its folder — regional/pki/<name> is instantiated per region (one
-// independent root each); global/pki/<name> is region-less. The age-encrypted
-// pki.enc.yaml sidecar (root key + cert) and the generate command land with the
-// PKI resource Grant behavior (slice C of #117); this slice defines and validates
-// the declarative shape only.
+// independent root each); global/pki/<name> is region-less.
+//
+// The manifest only DECLARES that the CA should exist. Its material (root cert +
+// age-encrypted root key) is generated separately, by `inforge pki add <env>
+// <name> --topology root-only`, into the environment's pki.enc.yaml — and a grant
+// on a declared-but-ungenerated PKI is rejected by validate.checkGrants, since it
+// would have nothing to deliver.
 type PKIResourceSpec struct {
 	Name      string `yaml:"name"`
 	Container string `yaml:"container"`
 	Topology  string `yaml:"topology"`           // "root-only" — the only valid topology for a PKI resource
-	Validity  string `yaml:"validity,omitempty"` // optional CA validity (e.g. "10y"); enforced when generation lands (slice C)
+	Validity  string `yaml:"validity,omitempty"` // optional CA validity (e.g. "10y")
 }
 
 // IngressRoute is one typed inbound routing entry the ingress proxy (nginx)
@@ -532,6 +535,34 @@ type AllOutputs struct {
 	// (ADR-0017). Region-independent — the store is env-scoped. Nil when the
 	// environment declares no vault: sources.
 	Encrypted map[string]map[string]string
+	// PKI maps a root-only PKI resource's bare name -> its decrypted material,
+	// resolved once per deploy from resources/<env>/pki.enc.yaml for every PKI a
+	// service actually grants (ADR-0025 slice C). Region-independent — the store
+	// is env-scoped, so a regional service's `pki/global/<name>` grant and a
+	// global service's `pki/<name>` grant resolve the same entry. Nil when no
+	// service declares a pki/* grant.
+	PKI map[string]PKIMaterial
+}
+
+// PKIMaterial is a root-only PKI resource's grantable material: the CA
+// certificate (public — committed in the clear) and its root signing key
+// (decrypted from the store's age ciphertext with the CI identity). Both are
+// file fields: a grant projects them as on-host PEMs and hands the service the
+// PATH, never the content (see grant.PKIResource).
+//
+// Key is the sensitive half. It is delivered only to a `rw` (issue) grant's
+// consumer, and it leaves the deploy process only as part of the age-encrypted
+// payload of the target host's secrets.age.
+//
+// Scope is the single scope the root-only PKI serves ("global" or an abstract
+// region). It is carried here so the deploy can reject a grant whose consumer sits
+// in a different scope: the store is env-scoped and keyed by bare name, so without
+// this check a regional service would silently receive a global PKI's root key (or
+// two regions would share one root, which a per-region PKI resource must never do).
+type PKIMaterial struct {
+	Cert  string
+	Key   string
+	Scope string
 }
 
 // ResolveScoped looks up name in a region-keyed output map (Compute/Database),
@@ -541,9 +572,25 @@ type AllOutputs struct {
 // error messages, and whether it was found. This is the single source of the
 // global/ redirect rule — both the Source DSL (ref:) and grant target resolution
 // MUST use it so they resolve a global resource identically (ADR-0025).
+// GlobalPrefix is the one allowed cross-scope reference form: a regional resource
+// names a global one as "global/<name>". It is the single source of that spelling
+// — ResolveScoped applies it to the region-keyed output maps, and StripGlobalPrefix
+// applies it to the env-scoped stores (the PKI store), which need the bare name but
+// no region redirect.
+const GlobalPrefix = "global/"
+
+// StripGlobalPrefix reduces a possibly cross-scope reference to the bare resource
+// name. Use it for an ENV-SCOPED store (one file per environment, region-independent
+// — e.g. pki.enc.yaml), where "global/" carries no lookup meaning and would only
+// corrupt the key. A region-keyed map must use ResolveScoped instead, which performs
+// the actual redirect. Both must agree on the spelling, so both come from here.
+func StripGlobalPrefix(name string) string {
+	return strings.TrimPrefix(name, GlobalPrefix)
+}
+
 func ResolveScoped[V any](m map[string]map[string]V, region, name string) (value V, resolvedRegion, bareName string, found bool) {
 	resolvedRegion, bareName = region, name
-	if rest, ok := strings.CutPrefix(name, "global/"); ok {
+	if rest, ok := strings.CutPrefix(name, GlobalPrefix); ok {
 		resolvedRegion, bareName = "global", rest
 	}
 	inner, ok := m[resolvedRegion]

@@ -14,7 +14,9 @@ import (
 
 // grantCtx builds a regionContext with a regional database "main", a global
 // database "shared", a root-only PKI resource "daemon", a global root-only PKI
-// "rootca", and a two-tier-by-mistake PKI resource "bad".
+// "rootca", and a two-tier-by-mistake PKI resource "bad". Every declared
+// root-only PKI is also GENERATED (has material in the store) — pkiGenerated is
+// keyed by bare name, so the "global/" grant form resolves to "rootca".
 func grantCtx() regionContext {
 	return regionContext{
 		databaseNames: map[string]bool{"main": true, "global/shared": true},
@@ -22,7 +24,10 @@ func grantCtx() regionContext {
 			"daemon":        pki.TopologyRootOnly,
 			"global/rootca": pki.TopologyRootOnly,
 			"bad":           pki.TopologyTwoTier,
+			// Declared in a manifest but never generated into the store.
+			"ungenerated": pki.TopologyRootOnly,
 		},
+		pkiGenerated: map[string]bool{"daemon": true, "rootca": true},
 	}
 }
 
@@ -65,6 +70,11 @@ func TestCheckGrantsErrors(t *testing.T) {
 		{"regional cannot reach global-less name", nil, []types.GrantSpec{{Resource: "database/shared", Permission: "ro", Outputs: map[string]string{"X": "{USER}"}}}, "not found"},
 		{"cross-scope database grant rejected", nil, []types.GrantSpec{{Resource: "database/global/shared", Permission: "ro", Outputs: map[string]string{"X": "{USER}"}}}, "cross-scope database access is not supported"},
 		{"pki not found", nil, []types.GrantSpec{{Resource: "pki/nope", Permission: "ro", Outputs: map[string]string{"X": "{CERT}"}}}, "pki resource \"nope\" not found"},
+		// A PKI resource may be declared in a manifest yet never generated into the
+		// store. The grant then has nothing to deliver: the deploy would write a
+		// descriptor without the grant's env vars and the service would crash-loop on
+		// a required variable. Fail at validate instead.
+		{"pki declared but never generated", nil, []types.GrantSpec{{Resource: "pki/ungenerated", Permission: "rw", Outputs: map[string]string{"X": "{KEY}"}}}, "has no material in"},
 		{"pki not root-only", nil, []types.GrantSpec{{Resource: "pki/bad", Permission: "ro", Outputs: map[string]string{"X": "{CERT}"}}}, "must be \"root-only\""},
 		{"unpublished value field", nil, []types.GrantSpec{{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"X": "{FOO}"}}}, "field {FOO} is not published"},
 		{"key not published for verify", nil, []types.GrantSpec{{Resource: "pki/daemon", Permission: "ro", Outputs: map[string]string{"X": "{KEY}"}}}, "field {KEY} is not published"},

@@ -190,8 +190,58 @@ Landing in dependency order: slice A = grant core + schema + credential-free val
 cluster host (ADR-0036 self-hosted minting: `postgres.MintRoleScript` run over `remote.NewCommand`
 local peer auth, CGO-free — the retired Neon path minted it via a `neon:resources:NeonRole` plugin
 resource), and the credential-bearing `DatabaseOutputs.ConnectionURL` is **removed** (`ref:database/*`
-is now rejected — DB credentials flow only through grants). slice C = the PKI resource Grantable
-(sidecar + `inforge pki generate` + file projection); `PKIResource.Grant` stays a stub.
+is now rejected — DB credentials flow only through grants). **slice C = the PKI resource Grantable**
+(live, see below).
+
+### Slice C — PKI grant materialization (file fields)
+
+A `pki/*` grant delivers **file fields**, a disjoint mechanism from the database grant's value fields.
+`PKIResource.Grant` mints nothing: a root-only PKI's material is generated once by `inforge pki add
+<env> <name> --topology root-only` and committed to `pki.enc.yaml`, so the grant is a pure **delivery**
+of existing material (its root key is encrypted to the **CI** recipient — not the offline root
+recipient — precisely so the deploy can decrypt it).
+
+The deploy path mirrors the `vault:` path — decrypt once, up front, provider-neutrally:
+
+- **`program.decryptPKIGrantMaterial`** collects every `pki/*` grant target across both scopes, loads
+  the env's `pki.enc.yaml`, and decrypts each root key with the CI identity into
+  `types.AllOutputs.PKI` (bare name → `types.PKIMaterial{Cert, Key}`). The store is env-scoped, so a
+  regional service's `pki/global/<name>` and a global service's `pki/<name>` resolve the SAME entry —
+  the `global/` prefix is stripped (`pkiGrantTarget`), not redirected like the region-keyed
+  Compute/Database maps.
+- **`program.resolvePKIGrants`** splits each grant into the two halves the agent rejoins:
+  `descriptorFiles` (env-var → file key, plan-time known) and `blobFiles` (file key → PEM). Both sides
+  derive the key from **`grant.FileKey`** (`pki/<name>/cert.pem` | `key.pem`) so producer and consumer
+  cannot drift; the namespace is disjoint from `meshcert.MtlsDir` ("mtls/"), so the descriptor's
+  `Files` merge can never clobber mesh material.
+- **`program.serviceMaterial`** carries both halves out of `provisionServiceSecrets`. A service whose
+  ONLY grant is a pki grant has no env secrets but still needs a `secrets.age` (for the PEMs), so the
+  secrets-vs-secret-less fork keys on `serviceMaterial.empty()`, not on the env map alone.
+- **`blobFrom`** splits the single flat `pulumi.All` await back into `Blob.Env` + `Blob.Files` by
+  position (env values first, then file PEMs). Both halves feed `Blob.Hash`, so rotating a granted PKI
+  re-triggers the `secrets.age` write and the restart exactly like a changed secret value.
+- **The agent's descriptor contract is untouched.** `Descriptor.Files` and `projectFiles` already
+  existed for `mtls_files:` (#109); a pki grant just populates them from the deploy-owned `secrets.age`
+  instead of the renew-owned `leaf.age`. **No descriptor version bump** — no field changed shape.
+- **`projectFiles` now owns DIRECTORY ownership, not just file ownership** (`mkdirOwned`). A service's
+  projection root is systemd's `RuntimeDirectory=` at `0700` with no `User=`, i.e. `root:root` — so
+  chowning only the PEM left the service without the search bit on its own directory and it crash-looped
+  with `EACCES` on a key that was sitting right there. Slice C is the first time a *service* ever carried
+  `files:` in production (the only other consumer, `mtls_files:`, was not deployed), which is why this
+  surfaced here. See the rule `projected-dirs-owned-by-consuming-user`.
+- **Grants may not cross scopes.** The PKI store is env-scoped and keyed by bare name, so the lookup
+  itself enforces nothing: `resolvePKIGrants` checks `PKIMaterial.Scope` against the consumer's scope, so
+  a regional service cannot silently receive a global CA's root key, and two regions cannot share one
+  regional PKI's root.
+
+**Every grant must be materialized by exactly one resolver.** `resolvePKIGrants` rejects a grantable
+type that neither it nor `resolveDatabaseGrants` handles, rather than skipping it — a silently-skipped
+grant ships a descriptor missing the env vars the service requires and crash-loops it at startup. That
+is precisely how the pre-slice-C stub failed: the deploy reported success while omitting the grant.
+
+**A declared PKI resource is not a generated one.** The manifest only says a CA *should* exist;
+`validate.checkGrants` additionally requires real material in the store (`ctx.pkiGenerated`, built by
+`pkiGeneratedNames`) and rejects a grant on a declared-but-ungenerated PKI with a command hint.
 
 - **`ro`** = read-only (CONNECT/USAGE/SELECT); **`rw`** = read/write **plus** `CREATE ON SCHEMA public`
   (the service owns its own migrations). The role-provisioning capability rides on
@@ -215,8 +265,10 @@ is now rejected — DB credentials flow only through grants). slice C = the PKI 
 - **The PKI resource is its own declarative type** (`types.PKIResourceSpec`, `schemas/pkiresource.json`,
   `regional|global/pki/<name>/manifest.yaml`): **root-only**, scope derived from its folder. It is
   distinct from the mesh-auth `pki.enc.yaml` store (two-tier, `pki:` membership). The two never cross — a
-  grant targets only a root-only PKI resource; `pki:` names only a two-tier mesh PKI. Slice A defines and
-  validates the shape; the `pki.enc.yaml` sidecar + generate command are slice C.
+  grant targets only a root-only PKI resource; `pki:` names only a two-tier mesh PKI. The manifest only
+  DECLARES the CA; its material is generated separately by `inforge pki add <env> <name> --topology
+  root-only` (into the same `pki.enc.yaml` file, under a root-only entry) and a grant on a
+  declared-but-ungenerated PKI is a validation error — see Slice C above.
 - **`validate.checkGrants`** is the credential-free pass: target resolves to a supported Grantable of the
   right shape (`database/*`, `pki/*` root-only); permission ∈ {ro,rw}; every `{FIELD}` is published for
   that permission; a file field stands alone; output env names avoid the reserved

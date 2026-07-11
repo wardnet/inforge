@@ -577,7 +577,7 @@ func TestRenderDescriptorRoundTrips(t *testing.T) {
 		AvailabilityZone: "ash",
 		MachineType:      "cx23",
 	}
-	out, err := renderDescriptor(svc, host, secretNames, "prd", "us-east-1", "use1", "wardnet.network", "ghost-01", 0)
+	out, err := renderDescriptor(svc, host, secretNames, nil, "prd", "us-east-1", "use1", "wardnet.network", "ghost-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))
@@ -613,7 +613,7 @@ func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
 
 	// Driven exactly as the scopes loop drives the global slice: region=globalScope,
 	// slug="".
-	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "prd", globalScope, "", "wardnet.network", "tenants-01", 0)
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, nil, "prd", globalScope, "", "wardnet.network", "tenants-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))
@@ -629,7 +629,7 @@ func TestRenderDescriptorGlobalScopeIsRegionLess(t *testing.T) {
 func TestRenderDescriptorSecretLess(t *testing.T) {
 	svc := types.ServiceSpec{Name: "ghost", Container: "ghost", User: "ghost"}
 
-	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, "prd", "us-east-1", "use1", "wardnet.network", "ghost-01", 0)
+	out, err := renderDescriptor(svc, types.ComputeOutputs{}, nil, nil, "prd", "us-east-1", "use1", "wardnet.network", "ghost-01", 0)
 	require.NoError(t, err)
 
 	d, err := agent.ParseDescriptor([]byte(out))
