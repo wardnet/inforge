@@ -587,7 +587,8 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		if err != nil {
 			return err
 		}
-		if err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug, inforgeVersion, gate); err != nil {
+		unit, err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug, inforgeVersion, gate)
+		if err != nil {
 			return err
 		}
 		// Every service gets a descriptor.yaml. A service with resolved env/grant
@@ -595,12 +596,21 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		// secrets.age (ADR-0035); a service with neither gets a static descriptor
 		// with no env (mtls_files: still gets its files: entries in the descriptor —
 		// its leaf.age is delivered later by `inforge pki renew`, not here).
+		//
+		// Delivery is gated on the UNIT (not just the cloud-init gate): its script
+		// ends in reloadOrRestartScript, which must never run while the unit file is
+		// absent. Every inforge release changes the provision script (it pins the
+		// agent version), replacing that resource — and DeleteBeforeReplace runs its
+		// `disable --now` + `rm -f <unit>` FIRST. Without this dependency the restart
+		// could land inside that window, fail with "Unit not found", and (before the
+		// `|| true` was removed) be swallowed — leaving the service stopped under a
+		// green deploy. That is exactly how tenants went down on 5.5.1 → 5.5.2.
 		if material := serviceSecrets[svc.Name]; !material.empty() {
-			if err := deliverServiceSecrets(ctx, svc, host, material, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], gate); err != nil {
+			if err := deliverServiceSecrets(ctx, svc, host, material, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], unit); err != nil {
 				return err
 			}
 		} else {
-			if err := deliverServiceDescriptor(ctx, svc, host, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], gate); err != nil {
+			if err := deliverServiceDescriptor(ctx, svc, host, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], unit); err != nil {
 				return err
 			}
 		}
@@ -610,11 +620,11 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 
 // provisionService writes one service's unit + folder (+ no-login user) on its
 // host. The unit is enabled but never started here (see provisionServices).
-func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug, inforgeVersion string, gate pulumi.Resource) error {
+func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug, inforgeVersion string, gate pulumi.Resource) (*remote.Command, error) {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	createScript := serviceProvisionScript(svc, inforgeVersion)
 	name := naming.Resource(env, slug, "svc", svc.Name)
-	if _, err := remote.NewCommand(ctx, name+"-provision", &remote.CommandArgs{
+	cmd, err := remote.NewCommand(ctx, name+"-provision", &remote.CommandArgs{
 		Connection: conn,
 		Create:     pulumi.String(createScript),
 		// Update (not replace) when the script changes: the script is idempotent
@@ -634,10 +644,11 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 		// against wardnet-infrastructure's tenants service). Matches the
 		// DeleteBeforeReplace already used by deliverServiceSecrets/
 		// deliverServiceDescriptor's remote.Command calls for the same reason.
-	}, pulumi.DependsOn([]pulumi.Resource{gate}), pulumi.DeleteBeforeReplace(true)); err != nil {
-		return fmt.Errorf("service %q: provision unit: %w", svc.Name, err)
+	}, pulumi.DependsOn([]pulumi.Resource{gate}), pulumi.DeleteBeforeReplace(true))
+	if err != nil {
+		return nil, fmt.Errorf("service %q: provision unit: %w", svc.Name, err)
 	}
-	return nil
+	return cmd, nil
 }
 
 // provisionObservability installs the host VM-metrics collector on every VM in this
@@ -1116,7 +1127,12 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 		// files — including across the secrets↔descriptor shape flip, which
 		// reuses this URN. Delete-before-replace makes the old files go first
 		// and the new write land last.
-	}, pulumi.DependsOn([]pulumi.Resource{hostKey}), pulumi.DeleteBeforeReplace(true)); err != nil {
+		// Depend on the unit EXPLICITLY, not just transitively through hostKey: this
+		// command's script ends in reloadOrRestartScript, and the ordering that keeps
+		// a restart from racing the `rm -f <unit>` of a provision replace is
+		// load-bearing enough to state outright rather than leave resting on
+		// hostKey's own dependency edge.
+	}, pulumi.DependsOn([]pulumi.Resource{hostKey, gate}), pulumi.DeleteBeforeReplace(true)); err != nil {
 		return fmt.Errorf("service %q: write descriptor/secrets: %w", svc.Name, err)
 	}
 	return nil
@@ -1180,20 +1196,28 @@ func safeTrigger(o pulumi.StringOutput) pulumi.Output {
 
 // reloadOrRestartScript renders the systemctl step that applies a changed
 // secrets.age (or descriptor) to the running unit: reload (no downtime) when
-// the service declares reload:, else restart. It is best-effort (|| true): on
-// a service's FIRST deploy the unit is enabled but not yet started (its
-// ExecStart payload does not exist until `inforge release` delivers it, see
-// provisionService), so this step's first run would otherwise fail and abort
-// the whole `pulumi up` — a conservative, deliberately narrower guarantee than
-// the ADR's "always restart on change" until a later slice tightens it (e.g.
-// by only restarting a unit already known to be active).
+// the service declares reload:, else restart.
+//
+// It is NOT best-effort. It used to end in `2>/dev/null || true`, which hid the
+// one failure that matters: when this step ran while the unit file did not exist
+// (the delivery command had no ordering dependency on provisionService, so it
+// could race the Delete half of a unit REPLACE), systemctl failed with "Unit not
+// found", the error was swallowed, and the service stayed STOPPED while the deploy
+// reported success. That took wardnet's tenants down on the 5.5.1 → 5.5.2 deploy.
+//
+// The original justification for `|| true` — a first deploy whose ExecStart payload
+// does not exist yet — does not need it: the unit carries
+// ConditionPathExists=<exec>, so systemd skips the start and exits 0 rather than
+// failing. And the unit is now guaranteed to exist, because every delivery command
+// DependsOn its service's provision command. A failure here is therefore real, and
+// must fail the deploy rather than leave a dead service behind a green apply.
 func reloadOrRestartScript(svc types.ServiceSpec) string {
 	unit := iremote.Quote(service.UnitName(svc.Name))
 	cmd := "restart"
 	if svc.Reload != "" {
 		cmd = "reload"
 	}
-	return fmt.Sprintf("sudo systemctl %s %s 2>/dev/null || true", cmd, unit)
+	return fmt.Sprintf("sudo systemctl %s %s", cmd, unit)
 }
 
 // readHostPubKey registers the remote command that reads a host's SSH public
@@ -1373,7 +1397,19 @@ func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string
 		fmt.Sprintf("sudo install -d -m 0755 %s", iremote.Quote(service.Folder(svc.Name))),
 		iremote.WriteFileScript(service.UnitPath(svc.Name), service.Unit(svc)),
 		"sudo systemctl daemon-reload",
-		fmt.Sprintf("sudo systemctl enable %s", iremote.Quote(service.UnitName(svc.Name))),
+		// enable --now, not enable: this script is also the CREATE half of a
+		// REPLACE (the Triggers hash covers the agent version, so every inforge
+		// release replaces this resource), and the matching Delete half ran
+		// `disable --now` moments earlier. Enabling without starting would leave a
+		// previously-RUNNING service stopped, with the deploy still reporting
+		// success — which is exactly what happened in production when the agent
+		// version bumped from 5.5.1 to 5.5.2.
+		//
+		// It is safe on a first deploy, before any release has landed a binary: the
+		// unit carries ConditionPathExists=<exec>, so systemd skips the start and
+		// exits 0 rather than failing. The service's real first start still comes
+		// from `inforge releases deploy`, once the code is present.
+		fmt.Sprintf("sudo systemctl enable --now %s", iremote.Quote(service.UnitName(svc.Name))),
 	)
 	// An mtls_files: service's leaf.age is delivered later by `inforge pki
 	// renew`'s SSH push, which also signals reload-or-restart directly — there

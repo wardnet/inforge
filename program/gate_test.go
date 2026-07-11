@@ -175,7 +175,12 @@ func TestProvisioningDependsOnGate(t *testing.T) {
 	svc := naming.Resource("prd", "use1", "svc", "ghost")
 	require.Contains(t, mocks.captured, gate)
 	assert.True(t, mocks.dependsOn(svc+"-provision", gate), "unit provision must wait on the gate")
-	assert.True(t, mocks.dependsOn(svc+"-secrets", gate), "descriptor write must wait on the gate")
+	// Delivery now waits on the UNIT rather than the gate directly (the unit waits on
+	// the gate, so cloud-init ordering is preserved transitively). Its script restarts
+	// the service, so it must never run while a provision replace has the unit file
+	// removed — see TestDeliveryDependsOnUnitProvision.
+	assert.True(t, mocks.dependsOn(svc+"-secrets", svc+"-provision"), "descriptor write must wait on the unit")
+	assert.True(t, mocks.dependsOn(svc+"-provision", gate), "…which transitively waits on the gate")
 }
 
 // TestTLSAndServiceShareOneGate: TLS realization and service provisioning SSH the
