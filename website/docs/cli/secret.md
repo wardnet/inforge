@@ -131,6 +131,24 @@ identity is printed once; update the `INFORGE_SECRETS_KEY` GitHub secret before 
 given via `--recipient`. Plaintext values are unchanged, so no deploy or service restart is needed;
 commit the rewritten store.
 
+### It re-keys the PKI store too
+
+The master recipient also owns the **CI-held key material in `resources/<env>/pki.enc.yaml`** — every
+two-tier PKI's per-scope **intermediate key**, and a root-only PKI's **root key** (the online issuer
+key). Rotating the secret store alone would leave that material readable only by the identity you are
+rotating away from, breaking the next `inforge deploy` and every `inforge pki renew`. So `rotate`
+re-encrypts both files and rewrites `pki.enc.yaml`'s `recipient:` header — **commit both stores**.
+
+A two-tier PKI's **cold root** is encrypted to the store's separate `rootRecipient` (the offline
+operator identity), which a master-key rotation does not touch: `INFORGE_PKI_ROOT_KEY` is *not*
+needed to run `rotate`, and no key is left undecryptable. If the PKI store's `recipient:` is not the
+secret store's current one (two stores initialized to different recipients), `rotate` refuses and
+tells you — it will not write material the new identity cannot read.
+
+`rotate` writes `pki.enc.yaml` first, then `secrets.enc.yaml`; if it dies between the two, re-run it
+with the old identity and `--recipient <new>` — the PKI re-key is a no-op once its recipient already
+matches.
+
 ## Incident response
 
 **A secret value leaked** (shows up in a log, a paste, a breach). Key rotation does nothing here —
@@ -146,8 +164,22 @@ Commit and merge — `inforge deploy` pushes the new value and restarts the serv
 **The master identity leaked** (`INFORGE_SECRETS_KEY` exposed). Two steps, in this order:
 
 1. `inforge secret rotate <env>` — new key pair, so everything you write next is encrypted to a
-   clean recipient. Update the GitHub secret.
+   clean recipient. This also re-keys the PKI store's CI-held keys (see above); commit both stores
+   and update the GitHub secret.
 2. **`set` every value in the store.** Re-encryption alone does **not** protect the existing values:
    the old ciphertexts remain in git history, decryptable with the leaked identity, and you must
    assume they were already read. `rotate` prints the full per-key command list to make this step
    mechanical; externally-issued credentials must also be reissued at their vendor.
+3. **Treat every CI-held PKI key as compromised.** The leaked identity decrypted the old
+   `pki.enc.yaml` in git history too, so the mesh intermediate keys (and any root-only issuer key)
+   are out. Re-keying them to a clean recipient does not un-expose them:
+   - **Two-tier (mesh) intermediates** — re-mint each scope's intermediate with a fresh key
+     ([`inforge pki recover-intermediate <env> <name> <scope>`](/runbooks/pki-recover-intermediate),
+     offline root custody), then `inforge pki renew <env>` to replace every leaf it signed. The cold
+     root is unaffected: CI never held it.
+   - **Root-only (issuer) PKIs** — the leaked key *is* the root, and there is no in-place rotation
+     for it (`pki rotate --root` is two-tier only: a root-only PKI has no intermediate to re-sign,
+     so every consumer must move to a new trust anchor anyway). Delete the PKI's entry from
+     `pki.enc.yaml`, re-add it (`inforge pki add <env> <name> --topology root-only`), and
+     redistribute the new root cert to everything that verifies with it — every token or
+     certificate the old root signed is untrusted from that moment.
