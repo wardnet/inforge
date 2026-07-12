@@ -69,16 +69,42 @@ END
 $$`, QuoteLiteral(role), QuoteIdent(role))
 }
 
+// MaxIdentifierLen is Postgres's NAMEDATALEN-1: the longest identifier the server
+// stores. A longer name is SILENTLY TRUNCATED to this many bytes at CREATE ROLE / CREATE
+// DATABASE — even when double-quoted — so a too-long name is never the name the
+// deployment then uses, and two names sharing a MaxIdentifierLen-byte prefix collapse
+// onto ONE real object. Every identifier inforge derives is length-checked against it.
+const MaxIdentifierLen = 63
+
 // CheckGroupRoleNames rejects a (role, database, owner) triple whose derived group-role
-// names collide with the login role or the database owner. The database owner is
-// operator-authored free text (database/<name>'s owner:), so nothing stops it being
-// named `<database>_rw` — and then the mint's `GRANT <writer-group> TO <login role>`
-// would quietly make the service a member of the role that OWNS the database and every
-// object in it (DROP DATABASE, DROP TABLE), collapsing the ro/rw split into
-// superuser-of-this-database. Fail the mint instead. `inforge validate` rejects the
-// same collision up front; this is the enforcement point.
+// names are unusable — either too long for Postgres to store as written, or colliding
+// with the login role or the database owner.
+//
+// Collision: the database owner is operator-authored free text (database/<name>'s
+// owner:), so nothing stops it being named `<database>_rw` — and then the mint's
+// `GRANT <writer-group> TO <login role>` would quietly make the service a member of the
+// role that OWNS the database and every object in it (DROP DATABASE, DROP TABLE),
+// collapsing the ro/rw split into superuser-of-this-database.
+//
+// Length: the group roles are derived from the operator's `database:` value with a
+// 3-byte suffix, so a database name within 3 bytes of MaxIdentifierLen renders a group
+// role Postgres truncates. Two databases whose `_rw` names share a 63-byte prefix then
+// collapse onto ONE real group role, and the ALTER DEFAULT PRIVILEGES each rw mint
+// declares for "its" group would feed the other database's grantees — the same
+// truncation bug class program.checkDBRoleNames closes for the LOGIN role, which does
+// not see these derived names. (The owner is checked too: it is a real CREATE ROLE
+// target, and a truncated owner is not the role `createdb -O` then names.)
+//
+// `inforge validate` reports all of this credential-free; the mint calls it as the
+// enforcement point, so a deploy that skipped validation still fails closed.
 func CheckGroupRoleNames(role, database, owner string) error {
+	if n := len(owner); n > MaxIdentifierLen {
+		return fmt.Errorf("pgrole: database %q: owner role %q is %d bytes; Postgres truncates identifiers at %d, so it would create a role of a different name than the deployment uses — shorten it by %d character(s)", database, owner, n, MaxIdentifierLen, n-MaxIdentifierLen)
+	}
 	for _, group := range []string{ReaderGroup(database), WriterGroup(database)} {
+		if n := len(group); n > MaxIdentifierLen {
+			return fmt.Errorf("pgrole: database %q: the derived group role %q is %d bytes; Postgres truncates identifiers at %d, so two databases whose group names share a %d-byte prefix would collapse onto one role — shorten the database name by %d character(s)", database, group, n, MaxIdentifierLen, MaxIdentifierLen, n-MaxIdentifierLen)
+		}
 		if owner == group {
 			return fmt.Errorf("pgrole: database %q: owner role %q collides with the derived group role of the same name; rename the owner (a service granted rw would inherit ownership of the database)", database, owner)
 		}

@@ -1814,15 +1814,22 @@ func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []strin
 		errs = append(errs, fmt.Sprintf("size_gb: %d must be >= 0", s.SizeGB))
 	}
 	// The mint derives two NOLOGIN group roles from the database name (<db>_ro/<db>_rw)
-	// to carry the privileges on objects created after a mint. An owner: that collides
-	// with one of them would be granted to every service holding that permission — the
-	// service would inherit ownership of the database and every object in it. Reject the
-	// name here (pgrole.CheckGroupRoleNames fails the mint too, but that is a deploy-time
-	// error, not a PR-time one).
-	if s.Database != "" && s.Owner != "" {
+	// to carry the privileges on objects created after a mint. Reject a database:/owner:
+	// pair whose derived names Postgres would truncate (a 63-byte identifier limit that
+	// silently collapses two names onto one role) or whose owner: collides with one of
+	// the groups (a service granted rw would then inherit ownership of the database and
+	// every object in it). pgrole.CheckGroupRoleNames fails the mint on the same rules —
+	// this reports them credential-free, at PR time.
+	if s.Database != "" {
 		if err := pgrole.CheckGroupRoleNames("", s.Database, s.Owner); err != nil {
-			errs = append(errs, fmt.Sprintf("owner: %q collides with the reader/writer group role inforge derives from database %q (%s_ro/%s_rw); choose another owner name", s.Owner, s.Database, s.Database, s.Database))
+			errs = append(errs, strings.TrimPrefix(err.Error(), "pgrole: "))
 		}
+	}
+	// The physical database name is itself a Postgres identifier: `createdb` truncates it
+	// past the same limit, so a too-long name creates a database of a different name than
+	// the connection URLs the mint hands out (and two long names can collide on one).
+	if n := len(s.Database); n > pgrole.MaxIdentifierLen {
+		errs = append(errs, fmt.Sprintf("database: %q is %d bytes; Postgres truncates identifiers at %d — shorten it by %d character(s)", s.Database, n, pgrole.MaxIdentifierLen, n-pgrole.MaxIdentifierLen))
 	}
 	// A physical (cluster, database) pair must be unique: two logical resources
 	// targeting the same database in the same cluster create the same Postgres

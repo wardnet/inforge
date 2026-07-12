@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/nginx"
+	"github.com/wardnet/inforge/internal/pgrole"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/sizes"
@@ -1854,5 +1855,33 @@ func TestCheckDatabaseRejectsOwnerCollidingWithGroupRole(t *testing.T) {
 	ok.Owner = "app_owner"
 	if errs, _ := checkDatabase(ok, ctx); len(errs) != 0 {
 		t.Errorf("a non-colliding owner must validate, got %v", errs)
+	}
+}
+
+// Postgres silently truncates identifiers at 63 bytes, so a long database: name yields
+// a physical database — and derived <db>_ro/<db>_rw group roles — under a name the
+// deployment never uses. `inforge validate` must reject it credential-free, at PR time.
+func TestCheckDatabaseRejectsTruncatedIdentifiers(t *testing.T) {
+	ctx := regionContext{clusterNames: map[string]bool{"pg": true}}
+	disabled := false
+	base := types.DatabaseSpec{Cluster: "pg", Owner: "app", Backup: types.BackupPolicy{Enabled: &disabled}}
+
+	// 61 bytes: the database name itself fits, but "<db>_rw" is 64 — over the limit.
+	tooLong := base
+	tooLong.Database = strings.Repeat("d", pgrole.MaxIdentifierLen-2)
+	if errs, _ := checkDatabase(tooLong, ctx); len(errs) == 0 {
+		t.Error("a database whose derived group roles exceed 63 bytes must be rejected")
+	}
+	// 64 bytes: the database name itself is over the limit.
+	over := base
+	over.Database = strings.Repeat("d", pgrole.MaxIdentifierLen+1)
+	if errs, _ := checkDatabase(over, ctx); len(errs) == 0 {
+		t.Error("a database name over 63 bytes must be rejected")
+	}
+	// 60 bytes: "<db>_rw" is exactly 63 — legal.
+	fits := base
+	fits.Database = strings.Repeat("d", pgrole.MaxIdentifierLen-3)
+	if errs, _ := checkDatabase(fits, ctx); len(errs) != 0 {
+		t.Errorf("a database at the limit must validate, got %v", errs)
 	}
 }

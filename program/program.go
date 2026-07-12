@@ -31,6 +31,7 @@ import (
 	"github.com/wardnet/inforge/internal/meshplan"
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/otelcol"
+	"github.com/wardnet/inforge/internal/pgrole"
 	"github.com/wardnet/inforge/internal/postgres"
 	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/registry"
@@ -831,8 +832,9 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 // pgMaxIdentifierLen is Postgres's NAMEDATALEN-1: the longest identifier the server
 // stores. A longer name is SILENTLY TRUNCATED to this many bytes at CREATE ROLE (even
 // double-quoted) — see checkDBRoleNames for why that must be rejected rather than
-// tolerated.
-const pgMaxIdentifierLen = 63
+// tolerated. Single-sourced with pgrole, which applies the same limit to the group
+// roles and the database owner it derives from the operator's `database:`/`owner:`.
+const pgMaxIdentifierLen = pgrole.MaxIdentifierLen
 
 // dbRoleName derives the per-service database role a grant mints: the consuming
 // service's env+slug scope it, so two regions granting the same (global) database

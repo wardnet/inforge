@@ -245,3 +245,31 @@ func TestMintMonitorRoleSQL(t *testing.T) {
 		}
 	}
 }
+
+// Postgres truncates identifiers at MaxIdentifierLen bytes, silently. The group roles
+// are derived from the operator's database: value with a 3-byte suffix, so a database
+// name within 3 bytes of the limit renders a group role the server stores under a
+// DIFFERENT name — and two databases whose _rw names share a 63-byte prefix collapse
+// onto ONE real group role, wiring one database's ALTER DEFAULT PRIVILEGES to the other
+// database's grantees. program.checkDBRoleNames applies the same limit to the LOGIN role
+// but never sees these derived names, so the check has to live here.
+func TestCheckGroupRoleNamesRejectsTruncatedIdentifiers(t *testing.T) {
+	// 61 bytes + "_rw" == 64 > 63: the writer group would be truncated.
+	long := strings.Repeat("d", MaxIdentifierLen-2)
+	if err := CheckGroupRoleNames("svc", long, "app"); err == nil {
+		t.Errorf("database %q derives the %d-byte group role %q; must be rejected", long, len(WriterGroup(long)), WriterGroup(long))
+	}
+	// 60 bytes + "_rw" == 63: exactly at the limit, still fine.
+	fits := strings.Repeat("d", MaxIdentifierLen-3)
+	if err := CheckGroupRoleNames("svc", fits, "app"); err != nil {
+		t.Errorf("database %q derives a group role of exactly %d bytes and must be accepted: %v", fits, MaxIdentifierLen, err)
+	}
+	// The owner is a real CREATE ROLE / createdb -O target and truncates the same way.
+	if err := CheckGroupRoleNames("svc", "app", strings.Repeat("o", MaxIdentifierLen+1)); err == nil {
+		t.Error("an over-long owner role must be rejected")
+	}
+	// A too-long database must also fail the mint, not just `inforge validate`.
+	if _, err := MintRoleSQL("svc", "pw", long, "app", "rw"); err == nil {
+		t.Error("MintRoleSQL must reject a database whose derived group roles truncate")
+	}
+}
