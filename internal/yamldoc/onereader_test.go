@@ -1,24 +1,35 @@
 package yamldoc_test
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// decodeCall matches a direct YAML decode: yaml.Unmarshal(...) or yaml.NewDecoder(...).
-// yaml.Marshal is deliberately NOT matched — WRITING a file is not reading one, and the
-// stores, descriptors and manifests inforge writes are free to marshal.
-var decodeCall = regexp.MustCompile(`yaml\.Unmarshal\(|yaml\.NewDecoder\(`)
+// yamlPkg is the YAML library. Importing it is fine — the stores and descriptors
+// MARSHAL through it, and writing a file is not reading one. Calling one of the
+// decode entry points below outside this package is not.
+const yamlPkg = "gopkg.in/yaml.v3"
+
+var decodeFuncs = map[string]bool{"Unmarshal": true, "NewDecoder": true}
 
 // TestYamldocIsTheOnlyReader fails if any file outside this package decodes YAML
 // directly. There is ONE reader, and this is what keeps it that way.
 //
-// It is here because the claim was once made and not kept: the reader shipped for two
+// It exists because the claim was once made and not kept: the reader shipped for two
 // config files while sixteen other read sites still called yaml.Unmarshal, and the
-// package doc said otherwise. A sentence in a doc comment is not a guarantee. This is.
+// package doc said otherwise. A sentence in a doc comment is not a guarantee.
+//
+// It resolves the import's LOCAL name from the AST rather than grepping for the text
+// "yaml.Unmarshal", because an aliased import (`import y "gopkg.in/yaml.v3"`) sails
+// straight past a textual match — and a guard with a hole in it is the same worthless
+// assurance as the doc comment it replaced.
 //
 // Adding a new YAML file to inforge means calling yamldoc.Read/Parse and choosing what
 // its leaves mean — Decode (literal), DecodeStrict (literal, unknown keys rejected), or
@@ -39,22 +50,19 @@ func TestYamldocIsTheOnlyReader(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		// Tests may unmarshal YAML they GENERATED — asserting on a rendered otelcol
+		// config or a release manifest is verifying output, not reading a config file.
+		if strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		// This package IS the reader.
 		if strings.Contains(filepath.ToSlash(path), "internal/yamldoc/") {
 			return nil
 		}
-		b, err := os.ReadFile(path) // #nosec G304 -- walking our own source tree
-		if err != nil {
-			return err
-		}
-		for i, line := range strings.Split(string(b), "\n") {
-			if decodeCall.MatchString(line) {
-				offenders = append(offenders, filepathLine(path, i+1, line))
-			}
-		}
+		offenders = append(offenders, decodesYAML(t, path)...)
 		return nil
 	})
 	if err != nil {
@@ -67,18 +75,55 @@ func TestYamldocIsTheOnlyReader(t *testing.T) {
 	}
 }
 
-func filepathLine(path string, line int, src string) string {
-	return filepath.ToSlash(path) + ":" + itoa(line) + ": " + strings.TrimSpace(src)
-}
+// decodesYAML returns every call in path that decodes YAML directly, whatever local
+// name the import was given.
+func decodesYAML(t *testing.T, path string) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
 
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
+	// The local name the file gave the YAML package: its alias, or the package name.
+	local := ""
+	for _, imp := range f.Imports {
+		p, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || p != yamlPkg {
+			continue
+		}
+		local = "yaml"
+		if imp.Name != nil {
+			local = imp.Name.Name
+		}
 	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
+	if local == "" || local == "_" {
+		return nil
 	}
-	return string(b)
+	if local == "." {
+		// A dot-import would put Unmarshal in scope unqualified. Nothing does this, and
+		// nothing should: it would defeat any check that looks for a qualifier.
+		return []string{fmt.Sprintf("%s: dot-imports %s", filepath.ToSlash(path), yamlPkg)}
+	}
+
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != local || !decodeFuncs[sel.Sel.Name] {
+			return true
+		}
+		pos := fset.Position(call.Pos())
+		out = append(out, fmt.Sprintf("%s:%d: %s.%s(...)",
+			filepath.ToSlash(path), pos.Line, local, sel.Sel.Name))
+		return true
+	})
+	return out
 }

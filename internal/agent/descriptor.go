@@ -129,7 +129,7 @@ func ParseDescriptor(b []byte) (Descriptor, error) {
 	// is machine-written and carries no references, so it decodes literally.
 	var d Descriptor
 	if err := doc.DecodeStrict(&d); err != nil {
-		return Descriptor{}, err
+		return Descriptor{}, fmt.Errorf("parse descriptor: %w", err)
 	}
 	if d.Version != SupportedVersion {
 		return Descriptor{}, fmt.Errorf("unsupported descriptor version %d (this agent supports version %d)", d.Version, SupportedVersion)

@@ -146,7 +146,6 @@ func (s Scalar) Resolve(ctx context.Context, chain Chain[string]) (string, error
 type Document struct {
 	path   string
 	root   *yaml.Node
-	raw    []byte // as read, for the strict decoder (yaml.Node.Decode cannot reject unknown fields)
 	exists bool
 }
 
@@ -172,9 +171,9 @@ func Parse(path string, b []byte) (Document, error) {
 	}
 	// An empty file decodes to a zero node: a valid, empty document.
 	if root.Kind == 0 {
-		return Document{path: path, raw: b, exists: true}, nil
+		return Document{path: path, exists: true}, nil
 	}
-	return Document{path: path, root: &root, raw: b, exists: true}, nil
+	return Document{path: path, root: &root, exists: true}, nil
 }
 
 // Exists reports whether the file was present.
@@ -195,20 +194,31 @@ func (d Document) Decode(out any) error {
 	return nil
 }
 
-// DecodeStrict is Decode, but REJECTS unknown fields: a key the target type does
-// not declare is an error rather than a silently dropped value. Use it where a typo
-// must fail loudly — a hand-placed host descriptor, or an older agent handed a newer
-// schema it does not understand.
+// DecodeStrict is Decode, but REJECTS unknown fields: a key the target type does not
+// declare is an error rather than a silently dropped value. Use it where a typo must
+// fail loudly — a hand-placed host descriptor, or an older agent handed a newer schema
+// it does not understand.
 //
-// yaml.Node.Decode cannot enforce this, so it decodes from the bytes as read. That is
-// exactly equivalent for a literal decode, which is the only kind that makes sense
-// here: the files that want strict decoding are machine-written and carry no
-// references.
+// yaml.Node.Decode cannot enforce that, so the node is re-encoded and fed to a
+// KnownFields decoder. Re-encoding rather than keeping the source bytes means a
+// Document never carries the file twice.
+//
+// A present-but-EMPTY document is an ERROR here, not a zero value: a caller that asks
+// for strict decoding wants a typo to fail, and a truncated or blank file is the
+// loudest typo there is. (An ABSENT file is still the caller's business — Exists()
+// reports it and this returns nil, same as Decode.)
 func (d Document) DecodeStrict(out any) error {
-	if len(d.raw) == 0 {
+	if !d.exists {
 		return nil
 	}
-	dec := yaml.NewDecoder(bytes.NewReader(d.raw))
+	if d.root == nil {
+		return fmt.Errorf("decode %s: empty document", d.path)
+	}
+	b, err := yaml.Marshal(d.root)
+	if err != nil {
+		return fmt.Errorf("decode %s: %w", d.path, err)
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
 	if err := dec.Decode(out); err != nil {
 		return fmt.Errorf("decode %s: %w", d.path, err)

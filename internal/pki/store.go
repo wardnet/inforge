@@ -167,7 +167,7 @@ func Load(path string) (*Store, error) {
 	}
 	var s Store
 	if err := doc.Decode(&s); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse pki store: %w", err)
 	}
 	if s.RootRecipient == "" || s.Recipient == "" {
 		return nil, fmt.Errorf("pki store %s is missing a recipient — the file is corrupt or was not created by `inforge pki init`", path)

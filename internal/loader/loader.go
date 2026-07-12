@@ -155,7 +155,7 @@ func LoadSizeTable(env, dir string) (sizes.Table, error) {
 	}
 	var names []string
 	if err := doc.Decode(&names); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse sizes table: %w", err)
 	}
 	tbl := make(sizes.Table, len(names))
 	for _, n := range names {

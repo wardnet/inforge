@@ -86,7 +86,7 @@ func (s *Store) LoadManifest(ctx context.Context, service, env string) (Manifest
 	}
 	var m Manifest
 	if err := doc.Decode(&m); err != nil {
-		return Manifest{}, "", false, err
+		return Manifest{}, "", false, fmt.Errorf("parse release manifest: %w", err)
 	}
 	if m.Deployments == nil {
 		m.Deployments = map[string]Deployment{}
@@ -189,7 +189,7 @@ func (s *Store) getManifestByKey(ctx context.Context, key string) (Manifest, err
 	}
 	var m Manifest
 	if err := doc.Decode(&m); err != nil {
-		return Manifest{}, err
+		return Manifest{}, fmt.Errorf("parse release manifest: %w", err)
 	}
 	return m, nil
 }

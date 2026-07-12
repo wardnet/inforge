@@ -64,7 +64,7 @@ func ParseMeshDescriptor(b []byte) (MeshDescriptor, error) {
 	// STRICT: an older agent handed a newer schema must fail loudly, not drop fields.
 	var d MeshDescriptor
 	if err := doc.DecodeStrict(&d); err != nil {
-		return MeshDescriptor{}, err
+		return MeshDescriptor{}, fmt.Errorf("parse mesh descriptor: %w", err)
 	}
 	if d.Version != MeshSupportedVersion {
 		return MeshDescriptor{}, fmt.Errorf("unsupported mesh descriptor version %d (this agent supports version %d)", d.Version, MeshSupportedVersion)

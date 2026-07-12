@@ -80,7 +80,7 @@ func Load(path string) (*Store, error) {
 	}
 	var s Store
 	if err := doc.Decode(&s); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse secret store: %w", err)
 	}
 	if s.Recipient == "" {
 		return nil, fmt.Errorf("secret store %s has no recipient — the file is corrupt or was not created by `inforge secret init`", path)
