@@ -2,7 +2,7 @@
   "name": "inforge-website",
   "version": "0.0.0",
   "private": true,
-  "packageManager": "yarn@4.9.2",
+  "packageManager": "yarn@4.17.1",
   "scripts": {
     "docusaurus": "docusaurus",
     "start": "docusaurus start",
