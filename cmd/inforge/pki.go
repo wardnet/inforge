@@ -25,6 +25,7 @@ import (
 	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/service"
 	"github.com/wardnet/inforge/internal/types"
+	"github.com/wardnet/inforge/internal/yamldoc"
 )
 
 // newPkiCmd manages the env's committed encrypted PKI store
@@ -761,11 +762,35 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 	if err != nil {
 		return 0, err
 	}
-	vars, err := loader.LoadVariables(configEnv, dir)
+	// Minting a mesh leaf reads exactly two things from config: the base domain (it
+	// goes in the leaf's SNI and the host FQDNs this pushes to) and each region's
+	// slug. It builds no provider and calls no cloud API, so it resolves ONLY those
+	// — never the ssh block, never a provider credential. Resolving the whole
+	// document here is what used to make `inforge pki renew` and `inforge releases
+	// deploy` fail on an unset SSH_AUTHORIZED_KEYS or HCLOUD_TOKEN they never read.
+	chain := yamldoc.Chain{yamldoc.Env()}
+	varsDoc, err := loader.VariablesDoc(configEnv, dir)
 	if err != nil {
 		return 0, err
 	}
-	regionTable, globalBlock, err := loader.LoadRegionTable(configEnv, dir)
+	baseDomainLeaf, ok := varsDoc.At("base_domain")
+	if !ok {
+		return 0, fmt.Errorf("%s: base_domain is required to mint a mesh leaf", varsDoc.Path())
+	}
+	baseDomain, err := baseDomainLeaf.Resolve(ctx, chain)
+	if err != nil {
+		return 0, err
+	}
+	// The region table is read LITERALLY: this needs the region names and their
+	// slugs, never a provider credential. A slug is a literal in every real config
+	// (it names cloud resources); one that carries a pattern is resolved below, at
+	// the point it is used, so an unresolvable slug can only fail a run that
+	// actually mints a regional leaf.
+	regionsDoc, err := loader.RegionsDoc(configEnv, dir)
+	if err != nil {
+		return 0, err
+	}
+	regionTable, globalBlock, err := loader.RegionsLiteralFrom(regionsDoc)
 	if err != nil {
 		return 0, err
 	}
@@ -803,7 +828,7 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 		if err != nil {
 			return "", "", fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
 		}
-		leafPEM, keyPEM, err = meshcert.MintLeaf(interCert, interKey, vars.BaseDomain, identityEnv, scope, svc.Name)
+		leafPEM, keyPEM, err = meshcert.MintLeaf(interCert, interKey, baseDomain, identityEnv, scope, svc.Name)
 		if err != nil {
 			return "", "", fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
 		}
@@ -844,7 +869,7 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 			if user == "" {
 				user = defaultSSHUser
 			}
-			hostDNS := naming.HostFQDN(identityEnv, slug, naming.BareComputeName(hostKey), vars.BaseDomain)
+			hostDNS := naming.HostFQDN(identityEnv, slug, naming.BareComputeName(hostKey), baseDomain)
 			return fmt.Sprintf("%s@%s", user, hostDNS)
 		}
 
@@ -942,11 +967,21 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 		}
 		renewSet(global, pki.ScopeGlobal, "")
 	}
-	// Regional services: one leaf per region, scope = region, per-region slug.
+	// Regional services: one leaf per region, scope = region, per-region slug. The
+	// slug is resolved HERE, where it is used — so a run with no regional work
+	// never touches it, and cannot be failed by a pattern it does not read.
 	if renewScopeHasWork(regional, only) {
 		for _, region := range allRegions {
-			ar := regionTable[region]
-			renewSet(regional, region, ar.Slug)
+			slug := regionTable[region].Slug
+			if leaf, ok := regionsDoc.At("regions", region, "slug"); ok {
+				resolved, err := leaf.Resolve(ctx, chain)
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				slug = resolved
+			}
+			renewSet(regional, region, slug)
 		}
 	}
 	return count, errors.Join(errs...)

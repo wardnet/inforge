@@ -439,7 +439,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 	// validation checks the region/provider structure, not credential values, and
 	// must not be tripped by an unset credential (e.g. an unresolved zone ref must
 	// not read as an empty, "missing", zone).
-	regionTable, global, err := loader.LoadRegionTableRaw(env, dir)
+	regionTable, global, err := loader.RegionsLiteral(env, dir)
 	if err != nil {
 		return err
 	}
@@ -447,7 +447,7 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 	if err != nil {
 		return err
 	}
-	vars, err := loader.LoadVariablesLenient(env, dir)
+	vars, err := loader.VariablesLiteral(env, dir)
 	if err != nil {
 		return err
 	}

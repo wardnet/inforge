@@ -1,6 +1,7 @@
 package loader
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,43 +9,80 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/types"
+	"github.com/wardnet/inforge/internal/yamldoc"
 )
 
 // testdataDir reuses the validate package's fixture environments.
 var testdataDir = filepath.Join("..", "validate", "testdata")
 
-func TestSubstituteEnvVarsPresent(t *testing.T) {
-	t.Setenv("INFORGE_TEST_TOKEN", "sekret")
-	out, err := substituteEnvVars(map[string]any{
-		"token": "${INFORGE_TEST_TOKEN}",
-		"nested": []any{
-			"plain",
-			"prefix-${INFORGE_TEST_TOKEN}",
-		},
-	}, false)
-	require.NoError(t, err)
-	m := out.(map[string]any)
-	assert.Equal(t, "sekret", m["token"])
-	assert.Equal(t, []any{"plain", "prefix-sekret"}, m["nested"])
-}
-
-func TestSubstituteEnvVarsMissing(t *testing.T) {
-	_, err := substituteEnvVars("${INFORGE_DEFINITELY_UNSET_VAR}", false)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing required env var")
-}
-
-func TestSubstituteEnvVarsLenient(t *testing.T) {
-	out, err := substituteEnvVars("${INFORGE_DEFINITELY_UNSET_VAR}", true)
-	require.NoError(t, err)
-	assert.Equal(t, "", out)
-}
-
-func TestLoadVariables(t *testing.T) {
-	vars, err := LoadVariables("ok", testdataDir)
+// Reading never resolves: the document keeps its patterns and needs no
+// environment. Resolution is a separate act, performed by a consumer that wants
+// a real value.
+func TestVariablesLiteralKeepsPatterns(t *testing.T) {
+	vars, err := VariablesLiteral("ok", testdataDir)
 	require.NoError(t, err)
 	assert.Equal(t, "example.com", vars.BaseDomain)
 	assert.Equal(t, "ssh-ed25519 AAAA...authorized", vars.SSH.AuthorizedKeys)
+}
+
+// The whole-file resolved decode: the deploy program's path. Every leaf goes
+// through the chain, so a missing value is reported before anything is created.
+func TestVariablesResolvesEveryLeaf(t *testing.T) {
+	dir := writeVariablesYAML(t, `base_domain: env:INFORGE_TEST_DOMAIN
+ssh:
+  authorizedKeys: env:INFORGE_TEST_KEYS
+`)
+	chain := yamldoc.Chain{yamldoc.EnvFrom(func(k string) (string, bool) {
+		return map[string]string{
+			"INFORGE_TEST_DOMAIN": "example.com",
+			"INFORGE_TEST_KEYS":   "ssh-ed25519 AAAA",
+		}[k], true
+	})}
+
+	vars, err := Variables(context.Background(), chain, "prd", dir)
+	require.NoError(t, err)
+	assert.Equal(t, "example.com", vars.BaseDomain)
+	assert.Equal(t, "ssh-ed25519 AAAA", vars.SSH.AuthorizedKeys)
+}
+
+// THE REGRESSION TEST. A consumer that reads ONE leaf cannot be failed by a
+// pattern in a leaf it never reads. Under the old eager loader the whole document
+// was expanded on load, so `inforge pki renew` and `inforge releases deploy` died
+// with "missing required env var: SSH_AUTHORIZED_KEYS" while minting a leaf — a
+// code path that reads base_domain and nothing else. Only tunneller broke, because
+// mtls_files: is what makes a release mint a leaf at all.
+func TestReadingOneLeafIgnoresPatternsInOtherLeaves(t *testing.T) {
+	dir := writeVariablesYAML(t, `base_domain: wardnet.network
+ssh:
+  authorizedKeys: env:SSH_AUTHORIZED_KEYS
+  deployPublicKey: env:DEPLOY_PUBLIC_KEY
+`)
+	// Nothing is set in the environment.
+	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "", false })}
+
+	doc, err := VariablesDoc("prd", dir)
+	require.NoError(t, err)
+
+	leaf, ok := doc.At("base_domain")
+	require.True(t, ok)
+	got, err := leaf.Resolve(context.Background(), chain)
+	require.NoError(t, err, "reading base_domain must not require the ssh block")
+	assert.Equal(t, "wardnet.network", got)
+
+	// ...and the same document still fails loudly for a consumer that DOES want the
+	// leaf whose variable is unset.
+	_, err = Variables(context.Background(), chain, "prd", dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ssh.authorizedKeys")
+	assert.Contains(t, err.Error(), "SSH_AUTHORIZED_KEYS")
+}
+
+func writeVariablesYAML(t *testing.T, doc string) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "variables.yaml"), []byte(doc), 0o644))
+	return dir
 }
 
 func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
@@ -140,42 +178,35 @@ func TestLoadGlobalResourcesMissing(t *testing.T) {
 	assert.Empty(t, global.Network)
 }
 
-// TestLoadRegionTableFromFile exercises the nested regions.yaml: the per-region
-// slug + provider config under `regions:`, plus the optional `global:` block.
-func TestLoadRegionTableFromFile(t *testing.T) {
-	// The ok fixture's dns.zone is an ${ENV_VAR} ref; the strict (deploy) load
-	// resolves it, so the var must be set here. Validation loads the same fixture
-	// raw and deliberately leaves it unset (see TestValidateResourcesOK).
-	t.Setenv("INFORGE_TEST_OK_ZONE", "test-zone")
-	rt, global, err := LoadRegionTable("ok", testdataDir)
+// The literal read of regions.yaml: the ok fixture's dns.zone is a ${...} ref and
+// no env var need be set — the pattern simply survives.
+func TestRegionsLiteralFromFile(t *testing.T) {
+	rt, global, err := RegionsLiteral("ok", testdataDir)
 	require.NoError(t, err)
 	slug, err := rt.Slug("us-east-1")
 	require.NoError(t, err)
 	assert.Equal(t, "use1", slug)
-	// Provider config now lives per region in regions.yaml.
 	assert.Contains(t, rt["us-east-1"].Providers, "hetzner")
-	// The ok fixture declares no global slot.
-	assert.Nil(t, global)
+	assert.Nil(t, global, "the ok fixture declares no global slot")
 
 	st, err := LoadSizeTable("ok", testdataDir)
 	require.NoError(t, err)
 	require.NoError(t, st.Resolve("SMALL"))
 }
 
-// TestLoadRegionTableMissing confirms an absent regions.yaml yields an empty
-// table (the new model makes regions.yaml the deploy authority — there is no
-// built-in fallback region set), with no error.
-func TestLoadRegionTableMissing(t *testing.T) {
+// An absent regions.yaml yields an empty table (regions.yaml is the deploy
+// authority — there is no built-in fallback region set), with no error.
+func TestRegionsMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
-	rt, global, err := LoadRegionTable("prd", dir)
+	rt, global, err := RegionsLiteral("prd", dir)
 	require.NoError(t, err)
 	assert.Empty(t, rt)
 	assert.Nil(t, global)
 }
 
-// writeRegionsYAML writes a regions.yaml with a ${ENV_VAR} provider credential
-// into a temp env dir and returns the dir, for the substitution tests below.
+// writeRegionsYAML writes a regions.yaml with a env:ENV_VAR provider credential
+// into a temp env dir and returns the dir.
 func writeRegionsYAML(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -185,48 +216,39 @@ func writeRegionsYAML(t *testing.T) string {
     slug: use1
     providers:
       hetzner:
-        apiToken: ${INFORGE_TEST_HCLOUD_TOKEN}
+        apiToken: env:INFORGE_TEST_HCLOUD_TOKEN
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "regions.yaml"), []byte(doc), 0o644))
 	return dir
 }
 
-// TestLoadRegionTableSubstitutesEnvVars is the regression guard for the bug: a
-// ${ENV_VAR} in regions.yaml (e.g. a provider credential) must be substituted, not
-// passed to the provider as the literal string "${...}".
-func TestLoadRegionTableSubstitutesEnvVars(t *testing.T) {
-	t.Setenv("INFORGE_TEST_HCLOUD_TOKEN", "real-token-value")
-	dir := writeRegionsYAML(t)
-
-	rt, _, err := LoadRegionTable("prd", dir)
+// The regression guard for the credential bug: a env:ENV_VAR must be resolved
+// before it reaches a provider, never passed through as the literal "${...}".
+func TestRegionsResolvesCredentials(t *testing.T) {
+	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "real-token-value", true })}
+	rt, _, err := Regions(context.Background(), chain, "prd", writeRegionsYAML(t))
 	require.NoError(t, err)
 	assert.Equal(t, "real-token-value", rt["us-east-1"].Providers["hetzner"]["apiToken"],
-		"the credential ${ENV_VAR} must be substituted, not passed through literally")
+		"the credential must be resolved, not passed through literally")
 }
 
-// TestLoadRegionTableMissingEnvVarErrors: strict load fails clearly when a
-// referenced credential env var is unset (rather than handing the provider a
-// literal "${...}").
-func TestLoadRegionTableMissingEnvVarErrors(t *testing.T) {
-	t.Setenv("INFORGE_TEST_HCLOUD_TOKEN", "")
-	dir := writeRegionsYAML(t)
-
-	_, _, err := LoadRegionTable("prd", dir)
+// Resolving fails clearly when a referenced credential is unset — and names the
+// leaf, not just the variable.
+func TestRegionsMissingCredentialErrors(t *testing.T) {
+	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "", false })}
+	_, _, err := Regions(context.Background(), chain, "prd", writeRegionsYAML(t))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required env var")
+	assert.Contains(t, err.Error(), "regions.us-east-1.providers.hetzner.apiToken")
 }
 
-// TestLoadRegionTableRaw: the raw load (used by validation) leaves a ${ENV_VAR}
-// reference as a literal — even when the env var is unset — so structural
-// validation runs without credentials and an unresolved credential never reads
-// as an (empty) missing value.
-func TestLoadRegionTableRaw(t *testing.T) {
-	t.Setenv("INFORGE_TEST_HCLOUD_TOKEN", "")
-	dir := writeRegionsYAML(t)
-
-	rt, _, err := LoadRegionTableRaw("prd", dir)
+// The literal read (what validation uses) leaves a env:ENV_VAR as written even
+// with the var unset, so structural validation runs without credentials and an
+// unresolved credential never reads as an (empty) missing value.
+func TestRegionsLiteralKeepsCredentialAsWritten(t *testing.T) {
+	rt, _, err := RegionsLiteral("prd", writeRegionsYAML(t))
 	require.NoError(t, err)
-	assert.Equal(t, "${INFORGE_TEST_HCLOUD_TOKEN}", rt["us-east-1"].Providers["hetzner"]["apiToken"])
+	assert.Equal(t, "env:INFORGE_TEST_HCLOUD_TOKEN", rt["us-east-1"].Providers["hetzner"]["apiToken"])
 }
 
 // TestLoadSizeTableFromFile exercises the on-disk size table: a YAML list of

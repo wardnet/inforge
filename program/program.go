@@ -38,6 +38,7 @@ import (
 	"github.com/wardnet/inforge/internal/service"
 	"github.com/wardnet/inforge/internal/tags"
 	"github.com/wardnet/inforge/internal/types"
+	"github.com/wardnet/inforge/internal/yamldoc"
 	"gopkg.in/yaml.v3"
 )
 
@@ -82,7 +83,13 @@ func Run(ctx *pulumi.Context) error {
 		ephemeralSlug = env
 	}
 
-	vars, err := loader.LoadVariables(srcEnv, dir)
+	// The deploy program builds providers, provisions hosts and talks to real
+	// clouds, so it needs every value in both config files — and needs them BEFORE
+	// the first resource is registered. Resolve the whole of variables.yaml and
+	// regions.yaml here, up front: a missing env var is reported now, with nothing
+	// created, rather than part-way through an apply.
+	chain := yamldoc.Chain{yamldoc.Env()}
+	vars, err := loader.Variables(ctx.Context(), chain, srcEnv, dir)
 	if err != nil {
 		return err
 	}
@@ -111,7 +118,7 @@ func Run(ctx *pulumi.Context) error {
 		inforgeVersion = "dev"
 	}
 
-	regionTable, globalBlock, err := loader.LoadRegionTable(srcEnv, dir)
+	regionTable, globalBlock, err := loader.Regions(ctx.Context(), chain, srcEnv, dir)
 	if err != nil {
 		return err
 	}
