@@ -91,6 +91,29 @@ provider credentials and realization for global-slice resources. It does not aff
 no slug is inserted into global cloud names. Omitting `placementRegion` when a `global:` block is
 present is a validation error.
 
+The global slice's **DNS authority is the placement region's** (`dns:` on that region), but its
+**providers come from `global.providers`** — the two halves are read from different blocks. So
+`global.providers` must itself carry the authority's provider block (e.g. `cloudflare`), or the
+global DNS provider would be registered with an empty credential and every global record would fail
+at apply. `inforge validate` enforces it; `regions.yaml` commonly reuses the region's block with a
+YAML anchor:
+
+```yaml
+regions:
+  us-east-1:
+    slug: use1
+    dns: &dns
+      provider: cloudflare
+      zone: ${CLOUDFLARE_ZONE_ID}
+    providers: &providers
+      hetzner: { apiToken: ${HCLOUD_TOKEN}, location: ash, network_zone: us-east }
+      cloudflare: { apiToken: ${CLOUDFLARE_API_TOKEN} }
+
+global:
+  placementRegion: us-east-1
+  providers: *providers
+```
+
 :::caution
 `regions.yaml` replaces the built-in region table entirely. There is no default fallback: an
 environment with no `regions.yaml` (or an empty `regions:` map) deploys nothing.

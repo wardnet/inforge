@@ -635,6 +635,35 @@ func TestCheckRegionsFile(t *testing.T) {
 		}, nil, "regions.yaml")
 		assert.True(t, r.failed)
 	})
+
+	// The global slice's DNS authority is the placement region's, but its providers
+	// come from the global block: the credentials must be in BOTH, or the global DNS
+	// provider is registered with an empty token and every global record fails at apply.
+	t.Run("global providers missing the dns authority's provider", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: map[string]map[string]any{
+				"hetzner":    {"apiToken": "t"},
+				"cloudflare": {"apiToken": "t"},
+			}, Dns: &regions.DnsAuthority{Provider: "cloudflare", Zone: "z1"}},
+		}, &regions.Global{PlacementRegion: "us-east-1", Providers: map[string]map[string]any{
+			"hetzner": {"apiToken": "t"},
+		}}, "regions.yaml")
+		assert.True(t, r.failed)
+	})
+
+	t.Run("global providers carry the dns authority's provider", func(t *testing.T) {
+		r := &reporter{}
+		full := map[string]map[string]any{
+			"hetzner":    {"apiToken": "t"},
+			"cloudflare": {"apiToken": "t"},
+		}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: full,
+				Dns: &regions.DnsAuthority{Provider: "cloudflare", Zone: "z1"}},
+		}, &regions.Global{PlacementRegion: "us-east-1", Providers: full}, "regions.yaml")
+		assert.False(t, r.failed)
+	})
 }
 
 // TestCheckProviderAvailabilityPerRegion confirms the single shared resource set
@@ -1645,4 +1674,66 @@ func TestCheckServiceUser(t *testing.T) {
 	errs, _ := checkService(types.ServiceSpec{Host: "bridge", Type: "raw"}, ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "must declare the no-login user")
+}
+
+// A deploy_user name lands unquoted in file paths and a sudoers rule inside the
+// root-run first-boot script, so anything outside the login-name charset is an
+// author error, not something to escape and boot with.
+func TestCheckComputeDeployUserCharset(t *testing.T) {
+	ctx := baseCtx()
+	ctx.sizeTable = sizes.DefaultTable()
+	ctx.networks = map[string]types.NetworkSpec{"corenet": {Name: "corenet"}}
+	base := types.ComputeSpec{Provider: "hetzner", Network: "corenet", Size: "SMALL", Kind: "vm"}
+
+	ok := base
+	ok.DeployUser = &types.DeployUserSpec{Name: "deploy"}
+	errs, _ := checkCompute(ok, ctx)
+	assert.Empty(t, errs)
+
+	for _, name := range []string{`deploy'; touch /pwn; '`, "de ploy", "Deploy", "1deploy", "deploy\nroot"} {
+		bad := base
+		bad.DeployUser = &types.DeployUserSpec{Name: name}
+		errs, _ := checkCompute(bad, ctx)
+		require.NotEmpty(t, errs, "deploy_user %q must be rejected", name)
+		assert.Contains(t, strings.Join(errs, "\n"), "deploy_user:")
+	}
+}
+
+// A vanity FQDN on another domain is not a record on that domain: records are
+// created zone-relative inside the DNS authority's zone, so it deploys as
+// "<fqdn>.<base_domain>" — a wrong hostname whose ACME cert can never issue.
+func TestCheckVanityZone(t *testing.T) {
+	svc := func(vanity ...string) types.Resources {
+		return types.Resources{Service: []types.ServiceSpec{{
+			Name:   "api",
+			Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: vanity}},
+		}}}
+	}
+
+	cases := []struct {
+		name   string
+		vanity []string
+		fail   bool
+	}{
+		{"bare token is derived in-zone", []string{"api"}, false},
+		{"literal under base_domain", []string{"account.example.com"}, false},
+		{"the apex itself", []string{"example.com"}, false},
+		{"base_domain template", []string{"account.{ENV}.{BASE_DOMAIN}"}, false},
+		{"out-of-zone literal", []string{"shop.other.net"}, true},
+		{"look-alike suffix", []string{"shop.notexample.com"}, true},
+		{"one bad among good", []string{"account.example.com", "shop.other.net"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := &reporter{}
+			checkVanityZone(r, svc(c.vanity...), "regional", "example.com")
+			assert.Equal(t, c.fail, r.failed)
+		})
+	}
+
+	t.Run("unresolved base_domain is not checked", func(t *testing.T) {
+		r := &reporter{}
+		checkVanityZone(r, svc("shop.other.net"), "regional", "${BASE_DOMAIN}")
+		assert.False(t, r.failed)
+	})
 }

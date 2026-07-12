@@ -19,6 +19,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	"github.com/wardnet/inforge/internal/agent"
+	"github.com/wardnet/inforge/internal/cloudinit"
 	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/meshcert"
@@ -566,6 +567,16 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 		checkSecretStoreEntries(r, encStore, regionalRes, globalRes, secretstore.Path(dir, env))
 	}
 
+	// Every derived DNS record is created INSIDE the authority's zone (the provider
+	// is handed a zone-relative name), so a literal vanity FQDN on another domain is
+	// not a record on that domain — it lands as "<that.fqdn>.<base_domain>". Reject
+	// it here; the deploy would otherwise create a wrong hostname whose ACME cert can
+	// never issue.
+	checkVanityZone(r, globalRes, globalBase, vars.BaseDomain)
+	if regionalLoadErr == nil {
+		checkVanityZone(r, regionalRes, regionalBase, vars.BaseDomain)
+	}
+
 	// Mesh PKI references: a global service's leaf comes from the global
 	// intermediate; a regional service's leaf, from each region's intermediate.
 	checkPKI(r, globalBase, regionalBase, regionTable, pkiStore)
@@ -681,6 +692,47 @@ func checkCrossScopeNames(r *reporter, regional, global types.Resources, regiona
 				"app name %q is declared in both the global scope and the regional scope (%s) — "+
 					"app names must be unique across the whole environment for the same reason as service names",
 				a.Name, filepath.Join(regionalBase, "app", a.Name)))
+		}
+	}
+}
+
+// checkVanityZone rejects a route vanity FQDN that is not under base_domain. Records
+// are created zone-relative in the DNS authority's zone (naming.ZoneRelative strips
+// the base domain and hands the rest to the provider), so an out-of-zone literal like
+// "shop.example.com" is NOT created on example.com — it becomes the record
+// "shop.example.com" inside the base_domain zone, i.e. the host
+// shop.example.com.<base_domain>, whose ACME cert can never issue. A derived (bare
+// token) vanity is in-zone by construction, and so is a {BASE_DOMAIN} template.
+func checkVanityZone(r *reporter, res types.Resources, base, baseDomain string) {
+	// base_domain is read literally at validate time; an unresolved ${VAR} ref carries
+	// no zone to compare against, so there is nothing to check.
+	if baseDomain == "" || strings.Contains(baseDomain, "${") {
+		return
+	}
+	// The env/slug placeholders can only affect the FQDN's tail if a vanity ends in
+	// one, which no zone-relative name does; a sentinel label keeps the expansion
+	// region-independent (the resource set is shared by every region).
+	expand := strings.NewReplacer(
+		"{BASE_DOMAIN}", baseDomain,
+		"{ENV}", "env",
+		"{REGION_SLUG}", "slug",
+	)
+	for _, s := range res.Service {
+		var errs []string
+		for _, rt := range s.Routes {
+			for _, v := range rt.Vanity {
+				if !strings.ContainsAny(v, ".{") {
+					continue // a bare token is derived under base_domain
+				}
+				fqdn := expand.Replace(v)
+				if fqdn == baseDomain || strings.HasSuffix(fqdn, "."+baseDomain) {
+					continue
+				}
+				errs = append(errs, fmt.Sprintf("routes: vanity %q resolves to %q, which is not under base_domain %q — a record is created inside the DNS authority's zone, so an out-of-zone name would deploy as %q and its ACME cert could never issue", v, fqdn, baseDomain, fqdn+"."+baseDomain))
+			}
+		}
+		if len(errs) > 0 {
+			r.fail(filepath.Join(base, "service", s.Name), errs...)
 		}
 	}
 }
@@ -1333,10 +1385,26 @@ func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, 
 		if len(global.Providers) == 0 {
 			errs = append(errs, "global: providers block required when global is defined")
 		}
-		if strings.TrimSpace(global.PlacementRegion) == "" {
+		switch {
+		case strings.TrimSpace(global.PlacementRegion) == "":
 			errs = append(errs, "global.placementRegion: required when a global block is present")
-		} else if _, err := table.Slug(global.PlacementRegion); err != nil {
-			errs = append(errs, fmt.Sprintf("global.placementRegion: %q is not a defined region", global.PlacementRegion))
+		default:
+			pr, ok := table[global.PlacementRegion]
+			if !ok {
+				errs = append(errs, fmt.Sprintf("global.placementRegion: %q is not a defined region", global.PlacementRegion))
+				break
+			}
+			// The global slice realizes DNS records against the PLACEMENT REGION's
+			// authority (ADR-0023) but registers its providers from the GLOBAL block, so
+			// the authority's credentials must exist there too — the two halves come from
+			// different blocks. Without them the global DNS provider is built with an empty
+			// token and every global record fails (or, worse, is created against Pulumi's
+			// ambient default provider) mid-apply.
+			if pr.Dns != nil {
+				if p := strings.TrimSpace(pr.Dns.Provider); p != "" && len(global.Providers[p]) == 0 {
+					errs = append(errs, fmt.Sprintf("global.providers: no %q block, but the global slice's DNS authority is placementRegion %q's (provider %q) — the global slice registers its providers from this block, so it must carry that provider's credentials (regions.yaml commonly reuses the region's block with a YAML anchor)", p, global.PlacementRegion, p))
+				}
+			}
 		}
 	}
 	r.report(path, errs, nil)
@@ -1640,6 +1708,15 @@ func checkCompute(s types.ComputeSpec, ctx regionContext) (errs, warns []string)
 	if s.CloudInit != "" {
 		if _, err := os.Stat(s.CloudInit); err != nil {
 			errs = append(errs, fmt.Sprintf("cloud_init: file not found: %s", s.CloudInit))
+		}
+	}
+	// The deploy user's name is interpolated into the root-run first-boot script
+	// (useradd, /home/<name>, /etc/sudoers.d/<name>), so it must be a login name and
+	// nothing else — a name carrying shell metacharacters is rejected here rather
+	// than merely escaped at render time.
+	if s.DeployUser != nil {
+		if err := (cloudinit.Vars{DeployUser: s.DeployUser.Name}).Validate(); err != nil {
+			errs = append(errs, "deploy_user: "+err.Error())
 		}
 	}
 	return errs, warns
