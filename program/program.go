@@ -382,7 +382,7 @@ func Run(ctx *pulumi.Context) error {
 		if err := provisionDatabaseBackups(ctx, sc.res, computeOutputs[sc.key], dbHostTails, backupsBucket, backupsEndpoint, backupsCredsPresent, backupsAccessKey, backupsSecretKey, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
 			return err
 		}
-		if err := checkDBRoleCollisions(sc.res, env, sc.slug); err != nil {
+		if err := checkDBRoleNames(sc.res, env, sc.slug); err != nil {
 			return err
 		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets, PKI: pkiMaterial}
@@ -825,10 +825,16 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 	return nil
 }
 
+// pgMaxIdentifierLen is Postgres's NAMEDATALEN-1: the longest identifier the server
+// stores. A longer name is SILENTLY TRUNCATED to this many bytes at CREATE ROLE (even
+// double-quoted) — see checkDBRoleNames for why that must be rejected rather than
+// tolerated.
+const pgMaxIdentifierLen = 63
+
 // dbRoleName derives the per-service database role a grant mints: the consuming
 // service's env+slug scope it, so two regions granting the same (global) database
 // never collide. It is joined with a dash, which is NOT injective on its own — see
-// checkDBRoleCollisions, the check that keeps the derivation unambiguous.
+// checkDBRoleNames, the check that keeps the derivation unambiguous.
 func dbRoleName(env, slug, service, database string) string {
 	return naming.Resource(env, slug, "dbrole", service+"-"+database)
 }
@@ -839,14 +845,25 @@ func monitorRoleName(env, slug, cluster string) string {
 	return naming.Resource(env, slug, "dbrole", cluster+"-otelmon")
 }
 
-// checkDBRoleCollisions rejects a scope whose derived Postgres role names are not
-// unique. Both derivations dash-join two names (`<service>-<database>`,
+// checkDBRoleNames rejects a scope whose derived Postgres role names are unusable —
+// either ambiguous or too long for Postgres to store as written.
+//
+// Ambiguity: both derivations dash-join two names (`<service>-<database>`,
 // `<cluster>-otelmon`), and a dash is a legal character in every one of them, so the
 // join is not injective: service `a-b` granting database `c` and service `a` granting
 // database `b-c` derive the SAME role name — one Postgres role, one Pulumi URN, two
 // services silently sharing a login (and a duplicate-URN failure mid-deploy).
 //
-// The check runs instead of re-encoding the name: the derived name is the resource's
+// Length: Postgres truncates any identifier past pgMaxIdentifierLen bytes, so a
+// too-long derived name is NOT the name the deployment then uses. `CREATE ROLE` mints
+// the truncated role while the connection URL this program hands the service (and the
+// collector's postgresql receiver username) carries the full name, so the service
+// cannot log in at all; worse, two distinct derived names sharing a 63-byte prefix
+// truncate to ONE real role — silently sharing a login behind an injectivity check
+// that saw two different strings. Rejecting the name is the only safe answer: the
+// truncation happens server-side and cannot be observed from the plan.
+//
+// Both checks run instead of re-encoding the name: the derived name is the resource's
 // URN, so changing the encoding would replace every live database role on every
 // existing deployment (drop + re-mint, rotating credentials fleet-wide) to fix a
 // collision no deployment has hit. Failing the deploy with a rename hint is the same
@@ -854,9 +871,12 @@ func monitorRoleName(env, slug, cluster string) string {
 //
 // Grants are same-scope only (validation rejects a cross-scope database grant), so
 // one scope's names are the whole namespace.
-func checkDBRoleCollisions(res types.Resources, env, slug string) error {
+func checkDBRoleNames(res types.Resources, env, slug string) error {
 	owner := map[string]string{}
 	claim := func(role, by string) error {
+		if n := len(role); n > pgMaxIdentifierLen {
+			return fmt.Errorf("database role %q (%s) is %d bytes; Postgres truncates identifiers at %d, so it would mint %q while the service connects as the full name — shorten the service, database or cluster name by %d character(s)", role, by, n, pgMaxIdentifierLen, role[:pgMaxIdentifierLen], n-pgMaxIdentifierLen)
+		}
 		if prev, dup := owner[role]; dup {
 			return fmt.Errorf("database role %q is derived by both %s and %s; the derivation dash-joins the two names, so it is ambiguous — rename one of them", role, prev, by)
 		}

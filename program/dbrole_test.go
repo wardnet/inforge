@@ -3,6 +3,7 @@ package program
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
@@ -115,10 +116,12 @@ func TestMonitorMintWaitsOnServiceRoleMints(t *testing.T) {
 		"the monitor mint must wait on the cluster's per-service role mints — concurrent GRANTs race the shared catalog")
 }
 
-// TestCheckDBRoleCollisions: the derived role name dash-joins two names, which is not
-// injective — a colliding pair must fail the deploy with a rename hint instead of
-// silently sharing one Postgres role (and one Pulumi URN) between two services.
-func TestCheckDBRoleCollisions(t *testing.T) {
+// TestCheckDBRoleNames: the derived role name dash-joins two names (not injective) and
+// is handed to Postgres verbatim (truncated past 63 bytes). Both an ambiguous pair and
+// an over-long name must fail the deploy with a rename hint instead of silently sharing
+// one Postgres role — or, for a truncated name, minting a role the service cannot even
+// log in as (the connection URL carries the untruncated name).
+func TestCheckDBRoleNames(t *testing.T) {
 	svc := func(name string, dbs ...string) types.ServiceSpec {
 		s := types.ServiceSpec{Name: name}
 		for _, db := range dbs {
@@ -149,14 +152,43 @@ func TestCheckDBRoleCollisions(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "the global/ prefix is stripped before the name is derived",
-			res:  types.Resources{Service: []types.ServiceSpec{svc("api-eu", "global/ddns"), svc("api", "eu-ddns")}},
+			name:    "the global/ prefix is stripped before the name is derived",
+			res:     types.Resources{Service: []types.ServiceSpec{svc("api-eu", "global/ddns"), svc("api", "eu-ddns")}},
+			wantErr: true,
+		},
+		{
+			// The longest name that survives Postgres intact: the derived role is exactly
+			// pgMaxIdentifierLen bytes, so nothing is truncated.
+			name: "a role name of exactly the identifier limit passes",
+			res:  types.Resources{Service: []types.ServiceSpec{svc(strings.Repeat("a", 20), strings.Repeat("b", 18))}},
+		},
+		{
+			// One byte over: CREATE ROLE would mint the 63-byte truncation while the
+			// connection URL carries the full name, so the service could never log in.
+			name:    "a role name one byte over the identifier limit is rejected",
+			res:     types.Resources{Service: []types.ServiceSpec{svc(strings.Repeat("a", 20), strings.Repeat("b", 19))}},
+			wantErr: true,
+		},
+		{
+			// Two DISTINCT derived names that share a 63-byte prefix: the uniqueness map
+			// sees two different strings, but Postgres would truncate both to one role —
+			// only the length rule catches this.
+			name: "two names truncating to one role are rejected",
+			res: types.Resources{Service: []types.ServiceSpec{
+				svc(strings.Repeat("a", 20), strings.Repeat("b", 19)+"x"),
+				svc(strings.Repeat("a", 20), strings.Repeat("b", 19)+"y"),
+			}},
+			wantErr: true,
+		},
+		{
+			name:    "the monitor role is length-checked too",
+			res:     types.Resources{DatabaseCluster: []types.DatabaseClusterSpec{{Name: strings.Repeat("c", 40), Host: "edge"}}},
 			wantErr: true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkDBRoleCollisions(tc.res, "prd", "use1")
+			err := checkDBRoleNames(tc.res, "prd", "use1")
 			if tc.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), naming.Resource("prd", "use1", "dbrole", ""))
@@ -165,6 +197,17 @@ func TestCheckDBRoleCollisions(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// TestDBRoleNameLimitMatchesPostgres pins the boundary the length rule enforces to the
+// real identifier the program hands Postgres: the accepted maximum is exactly
+// pgMaxIdentifierLen bytes, so no accepted role name can be truncated server-side.
+func TestDBRoleNameLimitMatchesPostgres(t *testing.T) {
+	ok := dbRoleName("prd", "use1", strings.Repeat("a", 20), strings.Repeat("b", 18))
+	require.Len(t, ok, pgMaxIdentifierLen)
+	require.NoError(t, checkDBRoleNames(types.Resources{Service: []types.ServiceSpec{
+		{Name: strings.Repeat("a", 20), Grants: []types.GrantSpec{{Resource: "database/" + strings.Repeat("b", 18), Permission: "rw"}}},
+	}}, "prd", "use1"))
 }
 
 // TestBackupCredentialTriggerIsNotSecret: the R2 credential write script carries both
