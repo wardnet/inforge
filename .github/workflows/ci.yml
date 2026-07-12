@@ -43,6 +43,16 @@ jobs:
           go-version: "1.26.5"
           cache: true
 
+      # The Automation API tests (cmd/inforge: createStack/selectStack, the ephemeral
+      # post-up deploy-key resolution) drive a real Pulumi engine against a throwaway
+      # file:// backend, and the Automation API shells out to the `pulumi` binary. They
+      # t.Skip when it is absent — so without this step the ephemeral teardown/key
+      # guards they protect would silently go untested on every CI run. No `command:`
+      # input: the action then only installs the CLI (no login, no credentials).
+      - uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7.0.0
+        with:
+          pulumi-version: "3.251.0"
+
       - name: go build
         run: go build ./...
 

@@ -40,9 +40,9 @@ func runEphemeralDown(ctx context.Context, configPath, slug string) error {
 		return fmt.Errorf("set INFORGE_VERSION: %w", err)
 	}
 
-	s, _, err := upsertStack(ctx, slug, projCfg)
+	s, err := selectStack(ctx, slug, projCfg)
 	if err != nil {
-		return fmt.Errorf("select ephemeral stack %q: %w", slug, err)
+		return err
 	}
 
 	cfg, err := s.GetAllConfig(ctx)
@@ -67,14 +67,14 @@ func runEphemeralDown(ctx context.Context, configPath, slug string) error {
 	}
 
 	fmt.Printf("tearing down ephemeral env %q (source %q)\n", slug, srcEnv)
-	return destroyEphemeralStack(ctx, s, slug)
+	return destroyEphemeralStack(ctx, s, projCfg, slug)
 }
 
 // destroyEphemeralStack runs a Pulumi destroy on s, rendering the engine event
-// stream through the shared Printer (mirroring runStackUp), then removes the stack
-// from the backend so a reaped/torn-down env leaves no orphaned stack object. It
-// is shared by `down` and `reap`.
-func destroyEphemeralStack(ctx context.Context, s auto.Stack, slug string) error {
+// stream through the shared Printer (mirroring runStackUp), deletes the env's
+// release manifests, then removes the stack from the backend so a reaped/torn-down
+// env leaves no orphaned stack object. It is shared by `down` and `reap`.
+func destroyEphemeralStack(ctx context.Context, s auto.Stack, projCfg projectConfig, slug string) error {
 	_, destroyErr := streamEngineRun(os.Stdout, fmt.Sprintf("Destroying (%s):\n\n", slug),
 		func(ch chan events.EngineEvent, progress, errProgress io.Writer) error {
 			_, err := s.Destroy(ctx,
@@ -88,9 +88,39 @@ func destroyEphemeralStack(ctx context.Context, s auto.Stack, slug string) error
 		return fmt.Errorf("destroy ephemeral env %q: %w", slug, destroyErr)
 	}
 
+	if err := deleteEphemeralManifests(ctx, projCfg, slug); err != nil {
+		return err
+	}
+
 	if err := s.Workspace().RemoveStack(ctx, slug); err != nil {
 		return fmt.Errorf("remove ephemeral stack %q after destroy: %w", slug, err)
 	}
 	fmt.Printf("ephemeral env %q torn down and stack removed.\n", slug)
+	return nil
+}
+
+// deleteEphemeralManifests removes the per-slug release manifests `up` wrote
+// (<workload>/manifest.<slug>.yaml). They must die with the env: Store.PinnedSHAs
+// unions the SHAs of EVERY manifest under a workload's prefix, so a dead preview's
+// leftover manifest would pin its SHA against pruning forever, silently defeating
+// artifacts.keep. It runs after the destroy and before RemoveStack, so a failure
+// leaves a (resource-free) stack the next reap retries rather than an orphaned pin.
+// A project with no artifacts store never replicated anything, so there is nothing
+// to delete.
+func deleteEphemeralManifests(ctx context.Context, projCfg projectConfig, slug string) error {
+	if !projCfg.Artifacts.configured() {
+		return nil
+	}
+	store, err := newArtifactStore(ctx, projCfg)
+	if err != nil {
+		return fmt.Errorf("delete release manifests for %q: %w", slug, err)
+	}
+	deleted, err := store.DeleteEnvManifests(ctx, slug)
+	if err != nil {
+		return fmt.Errorf("delete release manifests for %q: %w", slug, err)
+	}
+	if len(deleted) > 0 {
+		fmt.Printf("removed %d release manifest(s) for %q\n", len(deleted), slug)
+	}
 	return nil
 }

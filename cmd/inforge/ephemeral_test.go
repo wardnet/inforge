@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,12 +36,12 @@ func TestValidateSlug(t *testing.T) {
 		assert.NoError(t, validateSlug(s), "expected %q valid", s)
 	}
 	invalid := []string{
-		"",              // empty
-		"Eph-7f3k",      // uppercase
-		"-eph",          // leading hyphen
-		"eph-",          // trailing hyphen
-		"eph_7f3k",      // underscore
-		"eph.7f3k",      // dot
+		"",         // empty
+		"Eph-7f3k", // uppercase
+		"-eph",     // leading hyphen
+		"eph-",     // trailing hyphen
+		"eph_7f3k", // underscore
+		"eph.7f3k", // dot
 		"this-slug-name-is-way-too-long-to-be-valid", // > 24 chars
 	}
 	for _, s := range invalid {
@@ -164,4 +170,81 @@ func TestSourceHostDNS(t *testing.T) {
 	assert.Equal(t,
 		"bridge.vm.prd.use1.wardnet.network",
 		sourceHostDNS("bridge.vm.prd.use1.wardnet.network", "eph-7f3k", "testing"))
+}
+
+func TestCheckSlugFree(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o750))
+
+	// A slug naming a defined env would stamp the ephemeral identity (and the
+	// reaper's expires_at) onto that permanent env's stack.
+	err := checkSlugFree(dir, "prd")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "names a defined env")
+
+	assert.NoError(t, checkSlugFree(dir, "eph-7f3k"))
+}
+
+// testProjectConfig binds a project to a throwaway file:// Pulumi backend and
+// chdirs into a scratch workdir (the inline-source workspace writes Pulumi.yaml
+// into the cwd). The Automation API shells out to the pulumi CLI, so the test is
+// skipped where it is not installed.
+func testProjectConfig(t *testing.T) projectConfig {
+	t.Helper()
+	if _, err := exec.LookPath("pulumi"); err != nil {
+		t.Skip("pulumi CLI not installed")
+	}
+	state := t.TempDir()
+	t.Chdir(t.TempDir())
+	t.Setenv("PULUMI_CONFIG_PASSPHRASE", "test")
+	return projectConfig{Name: "inforgetest", Backend: backendConfig{Type: "file", URL: "file://" + state}}
+}
+
+// TestSelectStackDoesNotCreate: the teardown paths must never mint a stack. A
+// typo'd slug has to error out, leaving the name free for a later `up` (an
+// upserted empty stack would be unreapable AND unusable — createStack refuses an
+// existing name forever).
+func TestSelectStackDoesNotCreate(t *testing.T) {
+	ctx := context.Background()
+	projCfg := testProjectConfig(t)
+
+	_, err := selectStack(ctx, "eph-typo", projCfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no stack named")
+
+	// The slug is still free: a fresh `up` can claim it.
+	_, err = createStack(ctx, "eph-typo", projCfg)
+	require.NoError(t, err)
+
+	// And now that it exists, select finds it.
+	_, err = selectStack(ctx, "eph-typo", projCfg)
+	require.NoError(t, err)
+}
+
+// TestEphemeralPostUpUsesStackConfigDeployKey: in the standard CI setup the SSH
+// deploy key lives ONLY in the source stack config (deploy_private_key), which
+// `up` copies onto the ephemeral stack. The post-provision SSH work must resolve
+// it from there — resolving via the env-only path would hard-fail every `up`
+// after the whole env had been provisioned.
+func TestEphemeralPostUpUsesStackConfigDeployKey(t *testing.T) {
+	ctx := context.Background()
+	projCfg := testProjectConfig(t)
+	t.Setenv("INFORGE_DEPLOY_KEY", "")
+	t.Setenv("INFORGE_DEPLOY_PRIVATE_KEY", "")
+
+	s, err := createStack(ctx, "eph-key1", projCfg)
+	require.NoError(t, err)
+	require.NoError(t, s.SetConfig(ctx, "deploy_private_key", auto.ConfigValue{Value: "KEYMATERIAL", Secret: true}))
+
+	// An empty resources tree has no mesh hosts and no workloads, so the run has
+	// nothing to push: it succeeds iff the key resolved from the stack config.
+	dir := t.TempDir()
+	require.NoError(t, ephemeralPostUp(ctx, s, projCfg, dir, "prd", "eph-key1", ""))
+
+	// Control: with the stack-config key gone there is no key anywhere, and the
+	// same run refuses before touching a host.
+	require.NoError(t, s.RemoveConfig(ctx, "deploy_private_key"))
+	err = ephemeralPostUp(ctx, s, projCfg, dir, "prd", "eph-key1", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SSH deploy key required")
 }
