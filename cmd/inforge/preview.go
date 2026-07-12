@@ -14,7 +14,7 @@ import (
 	"github.com/wardnet/inforge/internal/output"
 )
 
-func newPreviewCmd(configPath *string) *cobra.Command {
+func newPreviewCmd(configPath, dir *string) *cobra.Command {
 	var stackConfig, format, report string
 	var allowMultiple bool
 
@@ -25,7 +25,7 @@ func newPreviewCmd(configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPreview(cmd.Context(), args[0], stackConfig, *configPath, format, report, allowMultiple)
+			return runPreview(cmd.Context(), args[0], stackConfig, *configPath, *dir, format, report, allowMultiple)
 		},
 	}
 
@@ -36,7 +36,7 @@ func newPreviewCmd(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, format, reportPath string, allowMultiple bool) error {
+func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, dir, format, reportPath string, allowMultiple bool) error {
 	projCfg, err := loadProjectConfig(configPath)
 	if err != nil {
 		return err
@@ -65,11 +65,15 @@ func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, for
 		return fmt.Errorf("set stack config: %w", err)
 	}
 
-	if err := setProviderDefaults(ctx, s, projCfg.Providers); err != nil {
+	if err := setResourcesDir(ctx, &s, dir); err != nil {
+		return fmt.Errorf("set resources dir: %w", err)
+	}
+
+	if err := setProviderDefaults(ctx, &s, projCfg.Providers); err != nil {
 		return fmt.Errorf("set provider defaults: %w", err)
 	}
 
-	if err := setBackups(ctx, s, projCfg.Backups); err != nil {
+	if err := setBackups(ctx, &s, projCfg.Backups); err != nil {
 		return fmt.Errorf("set backups config: %w", err)
 	}
 

@@ -12,6 +12,10 @@ import (
 // "-X main.version=<tag>". It defaults to "dev" for local builds.
 var version = "dev"
 
+// defaultResourcesDir is the root --dir default: the resources tree every command
+// (and program.Run, via the `dir` stack config key) reads when none is given.
+const defaultResourcesDir = "./resources"
+
 func main() {
 	if err := rootCmd().Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -27,7 +31,7 @@ func rootCmd() *cobra.Command {
 		Use:   "inforge",
 		Short: "inforge turns declarative infrastructure definitions into deployments",
 	}
-	root.PersistentFlags().StringVarP(&dir, "dir", "d", "./resources", "resources directory")
+	root.PersistentFlags().StringVarP(&dir, "dir", "d", defaultResourcesDir, "resources directory")
 	root.PersistentFlags().StringVarP(&cfg, "config", "c", "./inforge.yaml", "project config file")
 
 	// Nudge about newer releases after any command except update itself.
@@ -43,7 +47,7 @@ func rootCmd() *cobra.Command {
 		newUpdateCmd(),
 		newMatrixCmd(),
 		newPluginsCmd(),
-		newPreviewCmd(&cfg),
+		newPreviewCmd(&cfg, &dir),
 		newDeployCmd(&cfg, &dir),
 		newReleasesCmd(&cfg, &dir),
 		newReleaseCmd(&cfg),

@@ -126,11 +126,11 @@ func runEphemeralUp(ctx context.Context, configPath, dir, from, slugFlag, ttlFla
 	if err := s.SetAllConfig(ctx, idCfg); err != nil {
 		return fmt.Errorf("persist ephemeral identity config: %w", err)
 	}
-	if err := setProviderDefaults(ctx, s, projCfg.Providers); err != nil {
+	if err := setProviderDefaults(ctx, &s, projCfg.Providers); err != nil {
 		return fmt.Errorf("set provider defaults: %w", err)
 	}
 
-	if err := setBackups(ctx, s, projCfg.Backups); err != nil {
+	if err := setBackups(ctx, &s, projCfg.Backups); err != nil {
 		return fmt.Errorf("set backups config: %w", err)
 	}
 

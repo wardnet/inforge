@@ -129,18 +129,42 @@ func requireObjectBackend(projCfg projectConfig) error {
 	}
 }
 
+// configSetter is the slice of auto.Stack the stack-config injectors below use.
+// auto.Stack satisfies it; the interface keeps the injectors exercisable without a
+// Pulumi workspace.
+type configSetter interface {
+	SetConfig(ctx context.Context, key string, val auto.ConfigValue) error
+}
+
 // setProviderDefaults injects the project-level provider defaults into stack config
-// so program.Run can resolve effective providers without the project file. It is a
-// no-op when no defaults are configured, matching applyStackConfig's empty-guard.
-func setProviderDefaults(ctx context.Context, s auto.Stack, d types.ProviderDefaults) error {
-	if d.Compute == "" && len(d.Database) == 0 {
-		return nil
-	}
+// so program.Run can resolve effective providers without the project file.
+//
+// It ALWAYS writes the key (the marshalled zero value when nothing is configured)
+// rather than no-op'ing on an empty block, for the same reason setBackups does:
+// stack config persists across runs, so dropping the `providers:` block must clear
+// the previously-set defaults instead of silently re-applying them. program.Run
+// decodes the zero value back to "no defaults configured".
+func setProviderDefaults(ctx context.Context, s configSetter, d types.ProviderDefaults) error {
 	b, err := json.Marshal(d)
 	if err != nil {
 		return fmt.Errorf("marshal provider defaults: %w", err)
 	}
 	return s.SetConfig(ctx, "provider_defaults", auto.ConfigValue{Value: string(b)})
+}
+
+// setResourcesDir injects the resources directory (root --dir) into stack config —
+// the key program.Run reads to locate the resource tree. Without it the flag is
+// inert: the program would always load ./resources while the CLI-side steps (the
+// mesh baseline) read the requested tree.
+//
+// It ALWAYS writes the key, for the same persistence reason as setBackups: a run
+// without --dir must reset a tree stamped by an earlier run rather than keep
+// deploying it.
+func setResourcesDir(ctx context.Context, s configSetter, dir string) error {
+	if dir == "" {
+		dir = defaultResourcesDir
+	}
+	return s.SetConfig(ctx, "dir", auto.ConfigValue{Value: dir})
 }
 
 // setBackups injects the Postgres backup destination (ADR-0036) into stack config so
@@ -153,7 +177,7 @@ func setProviderDefaults(ctx context.Context, s auto.Stack, d types.ProviderDefa
 // absent block: stack config persists across runs, so removing the `backups:` block
 // must clear the previously-set values — otherwise program.Run keeps reading a stale
 // bucket and cannot be turned off. program.Run treats an empty bucket as unconfigured.
-func setBackups(ctx context.Context, s auto.Stack, b backupsConfig) error {
+func setBackups(ctx context.Context, s configSetter, b backupsConfig) error {
 	var bucket, endpoint string
 	if b.configured() {
 		var err error
