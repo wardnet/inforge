@@ -1207,17 +1207,29 @@ func safeTrigger(o pulumi.StringOutput) pulumi.Output {
 //
 // The original justification for `|| true` — a first deploy whose ExecStart payload
 // does not exist yet — does not need it: the unit carries
-// ConditionPathExists=<exec>, so systemd skips the start and exits 0 rather than
+// ConditionPathExists=<exec>, so systemd skips the START and exits 0 rather than
 // failing. And the unit is now guaranteed to exist, because every delivery command
 // DependsOn its service's provision command. A failure here is therefore real, and
 // must fail the deploy rather than leave a dead service behind a green apply.
+//
+// But that ConditionPathExists escape hatch covers start/restart ONLY. `systemctl
+// reload` on an inactive unit is a hard error — "Unit is not active, cannot reload"
+// — so a reload: service that has never had a release (unit enabled, condition
+// unmet, therefore inactive) failed the deploy at its own delivery command. That is
+// how a not-yet-deployed tunneller broke a wardnet deploy. So the signal branches:
+// reload/restart the unit when it is RUNNING, otherwise start it — a no-op exit 0
+// before the first release, and the thing that brings back a service that was
+// stopped mid-deploy. Never a bare skip: skipping is what leaves a service down
+// behind a green apply.
 func reloadOrRestartScript(svc types.ServiceSpec) string {
 	unit := iremote.Quote(service.UnitName(svc.Name))
 	cmd := "restart"
 	if svc.Reload != "" {
 		cmd = "reload"
 	}
-	return fmt.Sprintf("sudo systemctl %s %s", cmd, unit)
+	return fmt.Sprintf(
+		"if systemctl is-active --quiet %[1]s; then sudo systemctl %[2]s %[1]s; "+
+			"else sudo systemctl start %[1]s; fi", unit, cmd)
 }
 
 // readHostPubKey registers the remote command that reads a host's SSH public

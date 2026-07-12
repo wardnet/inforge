@@ -78,6 +78,27 @@ func TestReloadOrRestartScriptIsNotBestEffort(t *testing.T) {
 	assert.NotContains(t, got, "|| true")
 }
 
+// 2b. `systemctl reload` on an INACTIVE unit is a hard error ("Unit is not active,
+// cannot reload") — ConditionPathExists only saves a start/restart, never a reload.
+// A reload: service that has never had a release (unit enabled, condition unmet,
+// inactive) therefore failed the whole deploy at its delivery command. Guard the
+// reload on is-active, and start the unit when it is not running — never skip it,
+// or a service stopped mid-deploy would be left stopped behind a green apply.
+func TestReloadIsGuardedOnActiveUnit(t *testing.T) {
+	for _, svc := range []types.ServiceSpec{
+		{Name: "tunneller", Reload: "kill -HUP $MAINPID"},
+		{Name: "tenants"},
+	} {
+		got := reloadOrRestartScript(svc)
+		assert.True(t, strings.HasPrefix(got, "if systemctl is-active --quiet "),
+			"the signal must branch on whether the unit is running, got: %s", got)
+		assert.Contains(t, got, "systemctl start",
+			"a not-running unit must be STARTED (ConditionPathExists makes that a no-op "+
+				"before the first release), never skipped — skipping leaves it stopped: %s", got)
+		assert.NotContains(t, got, "|| true")
+	}
+}
+
 // 3. The provision script is also the CREATE half of a replace whose DELETE half ran
 // `disable --now`. Enabling without starting leaves a previously-running service
 // stopped.
