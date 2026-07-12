@@ -220,6 +220,11 @@ func globalNeedsDNS(g types.Resources) bool {
 
 // regionContext holds the foreign-key targets and tables a region's semantic
 // checks resolve against.
+// bindReasonHealth is the nginxBindsByHost reason for the public health listener —
+// the one implicit nginx bind checkIngress must NOT read as a collision with the
+// health port it is validating (it is that port's own registration).
+const bindReasonHealth = "public health listener"
+
 type regionContext struct {
 	available        map[string]bool
 	sizeTable        sizes.Table
@@ -300,7 +305,8 @@ type regionContext struct {
 	// (route target, backend health, exposed_ports, mesh.port) that lands on one of
 	// these fails at runtime with EADDRINUSE, so nginxBindErr rejects it at validate
 	// time. Kept separate from portUsersByHost so the ingress health-port check
-	// (checkIngress) does not self-collide against its own registered bind.
+	// (checkIngress) can tell its own registered bind (bindReasonHealth) from a
+	// foreign one and not self-collide.
 	nginxBindsByHost map[string]map[int]string
 	// meshHosts marks each canonical compute specKey that runs a mesh proxy — every
 	// host with >=1 service (pki: is required on every service) plus the gateway
@@ -1108,9 +1114,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		}
 		if f.spec.HealthProbesPort != 0 {
 			if host, ok := ctx.ingressHost[f.spec.Ingress]; ok && f.spec.Ingress != "" {
-				addNginxBind(host, ctx.ingressHealthPort[f.spec.Ingress], "public health listener")
+				addNginxBind(host, ctx.ingressHealthPort[f.spec.Ingress], bindReasonHealth)
 			} else if f.spec.Ingress == "" && ctx.gatewayServiceTargets[f.spec.Name] {
-				addNginxBind(ctx.gatewayHostKey, ctx.gatewayHealthPort, "public health listener")
+				addNginxBind(ctx.gatewayHostKey, ctx.gatewayHealthPort, bindReasonHealth)
 			}
 		}
 		if f.spec.Pki != "" {
@@ -2214,9 +2220,10 @@ func checkIngress(s types.IngressSpec, ctx regionContext) (errs, warns []string)
 	}
 
 	// The public health port nginx exposes (health_probes_port, default 81) must not
-	// collide with anything else nginx binds on this host: :80 (ACME HTTP-01) or any
-	// service route's public listen port. The backend health port is validated on the
-	// service (checkService), since that is where the service binds it.
+	// collide with anything else nginx binds on this host: :80 (ACME HTTP-01), the
+	// :443 an app or the scope gateway terminates TLS on, or any service route's
+	// public listen port. The backend health port is validated on the service
+	// (checkService), since that is where the service binds it.
 	healthPort := s.EffectiveHealthProbesPort()
 	if healthPort == 80 {
 		errs = append(errs, "health_probes_port: must not be 80 (ACME HTTP-01 owns :80 on the ingress host)")
@@ -2239,6 +2246,15 @@ func checkIngress(s types.IngressSpec, ctx regionContext) (errs, warns []string)
 	if hostKey != "" {
 		if users := ctx.portUsersByHost[hostKey][healthPort]; len(users) > 0 {
 			errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with a route listen port on this ingress host (used by service(s) %s); pick a distinct health port", healthPort, strings.Join(users, ", ")))
+		}
+		// The other public ports this host's nginx binds implicitly — the :443 an app
+		// or the scope gateway terminates TLS on (nginxBindsByHost; a route listen is
+		// covered above). The health servers are plain HTTP, and their port carries the
+		// listener's default_server, so sharing :443 with a TLS server block would both
+		// double-bind the socket and hand the port's default server to a plain-HTTP 404.
+		// The health listener's own bind on this port is not a collision with itself.
+		if reason, ok := ctx.nginxBindsByHost[hostKey][healthPort]; ok && reason != bindReasonHealth && healthPort != 80 {
+			errs = append(errs, fmt.Sprintf("health_probes_port: %d is already bound on this ingress host by nginx (%s); pick a distinct health port", healthPort, reason))
 		}
 	}
 	return errs, warns

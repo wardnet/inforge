@@ -2,6 +2,10 @@
 rootRecipient: age1testrootrecipient000000000000000000000000000000000000
 recipient: age1testcirecipient00000000000000000000000000000000000000000
 pkis:
+  # The mesh the fixture's one service (regional/service/relay) is a leaf of. Its
+  # material must exist: a service naming a pki: with no generated intermediate for
+  # its scope is a validation error, which would mask the forward-on-:80 error this
+  # fixture exists to assert.
   wardnet-mesh:
     topology: two-tier
     root:
@@ -14,14 +18,3 @@ pkis:
       us-east-1:
         cert: "TESTDATA-INT-CERT-PEM"
         key: "TESTDATA-INT-KEY-AGE"
-  # The root-only CA behind the `pki/daemon` grant in regional/service/api. A PKI
-  # resource manifest only declares that a CA should exist; its material is
-  # generated separately (`inforge pki add … --topology root-only`) and a grant on a
-  # declared-but-ungenerated PKI is a validation error — so the ok fixture must
-  # carry the material, not just the manifest.
-  daemon:
-    topology: root-only
-    scope: global
-    root:
-      cert: "TESTDATA-DAEMON-CERT-PEM"
-      key: "TESTDATA-DAEMON-KEY-AGE"

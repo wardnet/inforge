@@ -362,6 +362,48 @@ func TestRenderNoHealthNoCatchAll(t *testing.T) {
 	assert.NotContains(t, got, "default_server")
 }
 
+// TestRenderForwardOn80TerminatingHostRejected: :80 belongs to nginx's ACME
+// HTTP-01 challenge/redirect server whenever the host terminates TLS — for ANY
+// reason (a tls-termination route, an app, or the gateway). A forward there is a
+// stream{} server on the same public socket, so nginx would refuse to start;
+// Render must fail loud rather than emit a config that cannot come up. Validation
+// rejects this first — this is the enforcement layer behind a render that skipped it.
+func TestRenderForwardOn80TerminatingHostRejected(t *testing.T) {
+	fwd80 := []types.IngressRoute{
+		{Service: "relay", Type: types.IngressTypeForward, Listen: 80, Target: 8080, Backend: "127.0.0.1"},
+	}
+	// Terminating because of an app.
+	_, err := Render(fwd80, []types.IngressApp{{Name: "dash", FQDN: "my.example.com", Root: "/srv/dash", Spa: true}}, nil, 81, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ACME HTTP-01")
+	// Terminating because of a gateway.
+	_, err = Render(fwd80, nil, nil, 81, []types.IngressGateway{{Name: "api", FQDN: "api.example.com"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ACME HTTP-01")
+	// Terminating because of a tls-termination route.
+	_, err = Render(append(append([]types.IngressRoute(nil), fwd80...),
+		types.IngressRoute{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Backend: "127.0.0.1", FQDNs: []string{"api.example.com"}},
+	), nil, nil, 81, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ACME HTTP-01")
+	// Nothing terminates TLS: no :80 http server, so the forward owns the port.
+	got, err := Render(fwd80, nil, nil, 81, nil)
+	require.NoError(t, err)
+	assert.Contains(t, got, "listen 80;")
+}
+
+// TestRenderForwardOnHealthPortRejected: the public health port is nginx's too —
+// a forward on it would put the same socket in stream{} and http{}.
+func TestRenderForwardOnHealthPortRejected(t *testing.T) {
+	_, err := Render([]types.IngressRoute{
+		{Service: "relay", Type: types.IngressTypeForward, Listen: 81, Target: 8080, Backend: "127.0.0.1"},
+	}, nil, []types.IngressHealth{
+		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
+	}, 81, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "public health port")
+}
+
 // TestRenderHealthOnly: an ingress with only health endpoints (no TLS, no apps)
 // renders a minimal http block — no ACME issuer, no :80 redirect server, no stream.
 func TestRenderHealthOnly(t *testing.T) {

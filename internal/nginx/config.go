@@ -144,6 +144,25 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 		}
 		forwardByListen[f.Listen] = f
 	}
+	// http{} binds two public ports that are nginx's own, never a service's: :80 (the
+	// ACME HTTP-01 challenge/redirect server, whenever anything on the host terminates
+	// TLS) and healthPort (whenever there is a health entry). A forward is a stream{}
+	// server on its listen port, and nginx cannot hold one public socket in both
+	// contexts — it refuses to start. Validation rejects both collisions at authoring
+	// time (a forward on :80 where the host terminates TLS; a health/route listen
+	// clash); fail loud here too, so a render that skipped validation cannot ship an
+	// nginx.conf that will not start.
+	terminatesTLS := len(terminate) > 0 || len(sortedApps) > 0 || len(sortedGateways) > 0
+	if terminatesTLS {
+		if f, ok := forwardByListen[acmePort]; ok {
+			return "", fmt.Errorf("nginx: forward route for service %q listens on :%d, but this host terminates TLS — the ACME HTTP-01 challenge/redirect server owns that port", f.Service, acmePort)
+		}
+	}
+	if len(sortedHealth) > 0 {
+		if f, ok := forwardByListen[healthPort]; ok {
+			return "", fmt.Errorf("nginx: forward route for service %q listens on :%d, the public health port — the health servers own that port", f.Service, healthPort)
+		}
+	}
 	termOnListen := map[int]bool{}
 	for _, t := range terminate {
 		termOnListen[t.Listen] = true
@@ -299,7 +318,7 @@ func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health [
 		// /.well-known/acme-challenge/ before location matching, so the catch-all
 		// redirect to HTTPS does not swallow challenges.
 		children = append(children, block("server", nil,
-			dir("listen", "80"),
+			dir("listen", strconv.Itoa(acmePort)),
 			block("location", []string{"/"},
 				dir("return", "301", "https://$host$request_uri"),
 			),

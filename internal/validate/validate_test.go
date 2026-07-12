@@ -463,6 +463,24 @@ func TestCheckIngressUnknownHostRejected(t *testing.T) {
 	assert.Contains(t, errs[0], "does not resolve to a compute")
 }
 
+// TestCheckIngressHealthPortCollidesWithTLSBind: an app (or the scope gateway) on
+// the ingress host binds :443 without a route listen entry, so the public health
+// port must not be 443 — the health servers are plain HTTP and their port carries
+// the listener's default_server, so the collision would both double-bind the socket
+// and hand :443's default server to a plain-HTTP 404.
+func TestCheckIngressHealthPortCollidesWithTLSBind(t *testing.T) {
+	ctx := ingressCtx()
+	ctx.nginxBindsByHost = map[string]map[int]string{"bridge-01": {443: "app TLS listener"}}
+	errs, _ := checkIngress(types.IngressSpec{Name: "web", Host: "bridge", HealthProbesPort: 443}, ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "already bound on this ingress host by nginx (app TLS listener)")
+
+	// The health listener's OWN registered bind is not a collision with itself.
+	ctx.nginxBindsByHost = map[string]map[int]string{"bridge-01": {80: "ACME HTTP-01 challenge/redirect", 81: bindReasonHealth}}
+	errs, _ = checkIngress(types.IngressSpec{Name: "web", Host: "bridge", HealthProbesPort: 81}, ctx)
+	assert.Empty(t, errs)
+}
+
 // TestCheckAppGlobalIngressRejected: an app referencing a global ingress is
 // rejected — like service.host, an app served from a global ingress is declared
 // in the global slice itself, not referenced from a region.
