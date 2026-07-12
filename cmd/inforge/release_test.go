@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"slices"
@@ -42,15 +43,15 @@ func (s *stubS3) DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s
 	return nil, errors.New("stubS3: DeleteObject not implemented")
 }
 
-// TestServiceApplyScript pins adapter #1's remote command — the refactor behind
-// the delivery seam must keep the service path byte-for-byte: extract into the
-// service folder, drop the payload, restart the unit, off the shared payload path.
+// TestServiceApplyScript pins adapter #1's remote command: extract the payload
+// the orchestrator uploaded to THIS invocation's mktemp'd path into the service
+// folder, then restart the unit. The payload is removed by the orchestrator
+// (which does it on failure too), not by the script.
 func TestServiceApplyScript(t *testing.T) {
-	got := serviceApplyScript(service.DeployTarget{Folder: "/srv/wardnet/api", Unit: "wardnet-api.service"})
+	got := serviceApplyScript(service.DeployTarget{Folder: "/srv/wardnet/api", Unit: "wardnet-api.service"}, "/tmp/inforge-payload.AbCd012345")
 	// Folder and unit (both name-derived) are single-quoted via remote.Quote, matching
 	// the app path — no raw interpolation of a caller-supplied value into the shell.
-	want := "sudo tar -xzf /tmp/inforge-payload.tgz -C '/srv/wardnet/api' && " +
-		"rm -f /tmp/inforge-payload.tgz && " +
+	want := "sudo tar -xzf '/tmp/inforge-payload.AbCd012345' -C '/srv/wardnet/api' && " +
 		"sudo systemctl restart 'wardnet-api.service'"
 	assert.Equal(t, want, got)
 }
@@ -72,6 +73,10 @@ func TestServiceDeliveryTargets(t *testing.T) {
 	assert.Equal(t, "ops", dts[1].sshUser)
 	assert.Equal(t, "h1", dts[0].host)
 	assert.Equal(t, "extracting to /srv/wardnet/api and restarting wardnet-api.service", dts[0].describe)
+	// Each target's apply script closes over ITS OWN deploy target — h1's folder,
+	// h2's unit — not the last one in the loop.
+	assert.Contains(t, dts[0].applyScript("/tmp/p"), "restart 'wardnet-api.service'")
+	assert.Contains(t, dts[1].applyScript("/tmp/p"), "restart 'u'")
 	assert.Equal(t, "amd64", dts[0].arch)
 	assert.Equal(t, "/tmp/amd64.tgz", dts[0].payloadFile)
 	assert.Equal(t, "arm64", dts[1].arch)
@@ -81,9 +86,9 @@ func TestServiceDeliveryTargets(t *testing.T) {
 // TestAppReleaseScript pins adapter #2's fresh-release command: extract the bundle
 // into its per-SHA dir, atomically swap `current`, validate + reload nginx, GC.
 func TestAppReleaseScript(t *testing.T) {
-	got := appReleaseScript(iapp.DeployTarget{App: "my"}, "abc123")
+	got := appReleaseScript(iapp.DeployTarget{App: "my"}, "abc123", "/tmp/inforge-payload.AbCd012345")
 	assert.Contains(t, got, "sudo mkdir -p '/srv/wardnet/app/my/abc123'")
-	assert.Contains(t, got, "sudo tar -xzf /tmp/inforge-payload.tgz -C '/srv/wardnet/app/my/abc123'")
+	assert.Contains(t, got, "sudo tar -xzf '/tmp/inforge-payload.AbCd012345' -C '/srv/wardnet/app/my/abc123'")
 	assert.Contains(t, got, "sudo mv -T '/srv/wardnet/app/my/.current.tmp' '/srv/wardnet/app/my/current'")
 	assert.Contains(t, got, "sudo nginx -t")
 	assert.Contains(t, got, "sudo systemctl reload nginx")
@@ -119,14 +124,14 @@ func TestAppDeliveryTargets(t *testing.T) {
 
 	fresh := appDeliveryTargets(targets, "abc123", "/tmp/bundle.tgz", false)
 	assert.Equal(t, "edge.example.com", fresh[0].host)
-	assert.Contains(t, fresh[0].applyScript, "tar -xzf")
+	assert.Contains(t, fresh[0].applyScript("/tmp/inforge-payload.AbCd012345"), "tar -xzf '/tmp/inforge-payload.AbCd012345'")
 	assert.Equal(t, "releasing /srv/wardnet/app/my/abc123", fresh[0].describe)
 	assert.Empty(t, fresh[0].arch)
 	assert.Equal(t, "/tmp/bundle.tgz", fresh[0].payloadFile)
 
 	roll := appDeliveryTargets(targets, "abc123", "/tmp/bundle.tgz", true)
-	assert.Contains(t, roll[0].applyScript, "test -d")
-	assert.NotContains(t, roll[0].applyScript, "tar -xzf")
+	assert.Contains(t, roll[0].applyScript(""), "test -d")
+	assert.NotContains(t, roll[0].applyScript(""), "tar -xzf")
 	assert.Equal(t, "rolling back /srv/wardnet/app/my/abc123", roll[0].describe)
 	assert.Empty(t, roll[0].payloadFile, "rollback never uploads, regardless of the payload passed in")
 }
@@ -144,6 +149,167 @@ func idx(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// withFakeTransport swaps the whole delivery exec boundary (mktemp over
+// runProbeSSH, scp, ssh) for fakes, restoring the real implementations on
+// cleanup, so deliverToTarget's ordering/cleanup logic runs without a host.
+func withFakeTransport(t *testing.T, scp, ssh func(ctx context.Context, args []string) ([]byte, error)) {
+	t.Helper()
+	origSCP, origSSH := runSCP, runSSH
+	runSCP, runSSH = scp, ssh
+	t.Cleanup(func() { runSCP, runSSH = origSCP, origSSH })
+}
+
+// fakeMktemp makes runProbeSSH answer every `mktemp` with a distinct path, as a
+// real host would.
+func fakeMktemp(t *testing.T) {
+	t.Helper()
+	var n int
+	withFakeProbeSSH(t, func(_ context.Context, args []string) ([]byte, error) {
+		require.Contains(t, args[len(args)-1], "mktemp /tmp/inforge-payload.")
+		n++
+		return fmt.Appendf(nil, "/tmp/inforge-payload.rand%d\n", n), nil
+	})
+}
+
+// serviceTarget is a delivery target shaped like a real service release.
+func serviceTarget(payload string) deliveryTarget {
+	return deliveryTarget{
+		host: "h1", sshUser: "deploy", arch: "amd64", payloadFile: payload,
+		applyScript: func(p string) string {
+			return serviceApplyScript(service.DeployTarget{Folder: "/srv/wardnet/api", Unit: "u"}, p)
+		},
+	}
+}
+
+// TestDeliverToTargetUsesUniqueRemotePath: the payload lands on a per-invocation
+// mktemp'd path (never the world-writable, predictable /tmp/inforge-payload.tgz
+// two concurrent releases would clobber), the apply script extracts from THAT
+// path, and it is removed afterwards.
+func TestDeliverToTargetUsesUniqueRemotePath(t *testing.T) {
+	fakeMktemp(t)
+	var scpDest string
+	var sshCmds []string
+	withFakeTransport(t,
+		func(_ context.Context, args []string) ([]byte, error) {
+			scpDest = args[len(args)-1]
+			return nil, nil
+		},
+		func(_ context.Context, args []string) ([]byte, error) {
+			sshCmds = append(sshCmds, args[len(args)-1])
+			return nil, nil
+		})
+
+	err := deliverReleaseTo(context.Background(), "sha1", []deliveryTarget{serviceTarget("/tmp/local.tgz")}, "/tmp/key",
+		func(context.Context, string, string) error { return nil })
+	require.NoError(t, err)
+
+	assert.Equal(t, "deploy@h1:/tmp/inforge-payload.rand1", scpDest)
+	require.Len(t, sshCmds, 2)
+	assert.Contains(t, sshCmds[0], "tar -xzf '/tmp/inforge-payload.rand1'")
+	assert.NotContains(t, sshCmds[0], "/tmp/inforge-payload.tgz")
+	assert.Equal(t, "rm -f '/tmp/inforge-payload.rand1'", sshCmds[1])
+}
+
+// TestDeliverToTargetPinsBeforeApply: the manifest pin is written BEFORE the
+// apply script restarts the host onto the new SHA — otherwise a failed pin
+// leaves a live-but-unpinned SHA the next prune can delete.
+func TestDeliverToTargetPinsBeforeApply(t *testing.T) {
+	fakeMktemp(t)
+	var events []string
+	withFakeTransport(t,
+		func(context.Context, []string) ([]byte, error) { return nil, nil },
+		func(_ context.Context, args []string) ([]byte, error) {
+			if strings.Contains(args[len(args)-1], "systemctl restart") {
+				events = append(events, "apply")
+			}
+			return nil, nil
+		})
+
+	err := deliverReleaseTo(context.Background(), "sha1", []deliveryTarget{serviceTarget("/tmp/local.tgz")}, "/tmp/key",
+		func(_ context.Context, host, arch string) error {
+			events = append(events, "pin "+host+" "+arch)
+			return nil
+		})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pin h1 amd64", "apply"}, events)
+}
+
+// TestDeliverToTargetFailedPinNeverApplies: if the manifest write fails the host
+// must never be restarted onto the unpinned SHA — the error surfaces and the
+// apply is not attempted (the payload is still cleaned up).
+func TestDeliverToTargetFailedPinNeverApplies(t *testing.T) {
+	fakeMktemp(t)
+	boom := errors.New("bucket down")
+	var sshCmds []string
+	withFakeTransport(t,
+		func(context.Context, []string) ([]byte, error) { return nil, nil },
+		func(_ context.Context, args []string) ([]byte, error) {
+			sshCmds = append(sshCmds, args[len(args)-1])
+			return nil, nil
+		})
+
+	err := deliverReleaseTo(context.Background(), "sha1", []deliveryTarget{serviceTarget("/tmp/local.tgz")}, "/tmp/key",
+		func(context.Context, string, string) error { return boom })
+	require.ErrorIs(t, err, boom)
+	assert.Equal(t, []string{"rm -f '/tmp/inforge-payload.rand1'"}, sshCmds, "no apply may run once the pin failed; the payload is still removed")
+}
+
+// TestDeliverToTargetRemovesPayloadOnApplyFailure: a failed apply must not leave
+// the uploaded tarball behind, and the removal must still run on a cancelled
+// context (the payload outliving the release is the thing we're preventing).
+func TestDeliverToTargetRemovesPayloadOnApplyFailure(t *testing.T) {
+	fakeMktemp(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var removed bool
+	var removeCtxErr error
+	withFakeTransport(t,
+		func(context.Context, []string) ([]byte, error) { return nil, nil },
+		func(c context.Context, args []string) ([]byte, error) {
+			cmd := args[len(args)-1]
+			if strings.HasPrefix(cmd, "rm -f") {
+				removed, removeCtxErr = true, c.Err()
+				return nil, nil
+			}
+			cancel() // the apply died with the context (e.g. operator ^C)
+			return []byte("unit failed"), errors.New("exit 1")
+		})
+
+	err := deliverReleaseTo(ctx, "sha1", []deliveryTarget{serviceTarget("/tmp/local.tgz")}, "/tmp/key",
+		func(context.Context, string, string) error { return nil })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "remote deploy to h1")
+	assert.True(t, removed, "the uploaded payload must be removed even when the apply failed")
+	assert.NoError(t, removeCtxErr, "cleanup must not inherit the cancelled context")
+}
+
+// TestDeliverToTargetNoPayloadSkipsUpload: an app rollback carries no payload —
+// nothing is mktemp'd, uploaded or removed, and the apply script gets an empty
+// path.
+func TestDeliverToTargetNoPayloadSkipsUpload(t *testing.T) {
+	withFakeProbeSSH(t, func(context.Context, []string) ([]byte, error) {
+		return nil, errors.New("mktemp must not run for a payload-less target")
+	})
+	var scps, sshCmds int
+	withFakeTransport(t,
+		func(context.Context, []string) ([]byte, error) { scps++; return nil, nil },
+		func(_ context.Context, args []string) ([]byte, error) {
+			sshCmds++
+			assert.Equal(t, "rollback", args[len(args)-1])
+			return nil, nil
+		})
+
+	target := deliveryTarget{host: "h1", sshUser: "deploy", applyScript: func(p string) string {
+		assert.Empty(t, p)
+		return "rollback"
+	}}
+	require.NoError(t, deliverReleaseTo(context.Background(), "sha1", []deliveryTarget{target}, "/tmp/key",
+		func(context.Context, string, string) error { return nil }))
+	assert.Zero(t, scps)
+	assert.Equal(t, 1, sshCmds, "only the apply runs: no upload, so nothing to remove")
 }
 
 // withFakeProbeSSH swaps runProbeSSH for the duration of the test, restoring

@@ -33,19 +33,42 @@ const maxConcurrentArchProbes = 8
 // per-SHA dir, atomically swaps `current`, and reloads nginx). deliverRelease is
 // that shared seam — see ADR-0016 / ADR-0026.
 
-// remotePayloadPath is where the orchestrator uploads the artifact tarball on
-// every target before running its apply script (shared by service + app).
-const remotePayloadPath = "/tmp/inforge-payload.tgz"
+// remotePayloadTemplate is the mktemp(1) template the orchestrator materializes
+// the payload path from on every target, once per invocation. It must NOT be a
+// fixed name: /tmp is world-writable, so a predictable path is both a symlink
+// target an unprivileged local user can pre-plant (the extract runs under sudo)
+// and a file two concurrent releases against one host would clobber for each
+// other. mktemp creates it 0600-owned by the deploy user.
+const remotePayloadTemplate = "/tmp/inforge-payload.XXXXXXXXXX"
 
 // deliveryTarget is one host the orchestrator delivers to, plus the
-// workload-specific remote command that applies the uploaded payload.
+// workload-specific remote command that applies the uploaded payload — built
+// from the per-invocation remote payload path deliverRelease mktemps for that
+// host (empty for a payload-less apply, e.g. an app rollback).
 type deliveryTarget struct {
-	host        string // SSH host (public DNS name)
-	sshUser     string // connect-as account (the host's deploy_user)
-	applyScript string // remote shell run after the payload is uploaded
-	describe    string // human label for the apply step (folder+unit / bundle path)
-	arch        string // detected CPU arch (services) or "" (apps — architecture-agnostic)
-	payloadFile string // local path scp'd to this target; "" skips the upload (app rollback)
+	host        string                          // SSH host (public DNS name)
+	sshUser     string                          // connect-as account (the host's deploy_user)
+	applyScript func(payloadPath string) string // remote shell run after the payload is uploaded
+	describe    string                          // human label for the apply step (folder+unit / bundle path)
+	arch        string                          // detected CPU arch (services) or "" (apps — architecture-agnostic)
+	payloadFile string                          // local path scp'd to this target; "" skips the upload (app rollback)
+}
+
+// deploymentPinner records that host now runs (sha, arch) in the per-env
+// manifest — the store dependency deliverReleaseTo takes as an injected
+// function instead of a *release.Store, so the orchestrator's upload/pin/apply
+// ordering is unit testable without a live bucket.
+type deploymentPinner func(ctx context.Context, host, arch string) error
+
+// runSCP / runSSH are the exec boundary deliverReleaseTo pushes payloads and
+// runs apply scripts through, factored into swappable vars (as runProbeSSH is)
+// so the orchestration around them is testable against a fake transport.
+var runSCP = func(ctx context.Context, args []string) ([]byte, error) {
+	return exec.CommandContext(ctx, "scp", args...).CombinedOutput() // #nosec G204 -- scp binary hardcoded; account/host come from the deploy descriptor's resolved targets and the remote path is mktemp'd by us
+}
+
+var runSSH = func(ctx context.Context, args []string) ([]byte, error) {
+	return exec.CommandContext(ctx, "ssh", args...).CombinedOutput() // #nosec G204 -- ssh binary hardcoded; applyScript is built internally by serviceApplyScript/appReleaseScript from quoted config values, and account is from the resolved deploy target
 }
 
 // deliverRelease is the shared release orchestrator both the service and app
@@ -53,32 +76,92 @@ type deliveryTarget struct {
 // uploads its own payloadFile over scp — skipped when empty, which is how an
 // app rollback re-points an already-delivered bundle without re-fetching it, and
 // how a mixed-arch service fleet delivers a DIFFERENT payload to different
-// targets in one call — runs the target's apply script over ssh, then records
-// the delivered SHA (and arch) in the per-env manifest under slug.
+// targets in one call — records the delivered SHA (and arch) in the per-env
+// manifest under slug, then runs the target's apply script over ssh.
 func deliverRelease(ctx context.Context, store *release.Store, slug, env, sha string, targets []deliveryTarget, sshKeyPath string) error {
+	return deliverReleaseTo(ctx, sha, targets, sshKeyPath, func(ctx context.Context, host, arch string) error {
+		return store.SetDeployment(ctx, slug, env, host, sha, arch, time.Now())
+	})
+}
+
+// deliverReleaseTo is deliverRelease's store-free half: it delivers to every
+// target in order, pinning through pin.
+func deliverReleaseTo(ctx context.Context, sha string, targets []deliveryTarget, sshKeyPath string, pin deploymentPinner) error {
 	for _, t := range targets {
-		account := fmt.Sprintf("%s@%s", t.sshUser, t.host)
-		if t.payloadFile != "" {
-			fmt.Printf("uploading to %s...\n", t.host)
-			scpArgs := append(append([]string{}, sshArgs(sshKeyPath)...), t.payloadFile, account+":"+remotePayloadPath)
-			if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil { // #nosec G204 -- scp binary hardcoded; account/host come from the deploy descriptor's resolved targets and remotePayloadPath is a hardcoded constant
-				return fmt.Errorf("upload payload to %s: %w\n%s", t.host, err, out)
-			}
-		}
-		if t.describe != "" {
-			fmt.Printf("%s on %s...\n", t.describe, t.host)
-		} else {
-			fmt.Printf("applying %s on %s...\n", sha, t.host)
-		}
-		sshRunArgs := append(append([]string{}, sshArgs(sshKeyPath)...), account, t.applyScript)
-		if out, err := exec.CommandContext(ctx, "ssh", sshRunArgs...).CombinedOutput(); err != nil { // #nosec G204 -- ssh binary hardcoded; applyScript is built internally by serviceApplyScript/appApplyScript from quoted config values, and account is from the resolved deploy target
-			return fmt.Errorf("remote deploy to %s: %w\n%s", t.host, err, out)
-		}
-		if err := store.SetDeployment(ctx, slug, env, t.host, sha, t.arch, time.Now()); err != nil {
-			return fmt.Errorf("record manifest entry for %s: %w", t.host, err)
+		if err := deliverToTarget(ctx, sha, t, sshKeyPath, pin); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// deliverToTarget uploads t's payload to a freshly mktemp'd remote path (removed
+// again on every exit path, success or failure), pins the SHA, then applies.
+//
+// The pin must precede the apply: the apply script overwrites the on-host payload
+// and restarts the unit, so from the moment it runs the host IS this SHA. Pinning
+// afterwards leaves a window where a live SHA is unpinned in the manifest and the
+// next `releases push` prune can delete its artifact. Pinning first can only
+// over-retain an artifact (harmless), never delete a live one.
+func deliverToTarget(ctx context.Context, sha string, t deliveryTarget, sshKeyPath string, pin deploymentPinner) error {
+	account := fmt.Sprintf("%s@%s", t.sshUser, t.host)
+
+	var payloadPath string
+	if t.payloadFile != "" {
+		remotePath, err := remoteMktempPayload(ctx, account, sshKeyPath)
+		if err != nil {
+			return err
+		}
+		payloadPath = remotePath
+		defer removeRemotePayload(ctx, account, sshKeyPath, payloadPath)
+
+		fmt.Printf("uploading to %s...\n", t.host)
+		scpArgs := append(append([]string{}, sshArgs(sshKeyPath)...), t.payloadFile, account+":"+payloadPath)
+		if out, err := runSCP(ctx, scpArgs); err != nil {
+			return fmt.Errorf("upload payload to %s: %w\n%s", t.host, err, out)
+		}
+	}
+
+	if t.describe != "" {
+		fmt.Printf("%s on %s...\n", t.describe, t.host)
+	} else {
+		fmt.Printf("applying %s on %s...\n", sha, t.host)
+	}
+	if err := pin(ctx, t.host, t.arch); err != nil {
+		return fmt.Errorf("record manifest entry for %s: %w", t.host, err)
+	}
+	sshRunArgs := append(append([]string{}, sshArgs(sshKeyPath)...), account, t.applyScript(payloadPath))
+	if out, err := runSSH(ctx, sshRunArgs); err != nil {
+		return fmt.Errorf("remote deploy to %s: %w\n%s", t.host, err, out)
+	}
+	return nil
+}
+
+// remoteMktempPayload materializes this invocation's unique payload path on the
+// target, over the same SSH transport probeHostArch uses.
+func remoteMktempPayload(ctx context.Context, account, sshKeyPath string) (string, error) {
+	args := append(append([]string{}, sshArgs(sshKeyPath)...), account, "mktemp "+remotePayloadTemplate)
+	out, err := runProbeSSH(ctx, args)
+	if err != nil {
+		return "", fmt.Errorf("create remote payload path on %s: %w", account, err)
+	}
+	path := strings.TrimSpace(string(out))
+	if path == "" {
+		return "", fmt.Errorf("create remote payload path on %s: mktemp returned no path", account)
+	}
+	return path, nil
+}
+
+// removeRemotePayload drops the uploaded payload from the target. It runs on
+// every exit path — including a failed apply — and on a cancelled context (the
+// tarball must not outlive the release regardless of why it ended), so a
+// leftover payload can never be picked up by a later run. A cleanup failure is a
+// warning, never the error the caller sees.
+func removeRemotePayload(ctx context.Context, account, sshKeyPath, path string) {
+	args := append(append([]string{}, sshArgs(sshKeyPath)...), account, "rm -f "+remote.Quote(path))
+	if out, err := runSSH(context.WithoutCancel(ctx), args); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: remove payload %s on %s: %v\n%s\n", path, account, err, out)
+	}
 }
 
 // runProbeSSH executes `ssh <args...>` and returns stdout — the exec boundary
@@ -239,13 +322,12 @@ func downloadArchPayloads(ctx context.Context, store *release.Store, svc, sha st
 }
 
 // serviceApplyScript is adapter #1: the remote command that applies a service
-// payload — extract it into the service folder and restart the inforge-managed
-// unit. It reproduces the historical `sshDeliver` body verbatim so the refactor
-// behind the seam is behaviour-preserving.
-func serviceApplyScript(t service.DeployTarget) string {
+// payload from payloadPath — extract it into the service folder and restart the
+// inforge-managed unit. The payload itself is removed by the orchestrator, on
+// failure too, so the script never has to.
+func serviceApplyScript(t service.DeployTarget, payloadPath string) string {
 	return strings.Join([]string{
-		fmt.Sprintf("sudo tar -xzf %s -C %s", remotePayloadPath, remote.Quote(t.Folder)),
-		fmt.Sprintf("rm -f %s", remotePayloadPath),
+		fmt.Sprintf("sudo tar -xzf %s -C %s", remote.Quote(payloadPath), remote.Quote(t.Folder)),
 		fmt.Sprintf("sudo systemctl restart %s", remote.Quote(t.Unit)),
 	}, " && ")
 }
@@ -264,7 +346,7 @@ func serviceDeliveryTargets(targets []service.DeployTarget, archOf, payloadOf ma
 		out = append(out, deliveryTarget{
 			host:        t.HostDNS,
 			sshUser:     t.SSHUser,
-			applyScript: serviceApplyScript(t),
+			applyScript: func(payloadPath string) string { return serviceApplyScript(t, payloadPath) },
 			describe:    fmt.Sprintf("extracting to %s and restarting %s", t.Folder, t.Unit),
 			arch:        arch,
 			payloadFile: payloadOf[arch],
@@ -273,16 +355,16 @@ func serviceDeliveryTargets(targets []service.DeployTarget, archOf, payloadOf ma
 	return out
 }
 
-// appReleaseScript is adapter #2 (fresh release): extract the uploaded bundle
-// into its per-SHA directory, atomically swap `current` to it, validate + reload
-// nginx, then GC old bundles. Extraction is idempotent — re-releasing a SHA
-// re-populates the same directory.
-func appReleaseScript(t iapp.DeployTarget, sha string) string {
+// appReleaseScript is adapter #2 (fresh release): extract the bundle uploaded to
+// payloadPath into its per-SHA directory, atomically swap `current` to it,
+// validate + reload nginx, then GC old bundles. Extraction is idempotent —
+// re-releasing a SHA re-populates the same directory. The payload itself is
+// removed by the orchestrator, on failure too, so the script never has to.
+func appReleaseScript(t iapp.DeployTarget, sha, payloadPath string) string {
 	bundleDir := iapp.BundleDir(t.App, sha)
 	return strings.Join([]string{
 		fmt.Sprintf("sudo mkdir -p %s", remote.Quote(bundleDir)),
-		fmt.Sprintf("sudo tar -xzf %s -C %s", remotePayloadPath, remote.Quote(bundleDir)),
-		fmt.Sprintf("rm -f %s", remotePayloadPath),
+		fmt.Sprintf("sudo tar -xzf %s -C %s", remote.Quote(payloadPath), remote.Quote(bundleDir)),
 		// Validate BEFORE swapping `current`: if `nginx -t` fails, the swap never
 		// runs (&&), so the served doc root and `current` can't diverge.
 		"sudo nginx -t",
@@ -317,9 +399,11 @@ func appRollbackScript(t iapp.DeployTarget, sha string) string {
 func appDeliveryTargets(targets []iapp.DeployTarget, sha, payload string, rollback bool) []deliveryTarget {
 	out := make([]deliveryTarget, 0, len(targets))
 	for _, t := range targets {
-		script, verb, pf := appReleaseScript(t, sha), "releasing", payload
+		script := func(payloadPath string) string { return appReleaseScript(t, sha, payloadPath) }
+		verb, pf := "releasing", payload
 		if rollback {
-			script, verb, pf = appRollbackScript(t, sha), "rolling back", ""
+			script = func(string) string { return appRollbackScript(t, sha) }
+			verb, pf = "rolling back", ""
 		}
 		out = append(out, deliveryTarget{
 			host:        t.IngressHostDNS,
