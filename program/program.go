@@ -356,7 +356,7 @@ func Run(ctx *pulumi.Context) error {
 		// pki: service. It needs the scope's private IPs (attached above) and the
 		// global slice's outputs (realized first, so its public IPs are ready for a
 		// regional scope's cross-scope targets).
-		if err := realizeMesh(ctx, sc.reg, sc.res, globalRes, computeOutputs, sc.key, sc.slug, regionNames, gates, vars.SSH.DeployPrivateKey, env, providerDefaults); err != nil {
+		if err := realizeMesh(ctx, sc.reg, sc.res, res, globalRes, computeOutputs, sc.key, sc.slug, regionNames, gates, vars.SSH.DeployPrivateKey, env, providerDefaults); err != nil {
 			return err
 		}
 		// Self-hosted database clusters (ADR-0036): install Postgres on each cluster's
