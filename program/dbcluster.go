@@ -275,7 +275,7 @@ type selfHostedRoleProvisioner struct {
 	privateIP pulumi.StringOutput
 	port      int
 	database  string
-	owner     string          // the logical database owner, for role teardown (REASSIGN OWNED)
+	owner     string          // the logical database owner: reassign target on an rw→ro downgrade and on role teardown
 	dependsOn pulumi.Resource // the command that created the database + owner
 	lastMint  pulumi.Resource // the previous role mint on THIS database, to serialize mints
 }
@@ -296,7 +296,7 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 	// The mint script carries the password literal, so build it inside an apply over
 	// the secret; the whole command's Create is then encrypted in Pulumi state.
 	mintScript := pw.Result.ApplyT(func(password string) (string, error) {
-		return postgres.MintRoleScript(p.port, roleName, password, p.database, permission)
+		return postgres.MintRoleScript(p.port, roleName, password, p.database, p.owner, permission)
 	}).(pulumi.StringOutput)
 	// On teardown (grant/service removed) reassign the role's owned objects to the
 	// database owner and drop the role, so a retired service leaves no live login.
