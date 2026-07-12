@@ -141,7 +141,10 @@ func provisionDatabaseBackups(ctx *pulumi.Context, res types.Resources, computeO
 			Connection: conn,
 			Create:     credScript,
 			Update:     credScript,
-			Triggers:   pulumi.Array{credScript},
+			// credScript carries the R2 access key + secret (both secret outputs); a raw
+			// secret in Triggers persists it in state and breaks preview the moment the
+			// value is also unknown — safeTrigger hashes + unsecrets it (see program.go).
+			Triggers: pulumi.Array{safeTrigger(credScript)},
 		}, pulumi.DependsOn([]pulumi.Resource{installCmd}))
 		if err != nil {
 			return fmt.Errorf("backups: host %q: write R2 credential: %w", hostKey, err)

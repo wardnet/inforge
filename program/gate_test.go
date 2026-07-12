@@ -31,6 +31,11 @@ type capturedCommand struct {
 	// to the engine error `malformed RPC secret: missing value for "triggers"` at
 	// preview (see safeTrigger).
 	triggersSecret bool
+	// triggers records the command's resolved string trigger elements, so a test can
+	// assert a trigger is the safeTrigger HASH of a script rather than the script
+	// itself (the mocked engine resolves a secret value, so secretness alone does not
+	// prove the hashing happened).
+	triggers []string
 }
 
 // commandMocks is a Pulumi mock monitor that records every command.remote keyed
@@ -52,8 +57,15 @@ func (m *commandMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, err
 func (m *commandMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
 	if args.TypeToken == commandType {
 		c := capturedCommand{}
-		if v, ok := args.Inputs["create"]; ok && v.IsString() {
-			c.create = v.StringValue()
+		if v, ok := args.Inputs["create"]; ok {
+			// A script built inside an apply over a secret (a password, a credential) is
+			// itself secret — unwrap before reading it.
+			if v.IsSecret() {
+				v = v.SecretValue().Element
+			}
+			if v.IsString() {
+				c.create = v.StringValue()
+			}
 		}
 		// The connection carries the private key, so command.remote marks the whole
 		// object secret — unwrap it before reading the user.
@@ -69,6 +81,19 @@ func (m *commandMocks) NewResource(args pulumi.MockResourceArgs) (string, resour
 		}
 		if v, ok := args.Inputs["triggers"]; ok {
 			c.triggersSecret = v.ContainsSecrets()
+			if v.IsSecret() {
+				v = v.SecretValue().Element
+			}
+			if v.IsArray() {
+				for _, e := range v.ArrayValue() {
+					if e.IsSecret() {
+						e = e.SecretValue().Element
+					}
+					if e.IsString() {
+						c.triggers = append(c.triggers, e.StringValue())
+					}
+				}
+			}
 		}
 		if args.RegisterRPC != nil {
 			c.deps = args.RegisterRPC.GetDependencies()
