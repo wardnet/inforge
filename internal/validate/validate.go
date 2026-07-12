@@ -209,6 +209,13 @@ type regionContext struct {
 	// database-cluster, so checkService can reject a co-located service backend bind
 	// that falls in the reserved Postgres port range (postgres.ClusterPort, 5432+).
 	clusterHosts map[string]bool
+	// clusterHostByName maps a database-cluster NAME to the canonical specKey of its
+	// host compute, and databaseClusterByName maps a logical database NAME to its
+	// cluster. Together they resolve a database grant target to a host (and thence a
+	// network) so checkGrants can enforce the same-network rule the cluster's
+	// private-only 5432 firewall imposes.
+	clusterHostByName     map[string]string
+	databaseClusterByName map[string]string
 	// ingressNames holds the ingress resource names declared in this scope. An
 	// app's or service's `ingress:` foreign key must resolve to one of them —
 	// same-scope only, exactly like a service's host must be a compute in the same
@@ -245,6 +252,23 @@ type regionContext struct {
 	// holds the public port). It is the public-port collision oracle (e.g. a backend
 	// target may not equal a public listen port on its host).
 	portUsersByHost map[string]map[int][]string
+	// nginxBindsByHost records the IMPLICIT public ports the edge nginx holds on a
+	// host that are NOT route listen ports (which live in portUsersByHost): the ACME
+	// :80 challenge/redirect socket, the :443 socket an app/gateway server block
+	// binds without a route entry, and the public health-probe listener. The value is
+	// a short human reason for the collision message. A co-located backend bind
+	// (route target, backend health, exposed_ports, mesh.port) that lands on one of
+	// these fails at runtime with EADDRINUSE, so nginxBindErr rejects it at validate
+	// time. Kept separate from portUsersByHost so the ingress health-port check
+	// (checkIngress) does not self-collide against its own registered bind.
+	nginxBindsByHost map[string]map[int]string
+	// meshHosts marks each canonical compute specKey that runs a mesh proxy — every
+	// host with >=1 service (pki: is required on every service) plus the gateway
+	// host (the gateway is a synthetic mesh member). A PUBLIC bind (a route listen or
+	// the ingress/gateway public health port) in the reserved mesh egress range
+	// collides with the proxy's loopback egress listeners only on such a host, so the
+	// mesh-egress-range check on public binds is gated on this.
+	meshHosts map[string]bool
 	// forwardUsersByHost maps a canonical INGRESS host specKey to, per listen port,
 	// the names of the services with a FORWARD route on that port. A forward port is
 	// single-service-exclusive — at most one passthrough per (ingress host, port) —
@@ -665,6 +689,10 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		backupsBucketConfigured:   backupsBucketConfigured,
 		clusterNames:          map[string]bool{},
 		clusterHosts:          map[string]bool{},
+		clusterHostByName:     map[string]string{},
+		databaseClusterByName: map[string]string{},
+		nginxBindsByHost:      map[string]map[int]string{},
+		meshHosts:             map[string]bool{},
 		ingressNames:          map[string]bool{},
 		ingressHost:           map[string]string{},
 		appSubdomainCounts:    map[string]int{},
@@ -742,13 +770,17 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			// does not resolve is left absent — checkDatabaseCluster reports it.
 			if hk := canonicalHost(f.spec.Host, ctx); hk != "" {
 				ctx.clusterHosts[hk] = true
+				ctx.clusterHostByName[f.spec.Name] = hk
 			}
 		}
 	}
 	for _, f := range databaseFiles {
 		ctx.databaseNames[f.spec.Name] = true
-		if f.parseErr == nil && f.spec.Cluster != "" && f.spec.Database != "" {
-			ctx.databasePhysicalByCluster[f.spec.Cluster+"\x00"+f.spec.Database]++
+		if f.parseErr == nil && f.spec.Cluster != "" {
+			ctx.databaseClusterByName[f.spec.Name] = f.spec.Cluster
+			if f.spec.Database != "" {
+				ctx.databasePhysicalByCluster[f.spec.Cluster+"\x00"+f.spec.Database]++
+			}
 		}
 	}
 	for _, f := range pkiFiles {
@@ -908,6 +940,75 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			ctx.targetUsersByHost[backendHost][ep.Port] = append(ctx.targetUsersByHost[backendHost][ep.Port], f.spec.Name)
 		}
 	}
+	// Implicit nginx public binds + mesh-proxy host set. Built after the loops above so
+	// every host derivation (ingressHost, tlsTermIngressByHost, gatewayHostKey, health
+	// ports) is populated. nginxBindsByHost captures the public ports the edge nginx
+	// holds that are NOT route listens (route listens live in portUsersByHost): the
+	// ACME :80 socket, the :443 socket an app/gateway server block binds, and the
+	// public health listener.
+	addNginxBind := func(host string, port int, reason string) {
+		if host == "" || port == 0 {
+			return
+		}
+		if ctx.nginxBindsByHost[host] == nil {
+			ctx.nginxBindsByHost[host] = map[int]string{}
+		}
+		if _, ok := ctx.nginxBindsByHost[host][port]; !ok {
+			ctx.nginxBindsByHost[host][port] = reason
+		}
+	}
+	// A tls-termination route provisions an ACME cert, so nginx binds :80 (HTTP-01
+	// challenge + redirect) on its ingress host. Its :443 listen is a route listen,
+	// already in portUsersByHost.
+	for host := range ctx.tlsTermIngressByHost {
+		addNginxBind(host, 80, "ACME HTTP-01 challenge/redirect")
+	}
+	// An app's server block binds :443 and provisions a cert (-> :80) on its ingress's
+	// host, with no route listen entry of its own.
+	for _, f := range appFiles {
+		if f.parseErr != nil {
+			continue
+		}
+		if host := ctx.ingressHost[f.spec.Ingress]; host != "" {
+			addNginxBind(host, 443, "app TLS listener")
+			addNginxBind(host, 80, "ACME HTTP-01 challenge/redirect")
+		}
+	}
+	// The gateway host binds :443 (daemon edge) + :80 (ACME).
+	if ctx.gatewayHostKey != "" {
+		addNginxBind(ctx.gatewayHostKey, 443, "gateway TLS listener")
+		addNginxBind(ctx.gatewayHostKey, 80, "ACME HTTP-01 challenge/redirect")
+	}
+	// One pass over services for the two per-service derivations:
+	//   - the public health listener nginx binds where a service surfaces health: an
+	//     ingress-fronted service on its ingress host's health port, an ingress-less
+	//     gateway-listed service on the gateway host's health port (ADR-0034).
+	//     Registered only where a service actually surfaces health — nginx renders the
+	//     health server only then.
+	//   - meshHosts: every service host runs a mesh proxy (pki: is required on every
+	//     service).
+	for _, f := range serviceFiles {
+		if f.parseErr != nil {
+			continue
+		}
+		if f.spec.HealthProbesPort != 0 {
+			if host, ok := ctx.ingressHost[f.spec.Ingress]; ok && f.spec.Ingress != "" {
+				addNginxBind(host, ctx.ingressHealthPort[f.spec.Ingress], "public health listener")
+			} else if f.spec.Ingress == "" && ctx.gatewayServiceTargets[f.spec.Name] {
+				addNginxBind(ctx.gatewayHostKey, ctx.gatewayHealthPort, "public health listener")
+			}
+		}
+		if f.spec.Pki != "" {
+			if hk := canonicalHost(f.spec.Host, ctx); hk != "" {
+				ctx.meshHosts[hk] = true
+			}
+		}
+	}
+	// The gateway host is a synthetic mesh member too.
+	if ctx.gatewayHostKey != "" {
+		ctx.meshHosts[ctx.gatewayHostKey] = true
+	}
+
 	// Seed the global slice's referenceable outputs under a `global/` prefix so a
 	// regional secrets `ref:database/global/<name>` (RefName == "global/<name>")
 	// resolves. Only database/compute outputs are referenceable cross-region;
@@ -1404,8 +1505,23 @@ func checkCompute(s types.ComputeSpec, ctx regionContext) (errs, warns []string)
 	// network-existence check so the message is specific rather than "not found".
 	if strings.HasPrefix(s.Network, "global/") {
 		errs = append(errs, fmt.Sprintf("network: %q references a global network — cross-region networking is recognized but not supported yet", s.Network))
-	} else if _, ok := ctx.networks[s.Network]; !ok {
+	} else if netSpec, ok := ctx.networks[s.Network]; !ok {
 		errs = append(errs, fmt.Sprintf("network: %q not found", s.Network))
+	} else if s.Subnet != "" {
+		// subnet is an optional FK into the compute's own network. An unresolvable
+		// subnet name otherwise fails only at deploy (resolveNetworkOutput's
+		// netOuts lookup), so resolve it here against the network's declared
+		// subnets. Empty subnet defaults to the first-declared subnet (deterministic).
+		found := false
+		for _, sub := range netSpec.Subnets {
+			if sub.Name == s.Subnet {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errs = append(errs, fmt.Sprintf("subnet: %q is not a subnet of network %q", s.Subnet, s.Network))
+		}
 	}
 	if err := ctx.sizeTable.Resolve(s.Size); err != nil {
 		errs = append(errs, err.Error())
@@ -1548,6 +1664,15 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 	if s.Name == gatewayCallerName {
 		errs = append(errs, fmt.Sprintf("name: %q is reserved for the north-south gateway's mesh identity (<scope>/gateway); pick another service name", gatewayCallerName))
 	}
+	// "mesh" is the per-host mesh proxy's own name: its tmpfs RuntimeDirectory
+	// (meshpaths.RuntimeDir, /run/wardnet/mesh) and systemd unit (meshpaths.UnitName,
+	// wardnet-mesh) are exactly what hostpaths.RuntimeDir("mesh")/UnitName("mesh")
+	// produce for a service so named. A colliding service would clobber the proxy's
+	// unit and — because systemd deletes RuntimeDirectory= on stop — wipe every
+	// co-located service's projected leaf/key/trust-bundle. The name is reserved.
+	if s.Name == meshReservedName {
+		errs = append(errs, fmt.Sprintf("name: %q is reserved for the per-host mesh proxy (its runtime dir and systemd unit); pick another service name", meshReservedName))
+	}
 	// A service on a global host (host: global/<name>) is rejected: a service that
 	// runs on a global host is defined in the global slice itself, not referenced
 	// from a region. Detected before host resolution so the message is specific.
@@ -1633,11 +1758,29 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 				errs = append(errs, fmt.Sprintf("routes: listen and target must differ (both %d) when the service is co-located with its ingress; nginx occupies the public port on all interfaces", rt.Listen))
 			} else if backendHost != "" && len(ctx.portUsersByHost[backendHost][rt.Target]) > 0 {
 				errs = append(errs, fmt.Sprintf("routes: target %d collides with a public listen port on the backend host %q; nginx runs there and occupies that port on all interfaces, so the service cannot bind it", rt.Target, s.Host))
+			} else if msg := nginxBindErr("routes: target", backendHost, rt.Target, ctx); msg != "" {
+				// The backend also can't bind an IMPLICIT public port the edge nginx
+				// holds on its host — ACME :80, an app/gateway :443, or the public
+				// health listener (none of which are route listens in portUsersByHost).
+				errs = append(errs, msg)
 			}
-			// When co-located, nginx may run internal TLS terminators on loopback ports
-			// in the reserved range (mixed ssl_preread ports). A co-located backend binds
-			// 127.0.0.1:<target>, so the target must stay out of that range.
-			if coLocated && inReservedLoopbackRange(rt.Target) {
+			// A public listen bound on the ingress host in the reserved mesh egress
+			// range collides with that host's mesh proxy loopback egress listeners —
+			// but only on a host that actually runs a mesh proxy (an ingress-only host
+			// need not). Gate accordingly; the backend-target version below is ungated
+			// because every backend host runs a mesh proxy.
+			if hostRunsMeshProxy(ingHost, ctx) {
+				if msg := meshEgressRangeErr("routes: listen", rt.Listen); msg != "" {
+					errs = append(errs, msg)
+				}
+			}
+			// nginx may run internal TLS terminators on loopback ports in the reserved
+			// range (mixed ssl_preread ports) on ANY host that runs an edge nginx — the
+			// service's own co-located ingress OR one fronting another co-located
+			// service. A backend binds 127.0.0.1:<target> there, so the target must stay
+			// out of that range whenever the backend host runs an edge nginx (gated the
+			// same way as the health-port check below, not only when co-located).
+			if hostRunsEdgeNginx(backendHost, ctx) && inReservedLoopbackRange(rt.Target) {
 				errs = append(errs, fmt.Sprintf("routes: target %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a backend port outside it", rt.Target, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
 			}
 			if msg := meshEgressRangeErr("routes: target", rt.Target); msg != "" {
@@ -1801,6 +1944,10 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 				// another service's tcp backend port (route target / health / exposed).
 				if len(ctx.portUsersByHost[backendHost][ep.Port]) > 0 {
 					errs = append(errs, fmt.Sprintf("exposed_ports: tcp/%d collides with a public listen port on host %q; nginx occupies that port on all interfaces, so the service cannot bind it", ep.Port, s.Host))
+				} else if msg := nginxBindErr("exposed_ports: tcp", backendHost, ep.Port, ctx); msg != "" {
+					// ...nor an IMPLICIT public port the edge nginx holds there (ACME :80,
+					// an app/gateway :443, or the public health listener).
+					errs = append(errs, msg)
 				}
 				if others := otherUsers(ctx.targetUsersByHost[backendHost][ep.Port], s.Name); len(others) > 0 {
 					errs = append(errs, fmt.Sprintf("exposed_ports: tcp/%d on host %q is also a backend port of service(s) %s; a backend port belongs to a single service", ep.Port, s.Host, strings.Join(others, ", ")))
@@ -1956,6 +2103,15 @@ func checkIngress(s types.IngressSpec, ctx regionContext) (errs, warns []string)
 	if inReservedLoopbackRange(healthPort) {
 		errs = append(errs, fmt.Sprintf("health_probes_port: %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a health port outside it", healthPort, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
 	}
+	// This is a PUBLIC bind (0.0.0.0:<healthPort>) nginx holds on the ingress host. If
+	// that host also runs a mesh proxy (a co-located pki: service), a health port in
+	// the reserved mesh egress range collides with the proxy's loopback egress
+	// listeners. Gated on the host running a mesh proxy — an ingress-only host does not.
+	if hostRunsMeshProxy(hostKey, ctx) {
+		if msg := meshEgressRangeErr("health_probes_port", healthPort); msg != "" {
+			errs = append(errs, msg)
+		}
+	}
 	if hostKey != "" {
 		if users := ctx.portUsersByHost[hostKey][healthPort]; len(users) > 0 {
 			errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with a route listen port on this ingress host (used by service(s) %s); pick a distinct health port", healthPort, strings.Join(users, ", ")))
@@ -2010,6 +2166,13 @@ func checkApp(s types.AppSpec, ctx regionContext) (errs, warns []string) {
 // mesh identity (<scope>/gateway). A service lists it in mesh.allowed_services to be
 // reachable by daemon traffic routed through the gateway (ADR-0032).
 const gatewayCallerName = "gateway"
+
+// meshReservedName is the per-host mesh proxy's own service name. A user service so
+// named would share the proxy's on-host runtime dir (meshpaths.RuntimeDir) and systemd
+// unit (meshpaths.UnitName), so it is reserved in checkService. Kept as a literal
+// mirroring meshpaths (like gatewayCallerName ↔ meshpaths.GatewayMember) rather than
+// importing the path, since the collision is on the derived NAME, not a path.
+const meshReservedName = "mesh"
 
 // checkGateway validates the north-south daemon gateway resource (ADR-0032): its host:
 // foreign key must resolve to a single-instance vm compute in the SAME scope — a
@@ -2123,6 +2286,12 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 	if inReservedLoopbackRange(healthPort) {
 		errs = append(errs, fmt.Sprintf("health_probes_port: %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a health port outside it", healthPort, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
 	}
+	// The gateway host always runs a mesh proxy (the gateway is a mesh member), so its
+	// public health port must also stay clear of the reserved mesh egress range the
+	// proxy binds on loopback.
+	if msg := meshEgressRangeErr("health_probes_port", healthPort); msg != "" {
+		errs = append(errs, msg)
+	}
 	if gwHost != "" {
 		if users := ctx.portUsersByHost[gwHost][healthPort]; len(users) > 0 {
 			errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with a route listen port on the gateway host (used by service(s) %s); pick a distinct health port", healthPort, strings.Join(users, ", ")))
@@ -2168,6 +2337,29 @@ func checkExactPaths(field string, paths []string) []string {
 // public binds) share the host's port space with backend binds.
 func hostRunsEdgeNginx(backendHost string, ctx regionContext) bool {
 	return backendHost != "" && (len(ctx.ingressNamesByHost[backendHost]) > 0 || backendHost == ctx.gatewayHostKey)
+}
+
+// hostRunsMeshProxy reports whether a host runs a mesh proxy — every host with a
+// pki: service, plus the gateway host — whose loopback egress listeners occupy the
+// reserved mesh egress range. A public bind (route listen / public health port) in
+// that range collides with them only on such a host (meshHosts is built in the
+// context pass above).
+func hostRunsMeshProxy(host string, ctx regionContext) bool {
+	return host != "" && ctx.meshHosts[host]
+}
+
+// nginxBindErr returns a rejection message when port is an IMPLICIT public port the
+// edge nginx holds on host (ACME :80, an app/gateway :443, or the public health
+// listener — see nginxBindsByHost), or "" otherwise. It is the sibling of the
+// portUsersByHost route-listen check for the ports that map does not carry.
+func nginxBindErr(label, host string, port int, ctx regionContext) string {
+	if host == "" {
+		return ""
+	}
+	if reason, ok := ctx.nginxBindsByHost[host][port]; ok {
+		return fmt.Sprintf("%s: %d is held by the edge nginx on the backend host (%s); a co-located backend cannot bind it", label, port, reason)
+	}
+	return ""
 }
 
 // meshPkiOf returns the pki a resolved mesh caller joins, whether it is a
@@ -2255,6 +2447,10 @@ func checkMesh(s types.ServiceSpec, backendHost string, ctx regionContext) []str
 		if backendHost != "" {
 			if len(ctx.portUsersByHost[backendHost][m.Port]) > 0 {
 				errs = append(errs, fmt.Sprintf("mesh.port: %d collides with a public listen port on host %q; nginx occupies that port on all interfaces", m.Port, s.Host))
+			} else if msg := nginxBindErr("mesh.port", backendHost, m.Port, ctx); msg != "" {
+				// ...nor an IMPLICIT public port the edge nginx holds there (ACME :80,
+				// an app/gateway :443, or the public health listener).
+				errs = append(errs, msg)
 			}
 			if others := otherUsers(ctx.targetUsersByHost[backendHost][m.Port], s.Name); len(others) > 0 {
 				errs = append(errs, fmt.Sprintf("mesh.port: %d on host %q is also a backend port of service(s) %s; a backend port belongs to a single service", m.Port, s.Host, strings.Join(others, ", ")))
@@ -2396,6 +2592,20 @@ func checkGrants(s types.ServiceSpec, ctx regionContext) []string {
 				errs = append(errs, fmt.Sprintf("%s.resource: cross-scope database access is not supported — a self-hosted database is private to its scope, so a regional service cannot grant a global database %q", label, name))
 			case ctx.databaseNames[name]:
 				targetResolved = true
+				// Same-network rule: the cluster opens 5432 to its host's network CIDR
+				// only (never publicly), so the granting service's host must share that
+				// network or the minted role's connection URL points at an unreachable
+				// private IP. Resolve database -> cluster -> host -> network on both
+				// sides; skip silently if either host FK is unresolved (checkService /
+				// checkDatabaseCluster already report those). Mirrors the route/mesh
+				// cross-host same-network checks.
+				svcHost := canonicalHost(s.Host, ctx)
+				dbHost := ctx.clusterHostByName[ctx.databaseClusterByName[name]]
+				if svcHost != "" && dbHost != "" {
+					if sn, dn := ctx.computeNetwork[svcHost], ctx.computeNetwork[dbHost]; sn != "" && dn != "" && sn != dn {
+						errs = append(errs, fmt.Sprintf("%s.resource: database %q is on network %q but this service's host is on %q — a self-hosted cluster opens 5432 to its own network only, so the two must share a network", label, name, dn, sn))
+					}
+				}
 			default:
 				errs = append(errs, fmt.Sprintf("%s.resource: database %q not found", label, name))
 			}

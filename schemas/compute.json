@@ -11,6 +11,7 @@
     "container": { "type": "string", "minLength": 1 },
     "provider": { "type": "string", "minLength": 1 },
     "network": { "type": "string", "minLength": 1 },
+    "subnet": { "type": "string", "minLength": 1 },
     "size": { "type": "string", "minLength": 1 },
     "image": { "type": "string", "enum": ["ubuntu-24.04", "ubuntu-26.04"] },
     "cloud_init": { "type": "string", "minLength": 1 },

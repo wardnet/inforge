@@ -284,6 +284,35 @@ func TestCheckComputeGlobalNetworkRejected(t *testing.T) {
 	}
 }
 
+// TestCheckComputeSubnetFK: an optional subnet: FK must resolve to a subnet of
+// the compute's own network. A valid one passes; an unknown one is rejected at
+// validate time rather than only failing at deploy (resolveNetworkOutput).
+func TestCheckComputeSubnetFK(t *testing.T) {
+	ctx := baseCtx()
+	ctx.sizeTable = sizes.DefaultTable()
+	ctx.networks = map[string]types.NetworkSpec{
+		"corenet": {Name: "corenet", Subnets: []types.SubnetSpec{{Name: "app"}, {Name: "data"}}},
+	}
+	base := types.ComputeSpec{Provider: "hetzner", Network: "corenet", Size: "SMALL", Kind: "vm"}
+
+	// A declared subnet resolves.
+	ok := base
+	ok.Subnet = "data"
+	errs, _ := checkCompute(ok, ctx)
+	assert.Empty(t, errs)
+
+	// An unknown subnet is rejected.
+	bad := base
+	bad.Subnet = "nope"
+	errs, _ = checkCompute(bad, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), `subnet: "nope" is not a subnet of network "corenet"`)
+
+	// No subnet is fine (defaults to the first-declared subnet).
+	errs, _ = checkCompute(base, ctx)
+	assert.Empty(t, errs)
+}
+
 // TestCheckServiceGlobalHostRejected: a service on a global host is rejected —
 // such a service is defined in the global slice itself, not referenced from a region.
 func TestCheckServiceGlobalHostRejected(t *testing.T) {
@@ -736,6 +765,17 @@ func TestCheckServiceGatewayNameReserved(t *testing.T) {
 	errs, _ := checkService(s, c)
 	require.NotEmpty(t, errs)
 	assert.Contains(t, strings.Join(errs, "\n"), "reserved for the north-south gateway")
+}
+
+// TestCheckServiceMeshNameReserved: a service named "mesh" shares the per-host mesh
+// proxy's runtime dir + systemd unit; stopping it would wipe the proxy's projected
+// leaf/key/trust-bundle — the name is reserved.
+func TestCheckServiceMeshNameReserved(t *testing.T) {
+	c := meshCtx()
+	s := types.ServiceSpec{Name: "mesh", Host: "bridge", Type: "raw", User: "svc", Pki: "mesh"}
+	errs, _ := checkService(s, c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "reserved for the per-host mesh proxy")
 }
 
 // twoNetworkMeshCtx adds a second host "edge" on a DIFFERENT network to meshCtx,
@@ -1311,6 +1351,92 @@ func TestCheckIngressHealthPort(t *testing.T) {
 	ctx.ingressNamesByHost = map[string][]string{"bridge-01": {"other-ingress", "edge"}}
 	errs, _ = checkIngress(s, ctx)
 	assert.Contains(t, strings.Join(errs, "|"), "hosts at most one ingress")
+}
+
+// TestCheckServiceLoopbackRangeCrossHostIngress: the route-target reserved-loopback
+// check is gated on the backend host running an edge nginx (not only on co-location
+// with the service's own ingress). A service whose backend host independently hosts
+// a DIFFERENT ingress still can't bind a loopback-terminator port there.
+func TestCheckServiceLoopbackRangeCrossHostIngress(t *testing.T) {
+	c := baseCtx()
+	c.computeNetwork = map[string]string{"bridge-01": "net", "bridge": "net", "edge-01": "net", "edge": "net"}
+	c.computeNames["edge"] = true
+	c.computeCanonical["edge"] = "edge-01"
+	c.computeKind["edge-01"] = "vm"
+	// The service's ingress "web" is on edge-01 (cross-host), but the service's OWN
+	// host bridge-01 independently hosts ingress "other" — so nginx runs there.
+	c.ingressNames = map[string]bool{"web": true, "other": true}
+	c.ingressHost = map[string]string{"web": "edge-01", "other": "bridge-01"}
+	c.ingressNamesByHost = map[string][]string{"edge-01": {"web"}, "bridge-01": {"other"}}
+
+	s := types.ServiceSpec{Name: "api", Host: "bridge", Type: "raw", User: "svc", Ingress: "web",
+		Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: nginx.LoopbackBase}}}
+	errs, _ := checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "reserved internal range",
+		"a backend on a host that independently runs an ingress cannot bind a loopback-terminator port")
+}
+
+// TestCheckServiceNginxImplicitBinds: a co-located backend bind (exposed port,
+// mesh.port, or route target) that lands on an IMPLICIT public port the edge nginx
+// holds — ACME :80, an app/gateway :443, or the public health listener, none of
+// which are route listens in portUsersByHost — is rejected.
+func TestCheckServiceNginxImplicitBinds(t *testing.T) {
+	// exposed_ports tcp/443 hitting an app's :443 TLS listener on the same host.
+	c := baseCtx()
+	c.nginxBindsByHost = map[string]map[int]string{"bridge-01": {443: "app TLS listener"}}
+	s := types.ServiceSpec{Name: "tunneller", Host: "bridge", Type: "raw", User: "svc",
+		ExposedPorts: []types.ExposedPort{{Proto: "tcp", Port: 443}}}
+	errs, _ := checkService(s, c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "|"), "held by the edge nginx")
+
+	// mesh.port hitting ACME :80 on the same host.
+	mc := meshCtx()
+	mc.nginxBindsByHost = map[string]map[int]string{"bridge-01": {80: "ACME HTTP-01 challenge/redirect"}}
+	ms := types.ServiceSpec{Name: "tenants", Host: "bridge", Type: "raw", User: "svc", Pki: "mesh",
+		Mesh: &types.MeshSpec{Port: 80, InternalPaths: []string{"/x/**"}}}
+	errs = checkMesh(ms, "bridge-01", mc)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "|"), "held by the edge nginx")
+
+	// A route target hitting the public health listener the ingress host binds.
+	rc := ingressFKCtx()
+	rc.nginxBindsByHost = map[string]map[int]string{"bridge-01": {8081: "public health listener"}}
+	rs := types.ServiceSpec{Name: "api", Host: "bridge", Type: "raw", User: "svc", Ingress: "web",
+		Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8081}}}
+	errs, _ = checkService(rs, rc)
+	assert.Contains(t, strings.Join(errs, "|"), "held by the edge nginx")
+}
+
+// TestCheckMeshEgressRangeOnPublicBinds: a PUBLIC bind (route listen or the
+// ingress/gateway public health port) in the reserved mesh egress range collides
+// with the mesh proxy's loopback egress listeners — but only on a host that runs a
+// mesh proxy. Gated accordingly (unlike backend binds, which are always on a mesh
+// host).
+func TestCheckMeshEgressRangeOnPublicBinds(t *testing.T) {
+	egressPort := meshpaths.EgressBase
+
+	// Route listen in the range, ingress host runs a mesh proxy -> FAIL.
+	c := ingressFKCtx()
+	c.meshHosts = map[string]bool{"bridge-01": true}
+	s := types.ServiceSpec{Name: "api", Host: "bridge", Type: "raw", User: "svc", Ingress: "web",
+		Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: egressPort, Target: 8080}}}
+	errs, _ := checkService(s, c)
+	assert.Contains(t, strings.Join(errs, "|"), "reserved mesh egress range")
+
+	// Same route listen, ingress host runs NO mesh proxy -> OK (no proxy to collide).
+	c2 := ingressFKCtx()
+	errs, _ = checkService(s, c2)
+	assert.NotContains(t, strings.Join(errs, "|"), "reserved mesh egress range")
+
+	// Ingress public health port in the range, on a mesh host -> FAIL.
+	ic := regionContext{
+		computeNames: map[string]bool{"bridge": true}, computeCanonical: map[string]string{"bridge": "bridge-01", "bridge-01": "bridge-01"},
+		computeKind: map[string]string{"bridge-01": "vm"}, computeDeployer: map[string]bool{"bridge-01": true},
+		available: map[string]bool{"hetzner": true}, meshHosts: map[string]bool{"bridge-01": true},
+	}
+	ierrs, _ := checkIngress(types.IngressSpec{Name: "web", Host: "bridge", HealthProbesPort: egressPort}, ic)
+	assert.Contains(t, strings.Join(ierrs, "|"), "reserved mesh egress range")
 }
 
 func TestCheckServiceExposedPorts(t *testing.T) {

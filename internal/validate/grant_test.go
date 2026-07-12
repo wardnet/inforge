@@ -55,6 +55,33 @@ func TestCheckGrantsValid(t *testing.T) {
 	}
 }
 
+// TestCheckGrantsDatabaseSameNetwork: a database grant whose cluster host is on a
+// different network than the granting service's host is rejected (the cluster's
+// 5432 opens to its own network CIDR only); same-network passes.
+func TestCheckGrantsDatabaseSameNetwork(t *testing.T) {
+	base := func() regionContext {
+		return regionContext{
+			databaseNames:         map[string]bool{"main": true},
+			databaseClusterByName: map[string]string{"main": "pg"},
+			clusterHostByName:     map[string]string{"pg": "db-01"},
+			computeNames:          map[string]bool{"bridge": true, "db": true},
+			computeCanonical:      map[string]string{"bridge": "bridge-01", "db": "db-01"},
+			computeNetwork:        map[string]string{"bridge-01": "net-a", "db-01": "net-b"},
+		}
+	}
+	grant := types.GrantSpec{Resource: "database/main", Permission: "ro", Outputs: map[string]string{"DB_URL": "{URL}"}}
+
+	// Different networks: rejected.
+	errs := checkGrants(grantSvc(nil, grant), base())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "must share a network")
+
+	// Same network: allowed.
+	ctx := base()
+	ctx.computeNetwork["db-01"] = "net-a"
+	assert.Empty(t, checkGrants(grantSvc(nil, grant), ctx))
+}
+
 func TestCheckGrantsErrors(t *testing.T) {
 	ctx := grantCtx()
 	tests := []struct {
