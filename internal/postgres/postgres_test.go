@@ -281,7 +281,7 @@ func TestMintRoleScript(t *testing.T) {
 	}
 	for _, want := range []string{
 		"psql -p 5433 -w -v ON_ERROR_STOP=1 -d 'tunneller'",
-		`CREATE ROLE "svc" LOGIN PASSWORD 's3cr3t'`,
+		`CREATE ROLE "svc" LOGIN INHERIT PASSWORD 's3cr3t'`,
 		`GRANT USAGE, CREATE ON SCHEMA public TO "svc"`,
 		`ALTER DEFAULT PRIVILEGES FOR ROLE "svc" IN SCHEMA public GRANT SELECT ON TABLES TO "tunneller_ro"`,
 		"<<'INFORGE_PGSQL'",
@@ -311,15 +311,32 @@ func TestMintRoleScriptROReassignsInTargetDatabase(t *testing.T) {
 }
 
 func TestDropRoleScript(t *testing.T) {
-	s := DropRoleScript(5432, "svc", "app")
+	s := DropRoleScript(5432, "svc", "app-owner", "app")
 	for _, want := range []string{
-		`REASSIGN OWNED BY "svc" TO "app"`,
+		// REASSIGN OWNED / DROP OWNED are per-database: run from the cluster default
+		// database they would see none of the role's objects, ACLs or default-privilege
+		// entries, and the DROP ROLE below would then fail on those dependencies.
+		"psql -p 5432 -w -v ON_ERROR_STOP=1 -d 'app'",
+		`REASSIGN OWNED BY "svc" TO "app-owner"`,
 		`DROP OWNED BY "svc"`,
 		`DROP ROLE IF EXISTS "svc"`,
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("DropRoleScript missing %q", want)
+			t.Errorf("DropRoleScript missing %q in:\n%s", want, s)
 		}
+	}
+}
+
+// The monitor role is scoped to no single database and owns nothing: its teardown runs
+// from the cluster default (DROP OWNED reaches pg_monitor membership + the CONNECT
+// grants on shared objects from anywhere).
+func TestDropRoleScriptNoDatabase(t *testing.T) {
+	s := DropRoleScript(5432, "otelmon", OSUser, "")
+	if strings.Contains(s, " -d ") {
+		t.Errorf("a database-less teardown must not pass -d:\n%s", s)
+	}
+	if !strings.Contains(s, `DROP ROLE IF EXISTS "otelmon"`) {
+		t.Errorf("DropRoleScript missing the drop:\n%s", s)
 	}
 }
 

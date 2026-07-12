@@ -27,6 +27,7 @@ import (
 	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/nginx"
 	"github.com/wardnet/inforge/internal/pathglob"
+	"github.com/wardnet/inforge/internal/pgrole"
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/postgres"
 	"github.com/wardnet/inforge/internal/regions"
@@ -1811,6 +1812,17 @@ func checkDatabase(s types.DatabaseSpec, ctx regionContext) (errs, warns []strin
 	}
 	if s.SizeGB < 0 {
 		errs = append(errs, fmt.Sprintf("size_gb: %d must be >= 0", s.SizeGB))
+	}
+	// The mint derives two NOLOGIN group roles from the database name (<db>_ro/<db>_rw)
+	// to carry the privileges on objects created after a mint. An owner: that collides
+	// with one of them would be granted to every service holding that permission — the
+	// service would inherit ownership of the database and every object in it. Reject the
+	// name here (pgrole.CheckGroupRoleNames fails the mint too, but that is a deploy-time
+	// error, not a PR-time one).
+	if s.Database != "" && s.Owner != "" {
+		if err := pgrole.CheckGroupRoleNames("", s.Database, s.Owner); err != nil {
+			errs = append(errs, fmt.Sprintf("owner: %q collides with the reader/writer group role inforge derives from database %q (%s_ro/%s_rw); choose another owner name", s.Owner, s.Database, s.Database, s.Database))
+		}
 	}
 	// A physical (cluster, database) pair must be unique: two logical resources
 	// targeting the same database in the same cluster create the same Postgres

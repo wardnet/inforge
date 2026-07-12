@@ -100,12 +100,34 @@ func TestCreateRoleLoginSQL(t *testing.T) {
 	// Idempotent shape: guarded create, else alter.
 	for _, want := range []string{
 		"IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'svc-x')",
-		`CREATE ROLE "svc-x" LOGIN PASSWORD 'p''w'`,
-		`ALTER ROLE "svc-x" WITH LOGIN PASSWORD 'p''w'`,
+		// INHERIT is explicit on BOTH branches: every privilege on post-mint objects
+		// arrives through group membership (the db reader/writer groups, pg_monitor), and
+		// a NOINHERIT role would hold none of it without a SET ROLE no service issues.
+		`CREATE ROLE "svc-x" LOGIN INHERIT PASSWORD 'p''w'`,
+		`ALTER ROLE "svc-x" WITH LOGIN INHERIT PASSWORD 'p''w'`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("CreateRoleLoginSQL missing %q in:\n%s", want, s)
 		}
+	}
+}
+
+// The database owner is operator-authored free text. If it collides with a derived group
+// role, `GRANT <writer group> TO <service>` would make the service a member of the role
+// that OWNS the database and every object in it.
+func TestMintRoleSQLRejectsOwnerCollidingWithGroupRole(t *testing.T) {
+	for _, owner := range []string{"app_ro", "app_rw"} {
+		for _, perm := range []string{"ro", "rw"} {
+			if _, err := MintRoleSQL("svc", "pw", "app", owner, perm); err == nil {
+				t.Errorf("%s mint with owner %q must error (owner is a derived group role)", perm, owner)
+			}
+		}
+	}
+	if err := CheckGroupRoleNames("app_rw", "app", "app-owner"); err == nil {
+		t.Error("a login role named like a group role must error")
+	}
+	if err := CheckGroupRoleNames("svc", "app", "app-owner"); err != nil {
+		t.Errorf("a non-colliding triple must pass: %v", err)
 	}
 }
 
@@ -208,7 +230,7 @@ func TestMintMonitorRoleSQL(t *testing.T) {
 	// Idempotent LOGIN role with the password, pg_monitor membership, and CONNECT on
 	// each scraped database — and NOTHING else (no schema/table grants, no revoke-all).
 	for _, want := range []string{
-		`CREATE ROLE "mon" LOGIN PASSWORD 's3cret'`,
+		`CREATE ROLE "mon" LOGIN INHERIT PASSWORD 's3cret'`,
 		`GRANT pg_monitor TO "mon"`,
 		`GRANT CONNECT ON DATABASE "tenants" TO "mon"`,
 		`GRANT CONNECT ON DATABASE "audit" TO "mon"`,
