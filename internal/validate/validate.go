@@ -1599,6 +1599,28 @@ func checkNetwork(s types.NetworkSpec, ctx regionContext) (errs, warns []string)
 	if err != nil {
 		errs = append(errs, err.Error())
 	}
+
+	// One deterministic pass over the scope's OTHER networks builds both
+	// cross-network facts this check needs: which network already claims a subnet
+	// name (first in sorted order wins, so a name claimed twice by one other
+	// network still yields exactly one error here), and whether a network sharing
+	// this one's container disagrees on the CIDR.
+	subnetOwner := map[string]string{}
+	for _, other := range sortedKeys(ctx.networks) {
+		if other == s.Name {
+			continue
+		}
+		o := ctx.networks[other]
+		for _, osub := range o.Subnets {
+			if _, taken := subnetOwner[osub.Name]; !taken {
+				subnetOwner[osub.Name] = other
+			}
+		}
+		if o.Container == s.Container && o.CIDR != s.CIDR {
+			errs = append(errs, fmt.Sprintf("cidr: %q disagrees with network %q's cidr %q; both share container %q, which is realized as one cloud network", s.CIDR, other, o.CIDR, s.Container))
+		}
+	}
+
 	seen := map[string]bool{}
 	for i, sub := range s.Subnets {
 		subnet, serr := parseCIDR(fmt.Sprintf("subnets[%d].cidr", i), sub.CIDR)
@@ -1612,23 +1634,8 @@ func checkNetwork(s types.NetworkSpec, ctx regionContext) (errs, warns []string)
 			continue
 		}
 		seen[sub.Name] = true
-		for _, other := range sortedKeys(ctx.networks) {
-			if other == s.Name {
-				continue
-			}
-			for _, osub := range ctx.networks[other].Subnets {
-				if osub.Name == sub.Name {
-					errs = append(errs, fmt.Sprintf("subnets[%d].name: %q is also declared by network %q; subnet names must be unique across the networks of a scope", i, sub.Name, other))
-				}
-			}
-		}
-	}
-	for _, other := range sortedKeys(ctx.networks) {
-		if other == s.Name {
-			continue
-		}
-		if o := ctx.networks[other]; o.Container == s.Container && o.CIDR != s.CIDR {
-			errs = append(errs, fmt.Sprintf("cidr: %q disagrees with network %q's cidr %q; both share container %q, which is realized as one cloud network", s.CIDR, other, o.CIDR, s.Container))
+		if owner, taken := subnetOwner[sub.Name]; taken {
+			errs = append(errs, fmt.Sprintf("subnets[%d].name: %q is also declared by network %q; subnet names must be unique across the networks of a scope", i, sub.Name, owner))
 		}
 	}
 	return errs, warns

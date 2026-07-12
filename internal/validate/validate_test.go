@@ -377,7 +377,16 @@ func TestCheckNetworkSubnetNamesUniqueAcrossNetworks(t *testing.T) {
 
 	errs, _ := checkNetwork(edgenet, ctx)
 	require.NotEmpty(t, errs)
-	assert.Contains(t, errs[0], `"app" is also declared by network "corenet"`)
+	assert.Contains(t, strings.Join(errs, "\n"), `"app" is also declared by network "corenet"`)
+
+	// The collision is reported ONCE per colliding subnet, even when the other
+	// network declares the name more than once.
+	corenet.Subnets = append(corenet.Subnets, types.SubnetSpec{Name: "app", CIDR: "10.0.2.0/24"})
+	ctx.networks["corenet"] = corenet
+	errs, _ = checkNetwork(edgenet, ctx)
+	assert.Len(t, errs, 1)
+	corenet.Subnets = corenet.Subnets[:1]
+	ctx.networks["corenet"] = corenet
 
 	// A distinct name in the second network passes.
 	edgenet.Subnets = []types.SubnetSpec{{Name: "edge-app", CIDR: "10.1.1.0/24"}}
@@ -390,7 +399,7 @@ func TestCheckNetworkSubnetNamesUniqueAcrossNetworks(t *testing.T) {
 	ctx.networks["edgenet"] = edgenet
 	errs, _ = checkNetwork(edgenet, ctx)
 	require.NotEmpty(t, errs)
-	assert.Contains(t, errs[0], "declared twice by this network")
+	assert.Contains(t, strings.Join(errs, "\n"), "declared twice by this network")
 }
 
 // TestCheckNetworkContainerCIDRAgreement: a container is realized as ONE cloud
@@ -405,7 +414,7 @@ func TestCheckNetworkContainerCIDRAgreement(t *testing.T) {
 
 	errs, _ := checkNetwork(second, ctx)
 	require.NotEmpty(t, errs)
-	assert.Contains(t, errs[0], `both share container "edge"`)
+	assert.Contains(t, strings.Join(errs, "\n"), `both share container "edge"`)
 
 	// Agreeing CIDRs pass.
 	second.CIDR = "10.0.0.0/16"
