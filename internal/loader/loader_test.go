@@ -307,3 +307,102 @@ func TestNormalizeGatewayTrims(t *testing.T) {
 		t.Errorf("NormalizeGateway did not trim: %+v", g)
 	}
 }
+
+// --- the read sites migrated to the one reader ---
+
+func TestLoadSizeTableMalformed(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "sizes.yaml"), []byte("- [unclosed\n"), 0o644))
+
+	_, err := LoadSizeTable("prd", dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sizes.yaml")
+}
+
+func TestLoadSizeTableTypeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "sizes.yaml"), []byte("not: a list\n"), 0o644))
+
+	_, err := LoadSizeTable("prd", dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse sizes table")
+}
+
+// environment.yaml is read LITERALLY: its values are references (env:/vault:/ref:) and
+// are resolved later, by the deploy program, against a chain built for that service.
+// Reading is not resolving.
+func TestLoadEnvironmentFileKeepsReferencesAsWritten(t *testing.T) {
+	folder := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(folder, "environment.yaml"),
+		[]byte("STRIPE_SECRET_KEY: vault:STRIPE_SECRET_KEY\nLOG_LEVEL: info\n"), 0o644))
+
+	m, err := LoadEnvironmentFile(folder)
+	require.NoError(t, err)
+	assert.Equal(t, "vault:STRIPE_SECRET_KEY", m["STRIPE_SECRET_KEY"], "a reference is not resolved at read time")
+	assert.Equal(t, "info", m["LOG_LEVEL"])
+}
+
+func TestLoadEnvironmentFileAbsent(t *testing.T) {
+	m, err := LoadEnvironmentFile(t.TempDir())
+	require.NoError(t, err)
+	assert.Nil(t, m, "a service may have no env contract")
+}
+
+func TestLoadEnvironmentFileMalformed(t *testing.T) {
+	folder := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(folder, "environment.yaml"), []byte("KEY: [unclosed\n"), 0o644))
+
+	_, err := LoadEnvironmentFile(folder)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "environment.yaml")
+}
+
+// A manifest that is not YAML must fail with the manifest's path, not a bare parse error.
+func TestLoadResourcesMalformedManifest(t *testing.T) {
+	dir := t.TempDir()
+	folder := filepath.Join(dir, "prd", "regional", "compute", "edge")
+	require.NoError(t, os.MkdirAll(folder, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(folder, "manifest.yaml"), []byte("name: [unclosed\n"), 0o644))
+
+	_, err := LoadResources("prd", dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "manifest.yaml")
+}
+
+func TestLoadNotificationsMalformed(t *testing.T) {
+	dir := t.TempDir()
+	obs := filepath.Join(dir, "prd", "observability")
+	require.NoError(t, os.MkdirAll(obs, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(obs, "notifications.yaml"), []byte("profiles: [unclosed\n"), 0o644))
+
+	_, err := LoadNotifications("prd", dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "notifications.yaml")
+}
+
+func TestLoadAlertsMalformed(t *testing.T) {
+	dir := t.TempDir()
+	obs := filepath.Join(dir, "prd", "observability")
+	require.NoError(t, os.MkdirAll(obs, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(obs, "alerts.yaml"), []byte("alerts: [unclosed\n"), 0o644))
+
+	_, err := LoadAlerts("prd", dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "alerts.yaml")
+}
+
+// Absent observability files are not an error — the plane is optional.
+func TestLoadObservabilityFilesAbsent(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
+
+	n, err := LoadNotifications("prd", dir)
+	require.NoError(t, err)
+	assert.Empty(t, n.Profiles)
+
+	a, err := LoadAlerts("prd", dir)
+	require.NoError(t, err)
+	assert.Empty(t, a.Alerts)
+}

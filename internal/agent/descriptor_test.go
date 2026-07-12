@@ -69,3 +69,37 @@ func TestParseDescriptorSecretLess(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, d.Env)
 }
+
+// A truncated or blank descriptor must not decode as a zero value.
+func TestParseDescriptorRejectsEmptyDocument(t *testing.T) {
+	for _, src := range []string{"", "# nothing\n"} {
+		if _, err := ParseDescriptor([]byte(src)); err == nil {
+			t.Errorf("an empty descriptor (%q) must fail, not decode as zero", src)
+		}
+	}
+}
+
+func TestParseDescriptorMalformed(t *testing.T) {
+	if _, err := ParseDescriptor([]byte("version: [unclosed\n")); err == nil {
+		t.Fatal("malformed YAML must fail")
+	}
+}
+
+func TestParseMeshDescriptorRejectsUnknownField(t *testing.T) {
+	_, err := ParseMeshDescriptor([]byte("version: v1\nbogus_key: 1\n"))
+	if err == nil {
+		t.Fatal("an unknown field must be rejected")
+	}
+}
+
+func TestParseMeshDescriptorRejectsEmptyDocument(t *testing.T) {
+	if _, err := ParseMeshDescriptor([]byte("")); err == nil {
+		t.Fatal("an empty mesh descriptor must fail, not decode as zero")
+	}
+}
+
+func TestParseMeshDescriptorMalformed(t *testing.T) {
+	if _, err := ParseMeshDescriptor([]byte("version: [unclosed\n")); err == nil {
+		t.Fatal("malformed YAML must fail")
+	}
+}

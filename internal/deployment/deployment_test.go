@@ -100,3 +100,29 @@ func TestResolveUnknownEnv(t *testing.T) {
 	_, _, err := Resolve(cfg, desc, "api", "staging")
 	assert.ErrorContains(t, err, `no config for environment "staging"`)
 }
+
+func TestLoadConfigMalformed(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "inforge.yaml"), []byte("platform: [unclosed\n"), 0o644))
+
+	_, err := LoadConfig(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "inforge.yaml")
+}
+
+func TestLoadConfigTypeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "inforge.yaml"), []byte("platform:\n  - not a string\n"), 0o644))
+
+	_, err := LoadConfig(dir)
+	require.Error(t, err)
+}
+
+func TestLoadServiceDescriptorMalformed(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ddns.yaml"), []byte("environments: [unclosed\n"), 0o644))
+
+	_, err := LoadServiceDescriptor(dir, "ddns")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ddns.yaml")
+}
