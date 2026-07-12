@@ -10,14 +10,27 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/nginx"
 	"github.com/wardnet/inforge/internal/regions"
+	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/sizes"
-	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/types"
 )
 
 const testdataDir = "testdata"
+
+// lineContaining returns the first line of out holding substr (empty if none),
+// so a test can assert on the advice attached to ONE specific error rather than
+// on the whole captured report.
+func lineContaining(out, substr string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, substr) {
+			return line
+		}
+	}
+	return ""
+}
 
 // captureStdout redirects os.Stdout for the duration of fn and returns what was
 // written. The reporter prints per-resource OK/FAIL lines to stdout, so a test can
@@ -137,7 +150,7 @@ func TestValidateResourcesGlobalPlacementUndefined(t *testing.T) {
 		"the DNS guard must not fire for a region that does not exist")
 }
 
-// TestValidateResourcesEncryptedOK: a `vault:KEY` secret whose (container, KEY)
+// TestValidateResourcesEncryptedOK: a `vault:KEY` secret whose (service, KEY)
 // ciphertext exists in the env's secrets.enc.yaml validates
 // cleanly — the check is presence-only, so the fixture ciphertext is a dummy.
 func TestValidateResourcesEncryptedOK(t *testing.T) {
@@ -145,8 +158,87 @@ func TestValidateResourcesEncryptedOK(t *testing.T) {
 	assert.NoError(t, err, "an encrypted source with a matching store entry should validate cleanly")
 }
 
+// TestCheckSecretStoreEntries covers the store→manifest direction (ADR-0040): an
+// entry nothing reads is an error, because it is the one mismatch that would
+// otherwise stay silent until a service came up without its value. Both orphan
+// shapes appear in a hand migration off the container-keyed store: an entry left
+// under the old container name (no such service), and a key moved to the wrong
+// service (that service declares no such `vault:` ref).
+func TestCheckSecretStoreEntries(t *testing.T) {
+	// api and web share a container; each declares its own vault key.
+	res := types.Resources{Service: []types.ServiceSpec{
+		{Name: "api", Container: "bridge", Environment: map[string]string{"T": "vault:API_TOKEN"}},
+		{Name: "web", Container: "bridge", Environment: map[string]string{"T": "vault:WEB_TOKEN"}},
+	}}
+	global := types.Resources{Service: []types.ServiceSpec{
+		{Name: "edge", Container: "edge", Environment: map[string]string{"T": "vault:EDGE_TOKEN"}},
+	}}
+
+	store := &secretstore.Store{Recipient: "age1test"}
+	store.Set("api", "API_TOKEN", "ct")
+	store.Set("web", "WEB_TOKEN", "ct")
+	store.Set("edge", "EDGE_TOKEN", "ct") // the global slice counts too
+	store.SetReserved("observability", "anything_at_all", "ct")
+
+	st := secretStoreState{store: store}
+	clean := &reporter{}
+	captureStdout(t, func() { checkSecretStoreEntries(clean, st, res, global, "secrets.enc.yaml") })
+	assert.False(t, clean.failed, "every entry is declared by its service — and a reserved key is never checked")
+
+	// An entry left under the old CONTAINER name: no service is called "bridge".
+	store.Set("bridge", "API_TOKEN", "ct")
+	// A key moved to the wrong service: web declares no `vault:API_TOKEN`.
+	store.Set("web", "API_TOKEN", "ct")
+
+	dirty := &reporter{}
+	out := captureStdout(t, func() { checkSecretStoreEntries(dirty, st, res, global, "secrets.enc.yaml") })
+	assert.True(t, dirty.failed)
+	assert.Contains(t, out, `no service named "bridge" is declared`)
+	assert.Contains(t, out, "services.web.API_TOKEN")
+	assert.NotContains(t, out, "services.api.API_TOKEN", "a correctly-placed entry must not be flagged")
+
+	// The advice must be RUNNABLE. `inforge secret rm` calls requireService, so it
+	// refuses an undeclared service — offering it for the "bridge" orphan would
+	// send the operator to a command that exits 1. That entry is a hand edit; only
+	// the "web" orphan (a real service) may be pointed at `secret rm`.
+	bridgeLine := lineContaining(out, `no service named "bridge"`)
+	assert.NotContains(t, bridgeLine, "inforge secret rm", "the CLI cannot remove an entry for an undeclared service")
+	assert.Contains(t, bridgeLine, "by hand")
+	assert.Contains(t, lineContaining(out, "services.web.API_TOKEN"), "inforge secret rm",
+		"web IS declared, so the CLI can remove its orphaned key")
+}
+
+// TestSecretStoreStateUnreadableIsNotAbsent: a store that EXISTS but cannot be
+// read (corrupt, or still carrying a pre-ADR-0040 `containers:` block) must not
+// be reported as absent. The store-level error is printed once against its own
+// path; telling the operator per `vault:` ref that the file "does not exist —
+// run `inforge secret init`" would be false, would bury the one real error, and
+// names the single command that must NOT be run against a live store.
+func TestSecretStoreStateUnreadableIsNotAbsent(t *testing.T) {
+	// Absent: no conclusion is possible, but the "not initialized" advice is right.
+	_, known := secretStoreState{}.lookup("api", "K")
+	assert.False(t, known, "an absent store cannot answer a lookup")
+
+	// Unreadable: also unanswerable — and the caller must stay silent, not fall
+	// through to the absent-store advice.
+	unreadable := secretStoreState{unreadable: true}
+	_, known = unreadable.lookup("api", "K")
+	assert.False(t, known)
+	assert.True(t, unreadable.unreadable, "the caller distinguishes this from absent and says nothing")
+
+	// Loaded: answers normally.
+	store := &secretstore.Store{Recipient: "age1test"}
+	store.Set("api", "K", "ct")
+	found, known := secretStoreState{store: store}.lookup("api", "K")
+	assert.True(t, known)
+	assert.True(t, found)
+	found, known = secretStoreState{store: store}.lookup("api", "MISSING")
+	assert.True(t, known)
+	assert.False(t, found, "a loaded store reports a genuinely missing key")
+}
+
 // TestValidateResourcesEncryptedMissingKey: the store exists but holds no
-// ciphertext for the `vault:KEY` under the service's container.
+// ciphertext for the service's `vault:KEY`.
 func TestValidateResourcesEncryptedMissingKey(t *testing.T) {
 	err := ValidateResources("encrypted-bad", testdataDir, types.ProviderDefaults{})
 	require.Error(t, err, "an encrypted source without a store entry should fail validation")

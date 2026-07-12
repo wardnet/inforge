@@ -23,22 +23,26 @@ func encryptedFixture(t *testing.T, env string, values map[string]map[string]str
 	dir = t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, env), 0o755))
 	store := &secretstore.Store{Recipient: recipient}
-	for container, kv := range values {
+	for service, kv := range values {
 		for key, plaintext := range kv {
 			ct, err := secretstore.Encrypt([]byte(plaintext), recipient)
 			require.NoError(t, err)
-			store.Set(container, key, ct)
+			store.Set(service, key, ct)
 		}
 	}
 	require.NoError(t, store.Save(secretstore.Path(dir, env)))
 	return dir, identity
 }
 
-func encryptedSpec(container string, keys ...string) types.Resources {
+// encryptedSpec builds a one-service resource set declaring `vault:` sources for
+// keys. Every spec it builds sits in the SAME container ("shared") on purpose:
+// secrets are keyed by the SERVICE (ADR-0040), so the container must have no
+// bearing on which store entry a service resolves.
+func encryptedSpec(name string, keys ...string) types.Resources {
 	svc := types.ServiceSpec{
-		Name:        container + "-svc",
-		Container:   container,
-		User:        container,
+		Name:        name,
+		Container:   "shared",
+		User:        name,
 		Environment: map[string]string{},
 	}
 	for _, k := range keys {

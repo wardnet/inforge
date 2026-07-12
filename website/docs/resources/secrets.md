@@ -17,9 +17,10 @@ API_KEY: vault:API_KEY                          # a value from the git-encrypted
 LOG_LEVEL: info                                 # a literal (non-secret config) value
 ```
 
-Environment variables are **container-scoped**: every service sharing a `container` receives the same
-set of values. The [`inforge secret`](/cli/secret) CLI keys the encrypted store by `(container, KEY)`
-and takes a service name only as a handle onto its container.
+Environment variables are **service-scoped**: they belong to the service that declares them, and the
+[`inforge secret`](/cli/secret) CLI keys the encrypted store by `(service, KEY)`. Two services sharing
+a `container` share no secrets — if both need the same value, each holds its own entry and each is
+rotated independently.
 
 ## Source DSL
 
@@ -64,7 +65,7 @@ genuinely external to the deploy; for app secrets that should live in git, prefe
 ### `vault:<KEY>`
 
 A value held **age-encrypted in git**, in the environment's committed secret store
-(`resources/<env>/secrets.enc.yaml`), keyed by the service's `container` and `<KEY>`:
+(`resources/<env>/secrets.enc.yaml`), keyed by the declaring service's name and `<KEY>`:
 
 ```yaml
 API_KEY: vault:API_KEY                 # store key == env-var name
@@ -119,8 +120,8 @@ A `vault:` value lives in the env's committed, age-encrypted store. The full lif
    API_KEY: vault:API_KEY
    ```
 
-3. **Write the value** with the [`inforge secret`](/cli/secret) CLI (the `<service>` argument resolves
-   to its container; the value is read from stdin, or `--generate` mints a random one):
+3. **Write the value** with the [`inforge secret`](/cli/secret) CLI (the `<service>` argument is the
+   store key; the value is read from stdin, or `--generate` mints a random one):
 
    ```sh
    pbpaste | inforge secret set prd api API_KEY     # value from stdin

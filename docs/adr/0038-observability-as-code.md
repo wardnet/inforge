@@ -75,7 +75,7 @@ as every other resource.
   service-account token and contact-point secrets (the Grafana OnCall integration URL) are
   **reserved secrets** (`observability/grafana_token`, …) in `secrets.enc.yaml`, written
   `--reserved` and read via `decryptReservedSecret` — never a service-container secret
-  (`.agents/rules/reserved-secrets-live-outside-container-namespace.md`).
+  (`.agents/rules/reserved-secrets-live-outside-service-namespace.md`).
 
 - **Per-cluster / per-database / per-region drill-down needs collector-side label
   promotion.** `db.cluster.name`, the receiver's `postgresql.database.name`, and the

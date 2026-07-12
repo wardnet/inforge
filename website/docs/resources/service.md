@@ -72,7 +72,7 @@ Database credentials are **not** declared here — they flow through a [grant](#
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Service name. Also becomes the folder name (`/srv/wardnet/<name>`) and unit name (`wardnet-<name>.service`). |
-| `container` | string | Yes | Grouping label. Environment variables are scoped to the container, so services sharing one receive the same values. |
+| `container` | string | Yes | Grouping label (cloud tags, URN namespace). It has **no** bearing on secrets — those are keyed by the service. |
 | `host` | string | Yes | **Name** of the Compute resource that hosts this service (e.g. `bridge`). The host must have `instance_count: 1`; a multi-instance host is a validation error. |
 | `type` | string | Yes | Delivery type. Currently only `raw` (SSH-push) is supported. `container` is reserved. |
 | `user` | string | Yes | No-login system user the service runs as. inforge emits `User=<name>` in the systemd unit and creates the account via SSH on first deploy; the agent drops privilege to it before exec. |
@@ -175,11 +175,11 @@ The source kinds are:
 |--------|------|----------------------------|
 | **ref** | `ref:<database\|compute>/<name>.<output>` | A runtime output of another resource (e.g. a compute private IP). A **database credential is never a `ref:`** — it flows through a [grant](#grants). |
 | **env** | `env:<VAR>` | A variable in the **deploy process environment** — e.g. a CI secret mapped to an env var in your workflow. Unset/empty fails the deploy loudly. |
-| **vault** | `vault:<KEY>` | A value held **age-encrypted in git** in the env's committed store, keyed by `(container, KEY)`. Managed with the [`inforge secret`](/cli/secret) CLI. |
+| **vault** | `vault:<KEY>` | A value held **age-encrypted in git** in the env's committed store, keyed by `(service, KEY)`. Managed with the [`inforge secret`](/cli/secret) CLI. |
 | **literal** | any other string | A verbatim inline value. **Plaintext in git — non-secret config only.** |
 
-Environment variables are **container-scoped**: every service sharing a `container` receives the
-same set. At deploy, inforge resolves every entry (regardless of source kind), age-encrypts the
+Environment variables are **service-scoped**: they belong to the service that declares them, and two
+services sharing a `container` share none of them. At deploy, inforge resolves every entry (regardless of source kind), age-encrypts the
 resulting map directly to the host's own SSH key as `secrets.age`, and `inforge-agent` decrypts it
 locally and injects each value as an env var at start. The [`vault:`](/cli/secret) and full delivery
 mechanics are covered in [Secrets](./secrets).

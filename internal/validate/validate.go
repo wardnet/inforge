@@ -22,8 +22,8 @@ import (
 	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/meshcert"
-	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/meshpaths"
+	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/nginx"
 	"github.com/wardnet/inforge/internal/pathglob"
 	"github.com/wardnet/inforge/internal/pki"
@@ -39,6 +39,36 @@ import (
 // reporter accumulates pass/fail state while printing per-file results.
 type reporter struct {
 	failed bool
+}
+
+// secretStoreState carries the env's secret store together with WHY it is
+// absent, because the two cases need opposite advice and a bare nil pointer
+// cannot tell them apart:
+//
+//   - not initialized (`inforge secret init` is the fix), vs
+//   - present but unreadable — corrupt, or still carrying the pre-ADR-0040
+//     `containers:` block — where `secret init` is precisely the command that
+//     must NOT be run: the file exists and holds every secret the env owns.
+//
+// An unreadable store is already reported once against its own path, so the
+// per-service `vault:` checks stay silent rather than burying that one accurate
+// error under a "does not exist — run `inforge secret init`" per reference.
+type secretStoreState struct {
+	// store is the loaded store, nil when absent or unreadable.
+	store *secretstore.Store
+	// unreadable is true when the file exists but failed to load.
+	unreadable bool
+}
+
+// lookup reports the ciphertext for a (service, KEY), and whether the store
+// could answer at all — false for `known` means no conclusion can be drawn and
+// the caller must not report a missing secret.
+func (s secretStoreState) lookup(service, key string) (found, known bool) {
+	if s.unreadable || s.store == nil {
+		return false, false
+	}
+	_, ok := s.store.Get(service, key)
+	return ok, true
 }
 
 func (r *reporter) report(path string, errs, warns []string) {
@@ -362,11 +392,10 @@ type regionContext struct {
 	// author error is the early, clear form of that.
 	callerPki map[string]string
 	// encStore is the environment's committed encrypted secret store
-	// (resources/<env>/secrets.enc.yaml), nil when the file does not exist. A
-	// `vault:<KEY>` secret on a service must have a ciphertext under
-	// (container, KEY); the check is presence-only so validation stays
-	// credential-free.
-	encStore *secretstore.Store
+	// (resources/<env>/secrets.enc.yaml). A `vault:<KEY>` secret on a service must
+	// have a ciphertext under (service, KEY) — ADR-0040, not the service's
+	// container; the check is presence-only so validation stays credential-free.
+	encStore secretStoreState
 	// providerDefaults are the project-level provider fallbacks applied when a
 	// spec omits its provider field (resolved via types.ResolveProvider).
 	providerDefaults types.ProviderDefaults
@@ -450,11 +479,16 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 	// The encrypted secret store is optional (absent until `inforge secret init`);
 	// a present-but-broken store is reported against its own path so the rest of
 	// the resource set still validates. One env-scoped store serves both slices —
-	// secrets are container-keyed, not region-keyed.
-	encStore, err := secretstore.Load(secretstore.Path(dir, env))
+	// secrets are service-keyed, not region-keyed (ADR-0040).
+	// An unreadable store (corrupt, or not yet migrated off `containers:`) is
+	// recorded as such, NOT collapsed to "absent": the per-service `vault:` checks
+	// must not then advise `inforge secret init` on a file that exists and holds
+	// every secret the env owns.
+	loaded, err := secretstore.Load(secretstore.Path(dir, env))
+	encStore := secretStoreState{store: loaded}
 	if err != nil && !errors.Is(err, secretstore.ErrNotFound) {
 		r.fail(secretstore.Path(dir, env), err.Error())
-		encStore = nil
+		encStore = secretStoreState{unreadable: true}
 	}
 	// The PKI store is optional and read credential-free (only its plaintext
 	// structure — names, topology, which scopes have intermediates), exactly like
@@ -514,6 +548,12 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 	// validateResourceSet pass above already reports that failure precisely.
 	if regionalLoadErr == nil {
 		checkCrossScopeNames(r, regionalRes, globalRes, regionalBase, globalBase)
+		// The store→manifest direction. The per-service check above only proves every
+		// declared `vault:` ref HAS a ciphertext; without this, a stale entry, a
+		// typo'd service name, or a half-finished migration is invisible until a
+		// service silently comes up without the value it expected. Skipped when the
+		// regional set fails to load — every service would read as "not declared".
+		checkSecretStoreEntries(r, encStore, regionalRes, globalRes, secretstore.Path(dir, env))
 	}
 
 	// Mesh PKI references: a global service's leaf comes from the global
@@ -536,6 +576,67 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 		return errors.New("validation failed")
 	}
 	return nil
+}
+
+// checkSecretStoreEntries validates the store in the store→manifest direction:
+// every entry must be one a service actually reads. Secrets are keyed by service
+// (ADR-0040), so an entry names a service and a `vault:` key that service
+// declares — anything else is an orphan: a stale secret, a typo'd name, or an
+// entry left behind by a hand migration off the old container-keyed shape. An
+// orphan is an ERROR, not a warning: the store is the one place a silent
+// mismatch stays invisible until a service comes up without the value it
+// expected. Credential-free — only key names are read, never ciphertext.
+//
+// The reserved namespace is deliberately NOT checked: reserved keys are
+// operator-named (a Grafana contact-point secret, ADR-0038), so no closed set
+// exists to check them against. `secret set --reserved` warns instead.
+func checkSecretStoreEntries(r *reporter, st secretStoreState, regional, global types.Resources, storePath string) {
+	if st.store == nil {
+		return
+	}
+	store := st.store
+	// service -> the vault keys it declares, over both slices.
+	declared := map[string]map[string]bool{}
+	for _, set := range []types.Resources{regional, global} {
+		for _, s := range set.Service {
+			if declared[s.Name] == nil {
+				declared[s.Name] = map[string]bool{}
+			}
+			for _, src := range s.Environment {
+				if parsed, err := ParseSource(src); err == nil && parsed.Kind == SourceVault {
+					declared[s.Name][parsed.VaultKey] = true
+				}
+			}
+		}
+	}
+
+	services := make([]string, 0, len(store.Services))
+	for name := range store.Services {
+		services = append(services, name)
+	}
+	sort.Strings(services)
+	for _, name := range services {
+		keys, ok := declared[name]
+		if !ok {
+			// Deliberately NOT `inforge secret rm`: the CLI refuses to address a
+			// service the env does not declare (requireService), so an entry under an
+			// undeclared name is removed by editing the store — the same hand edit the
+			// container→service migration is (ADR-0040).
+			r.fail(storePath, fmt.Sprintf(
+				"services.%s: no service named %q is declared in this environment — delete the `%s:` entry from %s by hand (the CLI will not address an undeclared service), or fix the name if it is a typo",
+				name, name, name, secretstore.FileName))
+			continue
+		}
+		for _, key := range store.Keys(name) {
+			if !keys[key] {
+				// Here the service DOES exist, so the CLI can address it and `secret rm`
+				// is the right advice.
+				r.fail(storePath, fmt.Sprintf(
+					"services.%s.%s: service %q declares no `vault:%s` secret, so nothing would ever read this value — declare it in the service's environment, or remove the entry with `inforge secret rm <env> %s %s`",
+					name, key, name, key, name, key))
+			}
+		}
+	}
 }
 
 // checkCrossScopeNames rejects a service or app name declared in BOTH the
@@ -574,7 +675,7 @@ func checkCrossScopeNames(r *reporter, regional, global types.Resources, regiona
 	}
 }
 
-func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, siblingServices map[string]string, encStore *secretstore.Store, pkiStore *pki.Store, defaults types.ProviderDefaults, backupsBucketConfigured bool) error {
+func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, base string, available map[string]bool, sizeTable sizes.Table, global *globalRefs, siblingServices map[string]string, encStore secretStoreState, pkiStore *pki.Store, defaults types.ProviderDefaults, backupsBucketConfigured bool) error {
 	networkFiles, _, err := readFolders[types.NetworkSpec](filepath.Join(base, "network"))
 	if err != nil {
 		return err
@@ -675,48 +776,48 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 	}
 
 	ctx := regionContext{
-		available:             available,
-		sizeTable:             sizeTable,
-		networks:              map[string]types.NetworkSpec{},
-		computeKind:           map[string]string{},
-		computeCanonical:      map[string]string{},
-		computeInstances:      map[string]int{},
-		computeDeployer:       map[string]bool{},
-		computeNames:          map[string]bool{},
-		computeNetwork:        map[string]string{},
+		available:                 available,
+		sizeTable:                 sizeTable,
+		networks:                  map[string]types.NetworkSpec{},
+		computeKind:               map[string]string{},
+		computeCanonical:          map[string]string{},
+		computeInstances:          map[string]int{},
+		computeDeployer:           map[string]bool{},
+		computeNames:              map[string]bool{},
+		computeNetwork:            map[string]string{},
 		databaseNames:             map[string]bool{},
 		databasePhysicalByCluster: map[string]int{},
 		backupsBucketConfigured:   backupsBucketConfigured,
-		clusterNames:          map[string]bool{},
-		clusterHosts:          map[string]bool{},
-		clusterHostByName:     map[string]string{},
-		databaseClusterByName: map[string]string{},
-		nginxBindsByHost:      map[string]map[int]string{},
-		meshHosts:             map[string]bool{},
-		ingressNames:          map[string]bool{},
-		ingressHost:           map[string]string{},
-		appSubdomainCounts:    map[string]int{},
-		portUsersByHost:       map[string]map[int][]string{},
-		forwardUsersByHost:    map[string]map[int][]string{},
-		targetUsersByHost:     map[string]map[int][]string{},
-		udpExposedUsersByHost: map[string]map[int][]string{},
-		tlsTermIngressByHost:  map[string]bool{},
-		ingressHealthPort:     map[string]int{},
-		ingressNamesByHost:    map[string][]string{},
-		pkiResources:          map[string]string{},
-		pkiGenerated:          pkiGeneratedNames(pkiStore),
-		serviceAllowsGateway:  map[string]bool{},
-		servicePkiByName:      map[string]string{},
-		serviceHostByName:        map[string]string{},
-		serviceNamesInScope:      map[string]bool{},
-		meshServices:             map[string]bool{},
-		callerCandidates:         map[string]bool{},
-		forbiddenCallerNames:     map[string]bool{},
-		callerPki:                map[string]string{},
-		servicePublicPathsByName: map[string][]string{},
-		gatewayServiceTargets:    map[string]bool{},
-		encStore:                 encStore,
-		providerDefaults:         defaults,
+		clusterNames:              map[string]bool{},
+		clusterHosts:              map[string]bool{},
+		clusterHostByName:         map[string]string{},
+		databaseClusterByName:     map[string]string{},
+		nginxBindsByHost:          map[string]map[int]string{},
+		meshHosts:                 map[string]bool{},
+		ingressNames:              map[string]bool{},
+		ingressHost:               map[string]string{},
+		appSubdomainCounts:        map[string]int{},
+		portUsersByHost:           map[string]map[int][]string{},
+		forwardUsersByHost:        map[string]map[int][]string{},
+		targetUsersByHost:         map[string]map[int][]string{},
+		udpExposedUsersByHost:     map[string]map[int][]string{},
+		tlsTermIngressByHost:      map[string]bool{},
+		ingressHealthPort:         map[string]int{},
+		ingressNamesByHost:        map[string][]string{},
+		pkiResources:              map[string]string{},
+		pkiGenerated:              pkiGeneratedNames(pkiStore),
+		serviceAllowsGateway:      map[string]bool{},
+		servicePkiByName:          map[string]string{},
+		serviceHostByName:         map[string]string{},
+		serviceNamesInScope:       map[string]bool{},
+		meshServices:              map[string]bool{},
+		callerCandidates:          map[string]bool{},
+		forbiddenCallerNames:      map[string]bool{},
+		callerPki:                 map[string]string{},
+		servicePublicPathsByName:  map[string][]string{},
+		gatewayServiceTargets:     map[string]bool{},
+		encStore:                  encStore,
+		providerDefaults:          defaults,
 	}
 	// Gateway is a scope singleton; count the declarations so checkGateway can reject
 	// a scope with more than one and checkService can reject a gateway route in a
@@ -1981,10 +2082,18 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 		if parsed.Kind == SourceVault {
 			// A vault source's ciphertext must already exist in the committed store —
 			// fail at validate time so the fix is cheap (run inforge secret set, commit).
-			if ctx.encStore == nil {
+			switch found, known := ctx.encStore.lookup(s.Name, parsed.VaultKey); {
+			case !known && ctx.encStore.unreadable:
+				// The store exists but could not be read — already reported once against
+				// its own path. Saying "does not exist — run `inforge secret init`" here
+				// would be false, and would bury that one real error under a copy per ref.
+			case !known:
 				errs = append(errs, fmt.Sprintf("environment.%s: source is vault but resources/<env>/%s does not exist — run `inforge secret init <env>`, then `inforge secret set <env> %s %s`", k, secretstore.FileName, s.Name, parsed.VaultKey))
-			} else if _, ok := ctx.encStore.Get(s.Container, parsed.VaultKey); !ok {
-				errs = append(errs, fmt.Sprintf("environment.%s: no ciphertext for key %q in container %q in %s — run `inforge secret set <env> %s %s` and commit", k, parsed.VaultKey, s.Container, secretstore.FileName, s.Name, parsed.VaultKey))
+			case !found:
+				// Secrets are keyed by the SERVICE, not its container (ADR-0040): a
+				// sibling service in the same container holding this key does NOT
+				// satisfy this reference.
+				errs = append(errs, fmt.Sprintf("environment.%s: no ciphertext for key %q of service %q in %s — run `inforge secret set <env> %s %s` and commit", k, parsed.VaultKey, s.Name, secretstore.FileName, s.Name, parsed.VaultKey))
 			}
 			continue
 		}

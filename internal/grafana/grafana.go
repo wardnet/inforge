@@ -10,7 +10,7 @@ package grafana
 // the same "observability" namespace the OTLP credential uses
 // (otelcol.AuthSecretNamespace): both are inforge-internal observability secrets that
 // live in the store's reserved: namespace, never a service container
-// (.agents/rules/reserved-secrets-live-outside-container-namespace.md).
+// (.agents/rules/reserved-secrets-live-outside-service-namespace.md).
 const ReservedNamespace = "observability"
 
 // TokenKey is the reserved-secret key holding the Grafana service-account token used

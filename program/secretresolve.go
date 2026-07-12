@@ -30,10 +30,11 @@ import (
 // slot (all.Compute["global"]) regardless of the service's own region. The lookup
 // region and the bare name are derived once here.
 //
-// container addresses a vault: source's value in all.Encrypted — the program
+// service addresses a vault: source's value in all.Encrypted — the program
 // decrypts the env's committed store once, provider-neutrally, and this resolver
-// only ever sees plaintext (ADR-0017).
-func resolveRef(source, container, region string, all types.AllOutputs) (pulumi.StringOutput, error) {
+// only ever sees plaintext (ADR-0017). Secrets are keyed by the SERVICE that
+// declares the reference, never by its container (ADR-0040).
+func resolveRef(source, service, region string, all types.AllOutputs) (pulumi.StringOutput, error) {
 	src, err := validate.ParseSource(source)
 	if err != nil {
 		return pulumi.StringOutput{}, err
@@ -59,11 +60,11 @@ func resolveRef(source, container, region string, all types.AllOutputs) (pulumi.
 		return pulumi.String(src.LiteralValue).ToStringOutput(), nil
 
 	case validate.SourceVault:
-		val, ok := all.Encrypted[container][src.VaultKey]
+		val, ok := all.Encrypted[service][src.VaultKey]
 		if !ok {
 			return pulumi.StringOutput{}, fmt.Errorf(
-				"resolveRef %q: no decrypted value for vault key %q in container %q — is it in resources/<env>/secrets.enc.yaml and %s set?",
-				source, src.VaultKey, container, secretstore.IdentityEnvVar)
+				"resolveRef %q: no decrypted value for vault key %q of service %q — is it in resources/<env>/secrets.enc.yaml and %s set?",
+				source, src.VaultKey, service, secretstore.IdentityEnvVar)
 		}
 		// Marked secret so the plaintext is encrypted in Pulumi state and masked
 		// in console/diff output.

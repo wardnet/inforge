@@ -179,6 +179,35 @@ Key internal seams introduced in slice #110:
   `pki:` alone no longer forces anything to be delivered at deploy time: a plain mesh member's leaf
   is the mesh proxy's business, and an `mtls_files:` service's own leaf is `inforge pki renew`'s.
 
+## Service secrets (ADR-0017, ADR-0040)
+
+A service's `vault:<KEY>` sources resolve against the env's committed store,
+`resources/<env>/secrets.enc.yaml` — per-value armored age ciphertext under a committed `recipient:`,
+decrypted once per deploy with `INFORGE_SECRETS_KEY`.
+
+- **The store is keyed by SERVICE, never by container** (ADR-0040): `services: {<service>: {KEY:
+  ciphertext}}`. `program.decryptEncryptedSecrets` builds its wanted-set from `svc.Name`,
+  `program.resolveRef` reads `all.Encrypted[service][key]`, and `validate.checkService` requires a
+  ciphertext at `(s.Name, key)`. Two services sharing a `container:` share **nothing** — a value both
+  need is stored twice, deliberately, so a secret's blast radius equals the unit that rotates it.
+  Before ADR-0040 the key was `svc.Container`, so `ddns` and `tunneller` (both `container: edge`)
+  silently shared one namespace while the CLI showed only service names. **Do not re-couple secrets to
+  `container:`** — see the rule `reserved-secrets-live-outside-service-namespace`.
+- **`secretstore.Load` rejects an unmigrated store.** A file still carrying a `containers:` block fails
+  to load, with migration guidance. The `Store.Containers` field survives ONLY as a detect-only field:
+  yaml.v3 decodes non-strictly, so without it the block would be silently dropped and the store would
+  parse clean while serving no secrets at all. The guard lives in `Load` so validate, the CLI and the
+  deploy all inherit it. Migration is a hand edit — the ciphertext is unchanged, so re-keying an entry
+  needs no decryption.
+- **Validation is bidirectional and strict.** Beyond "every `vault:` ref has a ciphertext",
+  `validate.checkSecretStoreEntries` errors on any store entry nothing reads: a key naming an
+  undeclared service, or a KEY under a service that declares no `vault:` reference to it. Errors, not
+  warnings — with a hand migration the store is the one place a silent mismatch survives until a
+  service comes up without its value. `reserved:` is exempt (operator-named keys).
+- **The CLI surface is unchanged** (`inforge secret set|ls|rm <env> <service> <KEY>`); only the address
+  it writes changed. `requireService` (replacing the old `resolveServiceContainer`) rejects an
+  undeclared service, and `--reserved` bypasses it for the inforge-internal namespace.
+
 ## Grants (#117, ADR-0025)
 
 A **grant** is a service's declared, permissioned access to a **Grantable** resource, materialized as
@@ -493,12 +522,12 @@ resource-attribute set so VM metrics and app telemetry correlate on `host.id`.
   user. `program.provisionObservability` is an **always-on** per-host pass **gated on env-level
   config**: `variables.yaml` `observability.otlp_endpoint` (non-secret) + the OTLP Basic-auth
   credential in `secrets.enc.yaml`. That credential is an inforge **reserved secret**, NOT a
-  service container secret: it lives under the store's `reserved:` namespace as
+  service secret: it lives under the store's `reserved:` namespace as
   `observability/otlp_auth` (`otelcol.AuthSecretNamespace`/`AuthSecretKey`), is written with
   `inforge secret set <env> observability otlp_auth --reserved`, and is read directly by the deploy
   (`program.decryptReservedSecret`) — decoupled from the `vault:` service-secret path, so it
-  surfaces even when no service uses `vault:`, and a user service may use the container name
-  `observability` without colliding (see rule `reserved-secrets-live-outside-container-namespace`).
+  surfaces even when no service uses `vault:`, and a user may name a service
+  `observability` without colliding (see rule `reserved-secrets-live-outside-service-namespace`).
   With no endpoint it is a no-op; with an endpoint but no credential it fails the deploy. The
   credential is base64'd, `pulumi.ToSecret`-wrapped (encrypted in state), written `0600` owned by
   the collector user, and referenced from the config via the collector's `${file:…}` provider

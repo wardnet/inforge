@@ -918,7 +918,7 @@ func provisionServiceSecrets(ctx *pulumi.Context, res types.Resources, all types
 		}
 		resolved := map[string]pulumi.StringOutput{}
 		for key, source := range svc.Environment {
-			val, err := resolveRef(source, svc.Container, region, all)
+			val, err := resolveRef(source, svc.Name, region, all)
 			if err != nil {
 				return nil, fmt.Errorf("service %q: resolve ref for secret %q: %w", svc.Name, key, err)
 			}
