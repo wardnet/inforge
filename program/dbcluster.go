@@ -300,7 +300,7 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 	}).(pulumi.StringOutput)
 	// On teardown (grant/service removed) reassign the role's owned objects to the
 	// database owner and drop the role, so a retired service leaves no live login.
-	dropScript := postgres.DropRoleScript(p.port, roleName, p.owner)
+	dropScript := postgres.DropRoleScript(p.port, roleName, p.owner, []string{p.database})
 	// Serialize mints against ONE database: each mint depends on its db-create command
 	// AND the previous mint on this database, so concurrent GRANT/ALTER DEFAULT
 	// PRIVILEGES sessions never contend on the shared catalog. Different databases hold

@@ -77,15 +77,27 @@ func MintRoleScript(port int, role, password, database, permission string) (stri
 // grants CONNECT on each scraped database (ADR-0037). It runs on the host over local
 // peer auth from the default database — every statement is cluster-level. The password
 // appears in the rendered SQL (quoted), so the caller wraps the whole command as a
-// Pulumi secret. Teardown reuses DropRoleScript (the monitor role owns no objects, so
-// its DROP OWNED just revokes the pg_monitor membership + CONNECT grants).
+// Pulumi secret. Teardown reuses DropRoleScript over the same database set (the
+// monitor role owns no objects, so its DROP OWNED just revokes the pg_monitor
+// membership + CONNECT grants).
 func MintMonitorRoleScript(port int, role, password string, databases []string) string {
 	return psqlScript(port, "", pgrole.MintMonitorRoleSQL(role, password, databases))
 }
 
 // DropRoleScript renders shell that reassigns the role's owned objects to owner, drops
 // its privileges, then drops the role — run at role teardown over local peer auth.
-func DropRoleScript(port int, role, owner string) string {
-	stmts := append(pgrole.ReassignDropSQL(role, owner), pgrole.DropRoleSQL(role))
-	return psqlScript(port, "", stmts)
+//
+// REASSIGN OWNED / DROP OWNED are per-database: they only touch objects and privileges
+// in the database the session is connected to (plus ACLs on shared objects such as the
+// databases themselves), so they run once per database the role was granted on —
+// against that database, never the default one. DROP ROLE is cluster-wide and runs last
+// from the default database, once every dependent object is cleared; it still fails
+// loudly if the role holds privileges in some database outside databases.
+func DropRoleScript(port int, role, owner string, databases []string) string {
+	parts := []string{"set -e"}
+	for _, db := range databases {
+		parts = append(parts, psqlScript(port, db, pgrole.ReassignDropSQL(role, owner)))
+	}
+	parts = append(parts, psqlScript(port, "", []string{pgrole.DropRoleSQL(role)}))
+	return strings.Join(parts, "\n")
 }

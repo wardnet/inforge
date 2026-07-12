@@ -295,7 +295,7 @@ func TestMintRoleScript(t *testing.T) {
 }
 
 func TestDropRoleScript(t *testing.T) {
-	s := DropRoleScript(5432, "svc", "app")
+	s := DropRoleScript(5432, "svc", "app", []string{"tunneller"})
 	for _, want := range []string{
 		`REASSIGN OWNED BY "svc" TO "app"`,
 		`DROP OWNED BY "svc"`,
@@ -304,6 +304,44 @@ func TestDropRoleScript(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("DropRoleScript missing %q", want)
 		}
+	}
+	// The clears must run against the role's OWN database (REASSIGN/DROP OWNED are
+	// per-database); against the default database they are silent no-ops and the
+	// DROP ROLE then aborts on the role's dependent privileges, leaving a live login.
+	clears, drop, ok := strings.Cut(s, "DROP ROLE IF EXISTS")
+	if !ok {
+		t.Fatalf("no DROP ROLE in:\n%s", s)
+	}
+	if !strings.Contains(clears, "psql -p 5432 -w -v ON_ERROR_STOP=1 -d 'tunneller'") {
+		t.Errorf("clears must target the role's database:\n%s", clears)
+	}
+	if strings.Contains(clears, "-d 'postgres'") {
+		t.Errorf("clears must not target the default database:\n%s", clears)
+	}
+	// DROP ROLE is cluster-wide: it runs from the default database, after the clears.
+	if strings.Contains(drop, " -d ") || !strings.Contains(s, "psql -p 5432 -w -v ON_ERROR_STOP=1 <<") {
+		t.Errorf("DROP ROLE must run from the default database:\n%s", s)
+	}
+}
+
+// A role granted on several databases (the ADR-0037 monitor role) must be cleared in
+// every one of them before the cluster-wide DROP ROLE.
+func TestDropRoleScriptMultipleDatabases(t *testing.T) {
+	s := DropRoleScript(5433, "otelmon", "postgres", []string{"tenants", "ddns"})
+	iTenants := strings.Index(s, "-d 'tenants'")
+	iDdns := strings.Index(s, "-d 'ddns'")
+	iDrop := strings.Index(s, `DROP ROLE IF EXISTS "otelmon"`)
+	if iTenants < 0 || iDdns < 0 || iDrop < 0 {
+		t.Fatalf("missing per-database clear or drop:\n%s", s)
+	}
+	if iTenants > iDrop || iDdns > iDrop {
+		t.Errorf("every DROP OWNED must precede DROP ROLE:\n%s", s)
+	}
+	if strings.Count(s, `DROP OWNED BY "otelmon"`) != 2 {
+		t.Errorf("want one DROP OWNED per database:\n%s", s)
+	}
+	if !strings.HasPrefix(s, "set -e\n") {
+		t.Errorf("a failed clear must abort the teardown:\n%s", s)
 	}
 }
 
