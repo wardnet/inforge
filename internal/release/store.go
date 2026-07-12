@@ -282,12 +282,20 @@ func (s *Store) ListArtifacts(ctx context.Context, service string) ([]Artifact, 
 func (s *Store) Prune(ctx context.Context, service string, keep int) ([]string, error) {
 	// Order is load-bearing: the artifact objects MUST be listed BEFORE the
 	// pinned set is read. A `releases deploy` running concurrently pins a SHA by
-	// writing its manifest, and the two reads are not atomic — reading pins
-	// first would leave a window where a SHA pinned after that read is still a
-	// prune candidate, deleting an artifact a live host runs (ADR-0016's pin
-	// invariant). Listing first makes the window only ever over-retain: a SHA
-	// pinned in it is seen by the later pin read, and an artifact pushed in it
-	// is simply not a candidate this sweep.
+	// writing its manifest, and the two reads are not atomic (S3 gives us no
+	// snapshot), so whichever read comes LAST decides what a concurrent pin is
+	// raced against. Reading pins first meant everything from the pin read to the
+	// end of the sweep was a hole: a SHA pinned there was invisible and got
+	// deleted out from under a live host (ADR-0016's pin invariant). Listing
+	// first shrinks that hole to the pin read itself: a pin landing before it is
+	// seen and retained, and an artifact pushed in the window is simply not a
+	// candidate this sweep.
+	//
+	// This narrows the race, it does not close it — a pin written between
+	// PinnedSHAs' own read and the DeleteObject calls below is still missed.
+	// Closing it needs a lock or a conditional delete the store does not have;
+	// the pin read is deliberately the last thing before the deletes so the
+	// remaining window is as small as it can be.
 	objs, err := s.listArtifactObjects(ctx, service)
 	if err != nil {
 		return nil, err

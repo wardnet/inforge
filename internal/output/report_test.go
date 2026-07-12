@@ -14,17 +14,35 @@ func TestMarkdownCounts(t *testing.T) {
 	assert.NotContains(t, md, "### Failed")
 }
 
-// TestMarkdownCountsReplacements: a run that only REPLACED resources must not
-// report all-zeroes — Pulumi splits a replacement into create-replacement +
-// delete-replaced, and the report must account for both (as the streamed
-// summary does), or it silently disagrees with the run it describes.
+// TestMarkdownCountsReplacements: a replacement-only run must not report
+// all-zeroes, in BOTH shapes the counts can arrive in — the per-resource event
+// stream (every physical step: create-replacement + replace + delete-replaced)
+// and the SummaryEvent fallback (logical steps only, i.e. `replace` alone,
+// which is what a preview that emits no ResOutputsEvents leaves us with). Three
+// replaced resources must read as 3 replaced — not as 3 deleted on top, and not
+// as no changes at all.
 func TestMarkdownCountsReplacements(t *testing.T) {
+	for name, changes := range map[string]map[string]int{
+		"event stream (physical steps)": {"create-replacement": 3, "replace": 3, "delete-replaced": 3},
+		"summary fallback (logical)":    {"replace": 3},
+	} {
+		t.Run(name, func(t *testing.T) {
+			md := Markdown("inforge deploy — prd", changes, nil)
+			assert.Contains(t, md, "| 0 | 0 | 0 | 3 | 0 |",
+				"3 replaced resources are 3 replacements — not deletions, not nothing")
+		})
+	}
+}
+
+// TestMarkdownDeletedExcludesReplacements: the 🗑️ deleted column counts only
+// resources that actually go away. A run that deletes one resource and replaces
+// three must not read as four deletions.
+func TestMarkdownDeletedExcludesReplacements(t *testing.T) {
 	md := Markdown("inforge deploy — prd",
-		map[string]int{"create-replacement": 3, "delete-replaced": 3},
+		map[string]int{"delete": 1, "create-replacement": 3, "replace": 3, "delete-replaced": 3},
 		nil,
 	)
-	assert.Contains(t, md, "| 0 | 0 | 3 | 3 | 0 |")
-	assert.NotContains(t, md, "| 0 | 0 | 0 | 0 |", "a replacement-only run must not read as no changes")
+	assert.Contains(t, md, "| 0 | 0 | 1 | 3 | 0 |")
 }
 
 func TestMarkdownFailures(t *testing.T) {
