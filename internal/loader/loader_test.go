@@ -28,9 +28,9 @@ func TestVariablesLiteralKeepsPatterns(t *testing.T) {
 // The whole-file resolved decode: the deploy program's path. Every leaf goes
 // through the chain, so a missing value is reported before anything is created.
 func TestVariablesResolvesEveryLeaf(t *testing.T) {
-	dir := writeVariablesYAML(t, `base_domain: ${INFORGE_TEST_DOMAIN}
+	dir := writeVariablesYAML(t, `base_domain: env:INFORGE_TEST_DOMAIN
 ssh:
-  authorizedKeys: ${INFORGE_TEST_KEYS}
+  authorizedKeys: env:INFORGE_TEST_KEYS
 `)
 	chain := yamldoc.Chain{yamldoc.EnvFrom(func(k string) (string, bool) {
 		return map[string]string{
@@ -54,8 +54,8 @@ ssh:
 func TestReadingOneLeafIgnoresPatternsInOtherLeaves(t *testing.T) {
 	dir := writeVariablesYAML(t, `base_domain: wardnet.network
 ssh:
-  authorizedKeys: ${SSH_AUTHORIZED_KEYS}
-  deployPublicKey: ${DEPLOY_PUBLIC_KEY}
+  authorizedKeys: env:SSH_AUTHORIZED_KEYS
+  deployPublicKey: env:DEPLOY_PUBLIC_KEY
 `)
 	// Nothing is set in the environment.
 	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "", false })}
@@ -205,7 +205,7 @@ func TestRegionsMissingFile(t *testing.T) {
 	assert.Nil(t, global)
 }
 
-// writeRegionsYAML writes a regions.yaml with a ${ENV_VAR} provider credential
+// writeRegionsYAML writes a regions.yaml with a env:ENV_VAR provider credential
 // into a temp env dir and returns the dir.
 func writeRegionsYAML(t *testing.T) string {
 	t.Helper()
@@ -216,13 +216,13 @@ func writeRegionsYAML(t *testing.T) string {
     slug: use1
     providers:
       hetzner:
-        apiToken: ${INFORGE_TEST_HCLOUD_TOKEN}
+        apiToken: env:INFORGE_TEST_HCLOUD_TOKEN
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "regions.yaml"), []byte(doc), 0o644))
 	return dir
 }
 
-// The regression guard for the credential bug: a ${ENV_VAR} must be resolved
+// The regression guard for the credential bug: a env:ENV_VAR must be resolved
 // before it reaches a provider, never passed through as the literal "${...}".
 func TestRegionsResolvesCredentials(t *testing.T) {
 	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "real-token-value", true })}
@@ -242,13 +242,13 @@ func TestRegionsMissingCredentialErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "regions.us-east-1.providers.hetzner.apiToken")
 }
 
-// The literal read (what validation uses) leaves a ${ENV_VAR} as written even
+// The literal read (what validation uses) leaves a env:ENV_VAR as written even
 // with the var unset, so structural validation runs without credentials and an
 // unresolved credential never reads as an (empty) missing value.
 func TestRegionsLiteralKeepsCredentialAsWritten(t *testing.T) {
 	rt, _, err := RegionsLiteral("prd", writeRegionsYAML(t))
 	require.NoError(t, err)
-	assert.Equal(t, "${INFORGE_TEST_HCLOUD_TOKEN}", rt["us-east-1"].Providers["hetzner"]["apiToken"])
+	assert.Equal(t, "env:INFORGE_TEST_HCLOUD_TOKEN", rt["us-east-1"].Providers["hetzner"]["apiToken"])
 }
 
 // TestLoadSizeTableFromFile exercises the on-disk size table: a YAML list of

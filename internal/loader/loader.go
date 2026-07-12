@@ -8,9 +8,9 @@
 //
 // Reading never resolves anything. Every file is parsed by internal/yamldoc into
 // a document whose leaves are Scalars, and a leaf becomes a real value only when a
-// consumer asks for one — by handing it to a Chain of Resolvers (today, ${ENV_VAR}
-// against the environment; next, environment.yaml's env:/vault:/ref: sources, which
-// are the same idea). A leaf no resolver claims is a static literal.
+// consumer asks for one — by handing it to a Chain of Resolvers. One DSL, every
+// file: `env:NAME` today; `vault:KEY` and `ref:...` (already environment.yaml's
+// syntax) join the same chain next. A leaf no resolver claims is a static literal.
 //
 // So a command requires exactly the values it reads and no others: the deploy
 // program decodes both config files resolved, up front, and fails before it touches
@@ -62,12 +62,16 @@ func Variables(ctx context.Context, chain yamldoc.Chain, env, dir string) (types
 	if !doc.Exists() {
 		return vars, fmt.Errorf("read variables: %s does not exist", doc.Path())
 	}
-	return vars, doc.DecodeResolved(ctx, chain, &vars)
+	if err := doc.DecodeResolved(ctx, chain, &vars); err != nil {
+		return types.EnvironmentVariables{}, err
+	}
+	return vars, nil
 }
 
-// VariablesLiteral reads variables.yaml with every leaf exactly as written — a
-// ${...} stays a ${...}. Structural validation uses this: it checks the shape,
-// not the values, so it must neither require nor be tripped by an unset variable.
+// VariablesLiteral reads variables.yaml with every leaf exactly as written — an
+// `env:FOO` stays the literal text "env:FOO". Structural validation uses this: it
+// checks the shape, not the values, so it must neither require nor be tripped by an
+// unset variable.
 func VariablesLiteral(env, dir string) (types.EnvironmentVariables, error) {
 	var vars types.EnvironmentVariables
 	doc, err := VariablesDoc(env, dir)
@@ -77,7 +81,10 @@ func VariablesLiteral(env, dir string) (types.EnvironmentVariables, error) {
 	if !doc.Exists() {
 		return vars, fmt.Errorf("read variables: %s does not exist", doc.Path())
 	}
-	return vars, doc.Decode(&vars)
+	if err := doc.Decode(&vars); err != nil {
+		return types.EnvironmentVariables{}, err
+	}
+	return vars, nil
 }
 
 // RegionsDoc reads <dir>/<env>/regions.yaml into a document — the per-region
@@ -93,7 +100,11 @@ func RegionsDoc(env, dir string) (yamldoc.Document, error) {
 // notably the provider credentials and the DNS authority's zone. Only a command
 // that builds a provider needs this.
 func Regions(ctx context.Context, chain yamldoc.Chain, env, dir string) (regions.Table, *regions.Global, error) {
-	return decodeRegions(env, dir, func(doc yamldoc.Document, f *regions.File) error {
+	doc, err := RegionsDoc(env, dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	return RegionsFrom(doc, func(f *regions.File) error {
 		return doc.DecodeResolved(ctx, chain, f)
 	})
 }
@@ -102,18 +113,25 @@ func Regions(ctx context.Context, chain yamldoc.Chain, env, dir string) (regions
 // this (structure, not credentials), and so does any command that needs only the
 // region names and slugs.
 func RegionsLiteral(env, dir string) (regions.Table, *regions.Global, error) {
-	return decodeRegions(env, dir, func(doc yamldoc.Document, f *regions.File) error {
-		return doc.Decode(f)
-	})
-}
-
-func decodeRegions(env, dir string, decode func(yamldoc.Document, *regions.File) error) (regions.Table, *regions.Global, error) {
 	doc, err := RegionsDoc(env, dir)
 	if err != nil {
 		return nil, nil, err
 	}
+	return RegionsLiteralFrom(doc)
+}
+
+// RegionsLiteralFrom decodes a regions document already in hand — so a caller that
+// also needs individual leaves (a slug, resolved where it is used) reads the file
+// once, not twice.
+func RegionsLiteralFrom(doc yamldoc.Document) (regions.Table, *regions.Global, error) {
+	return RegionsFrom(doc, func(f *regions.File) error { return doc.Decode(f) })
+}
+
+// RegionsFrom applies a decode to a regions document and normalises the result: an
+// absent or empty file yields an empty table, never a nil map.
+func RegionsFrom(doc yamldoc.Document, decode func(*regions.File) error) (regions.Table, *regions.Global, error) {
 	var f regions.File
-	if err := decode(doc, &f); err != nil {
+	if err := decode(&f); err != nil {
 		return nil, nil, err
 	}
 	if f.Regions == nil {

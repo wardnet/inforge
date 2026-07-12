@@ -6,7 +6,7 @@ regions:
     # placementRegion, so it must be declared.
     dns:
       provider: cloudflare
-      zone: ${INFORGE_TEST_INGRESS_APP_ZONE}
+      zone: env:INFORGE_TEST_INGRESS_APP_ZONE
     providers:
       hetzner:
         apiToken: test-token

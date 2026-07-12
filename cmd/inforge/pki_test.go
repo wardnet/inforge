@@ -297,8 +297,8 @@ func TestRenewMeshCertsAsIgnoresUnrelatedVariables(t *testing.T) {
 	t.Setenv("DEPLOY_PUBLIC_KEY", "")
 	const varsDoc = `base_domain: example.invalid
 ssh:
-  authorizedKeys: ${SSH_AUTHORIZED_KEYS}
-  deployPublicKey: ${DEPLOY_PUBLIC_KEY}
+  authorizedKeys: env:SSH_AUTHORIZED_KEYS
+  deployPublicKey: env:DEPLOY_PUBLIC_KEY
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "variables.yaml"), []byte(varsDoc), 0o644))
 
@@ -312,12 +312,12 @@ ssh:
     slug: euc
     providers:
       hetzner:
-        apiToken: ${HCLOUD_TOKEN}
+        apiToken: env:HCLOUD_TOKEN
 global:
   placementRegion: eu-central
   providers:
     hetzner:
-      apiToken: ${HCLOUD_TOKEN}
+      apiToken: env:HCLOUD_TOKEN
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "regions.yaml"), []byte(regionsDoc), 0o644))
 

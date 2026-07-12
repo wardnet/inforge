@@ -790,7 +790,7 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 	if err != nil {
 		return 0, err
 	}
-	regionTable, globalBlock, err := loader.RegionsLiteral(configEnv, dir)
+	regionTable, globalBlock, err := loader.RegionsLiteralFrom(regionsDoc)
 	if err != nil {
 		return 0, err
 	}

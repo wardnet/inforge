@@ -3,18 +3,28 @@
 // — not strings — and it NEVER resolves anything on its own.
 //
 // Resolution happens when a consumer asks for a real value, and only then. A
-// Scalar is handed to a Chain of Resolvers; the first Resolver whose pattern
-// matches the raw text resolves it, and a Scalar no Resolver claims is simply a
-// static literal. Today the only Resolver expands ${ENV_VAR} against the process
-// environment, but the interface is deliberately open: environment.yaml's
-// env:/vault:/ref: sources are the same idea (match a pattern, fetch a value)
-// and become Resolvers too, as could one that fetches from an API.
+// Scalar is handed to a Chain of Resolvers; the first Resolver whose scheme claims
+// the raw text resolves it, and a Scalar no Resolver claims is simply a static
+// literal.
 //
-// This is why the reader needs no exceptions, no lenient mode and no opt-out.
-// A file whose leaves nobody resolves — an encrypted store, a Grafana dashboard
-// carrying Grafana's own ${DS_FOO} template syntax, a descriptor inforge wrote
-// itself — is read through the same reader and comes back verbatim, because
-// nothing asked for a resolved value. Reading and resolving are separate acts.
+// One authoring DSL, every file: `<scheme>:<key>` — a whole-value reference, never
+// an interpolation.
+//
+//	authorizedKeys: env:SSH_AUTHORIZED_KEYS
+//	STRIPE_SECRET_KEY: vault:STRIPE_SECRET_KEY
+//	DATABASE_URL: ref:database/tenants.url
+//
+// environment.yaml has spoken this DSL for years; variables.yaml and regions.yaml
+// now speak it too. What a reference can reach is decided by the CHAIN the caller
+// passes, not by which file it appears in — a vault: reference in a document decoded
+// with an env-only chain resolves to nothing, because no resolver claims it. The
+// caller owns the capability; the syntax merely names the mechanism.
+//
+// This is why the reader needs no exceptions, no lenient mode and no opt-out. A
+// file whose leaves nobody resolves — an encrypted store, a Grafana dashboard, a
+// descriptor inforge wrote itself — is read through the same reader and comes back
+// verbatim, because nothing asked for a resolved value. Reading and resolving are
+// separate acts.
 //
 // Three ways out of a Document:
 //
@@ -54,18 +64,29 @@ type Resolver interface {
 // as written. An empty Chain therefore resolves nothing — every leaf is literal.
 type Chain []Resolver
 
-// Resolve runs raw through the chain.
-func (c Chain) Resolve(ctx context.Context, raw string) (string, error) {
+// Claim returns the first resolver whose pattern matches raw, if any. No match
+// means the leaf is a static value, not a reference.
+func (c Chain) Claim(raw string) (Resolver, bool) {
 	for _, r := range c {
 		if r.Matches(raw) {
-			v, err := r.Resolve(ctx, raw)
-			if err != nil {
-				return "", fmt.Errorf("%s: %w", r.Name(), err)
-			}
-			return v, nil
+			return r, true
 		}
 	}
-	return raw, nil
+	return nil, false
+}
+
+// Resolve runs raw through the chain. A leaf no resolver claims is returned as
+// written.
+func (c Chain) Resolve(ctx context.Context, raw string) (string, error) {
+	r, ok := c.Claim(raw)
+	if !ok {
+		return raw, nil
+	}
+	v, err := r.Resolve(ctx, raw)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", r.Name(), err)
+	}
+	return v, nil
 }
 
 // Scalar is a leaf of a Document: the raw text as written, plus where it came
@@ -77,8 +98,8 @@ type Scalar struct {
 	line int
 }
 
-// Literal returns the leaf exactly as written, patterns unexpanded. Use it when
-// the text IS the value (an encrypted blob, a dashboard's own ${} template).
+// Literal returns the leaf exactly as written, references unresolved. Use it when
+// the text IS the value (an encrypted blob, a dashboard's own template syntax).
 func (s Scalar) Literal() string { return s.raw }
 
 // Path returns the leaf's dotted path within its document.
@@ -135,7 +156,7 @@ func (d Document) Exists() bool { return d.exists }
 func (d Document) Path() string { return d.path }
 
 // Decode decodes the document into out with every leaf exactly as written. No
-// resolver runs, so a ${...} stays a ${...}.
+// resolver runs, so an `env:FOO` stays the literal text "env:FOO".
 func (d Document) Decode(out any) error {
 	if d.root == nil {
 		return nil // absent or empty file: leave out at its zero value
@@ -157,7 +178,7 @@ func (d Document) DecodeResolved(ctx context.Context, chain Chain, out any) erro
 	if d.root == nil {
 		return nil
 	}
-	resolved, err := resolveNode(ctx, chain, d.root, "")
+	resolved, err := resolveNode(ctx, chain, d.root, "", map[*yaml.Node]*yaml.Node{})
 	if err != nil {
 		return fmt.Errorf("%s: %w", d.path, err)
 	}
@@ -175,9 +196,9 @@ func (d Document) DecodeResolved(ctx context.Context, chain Chain, out any) erro
 // never touches the rest of the document, so a variable it does not read can
 // never fail it.
 func (d Document) At(path ...string) (Scalar, bool) {
-	node := d.root
+	node := deref(d.root)
 	if node != nil && node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
-		node = node.Content[0]
+		node = deref(node.Content[0])
 	}
 	for _, key := range path {
 		if node == nil || node.Kind != yaml.MappingNode {
@@ -187,7 +208,7 @@ func (d Document) At(path ...string) (Scalar, bool) {
 		// A mapping's Content alternates key, value.
 		for i := 0; i+1 < len(node.Content); i += 2 {
 			if node.Content[i].Value == key {
-				next = node.Content[i+1]
+				next = deref(node.Content[i+1])
 				break
 			}
 		}
@@ -202,26 +223,69 @@ func (d Document) At(path ...string) (Scalar, bool) {
 	return Scalar{raw: node.Value, path: strings.Join(path, "."), line: node.Line}, true
 }
 
-// resolveNode returns a copy of node with every string leaf resolved. Only !!str
-// scalars are resolved: a pattern is text, and expanding an int or bool node would
-// change its type. Mapping KEYS are left alone — a pattern belongs in a value.
-func resolveNode(ctx context.Context, chain Chain, node *yaml.Node, path string) (*yaml.Node, error) {
+// deref follows an alias to its anchor, so a leaf reached through *anchor reads the
+// same as one written inline.
+func deref(node *yaml.Node) *yaml.Node {
+	for node != nil && node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	return node
+}
+
+// resolveNode returns a copy of node with every string leaf resolved.
+//
+// seen memoizes original node -> resolved copy. That is what makes ANCHORS and
+// ALIASES work: an alias node carries no Content, only a pointer to its anchor, so
+// a naive copy would leave that pointer aimed at the ORIGINAL, unresolved node —
+// and yaml would follow it at decode time, delivering a raw `env:HCLOUD_TOKEN`
+// straight to the provider with no error. Here an alias is repointed at the
+// RESOLVED copy of its anchor, and the memo both keeps the two views identical and
+// terminates on recursive anchors. Merge keys (`<<: *defaults`) are aliases, so
+// they are covered by the same fix.
+//
+// Only string leaves are resolved: a pattern is text, and a resolver has nothing to
+// say about an int. Mapping KEYS are carried through untouched — a reference
+// belongs in a value.
+func resolveNode(ctx context.Context, chain Chain, node *yaml.Node, path string, seen map[*yaml.Node]*yaml.Node) (*yaml.Node, error) {
 	if node == nil {
 		return nil, nil
 	}
+	if done, ok := seen[node]; ok {
+		return done, nil
+	}
 	out := *node
 	out.Content = nil
+	seen[node] = &out // before recursing, so a recursive anchor terminates
 
-	if node.Kind == yaml.ScalarNode {
-		if node.Tag != "!!str" {
-			return &out, nil
-		}
-		leaf := Scalar{raw: node.Value, path: path, line: node.Line}
-		v, err := leaf.Resolve(ctx, chain)
+	switch node.Kind {
+	case yaml.AliasNode:
+		target, err := resolveNode(ctx, chain, node.Alias, path, seen)
 		if err != nil {
 			return nil, err
 		}
+		out.Alias = target
+		return &out, nil
+
+	case yaml.ScalarNode:
+		if node.Tag != "!!str" {
+			return &out, nil // an int is an int; no resolver has anything to say about it
+		}
+		r, claimed := chain.Claim(node.Value)
+		if !claimed {
+			return &out, nil // a static value, exactly as written
+		}
+		v, err := r.Resolve(ctx, node.Value)
+		if err != nil {
+			return nil, fmt.Errorf("%s:%d: %s: %s: %w", path, node.Line, node.Value, r.Name(), err)
+		}
 		out.Value = v
+		// The author decides the resolved type with ordinary YAML quoting. An
+		// UNQUOTED reference re-infers its tag, so `port: env:PORT` yields an int and
+		// `enabled: env:FLAG` a bool. A QUOTED one stays a string, so a credential
+		// that happens to be all digits does not become an int.
+		if node.Style == 0 {
+			out.Tag = ""
+		}
 		return &out, nil
 	}
 
@@ -229,7 +293,6 @@ func resolveNode(ctx context.Context, chain Chain, node *yaml.Node, path string)
 		childPath := path
 		if node.Kind == yaml.MappingNode {
 			if i%2 == 0 {
-				// A key: carry it through untouched, and use it to name its value.
 				k := *child
 				out.Content = append(out.Content, &k)
 				continue
@@ -238,7 +301,7 @@ func resolveNode(ctx context.Context, chain Chain, node *yaml.Node, path string)
 		} else if node.Kind == yaml.SequenceNode {
 			childPath = fmt.Sprintf("%s[%d]", path, i)
 		}
-		rc, err := resolveNode(ctx, chain, child, childPath)
+		rc, err := resolveNode(ctx, chain, child, childPath, seen)
 		if err != nil {
 			return nil, err
 		}
