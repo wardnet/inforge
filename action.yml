@@ -15,12 +15,17 @@ runs:
         VERSION: ${{ inputs.version }}
       run: |
         # install.sh is always fetched from the latest release; INFORGE_VERSION
-        # pins which inforge binary it installs.
+        # pins which inforge binary it installs. install.sh is fetched to a file
+        # and executed as a separate step, not piped straight from curl into sh,
+        # so the whole script is on disk before any of it runs — a response that
+        # is truncated or altered mid-flight can't execute the prefix that did
+        # arrive. Same shape as wardnet/bulwark's own installer step.
         if [[ "${VERSION}" != "latest" ]]; then
           export INFORGE_VERSION="${VERSION}"
         fi
         export INFORGE_INSTALL_DIR="${RUNNER_TEMP}/inforge-bin"
-        curl -fsSL https://github.com/wardnet/inforge/releases/latest/download/install.sh | sh
+        curl -fsSL -o "${RUNNER_TEMP}/inforge-install.sh" https://github.com/wardnet/inforge/releases/latest/download/install.sh
+        sh "${RUNNER_TEMP}/inforge-install.sh"
         echo "${INFORGE_INSTALL_DIR}" >> "$GITHUB_PATH"
 
     - name: Install provider plugins

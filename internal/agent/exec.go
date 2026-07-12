@@ -45,6 +45,9 @@ func dropAndExec(execPath string, uid, gid int, envv []string) error {
 		return fmt.Errorf("privilege drop verification failed: gid is %d, want %d", got, gid)
 	}
 
+	// Same audit as the #nosec below: execPath comes from a root-owned, ParseDescriptor-validated
+	// descriptor (ADR-0035), and the process has already dropped privileges irrevocably by this point.
+	// nosemgrep: go.lang.security.audit.dangerous-syscall-exec.dangerous-syscall-exec
 	if err := syscall.Exec(execPath, []string{execPath}, envv); err != nil { // #nosec G204 -- execPath is desc.Exec from the root-owned, inforge-written descriptor.yaml validated by ParseDescriptor (ADR-0035); not user or network input, and this runs only after an irrevocable privilege drop
 		return fmt.Errorf("exec %s: %w", execPath, err)
 	}

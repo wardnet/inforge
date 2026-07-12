@@ -8,7 +8,7 @@ updates:
     # Wait 5 days after a release is published before opening an update PR,
     # so freshly-cut versions have time to be yanked or superseded.
     cooldown:
-      default-days: 5
+      default-days: 7
     open-pull-requests-limit: 10
     groups:
       # The pulumi core modules are released in lockstep and must move
@@ -30,5 +30,5 @@ updates:
     schedule:
       interval: weekly
     cooldown:
-      default-days: 5
+      default-days: 7
     open-pull-requests-limit: 10
