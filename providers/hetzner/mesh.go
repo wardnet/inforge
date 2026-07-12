@@ -49,13 +49,14 @@ func (h *HetznerMesh) Realize(
 	env string,
 	dependsOn []pulumi.Resource,
 ) error {
-	if !ctx.DryRun() {
-		if deployUser == "" {
-			return fmt.Errorf("mesh %q: host has no deploy_user; inforge needs one to SSH and realize the mesh proxy", hostKey)
-		}
-		if h.deployPrivateKey == "" {
-			return fmt.Errorf("mesh %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", hostKey)
-		}
+	// The key is checked on a preview too — an empty one previews a spurious
+	// update on every command below. See the same guard in tls.go and, for the
+	// full reasoning, program.resolveDeployKey.
+	if h.deployPrivateKey == "" {
+		return fmt.Errorf("mesh %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", hostKey)
+	}
+	if !ctx.DryRun() && deployUser == "" {
+		return fmt.Errorf("mesh %q: host has no deploy_user; inforge needs one to SSH and realize the mesh proxy", hostKey)
 	}
 
 	conn := iremote.Connection(host.PublicIP, deployUser, h.deployPrivateKey)

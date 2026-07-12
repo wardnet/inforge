@@ -760,8 +760,12 @@ type SSHConfig struct {
 	// DeployPrivateKey is the private half of the deploy keypair. It is
 	// authentication/transport only: it lets inforge SSH the host (which trusts
 	// the public half via provision.sh) to realize host-level resources such as
-	// tls-termination. It encrypts nothing. Empty outside deploy (e.g. preview),
-	// where no remote command runs.
+	// tls-termination. It encrypts nothing.
+	//
+	// It is required on a preview as well as a deploy. A preview opens no SSH
+	// connection, but the key is an INPUT to every remote command resource, so a
+	// keyless run diffs an empty key against the one in state and previews a
+	// spurious update for every host command. See program.resolveDeployKey.
 	//
 	// It is a deploy-time secret: never read from variables.yaml (hence
 	// `yaml:"-"`), but injected by the program from stack config

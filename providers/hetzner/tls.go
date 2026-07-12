@@ -61,18 +61,17 @@ func (h *HetznerTLS) Realize(
 	env string,
 	dependsOn []pulumi.Resource,
 ) error {
-	// Both connection requirements are enforced only at up time. During preview
-	// the command.remote resources never connect (no Create on a dry run), so a
-	// missing deploy user or key is harmless and preview must still succeed.
-	// deploy_user is also validated up front (an ingress host must declare one),
-	// so this guard is a backstop.
-	if !ctx.DryRun() {
-		if deployUser == "" {
-			return fmt.Errorf("ingress %q: host has no deploy_user; inforge needs one to SSH and realize the ingress proxy", hostKey)
-		}
-		if h.deployPrivateKey == "" {
-			return fmt.Errorf("ingress %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", hostKey)
-		}
+	// The key is required on a preview too, not just an up: it is an input to
+	// every command.remote resource below, so an empty one diffs against the key
+	// in state and previews a spurious update for every command (see
+	// program.resolveDeployKey, which is the real gate — this is a backstop).
+	// deploy_user is only needed to connect, and is validated up front (an ingress
+	// host must declare one), so it stays an up-time check.
+	if h.deployPrivateKey == "" {
+		return fmt.Errorf("ingress %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", hostKey)
+	}
+	if !ctx.DryRun() && deployUser == "" {
+		return fmt.Errorf("ingress %q: host has no deploy_user; inforge needs one to SSH and realize the ingress proxy", hostKey)
 	}
 
 	writeScript, err := h.renderWriteScript(hostKey, routes, apps, health, healthPort, gateways, backendIPs)

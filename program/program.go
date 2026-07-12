@@ -87,14 +87,14 @@ func Run(ctx *pulumi.Context) error {
 		return err
 	}
 
-	// The deploy SSH private key is a deploy-time secret used purely to SSH the
-	// host and realize host-level resources (tls-termination, service units). It
-	// is injected here from stack config (deploy_private_key) or
-	// INFORGE_DEPLOY_PRIVATE_KEY — never read from variables.yaml. Empty in
-	// preview, where no remote command runs.
-	deployPrivateKey := cfg.Get("deploy_private_key")
-	if deployPrivateKey == "" {
-		deployPrivateKey = os.Getenv("INFORGE_DEPLOY_PRIVATE_KEY")
+	// The deploy SSH private key is a deploy-time secret used to SSH the host and
+	// realize host-level resources (tls-termination, service units). It is
+	// injected here from stack config (deploy_private_key) or
+	// INFORGE_DEPLOY_PRIVATE_KEY — never read from variables.yaml. It is required
+	// on EVERY run, preview included: see resolveDeployKey.
+	deployPrivateKey, err := resolveDeployKey(cfg.Get("deploy_private_key"), os.Getenv("INFORGE_DEPLOY_PRIVATE_KEY"))
+	if err != nil {
+		return err
 	}
 	vars.SSH.DeployPrivateKey = deployPrivateKey
 
