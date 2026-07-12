@@ -200,6 +200,11 @@ func (s *Store) DeleteEnvManifests(ctx context.Context, env string) ([]string, e
 		if out.IsTruncated == nil || !*out.IsTruncated {
 			break
 		}
+		// A truncated page with no continuation token would otherwise re-list page
+		// one forever (the teardown path this serves must never hang): stop instead.
+		if aws.ToString(out.NextContinuationToken) == "" {
+			break
+		}
 		token = out.NextContinuationToken
 	}
 	sort.Strings(keys)

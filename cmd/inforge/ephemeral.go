@@ -178,10 +178,15 @@ func checkSourceDefined(dir, srcEnv string) error {
 // ephemeral+expires_at onto that identity, and hand the real env's name to the
 // reaper. The identity slug must therefore never be the name of a defined env.
 func checkSlugFree(dir, slug string) error {
-	if _, err := os.Stat(filepath.Join(dir, slug)); err == nil {
-		return fmt.Errorf("slug %q names a defined env (%s exists) — an ephemeral identity must not take a permanent env's name; pick a different --slug", slug, filepath.Join(dir, slug))
-	} else if !os.IsNotExist(err) {
-		return err
+	envDir := filepath.Join(dir, slug)
+	_, err := os.Stat(envDir)
+	switch {
+	case err == nil:
+		return fmt.Errorf("slug %q names a defined env (%s exists) — an ephemeral identity must not take a permanent env's name; pick a different --slug", slug, envDir)
+	case os.IsNotExist(err):
+		return nil
+	default:
+		// An unreadable path is not a "free" slug: fail closed, with the path.
+		return fmt.Errorf("check slug %q against %s: %w", slug, envDir, err)
 	}
-	return nil
 }
