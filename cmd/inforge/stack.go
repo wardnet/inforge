@@ -95,6 +95,10 @@ func setupGitBranchBackend(ctx context.Context, branch string) (stateDir string,
 			{[]string{"git", "push", "origin", "HEAD:" + branch}},
 		}
 		for _, step := range steps {
+			// Same audit as the #nosec below: the command is a hardcoded literal, not reachable by
+			// untrusted input. The suppression has to sit on the line directly above the finding —
+			// Semgrep only reads that one line, not a comment block above it.
+			// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 			if out, cerr := exec.CommandContext(ctx, step.args[0], step.args[1:]...).CombinedOutput(); cerr != nil { // #nosec G204 -- steps are a hardcoded literal git add/commit/push sequence; the only variable, branch, is from the local backend config
 				return fmt.Errorf("%s: %w\n%s", strings.Join(step.args, " "), cerr, out)
 			}
