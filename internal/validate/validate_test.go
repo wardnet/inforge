@@ -373,6 +373,70 @@ func TestCheckCrossScopeNamesAllowsDistinctNames(t *testing.T) {
 	assert.False(t, r.failed)
 }
 
+// TestCheckNetworkSubnetNamesUniqueAcrossNetworks: a subnet's provider resource
+// name derives from the subnet name alone, so two networks of one scope reusing
+// a subnet name collide on one URN at deploy. Validation rejects it — including
+// the same name declared twice by one network — while distinct names pass.
+func TestCheckNetworkSubnetNamesUniqueAcrossNetworks(t *testing.T) {
+	ctx := baseCtx()
+	corenet := types.NetworkSpec{
+		Name: "corenet", Container: "core", Provider: "hetzner", CIDR: "10.0.0.0/16",
+		Subnets: []types.SubnetSpec{{Name: "app", CIDR: "10.0.1.0/24"}},
+	}
+	edgenet := types.NetworkSpec{
+		Name: "edgenet", Container: "edge", Provider: "hetzner", CIDR: "10.1.0.0/16",
+		Subnets: []types.SubnetSpec{{Name: "app", CIDR: "10.1.1.0/24"}},
+	}
+	ctx.networks = map[string]types.NetworkSpec{"corenet": corenet, "edgenet": edgenet}
+
+	errs, _ := checkNetwork(edgenet, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), `"app" is also declared by network "corenet"`)
+
+	// The collision is reported ONCE per colliding subnet, even when the other
+	// network declares the name more than once.
+	corenet.Subnets = append(corenet.Subnets, types.SubnetSpec{Name: "app", CIDR: "10.0.2.0/24"})
+	ctx.networks["corenet"] = corenet
+	errs, _ = checkNetwork(edgenet, ctx)
+	assert.Len(t, errs, 1)
+	corenet.Subnets = corenet.Subnets[:1]
+	ctx.networks["corenet"] = corenet
+
+	// A distinct name in the second network passes.
+	edgenet.Subnets = []types.SubnetSpec{{Name: "edge-app", CIDR: "10.1.1.0/24"}}
+	ctx.networks["edgenet"] = edgenet
+	errs, _ = checkNetwork(edgenet, ctx)
+	assert.Empty(t, errs)
+
+	// A name repeated within one network is rejected too.
+	edgenet.Subnets = append(edgenet.Subnets, types.SubnetSpec{Name: "edge-app", CIDR: "10.1.2.0/24"})
+	ctx.networks["edgenet"] = edgenet
+	errs, _ = checkNetwork(edgenet, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "declared twice by this network")
+}
+
+// TestCheckNetworkContainerCIDRAgreement: a container is realized as ONE cloud
+// network, with the CIDR of the first spec that reached it — so two networks
+// sharing a container must agree on the CIDR, or the later spec's subnets land
+// out of range.
+func TestCheckNetworkContainerCIDRAgreement(t *testing.T) {
+	ctx := baseCtx()
+	first := types.NetworkSpec{Name: "first", Container: "edge", Provider: "hetzner", CIDR: "10.0.0.0/16"}
+	second := types.NetworkSpec{Name: "second", Container: "edge", Provider: "hetzner", CIDR: "10.1.0.0/16"}
+	ctx.networks = map[string]types.NetworkSpec{"first": first, "second": second}
+
+	errs, _ := checkNetwork(second, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), `both share container "edge"`)
+
+	// Agreeing CIDRs pass.
+	second.CIDR = "10.0.0.0/16"
+	ctx.networks["second"] = second
+	errs, _ = checkNetwork(second, ctx)
+	assert.Empty(t, errs)
+}
+
 // TestCheckComputeGlobalNetworkRejected: a compute attaching to a global network
 // is recognized but rejected (cross-region networking not supported yet).
 func TestCheckComputeGlobalNetworkRejected(t *testing.T) {

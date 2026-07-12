@@ -23,7 +23,12 @@ type HetznerNetwork struct {
 	mu       sync.Mutex
 	// containers caches created hcloud.Network objects keyed by container name
 	// to avoid creating duplicates.
-	containers map[string]*hcloud.Network
+	containers map[string]*containerNet
+	// subnetOwners maps an already-realized subnet name to the network spec that
+	// realized it. A subnet's Pulumi resource name derives from the subnet name
+	// alone, so two networks of one scope declaring the same subnet name would
+	// collide on one URN; Create fails closed on the second.
+	subnetOwners map[string]string
 	// regions holds the per-region realizations (from providers.hetzner.regions)
 	// and is used by ResolveRegion to look up a region's network zone.
 	regions map[string]RegionConfig
@@ -40,13 +45,21 @@ func New(provider *hcloud.Provider, project, slug string, eph tags.Ephemeral, re
 		regionOverrides = map[string]RegionConfig{}
 	}
 	return &HetznerNetwork{
-		provider:   provider,
-		project:    project,
-		slug:       slug,
-		eph:        eph,
-		containers: map[string]*hcloud.Network{},
-		regions:    regionOverrides,
+		provider:     provider,
+		project:      project,
+		slug:         slug,
+		eph:          eph,
+		containers:   map[string]*containerNet{},
+		subnetOwners: map[string]string{},
+		regions:      regionOverrides,
 	}
+}
+
+// containerNet is one realized hcloud Network plus the CIDR it was realized
+// with, so a later NetworkSpec sharing the container can be checked against it.
+type containerNet struct {
+	net  *hcloud.Network
+	cidr string
 }
 
 // Create provisions a Hetzner Network + Subnets for the given spec. It is safe
@@ -72,6 +85,9 @@ func (h *HetznerNetwork) Create(ctx *pulumi.Context, spec types.NetworkSpec, env
 
 	result := make(map[string]types.NetworkOutputs, len(spec.Subnets))
 	for _, sub := range spec.Subnets {
+		if err := h.claimSubnet(sub.Name, spec.Name); err != nil {
+			return nil, err
+		}
 		subnetName := naming.Resource(env, h.slug, "subnet", sub.Name)
 		subnet, err := hcloud.NewNetworkSubnet(ctx, subnetName, &hcloud.NetworkSubnetArgs{
 			NetworkId:   networkIntID,
@@ -91,14 +107,37 @@ func (h *HetznerNetwork) Create(ctx *pulumi.Context, spec types.NetworkSpec, env
 	return result, nil
 }
 
+// claimSubnet records that network spec owner realizes the subnet name, failing
+// closed when another network already claimed it: both would derive the same
+// Pulumi resource name (and thus URN) and abort the deploy with an opaque
+// duplicate-resource error. Validation rejects this ahead of deploy; this is the
+// provider-side backstop.
+func (h *HetznerNetwork) claimSubnet(subnet, owner string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if prev, ok := h.subnetOwners[subnet]; ok {
+		return fmt.Errorf("subnet %q of network %q is already declared by network %q: subnet names must be unique across the networks of a scope", subnet, owner, prev)
+	}
+	h.subnetOwners[subnet] = owner
+	return nil
+}
+
 // ensureContainer returns the hcloud.Network for the container, creating it if
-// it does not yet exist. It is safe to call concurrently.
+// it does not yet exist. A container's network is realized once, with the CIDR
+// of the first NetworkSpec that reached it, so a later spec sharing the
+// container but declaring a different CIDR is an error: its subnets would land
+// in a network whose IP range does not cover them. It is safe to call
+// concurrently.
 func (h *HetznerNetwork) ensureContainer(ctx *pulumi.Context, container, env, cidr string) (*hcloud.Network, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if net, ok := h.containers[container]; ok {
-		return net, nil
+	if existing, ok := h.containers[container]; ok {
+		if existing.cidr != cidr {
+			return nil, fmt.Errorf("container %q network already realized with cidr %q, but another network spec declares cidr %q: every network sharing a container must declare the same cidr", container, existing.cidr, cidr)
+		}
+		return existing.net, nil
 	}
 
 	netName := naming.Resource(env, h.slug, "net", container)
@@ -112,7 +151,7 @@ func (h *HetznerNetwork) ensureContainer(ctx *pulumi.Context, container, env, ci
 		return nil, fmt.Errorf("create hcloud network %s: %w", netName, err)
 	}
 
-	h.containers[container] = net
+	h.containers[container] = &containerNet{net: net, cidr: cidr}
 	return net, nil
 }
 

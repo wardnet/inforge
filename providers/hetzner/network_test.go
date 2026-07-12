@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/tags"
+	"github.com/wardnet/inforge/internal/types"
 	"gopkg.in/yaml.v3"
 )
 
@@ -153,6 +154,64 @@ func (m *testMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.
 		"ipRange": resource.NewStringProperty("10.0.0.0/8"),
 		"labels":  resource.NewObjectProperty(resource.PropertyMap{}),
 	}, nil
+}
+
+// numericIDMocks hands back a numeric resource ID, which a subnet's networkId
+// (an int arg, via idToInt) requires.
+type numericIDMocks struct{}
+
+func (m *numericIDMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	return resource.PropertyMap{}, nil
+}
+
+func (m *numericIDMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
+	return "42", resource.PropertyMap{"name": resource.NewStringProperty(args.Name)}, nil
+}
+
+// TestEnsureContainerCIDRMismatch: a container is realized as one hcloud Network
+// with the first spec's CIDR. A later spec sharing the container but declaring a
+// different CIDR must fail closed rather than silently placing its subnets in a
+// network whose IP range does not cover them.
+func TestEnsureContainerCIDRMismatch(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		h := New(nil, "test-project", "use1", tags.Ephemeral{}, nil)
+
+		_, err := h.ensureContainer(ctx, "edge", "prod", "10.0.0.0/16")
+		require.NoError(t, err)
+
+		_, err = h.ensureContainer(ctx, "edge", "prod", "10.1.0.0/16")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must declare the same cidr")
+		return nil
+	}, pulumi.WithMocks("inforge", "test", &testMocks{}))
+
+	require.NoError(t, err)
+}
+
+// TestCreateRejectsDuplicateSubnetName: a subnet's Pulumi resource name derives
+// from the subnet name alone, so two networks of one scope reusing a subnet name
+// would collide on one URN. Create fails closed on the second.
+func TestCreateRejectsDuplicateSubnetName(t *testing.T) {
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		regions := map[string]RegionConfig{"eu-central": {Location: "nbg1", NetworkZone: "eu-central"}}
+		h := New(nil, "test-project", "euc", tags.Ephemeral{}, regions)
+
+		_, err := h.Create(ctx, types.NetworkSpec{
+			Name: "corenet", Container: "core", CIDR: "10.0.0.0/16",
+			Subnets: []types.SubnetSpec{{Name: "app", CIDR: "10.0.1.0/24"}},
+		}, "prod", "eu-central")
+		require.NoError(t, err)
+
+		_, err = h.Create(ctx, types.NetworkSpec{
+			Name: "edgenet", Container: "edge", CIDR: "10.1.0.0/16",
+			Subnets: []types.SubnetSpec{{Name: "app", CIDR: "10.1.1.0/24"}},
+		}, "prod", "eu-central")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `already declared by network "corenet"`)
+		return nil
+	}, pulumi.WithMocks("inforge", "test", &numericIDMocks{}))
+
+	require.NoError(t, err)
 }
 
 func TestEnsureContainerIdempotency(t *testing.T) {
