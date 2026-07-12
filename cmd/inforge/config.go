@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/wardnet/inforge/internal/types"
-	"gopkg.in/yaml.v3"
+	"github.com/wardnet/inforge/internal/yamldoc"
 )
 
 // defaultEphemeralMaxTTL is the built-in hard ceiling on an ephemeral env's TTL,
@@ -205,8 +205,12 @@ func loadProjectConfig(path string) (projectConfig, error) {
 		}
 		return cfg, err
 	}
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parse %s: %w", path, err)
+	doc, err := yamldoc.Parse(path, data)
+	if err != nil {
+		return cfg, err
+	}
+	if err := doc.Decode(&cfg); err != nil {
+		return cfg, err
 	}
 	if cfg.Name == "" {
 		return cfg, fmt.Errorf("%s: name is required", path)
@@ -275,8 +279,12 @@ func loadStackConfig(path string) (stackConfig, error) {
 		}
 		return cfg, err
 	}
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parse %s: %w", path, err)
+	doc, err := yamldoc.Parse(path, data)
+	if err != nil {
+		return cfg, err
+	}
+	if err := doc.Decode(&cfg); err != nil {
+		return cfg, err
 	}
 	return cfg, nil
 }

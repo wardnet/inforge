@@ -30,7 +30,6 @@ import (
 	"github.com/wardnet/inforge/internal/sizes"
 	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/internal/yamldoc"
-	"gopkg.in/yaml.v3"
 )
 
 // envDir returns the directory holding one environment's definitions.
@@ -147,16 +146,16 @@ func RegionsFrom(doc yamldoc.Document, decode func(*regions.File) error) (region
 // cpus/memory payload (a provider maps a size name to a concrete SKU).
 func LoadSizeTable(env, dir string) (sizes.Table, error) {
 	path := filepath.Join(envDir(env, dir), "sizes.yaml")
-	b, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
-	if os.IsNotExist(err) {
+	doc, err := yamldoc.Read(path)
+	if err != nil {
+		return nil, err
+	}
+	if !doc.Exists() {
 		return sizes.DefaultTable(), nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read sizes table: %w", err)
-	}
 	var names []string
-	if err := yaml.Unmarshal(b, &names); err != nil {
-		return nil, fmt.Errorf("parse sizes table: %w", err)
+	if err := doc.Decode(&names); err != nil {
+		return nil, err
 	}
 	tbl := make(sizes.Table, len(names))
 	for _, n := range names {
@@ -198,9 +197,13 @@ func loadTypeFromFolders[T any](dir string) ([]T, []string, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("read %s: %w", manifest, err)
 		}
+		doc, err := yamldoc.Parse(manifest, b)
+		if err != nil {
+			return nil, nil, err
+		}
 		var v T
-		if err := yaml.Unmarshal(b, &v); err != nil {
-			return nil, nil, fmt.Errorf("parse %s: %w", manifest, err)
+		if err := doc.Decode(&v); err != nil {
+			return nil, nil, err
 		}
 		specs = append(specs, v)
 		folders = append(folders, folder)
@@ -215,17 +218,19 @@ func loadTypeFromFolders[T any](dir string) ([]T, []string, error) {
 // folder. Returns nil, nil when the file is absent (a service may have no env
 // contract). Returns an error on malformed YAML.
 func LoadEnvironmentFile(folder string) (map[string]string, error) {
-	path := filepath.Join(folder, "environment.yaml")
-	b, err := os.ReadFile(path) // #nosec G304 -- folder derives from operator-supplied --dir tree
-	if os.IsNotExist(err) {
+	doc, err := yamldoc.Read(filepath.Join(folder, "environment.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	if !doc.Exists() {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
+	// Read LITERALLY. environment.yaml's values are references (env:/vault:/ref:), and
+	// they are resolved by the deploy program against a chain built for that service —
+	// not here. Reading is not resolving.
 	var m map[string]string
-	if err := yaml.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+	if err := doc.Decode(&m); err != nil {
+		return nil, err
 	}
 	return m, nil
 }

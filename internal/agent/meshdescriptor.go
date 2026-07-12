@@ -1,12 +1,11 @@
 package agent
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 
 	"github.com/wardnet/inforge/internal/meshpaths"
-	"gopkg.in/yaml.v3"
+	"github.com/wardnet/inforge/internal/yamldoc"
 )
 
 // MeshSupportedVersion is the mesh descriptor schema version this agent
@@ -58,12 +57,14 @@ func LoadMeshDescriptor(path string) (MeshDescriptor, error) {
 // are rejected (an older agent must fail loudly on a newer schema, not
 // silently drop fields).
 func ParseMeshDescriptor(b []byte) (MeshDescriptor, error) {
-	dec := yaml.NewDecoder(bytes.NewReader(b))
-	dec.KnownFields(true)
-
+	doc, err := yamldoc.Parse("mesh descriptor", b)
+	if err != nil {
+		return MeshDescriptor{}, err
+	}
+	// STRICT: an older agent handed a newer schema must fail loudly, not drop fields.
 	var d MeshDescriptor
-	if err := dec.Decode(&d); err != nil {
-		return MeshDescriptor{}, fmt.Errorf("parse mesh descriptor: %w", err)
+	if err := doc.DecodeStrict(&d); err != nil {
+		return MeshDescriptor{}, err
 	}
 	if d.Version != MeshSupportedVersion {
 		return MeshDescriptor{}, fmt.Errorf("unsupported mesh descriptor version %d (this agent supports version %d)", d.Version, MeshSupportedVersion)

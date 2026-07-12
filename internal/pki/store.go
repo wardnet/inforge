@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wardnet/inforge/internal/yamldoc"
 	"gopkg.in/yaml.v3"
 )
 
@@ -159,9 +160,14 @@ func Load(path string) (*Store, error) {
 		}
 		return nil, fmt.Errorf("read pki store: %w", err)
 	}
+	// Machine-written: decode literally (see secretstore.Load).
+	doc, err := yamldoc.Parse(path, b)
+	if err != nil {
+		return nil, err
+	}
 	var s Store
-	if err := yaml.Unmarshal(b, &s); err != nil {
-		return nil, fmt.Errorf("parse pki store %s: %w", path, err)
+	if err := doc.Decode(&s); err != nil {
+		return nil, err
 	}
 	if s.RootRecipient == "" || s.Recipient == "" {
 		return nil, fmt.Errorf("pki store %s is missing a recipient — the file is corrupt or was not created by `inforge pki init`", path)

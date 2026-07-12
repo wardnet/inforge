@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"gopkg.in/yaml.v3"
+	"github.com/wardnet/inforge/internal/yamldoc"
 )
 
 // Config is the top-level deployments/inforge.yaml. It declares the default
@@ -57,8 +57,12 @@ func LoadConfig(dir string) (Config, error) {
 		}
 		return cfg, err
 	}
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parse %s: %w", path, err)
+	doc, err := yamldoc.Parse(path, data)
+	if err != nil {
+		return cfg, err
+	}
+	if err := doc.Decode(&cfg); err != nil {
+		return cfg, err
 	}
 	if cfg.Platform == "" {
 		return cfg, fmt.Errorf("%s: platform is required", path)
@@ -80,8 +84,12 @@ func LoadServiceDescriptor(dir, name string) (ServiceDescriptor, error) {
 		}
 		return desc, err
 	}
-	if err := yaml.Unmarshal(data, &desc); err != nil {
-		return desc, fmt.Errorf("parse %s: %w", path, err)
+	doc, err := yamldoc.Parse(path, data)
+	if err != nil {
+		return desc, err
+	}
+	if err := doc.Decode(&desc); err != nil {
+		return desc, err
 	}
 	if len(desc.Environments) == 0 {
 		return desc, fmt.Errorf("%s: environments map is empty", path)
