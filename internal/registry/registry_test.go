@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -264,4 +265,39 @@ func TestRegistryUnknownProvider(t *testing.T) {
 	_, err = r.Network("unknown-cloud")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown provider: "unknown-cloud"`)
+}
+
+// A provider that fails to register must fail the run, not degrade into a nil
+// provider: every resource built with a nil provider silently lands on Pulumi's
+// ambient default provider (an unconfigured account), which is worse than an
+// aborted deploy. The registration failure is simulated by pre-tripping the
+// memoising Once with an error, the state hetznerProv/cfProv leave behind.
+func TestProviderRegistrationErrorIsPropagated(t *testing.T) {
+	t.Run("hetzner", func(t *testing.T) {
+		boom := errors.New("boom")
+		r := &registry{region: "global"}
+		r.hetznerProviderOnce.Do(func() { r.hetznerProviderErr = boom })
+
+		np, err := r.Network("hetzner")
+		require.ErrorIs(t, err, boom)
+		assert.Nil(t, np, "no provider may be handed out when registration failed")
+
+		cp, err := r.Compute("hetzner")
+		require.ErrorIs(t, err, boom)
+		assert.Nil(t, cp)
+
+		sp, err := r.Storage("hetzner")
+		require.ErrorIs(t, err, boom)
+		assert.Nil(t, sp)
+	})
+
+	t.Run("cloudflare", func(t *testing.T) {
+		boom := errors.New("boom")
+		r := &registry{region: "global"}
+		r.cfProviderOnce.Do(func() { r.cfProviderErr = boom })
+
+		dp, err := r.DNS("cloudflare")
+		require.ErrorIs(t, err, boom)
+		assert.Nil(t, dp, "no DNS provider may be handed out when registration failed")
+	})
 }
