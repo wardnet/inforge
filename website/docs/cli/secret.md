@@ -6,8 +6,9 @@ sidebar_position: 6
 
 Manage an environment's **git-committed encrypted secret store** — the file behind the
 [`vault:` source kind](/resources/secrets#vaultkey). Values live age-encrypted at
-`resources/<env>/secrets.enc.yaml`, keyed by `(container, KEY)`; this CLI is the only writer of that
-file. See [ADR-0017](https://github.com/wardnet/inforge/blob/main/docs/adr/0017-git-native-encrypted-secret-store.md).
+`resources/<env>/secrets.enc.yaml`, keyed by `(service, KEY)`; this CLI is the only writer of that
+file. See [ADR-0017](https://github.com/wardnet/inforge/blob/main/docs/adr/0017-git-native-encrypted-secret-store.md)
+and [ADR-0040](https://github.com/wardnet/inforge/blob/main/docs/adr/0040-service-scoped-secrets.md).
 
 :::info Git-only by design
 No `inforge secret` subcommand ever writes to a host. The value only reaches a service via
@@ -25,14 +26,16 @@ no separate restart step is needed).
 |---------|---------|
 | `inforge secret init <env>` | Create the env's store; generates the master key pair (or takes `--recipient`). |
 | `inforge secret set <env> <service> <KEY>` | Write or replace a **value** — stdin, or `--generate` for a fresh random one. |
-| `inforge secret ls <env> <service>` | List the keys stored for the service's container. |
+| `inforge secret ls <env> <service>` | List the keys stored for the service. |
 | `inforge secret rm <env> <service> <KEY>` | Remove a value from the store. |
 | `inforge secret rotate <env>` | Rotate the **master key pair** and re-encrypt the store (alias: `rekey`). |
 
 Note the split: `set` changes a *value* (it is an upsert — fixing a leaked credential is just setting
-it again), `rotate` changes the *key pair* the store is encrypted to. The `<service>` argument
-resolves to its **container**: secrets are container-scoped, so every service sharing the container
-consumes the same values, and the commands tell you which services are affected.
+it again), `rotate` changes the *key pair* the store is encrypted to.
+
+Secrets are **service-scoped**: the `<service>` argument is the store key itself. Two services that
+share a `container` share no secrets — if both need the same upstream token, each holds its own entry
+and each is rotated on its own. That is deliberate: a secret's blast radius is the service you rotate.
 
 ### Reserved secrets (`--reserved`)
 
@@ -44,8 +47,8 @@ A few secrets are consumed by **inforge itself** at deploy, not by a service:
   `backups/r2_secret_access_key` (needed when `backups.bucket` is set and any database has backups
   enabled). See [Database — Backups](../resources/database#backups).
 
-These live in a separate **reserved namespace** in the store, outside the service-container namespace,
-so they don't need a backing service and a normal service can still use the same name as a container.
+These live in a separate **reserved namespace** in the store, outside the per-service namespace,
+so they don't need a backing service and a service may still carry the same name.
 Pass `--reserved` on `set`/`ls`/`rm` and the second argument is the reserved namespace instead of a
 service:
 
@@ -67,8 +70,8 @@ deploy pick it up.
 ```yaml title="resources/prd/secrets.enc.yaml"
 # managed by `inforge secret` — do not edit by hand
 recipient: age1…                # the committed public key all values are encrypted to
-containers:
-  bridge:
+services:
+  api:
     STRIPE_API_KEY: |
       -----BEGIN AGE ENCRYPTED FILE-----
       …

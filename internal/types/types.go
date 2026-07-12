@@ -530,9 +530,10 @@ type DBRoleFields struct {
 type AllOutputs struct {
 	Compute  map[string]map[string]ComputeOutputs
 	Database map[string]map[string]DatabaseOutputs
-	// Encrypted maps container -> KEY -> plaintext for `vault:<KEY>` secrets,
-	// decrypted once per deploy from resources/<env>/secrets.enc.yaml
-	// (ADR-0017). Region-independent — the store is env-scoped. Nil when the
+	// Encrypted maps service -> KEY -> plaintext for `vault:<KEY>` secrets,
+	// decrypted once per deploy from resources/<env>/secrets.enc.yaml (ADR-0017,
+	// ADR-0040 — keyed by the service that declares the reference, never by its
+	// container). Region-independent — the store is env-scoped. Nil when the
 	// environment declares no vault: sources.
 	Encrypted map[string]map[string]string
 	// PKI maps a root-only PKI resource's bare name -> its decrypted material,

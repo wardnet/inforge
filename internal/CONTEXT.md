@@ -61,8 +61,10 @@ resources.
 _Avoid_: "global resource type" (global is a scope, not a kind).
 
 **Container**:
-A logical grouping label (e.g. `bridge`, `ingress`) shared by the resources that make up one unit;
-the basis of URN namespaces and tags.
+A logical grouping/isolation label (e.g. `bridge`, `ingress`) shared by the resources that make up one
+unit; the basis of URN namespaces and tags, and the intended boundary for future infrastructure
+segregation (several cloud projects within one region). It carries **no secret semantics**: a service's
+secrets are keyed by the service itself (ADR-0040), and two services sharing a container share nothing.
 _Avoid_: group (old name), and do not confuse with a service delivery `type: container`.
 
 **specKey**:
@@ -418,7 +420,8 @@ The number of *unpinned* (historical, rollback) artifacts a service retains. Pru
   `{location, network_zone, serverTypes, images}` for a region, under that region's
   `providers.<name>` block).
 - **"Container"** — the resource grouping label, **not** a Docker/OCI container. A service's
-  `type: container` is an unrelated delivery mode. Keep the two distinct.
+  `type: container` is an unrelated delivery mode. Keep the two distinct. It is also **not** a secret
+  namespace (ADR-0040) — secrets are keyed by service.
 - **"Provider"** — the named integration chosen in a resource (`provider: hetzner`), **not** the
   Pulumi provider object an implementation constructs internally.
 - **"Instance"** — one expanded `specKey` produced by a compute's `instance_count`, **not** the YAML

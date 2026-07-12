@@ -12,9 +12,10 @@ import (
 )
 
 // secretFixture builds a minimal consumer resources dir: a regional service
-// (api, container bridge) that declares API_TOKEN as a `vault:` secret, a
-// sibling on the same container (web), and a global service (edge, container
-// edge).
+// (api) that declares API_TOKEN as a `vault:` secret, a second service on the
+// SAME container (web) that also declares API_TOKEN, and a global service
+// (edge). api and web sharing container "bridge" is the whole point: their
+// secrets must not be.
 func secretFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -27,31 +28,63 @@ func secretFixture(t *testing.T) string {
 	write("prd/regional/service/api/manifest.yaml", "name: api\ncontainer: bridge\nhost: bridge-01\ntype: raw\nuser: api\n")
 	write("prd/regional/service/api/environment.yaml", "API_TOKEN: \"vault:API_TOKEN\"\n")
 	write("prd/regional/service/web/manifest.yaml", "name: web\ncontainer: bridge\nhost: bridge-01\ntype: raw\nuser: web\n")
+	write("prd/regional/service/web/environment.yaml", "API_TOKEN: \"vault:API_TOKEN\"\n")
 	write("prd/global/service/edge/manifest.yaml", "name: edge\ncontainer: edge\nhost: edge-01\ntype: raw\nuser: edge\n")
 	return dir
 }
 
-func TestResolveServiceContainer(t *testing.T) {
+func TestRequireService(t *testing.T) {
 	dir := secretFixture(t)
 
-	container, siblings, err := resolveServiceContainer(dir, "prd", "api")
+	svc, err := requireService(dir, "prd", "api")
 	require.NoError(t, err)
-	assert.Equal(t, "bridge", container)
-	names := make([]string, 0, len(siblings))
-	for _, s := range siblings {
-		names = append(names, s.Name)
-	}
-	assert.Equal(t, []string{"api", "web"}, names, "every service sharing the container consumes its secrets")
+	// The matched spec comes back, so the caller need not re-load the tree.
+	assert.Equal(t, "api", svc.Name)
+	assert.Equal(t, map[string]bool{"API_TOKEN": true}, declaredEncryptedKeys(svc))
 
 	// A service declared only in the global slice resolves too.
-	container, siblings, err = resolveServiceContainer(dir, "prd", "edge")
+	svc, err = requireService(dir, "prd", "edge")
 	require.NoError(t, err)
-	assert.Equal(t, "edge", container)
-	require.Len(t, siblings, 1)
+	assert.Equal(t, "edge", svc.Name)
 
-	_, _, err = resolveServiceContainer(dir, "prd", "nope")
+	_, err = requireService(dir, "prd", "nope")
 	require.ErrorContains(t, err, `service "nope" is not declared`)
 	assert.Contains(t, err.Error(), "api", "the error should list known services")
+}
+
+// TestSecretsAreServiceScoped is the regression this whole change exists for
+// (ADR-0040): api and web share container "bridge" and both declare
+// `vault:API_TOKEN`. Writing api's value must not touch web's — under the old
+// container-keyed store this single `set` served BOTH services, so a rotation
+// for one silently rotated the other.
+func TestSecretsAreServiceScoped(t *testing.T) {
+	dir := secretFixture(t)
+	identity, recipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	require.NoError(t, runSecretInit(dir, "prd", recipient))
+
+	require.NoError(t, runSecretWrite(dir, "prd", "api", "API_TOKEN", true, false))
+
+	store, err := secretstore.Load(secretstore.Path(dir, "prd"))
+	require.NoError(t, err)
+	_, ok := store.Get("api", "API_TOKEN")
+	require.True(t, ok, "the value is stored under the SERVICE, not its container")
+	_, ok = store.Get("web", "API_TOKEN")
+	assert.False(t, ok, "a co-located service in the same container must NOT receive api's secret")
+	_, ok = store.Get("bridge", "API_TOKEN")
+	assert.False(t, ok, "the container is not a secret namespace any more")
+
+	// web's own value is independent: setting it leaves api's untouched.
+	require.NoError(t, runSecretWrite(dir, "prd", "web", "API_TOKEN", true, false))
+	store, err = secretstore.Load(secretstore.Path(dir, "prd"))
+	require.NoError(t, err)
+	apiCt, _ := store.Get("api", "API_TOKEN")
+	webCt, _ := store.Get("web", "API_TOKEN")
+	apiVal, err := secretstore.Decrypt(apiCt, identity)
+	require.NoError(t, err)
+	webVal, err := secretstore.Decrypt(webCt, identity)
+	require.NoError(t, err)
+	assert.NotEqual(t, apiVal, webVal, "two services sharing a container hold two independent values")
 }
 
 func TestRunSecretInitAndWriteRoundTrip(t *testing.T) {
@@ -71,8 +104,8 @@ func TestRunSecretInitAndWriteRoundTrip(t *testing.T) {
 	require.NoError(t, runSecretWrite(dir, "prd", "api", "API_TOKEN", true, false))
 	store, err := secretstore.Load(secretstore.Path(dir, "prd"))
 	require.NoError(t, err)
-	ct, ok := store.Get("bridge", "API_TOKEN")
-	require.True(t, ok, "the value must be stored under the service's container")
+	ct, ok := store.Get("api", "API_TOKEN")
+	require.True(t, ok, "the value must be stored under the service")
 	plaintext, err := secretstore.Decrypt(ct, identity)
 	require.NoError(t, err)
 	assert.Len(t, plaintext, 43, "32 random bytes base64url without padding")
@@ -82,7 +115,7 @@ func TestRunSecretInitAndWriteRoundTrip(t *testing.T) {
 	require.NoError(t, runSecretWrite(dir, "prd", "api", "API_TOKEN", true, false))
 	store, err = secretstore.Load(secretstore.Path(dir, "prd"))
 	require.NoError(t, err)
-	ct2, _ := store.Get("bridge", "API_TOKEN")
+	ct2, _ := store.Get("api", "API_TOKEN")
 	plaintext2, err := secretstore.Decrypt(ct2, identity)
 	require.NoError(t, err)
 	assert.NotEqual(t, plaintext, plaintext2)
@@ -96,7 +129,7 @@ func TestRunSecretWriteWithoutInitFails(t *testing.T) {
 
 // TestRunSecretReservedRoundTrip: --reserved writes/reads/removes a value in the
 // reserved namespace without any service backing it (the observability fix), and
-// it does NOT collide with a service container of the same name.
+// it does NOT collide with a service of the same name.
 func TestRunSecretReservedRoundTrip(t *testing.T) {
 	dir := secretFixture(t)
 	identity, recipient, err := secretstore.GenerateIdentity()
@@ -114,10 +147,10 @@ func TestRunSecretReservedRoundTrip(t *testing.T) {
 	plaintext, err := secretstore.Decrypt(ct, identity)
 	require.NoError(t, err)
 	assert.Len(t, plaintext, 43)
-	// It is NOT in the container namespace — a service container "observability"
+	// It is NOT in the service namespace — a SERVICE named "observability"
 	// would be free of it.
 	_, ok = store.Get("observability", "otlp_auth")
-	assert.False(t, ok, "reserved secrets never occupy the container namespace")
+	assert.False(t, ok, "reserved secrets never occupy the service namespace")
 
 	require.NoError(t, runSecretRm(dir, "prd", "observability", "otlp_auth", true))
 	store, err = secretstore.Load(secretstore.Path(dir, "prd"))
@@ -139,7 +172,7 @@ func TestRunSecretRm(t *testing.T) {
 	require.NoError(t, runSecretRm(dir, "prd", "api", "API_TOKEN", false))
 	store, err := secretstore.Load(secretstore.Path(dir, "prd"))
 	require.NoError(t, err)
-	_, ok := store.Get("bridge", "API_TOKEN")
+	_, ok := store.Get("api", "API_TOKEN")
 	assert.False(t, ok)
 
 	err = runSecretRm(dir, "prd", "api", "API_TOKEN", false)
@@ -170,7 +203,7 @@ func TestRunSecretRotate(t *testing.T) {
 	store, err := secretstore.Load(secretstore.Path(dir, "prd"))
 	require.NoError(t, err)
 	assert.Equal(t, newRecipient, store.Recipient)
-	ct, ok := store.Get("bridge", "API_TOKEN")
+	ct, ok := store.Get("api", "API_TOKEN")
 	require.True(t, ok)
 	// Decryptable with the NEW identity only; the plaintext survived the rotation.
 	plaintext, err := secretstore.Decrypt(ct, newIdentity)
@@ -179,7 +212,7 @@ func TestRunSecretRotate(t *testing.T) {
 	_, err = secretstore.Decrypt(ct, oldIdentity)
 	require.Error(t, err)
 
-	// The reserved secret rotated alongside the container secret.
+	// The reserved secret rotated alongside the service secret.
 	rct, ok := store.GetReserved("observability", "otlp_auth")
 	require.True(t, ok)
 	_, err = secretstore.Decrypt(rct, newIdentity)
@@ -189,24 +222,27 @@ func TestRunSecretRotate(t *testing.T) {
 }
 
 // TestCompromisedValueGuidance: rotate's post-rotation warning addresses every
-// stored entry — container secrets by a real service handle (flagging containers
-// with none) and reserved secrets via the --reserved reissue form.
+// stored entry — service secrets by their own name (the store key IS the CLI
+// handle now) and reserved secrets via the --reserved reissue form.
 func TestCompromisedValueGuidance(t *testing.T) {
 	dir := secretFixture(t)
 	store := &secretstore.Store{Recipient: "age1test"}
-	store.Set("bridge", "API_TOKEN", "ct")
-	store.Set("bridge", "SESSION_KEY", "ct")
-	store.Set("orphan", "TOKEN", "ct")
+	store.Set("api", "API_TOKEN", "ct")
+	store.Set("api", "SESSION_KEY", "ct")
+	store.Set("web", "API_TOKEN", "ct")
+	store.Set("ghost", "TOKEN", "ct") // stale: no such service
 	store.SetReserved("observability", "otlp_auth", "ct")
 
-	lines, err := compromisedValueGuidance(dir, "prd", store)
-	require.NoError(t, err)
 	assert.Equal(t, []string{
-		// api, not web: alphabetically-first service of the container.
 		"inforge secret set prd api API_TOKEN",
 		"inforge secret set prd api SESSION_KEY",
-		`# container "orphan" has no declared service for key TOKEN`,
+		// A stale entry gets a COMMENT, not a command: `secret set` would reject an
+		// undeclared service, and a line that errors mid-incident is worse than none.
+		`# service "ghost" is not declared in this env — remove the stale entry: inforge secret rm prd ghost TOKEN`,
+		// web's own copy of the same KEY is a DISTINCT value that must be reissued
+		// separately — the point of service scoping.
+		"inforge secret set prd web API_TOKEN",
 		// reserved secrets have no service handle — reissue with --reserved.
 		"inforge secret set prd observability otlp_auth --reserved",
-	}, lines)
+	}, compromisedValueGuidance(dir, "prd", store))
 }

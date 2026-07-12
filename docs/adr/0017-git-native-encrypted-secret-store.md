@@ -7,6 +7,8 @@ issue: "#91"
 # App secrets live age-encrypted in git; inforge provisions them into the provider
 
 > _Note: the "write plaintext into the secrets provider; the host fetches it" delivery half was replaced by git-committed age secrets delivered per-host over SSH ([ADR-0035](0035-git-backed-per-host-secrets-delivery.md)). The git-encrypted-store half stands._
+>
+> _Note: the store's **namespace** is no longer the container. Values are keyed by the **service** that declares the `vault:` reference — `services:`, not `containers:` ([ADR-0040](0040-service-scoped-secrets.md)). Everything below about the store's per-value age encryption, its committed recipient, and the single deploy-side identity is unchanged; only the map key is._
 
 Today a service's app secret reaches the provider one of two ways: an `${ENV}` source (the value is
 injected into the deploy process environment — one CI-secret-to-env line per secret, in the consumer's
@@ -81,7 +83,8 @@ nothing on the host can provide it, and this ADR does not pretend otherwise.
 
 - **The store is age ciphertext in git, per environment.** Values live in the consumer repo at
   `resources/<env>/secrets.enc.yaml`: a `recipient:` header (the env's committed public key) and a
-  `containers:` map of `container → { KEY → armored-age-ciphertext }`. Carrying the recipient in the store
+  map of `container → { KEY → armored-age-ciphertext }` (superseded by ADR-0040: the map is `services:`,
+  keyed by `service`). Carrying the recipient in the store
   file keeps each env's store self-contained — `set` knows what to encrypt to with no further configuration,
   and `rotate <env>` swaps the recipient and re-encrypts in one file. Per-value encryption (not a single
   encrypted blob) so a diff shows exactly which secret changed and a single value can be replaced independently.

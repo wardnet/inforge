@@ -29,7 +29,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	got, err := secretstore.Load(path)
 	require.NoError(t, err)
 	assert.Equal(t, s.Recipient, got.Recipient)
-	assert.Equal(t, s.Containers, got.Containers)
+	assert.Equal(t, s.Services, got.Services)
 
 	b, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -81,6 +81,38 @@ func TestLoadMissingRecipientFails(t *testing.T) {
 	require.ErrorContains(t, err, "no recipient")
 }
 
+// TestLoadUnmigratedContainersFails: a store still carrying the pre-ADR-0040
+// container-keyed block is REJECTED, not silently ignored. yaml.v3 decodes
+// non-strictly, so without the detect-only Containers field the block would be
+// dropped and the store would load clean while serving no secrets at all —
+// every service would come up missing every value. Load is the single guard, so
+// validate, the CLI and the deploy all inherit it.
+func TestLoadUnmigratedContainersFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.enc.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("recipient: age1test\ncontainers:\n  edge:\n    OTEL_AUTH_TOKEN: ct\n"), 0o644))
+
+	_, err := secretstore.Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "`containers:`", "the error must name the stale block")
+	assert.Contains(t, err.Error(), "edge", "and list the containers to migrate")
+	assert.Contains(t, err.Error(), "services:", "and say where the entries belong")
+	assert.False(t, errors.Is(err, secretstore.ErrNotFound), "an unmigrated store exists — it is not a missing one")
+}
+
+// TestSaveNeverWritesContainers: the legacy field is detect-only. A store that
+// loaded clean and is written back must not resurrect a `containers:` key.
+func TestSaveNeverWritesContainers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.enc.yaml")
+	s := &secretstore.Store{Recipient: "age1test"}
+	s.Set("api", "TOKEN", "ct")
+	require.NoError(t, s.Save(path))
+
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "containers:")
+	assert.Contains(t, string(b), "services:")
+}
+
 func TestGetSetDeleteKeys(t *testing.T) {
 	s := &secretstore.Store{Recipient: "age1test"}
 
@@ -99,26 +131,26 @@ func TestGetSetDeleteKeys(t *testing.T) {
 	assert.False(t, s.Delete("other", "A"))
 	assert.True(t, s.Delete("ghost", "A"))
 	assert.True(t, s.Delete("ghost", "B"))
-	// Emptied container map is pruned so the saved YAML carries no husk.
-	assert.NotContains(t, s.Containers, "ghost")
+	// Emptied service map is pruned so the saved YAML carries no husk.
+	assert.NotContains(t, s.Services, "ghost")
 }
 
-// TestReservedNamespaceIsolated: reserved secrets share none of the container
-// namespace — a reserved namespace and a container of the same name coexist
+// TestReservedNamespaceIsolated: reserved secrets share none of the service
+// namespace — a reserved namespace and a SERVICE of the same name coexist
 // without collision (ADR-0034 / the observability fix), and the two-level-map
-// behaviour (nil-alloc, prune, sort) matches the container accessors.
+// behaviour (nil-alloc, prune, sort) matches the service accessors.
 func TestReservedNamespaceIsolated(t *testing.T) {
 	s := &secretstore.Store{Recipient: "age1test"}
 
-	// A container and a reserved namespace with the same name do not collide.
+	// A service and a reserved namespace with the same name do not collide.
 	s.Set("observability", "SVC_TOKEN", "ct-svc")
 	s.SetReserved("observability", "otlp_auth", "ct-auth")
 
 	if _, ok := s.Get("observability", "otlp_auth"); ok {
-		t.Error("reserved key leaked into the container namespace")
+		t.Error("reserved key leaked into the service namespace")
 	}
 	if _, ok := s.GetReserved("observability", "SVC_TOKEN"); ok {
-		t.Error("container key leaked into the reserved namespace")
+		t.Error("service key leaked into the reserved namespace")
 	}
 	v, ok := s.GetReserved("observability", "otlp_auth")
 	assert.True(t, ok)
@@ -126,10 +158,10 @@ func TestReservedNamespaceIsolated(t *testing.T) {
 	assert.Equal(t, []string{"SVC_TOKEN"}, s.Keys("observability"))
 	assert.Equal(t, []string{"otlp_auth"}, s.ReservedKeys("observability"))
 
-	// Prune behaviour mirrors containers.
+	// Prune behaviour mirrors the service map.
 	assert.False(t, s.DeleteReserved("observability", "missing"))
 	assert.True(t, s.DeleteReserved("observability", "otlp_auth"))
 	assert.NotContains(t, s.Reserved, "observability")
-	// The same-named container is untouched by the reserved delete.
+	// The same-named service is untouched by the reserved delete.
 	assert.Equal(t, []string{"SVC_TOKEN"}, s.Keys("observability"))
 }
