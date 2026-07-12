@@ -144,6 +144,25 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 		}
 		forwardByListen[f.Listen] = f
 	}
+	// http{} binds two public ports that are nginx's own, never a service's: :80 (the
+	// ACME HTTP-01 challenge/redirect server, whenever anything on the host terminates
+	// TLS) and healthPort (whenever there is a health entry). A forward is a stream{}
+	// server on its listen port, and nginx cannot hold one public socket in both
+	// contexts — it refuses to start. Validation rejects both collisions at authoring
+	// time (a forward on :80 where the host terminates TLS; a health/route listen
+	// clash); fail loud here too, so a render that skipped validation cannot ship an
+	// nginx.conf that will not start.
+	terminatesTLS := len(terminate) > 0 || len(sortedApps) > 0 || len(sortedGateways) > 0
+	if terminatesTLS {
+		if f, ok := forwardByListen[acmePort]; ok {
+			return "", fmt.Errorf("nginx: forward route for service %q listens on :%d, but this host terminates TLS — the ACME HTTP-01 challenge/redirect server owns that port", f.Service, acmePort)
+		}
+	}
+	if len(sortedHealth) > 0 {
+		if f, ok := forwardByListen[healthPort]; ok {
+			return "", fmt.Errorf("nginx: forward route for service %q listens on :%d, the public health port — the health servers own that port", f.Service, healthPort)
+		}
+	}
 	termOnListen := map[int]bool{}
 	for _, t := range terminate {
 		termOnListen[t.Listen] = true
@@ -232,8 +251,9 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 // httpBlock renders the http{} context: the ACME issuer + shared zone (only when
 // something terminates TLS), the real-ip recovery directives (only when a mixed
 // port routes through ssl_preread + the PROXY protocol), one server per
-// tls-termination route, one per app, one plain-HTTP server per health endpoint,
-// and the :80 ACME-challenge/redirect server (only when something terminates TLS).
+// tls-termination route, one per app, the health port's default_server 404
+// catch-all plus one plain-HTTP server per health endpoint, and the :80
+// ACME-challenge/redirect server (only when something terminates TLS).
 // listenDir places a terminating server on its public port or, when that port is
 // mixed, on its internal loopback port.
 func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway, gatewayRegexOf map[string]string, listenDir func(int) *crossplane.Directive, anyMixed bool) *crossplane.Directive {
@@ -287,6 +307,9 @@ func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health [
 	for _, g := range gateways {
 		children = append(children, gatewayServer(g, listenDir(443), gatewayRegexOf))
 	}
+	if len(health) > 0 {
+		children = append(children, healthCatchAllServer(healthPort))
+	}
 	for _, h := range health {
 		children = append(children, healthServer(h, healthPort))
 	}
@@ -295,7 +318,7 @@ func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health [
 		// /.well-known/acme-challenge/ before location matching, so the catch-all
 		// redirect to HTTPS does not swallow challenges.
 		children = append(children, block("server", nil,
-			dir("listen", "80"),
+			dir("listen", strconv.Itoa(acmePort)),
 			block("location", []string{"/"},
 				dir("return", "301", "https://$host$request_uri"),
 			),
@@ -432,14 +455,28 @@ func jsonNotFoundLocation() *crossplane.Directive {
 	)
 }
 
+// healthCatchAllServer renders the health port's explicit default server: it
+// answers every request whose Host matches no service's health FQDN with a 404.
+// It is REQUIRED, not decorative — with no default_server marked, nginx promotes
+// the first server on the port to the implicit default, so an absent or unknown
+// Host on the public health port would be proxied straight to that service's
+// backend health listener.
+func healthCatchAllServer(healthPort int) *crossplane.Directive {
+	return block("server", nil,
+		dir("listen", strconv.Itoa(healthPort), "default_server"),
+		dir("server_name", "_"),
+		dir("return", "404"),
+	)
+}
+
 // healthServer renders one plain-HTTP health server on the ingress's public health
 // port, matched strictly by server_name (the service FQDN / request Host) and
 // reverse-proxied to the service's backend health port. Every service's health
 // shares the one public port, so the Host header is what selects the backend — a
-// missing/wrong Host returns 404 (no default_server). Only the service's declared
-// probe paths are proxied (exact match); anything else 404s at the listener
-// (ADR-0034). Render has already rejected an entry with no paths (allowlist-only,
-// never full-open).
+// missing/wrong Host lands on healthCatchAllServer and returns 404. Only the
+// service's declared probe paths are proxied (exact match); anything else 404s at
+// the listener (ADR-0034). Render has already rejected an entry with no paths
+// (allowlist-only, never full-open).
 func healthServer(h types.IngressHealth, healthPort int) *crossplane.Directive {
 	proxy := func() crossplane.Directives {
 		return crossplane.Directives{

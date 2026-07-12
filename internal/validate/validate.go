@@ -220,6 +220,11 @@ func globalNeedsDNS(g types.Resources) bool {
 
 // regionContext holds the foreign-key targets and tables a region's semantic
 // checks resolve against.
+// bindReasonHealth is the nginxBindsByHost reason for the public health listener —
+// the one implicit nginx bind checkIngress must NOT read as a collision with the
+// health port it is validating (it is that port's own registration).
+const bindReasonHealth = "public health listener"
+
 type regionContext struct {
 	available        map[string]bool
 	sizeTable        sizes.Table
@@ -300,7 +305,8 @@ type regionContext struct {
 	// (route target, backend health, exposed_ports, mesh.port) that lands on one of
 	// these fails at runtime with EADDRINUSE, so nginxBindErr rejects it at validate
 	// time. Kept separate from portUsersByHost so the ingress health-port check
-	// (checkIngress) does not self-collide against its own registered bind.
+	// (checkIngress) can tell its own registered bind (bindReasonHealth) from a
+	// foreign one and not self-collide.
 	nginxBindsByHost map[string]map[int]string
 	// meshHosts marks each canonical compute specKey that runs a mesh proxy — every
 	// host with >=1 service (pki: is required on every service) plus the gateway
@@ -338,9 +344,11 @@ type regionContext struct {
 	// only with another service's udp exposed port. TCP exposed ports share
 	// targetUsersByHost with route targets and health ports.
 	udpExposedUsersByHost map[string]map[int][]string
-	// tlsTermIngressByHost marks a canonical INGRESS host specKey that has at least
-	// one tls-termination route across the services it fronts — so a forward on :80
-	// (which ACME needs) can be rejected.
+	// tlsTermIngressByHost marks a canonical INGRESS host specKey whose edge nginx
+	// terminates TLS — a tls-termination route across the services it fronts, an app
+	// it serves, or the scope gateway co-hosted on it. Every one of those provisions
+	// an ACME cert, so nginx binds :80 there for HTTP-01 (+ the redirect) and a
+	// forward on :80 (a stream bind on the same socket) can be rejected.
 	tlsTermIngressByHost map[string]bool
 	// gatewayScopeCount is the number of gateway resources declared in this scope.
 	// A gateway is a scope singleton (≤1 per scope): it is the scope's one public
@@ -1068,27 +1076,29 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			ctx.nginxBindsByHost[host][port] = reason
 		}
 	}
-	// A tls-termination route provisions an ACME cert, so nginx binds :80 (HTTP-01
-	// challenge + redirect) on its ingress host. Its :443 listen is a route listen,
-	// already in portUsersByHost.
-	for host := range ctx.tlsTermIngressByHost {
-		addNginxBind(host, 80, "ACME HTTP-01 challenge/redirect")
-	}
 	// An app's server block binds :443 and provisions a cert (-> :80) on its ingress's
-	// host, with no route listen entry of its own.
+	// host, with no route listen entry of its own. The host terminates TLS all the
+	// same, so it joins tlsTermIngressByHost — an app-only (routeless) ingress host
+	// still owns :80 for ACME.
 	for _, f := range appFiles {
 		if f.parseErr != nil {
 			continue
 		}
 		if host := ctx.ingressHost[f.spec.Ingress]; host != "" {
+			ctx.tlsTermIngressByHost[host] = true
 			addNginxBind(host, 443, "app TLS listener")
-			addNginxBind(host, 80, "ACME HTTP-01 challenge/redirect")
 		}
 	}
-	// The gateway host binds :443 (daemon edge) + :80 (ACME).
+	// The gateway host binds :443 (daemon edge) and terminates TLS there (-> :80).
 	if ctx.gatewayHostKey != "" {
+		ctx.tlsTermIngressByHost[ctx.gatewayHostKey] = true
 		addNginxBind(ctx.gatewayHostKey, 443, "gateway TLS listener")
-		addNginxBind(ctx.gatewayHostKey, 80, "ACME HTTP-01 challenge/redirect")
+	}
+	// Anything terminating TLS on a host provisions an ACME cert, so nginx binds :80
+	// (HTTP-01 challenge + redirect) there. Its :443 listen is a route listen (already
+	// in portUsersByHost) or the app/gateway bind registered above.
+	for host := range ctx.tlsTermIngressByHost {
+		addNginxBind(host, 80, "ACME HTTP-01 challenge/redirect")
 	}
 	// One pass over services for the two per-service derivations:
 	//   - the public health listener nginx binds where a service surfaces health: an
@@ -1104,9 +1114,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		}
 		if f.spec.HealthProbesPort != 0 {
 			if host, ok := ctx.ingressHost[f.spec.Ingress]; ok && f.spec.Ingress != "" {
-				addNginxBind(host, ctx.ingressHealthPort[f.spec.Ingress], "public health listener")
+				addNginxBind(host, ctx.ingressHealthPort[f.spec.Ingress], bindReasonHealth)
 			} else if f.spec.Ingress == "" && ctx.gatewayServiceTargets[f.spec.Name] {
-				addNginxBind(ctx.gatewayHostKey, ctx.gatewayHealthPort, "public health listener")
+				addNginxBind(ctx.gatewayHostKey, ctx.gatewayHealthPort, bindReasonHealth)
 			}
 		}
 		if f.spec.Pki != "" {
@@ -1924,9 +1934,10 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 					errs = append(errs, fmt.Sprintf("routes: forward on listen %d is single-service-exclusive (one passthrough per port), but that port on ingress %q already has a forward from %s", rt.Listen, s.Ingress, who))
 				}
 				// ACME owns :80 on the ingress host for HTTP-01 challenges, so a
-				// forward there collides with any tls-termination on the same ingress.
+				// forward there collides with anything terminating TLS on that host —
+				// a tls-termination route, an app, or the scope gateway.
 				if rt.Listen == 80 && ctx.tlsTermIngressByHost[ingHost] {
-					errs = append(errs, fmt.Sprintf("routes: forward on :80 conflicts with a tls-termination on ingress %q (ACME owns :80 for HTTP-01 challenges)", s.Ingress))
+					errs = append(errs, fmt.Sprintf("routes: forward on :80 conflicts with TLS termination (a tls-termination route, an app, or the gateway) on ingress %q's host (ACME owns :80 for HTTP-01 challenges)", s.Ingress))
 				}
 			}
 		}
@@ -2209,9 +2220,10 @@ func checkIngress(s types.IngressSpec, ctx regionContext) (errs, warns []string)
 	}
 
 	// The public health port nginx exposes (health_probes_port, default 81) must not
-	// collide with anything else nginx binds on this host: :80 (ACME HTTP-01) or any
-	// service route's public listen port. The backend health port is validated on the
-	// service (checkService), since that is where the service binds it.
+	// collide with anything else nginx binds on this host: :80 (ACME HTTP-01), the
+	// :443 an app or the scope gateway terminates TLS on, or any service route's
+	// public listen port. The backend health port is validated on the service
+	// (checkService), since that is where the service binds it.
 	healthPort := s.EffectiveHealthProbesPort()
 	if healthPort == 80 {
 		errs = append(errs, "health_probes_port: must not be 80 (ACME HTTP-01 owns :80 on the ingress host)")
@@ -2234,6 +2246,15 @@ func checkIngress(s types.IngressSpec, ctx regionContext) (errs, warns []string)
 	if hostKey != "" {
 		if users := ctx.portUsersByHost[hostKey][healthPort]; len(users) > 0 {
 			errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with a route listen port on this ingress host (used by service(s) %s); pick a distinct health port", healthPort, strings.Join(users, ", ")))
+		}
+		// The other public ports this host's nginx binds implicitly — the :443 an app
+		// or the scope gateway terminates TLS on (nginxBindsByHost; a route listen is
+		// covered above). The health servers are plain HTTP, and their port carries the
+		// listener's default_server, so sharing :443 with a TLS server block would both
+		// double-bind the socket and hand the port's default server to a plain-HTTP 404.
+		// The health listener's own bind on this port is not a collision with itself.
+		if reason, ok := ctx.nginxBindsByHost[hostKey][healthPort]; ok && reason != bindReasonHealth && healthPort != 80 {
+			errs = append(errs, fmt.Sprintf("health_probes_port: %d is already bound on this ingress host by nginx (%s); pick a distinct health port", healthPort, reason))
 		}
 	}
 	return errs, warns

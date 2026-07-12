@@ -1,0 +1,11 @@
+name: relay
+container: bridge
+host: bridge
+type: raw
+user: relay
+pki: wardnet-mesh
+ingress: edge
+routes:
+  - type: forward
+    listen: 80
+    target: 8080

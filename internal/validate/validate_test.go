@@ -261,6 +261,20 @@ func TestValidateResourcesIngressAppOK(t *testing.T) {
 	assert.NoError(t, err, "regional and global ingress/app referencing same-scope hosts should validate cleanly")
 }
 
+// TestValidateResourcesForwardOn80WithApp: an ingress host that terminates TLS
+// only because it serves an APP (no tls-termination route anywhere) still owns
+// :80 — nginx renders the ACME HTTP-01/redirect server there. A forward on :80
+// on that ingress is a stream bind on the same socket, so nginx would refuse to
+// start; validation must reject it.
+func TestValidateResourcesForwardOn80WithApp(t *testing.T) {
+	var err error
+	out := captureStdout(t, func() {
+		err = ValidateResources("forward-80-app", testdataDir, types.ProviderDefaults{})
+	})
+	require.Error(t, err, "a forward on :80 on a host serving an app should fail validation")
+	assert.Contains(t, out, "ACME owns :80")
+}
+
 // TestValidateResourcesAppBadIngress: an app whose ingress: foreign key names no
 // ingress resource in its scope fails validation (the same-scope FK rule).
 func TestValidateResourcesAppBadIngress(t *testing.T) {
@@ -447,6 +461,24 @@ func TestCheckIngressUnknownHostRejected(t *testing.T) {
 	errs, _ := checkIngress(types.IngressSpec{Name: "web", Host: "ghost"}, ingressCtx())
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "does not resolve to a compute")
+}
+
+// TestCheckIngressHealthPortCollidesWithTLSBind: an app (or the scope gateway) on
+// the ingress host binds :443 without a route listen entry, so the public health
+// port must not be 443 — the health servers are plain HTTP and their port carries
+// the listener's default_server, so the collision would both double-bind the socket
+// and hand :443's default server to a plain-HTTP 404.
+func TestCheckIngressHealthPortCollidesWithTLSBind(t *testing.T) {
+	ctx := ingressCtx()
+	ctx.nginxBindsByHost = map[string]map[int]string{"bridge-01": {443: "app TLS listener"}}
+	errs, _ := checkIngress(types.IngressSpec{Name: "web", Host: "bridge", HealthProbesPort: 443}, ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "already bound on this ingress host by nginx (app TLS listener)")
+
+	// The health listener's OWN registered bind is not a collision with itself.
+	ctx.nginxBindsByHost = map[string]map[int]string{"bridge-01": {80: "ACME HTTP-01 challenge/redirect", 81: bindReasonHealth}}
+	errs, _ = checkIngress(types.IngressSpec{Name: "web", Host: "bridge", HealthProbesPort: 81}, ctx)
+	assert.Empty(t, errs)
 }
 
 // TestCheckAppGlobalIngressRejected: an app referencing a global ingress is
