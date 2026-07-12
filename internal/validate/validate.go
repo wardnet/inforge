@@ -1586,6 +1586,12 @@ func resolvedProviderErr(specProvider, class, engine string, ctx regionContext) 
 	return nil
 }
 
+// checkNetwork validates one network: its provider resolves, every subnet CIDR
+// sits inside the network CIDR, every subnet name is unique across the scope's
+// networks (a subnet's provider resource name — and thus its URN — derives from
+// the subnet name alone, so a cross-network reuse collides at deploy), and every
+// network sharing a container agrees on the CIDR (a container is realized as ONE
+// cloud network, with the first spec's CIDR).
 func checkNetwork(s types.NetworkSpec, ctx regionContext) (errs, warns []string) {
 	errs = append(errs, resolvedProviderErr(s.Provider, "network", "", ctx)...)
 
@@ -1593,12 +1599,36 @@ func checkNetwork(s types.NetworkSpec, ctx regionContext) (errs, warns []string)
 	if err != nil {
 		errs = append(errs, err.Error())
 	}
+	seen := map[string]bool{}
 	for i, sub := range s.Subnets {
 		subnet, serr := parseCIDR(fmt.Sprintf("subnets[%d].cidr", i), sub.CIDR)
 		if serr != nil {
 			errs = append(errs, serr.Error())
 		} else if cidr != nil && !cidrContains(cidr, subnet) {
 			errs = append(errs, fmt.Sprintf("subnets[%d].cidr: %q is not within cidr %q", i, sub.CIDR, s.CIDR))
+		}
+		if seen[sub.Name] {
+			errs = append(errs, fmt.Sprintf("subnets[%d].name: %q is declared twice by this network; subnet names must be unique within a scope", i, sub.Name))
+			continue
+		}
+		seen[sub.Name] = true
+		for _, other := range sortedKeys(ctx.networks) {
+			if other == s.Name {
+				continue
+			}
+			for _, osub := range ctx.networks[other].Subnets {
+				if osub.Name == sub.Name {
+					errs = append(errs, fmt.Sprintf("subnets[%d].name: %q is also declared by network %q; subnet names must be unique across the networks of a scope", i, sub.Name, other))
+				}
+			}
+		}
+	}
+	for _, other := range sortedKeys(ctx.networks) {
+		if other == s.Name {
+			continue
+		}
+		if o := ctx.networks[other]; o.Container == s.Container && o.CIDR != s.CIDR {
+			errs = append(errs, fmt.Sprintf("cidr: %q disagrees with network %q's cidr %q; both share container %q, which is realized as one cloud network", s.CIDR, other, o.CIDR, s.Container))
 		}
 	}
 	return errs, warns
