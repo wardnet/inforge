@@ -16,7 +16,6 @@ import (
 
 func newPreviewCmd(configPath, dir *string) *cobra.Command {
 	var stackConfig, format, report string
-	var allowMultiple bool
 
 	cmd := &cobra.Command{
 		Use:           "preview <env>",
@@ -25,18 +24,17 @@ func newPreviewCmd(configPath, dir *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPreview(cmd.Context(), args[0], stackConfig, *configPath, *dir, format, report, allowMultiple)
+			return runPreview(cmd.Context(), args[0], stackConfig, *configPath, *dir, format, report)
 		},
 	}
 
 	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to stack config (default: inforge.<env>.yaml)")
 	cmd.Flags().StringVarP(&format, "output", "o", "", "output format: '' (default human) or 'json'")
 	cmd.Flags().StringVar(&report, "report", "", "write a markdown run report to this path (default: a temp file)")
-	cmd.Flags().BoolVar(&allowMultiple, "allow-multiple", false, "allow running when multiple environments have changes")
 	return cmd
 }
 
-func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, dir, format, reportPath string, allowMultiple bool) error {
+func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, dir, format, reportPath string) error {
 	projCfg, err := loadProjectConfig(configPath)
 	if err != nil {
 		return err
