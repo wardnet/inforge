@@ -14,7 +14,7 @@ import (
 	"github.com/wardnet/inforge/internal/output"
 )
 
-func newPreviewCmd(configPath *string) *cobra.Command {
+func newPreviewCmd(configPath, dir *string) *cobra.Command {
 	var stackConfig, format, report string
 	var allowMultiple bool
 
@@ -25,7 +25,7 @@ func newPreviewCmd(configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPreview(cmd.Context(), args[0], stackConfig, *configPath, format, report, allowMultiple)
+			return runPreview(cmd.Context(), args[0], stackConfig, *configPath, *dir, format, report, allowMultiple)
 		},
 	}
 
@@ -36,7 +36,7 @@ func newPreviewCmd(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, format, reportPath string, allowMultiple bool) error {
+func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, dir, format, reportPath string, allowMultiple bool) error {
 	projCfg, err := loadProjectConfig(configPath)
 	if err != nil {
 		return err
@@ -65,12 +65,10 @@ func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, for
 		return fmt.Errorf("set stack config: %w", err)
 	}
 
-	if err := setProviderDefaults(ctx, s, projCfg.Providers); err != nil {
-		return fmt.Errorf("set provider defaults: %w", err)
-	}
-
-	if err := setBackups(ctx, s, projCfg.Backups); err != nil {
-		return fmt.Errorf("set backups config: %w", err)
+	// The CLI-derived keys program.Run reads — `dir` included, so a --dir preview
+	// plans the tree it was pointed at rather than ./resources.
+	if err := setDerivedStackConfig(ctx, &s, dir, projCfg); err != nil {
+		return fmt.Errorf("set derived stack config: %w", err)
 	}
 
 	// A single Printer renders the engine's event stream (per-resource lines plus

@@ -79,12 +79,11 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 		return fmt.Errorf("set stack config: %w", err)
 	}
 
-	if err := setProviderDefaults(ctx, s, projCfg.Providers); err != nil {
-		return fmt.Errorf("set provider defaults: %w", err)
-	}
-
-	if err := setBackups(ctx, s, projCfg.Backups); err != nil {
-		return fmt.Errorf("set backups config: %w", err)
+	// The CLI-derived keys program.Run reads, `dir` among them: without it the root
+	// --dir would move only the CLI-side steps (the mesh baseline below) while the
+	// Pulumi program kept deploying ./resources.
+	if err := setDerivedStackConfig(ctx, &s, dir, projCfg); err != nil {
+		return fmt.Errorf("set derived stack config: %w", err)
 	}
 
 	// A single Printer renders the engine's event stream — per-resource lines plus

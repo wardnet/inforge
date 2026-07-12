@@ -118,20 +118,17 @@ func runEphemeralUp(ctx context.Context, configPath, dir, from, slugFlag, ttlFla
 		cfgKeySourceEnvironment: {Value: from},
 		cfgKeyEphemeral:         {Value: "true"},
 		cfgKeyExpiresAt:         {Value: expiresAt},
-		// Always re-assert dir (the resources tree) so a source stack config's own
-		// `dir` key can never override the tree checkSourceDefined just validated —
-		// program.Run must read exactly the tree `up` verified, not a source-provided one.
-		"dir": {Value: dir},
 	}
 	if err := s.SetAllConfig(ctx, idCfg); err != nil {
 		return fmt.Errorf("persist ephemeral identity config: %w", err)
 	}
-	if err := setProviderDefaults(ctx, s, projCfg.Providers); err != nil {
-		return fmt.Errorf("set provider defaults: %w", err)
-	}
 
-	if err := setBackups(ctx, s, projCfg.Backups); err != nil {
-		return fmt.Errorf("set backups config: %w", err)
+	// The CLI-derived keys, written AFTER the source stack config: `dir` is always
+	// re-asserted, so a source stack config's own `dir` key can never override the
+	// tree checkSourceDefined just validated — program.Run must read exactly the tree
+	// `up` verified, not a source-provided one.
+	if err := setDerivedStackConfig(ctx, &s, dir, projCfg); err != nil {
+		return fmt.Errorf("set derived stack config: %w", err)
 	}
 
 	fmt.Printf("spinning up ephemeral env %q from source %q (ttl %s, expires_at %s)\n", slug, from, ttl, expiresAt)
