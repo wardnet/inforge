@@ -335,6 +335,33 @@ func TestRenderHealthGolden(t *testing.T) {
 		strings.Index(got, "server_name web.svc.prd.use1.wardnet.network;\n        location ="))
 }
 
+// TestRenderHealthCatchAll: the health port carries an explicit default_server
+// that 404s. Without it nginx would promote the first health server to the
+// implicit default and proxy an unknown/absent Host to that service's backend.
+func TestRenderHealthCatchAll(t *testing.T) {
+	got, err := Render(nil, nil, []types.IngressHealth{
+		{Service: "web", FQDN: "web.svc.prd.use1.wardnet.network", Target: 3001, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
+		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
+	}, 81, nil)
+	require.NoError(t, err)
+	assert.Contains(t, got, "    server {\n        listen 81 default_server;\n        server_name _;\n        return 404;\n    }")
+	// The catch-all precedes every named health server, so no service's server can
+	// be the implicit default for the port.
+	assert.Less(t, strings.Index(got, "listen 81 default_server;"), strings.Index(got, "server_name api.svc.prd.use1.wardnet.network;"))
+	// It is emitted exactly once for the port, whatever the health count.
+	assert.Equal(t, 1, strings.Count(got, "default_server"))
+}
+
+// TestRenderNoHealthNoCatchAll: with no health endpoints there is no health port
+// to defend, so no catch-all server is emitted.
+func TestRenderNoHealthNoCatchAll(t *testing.T) {
+	got, err := Render([]types.IngressRoute{
+		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Backend: "127.0.0.1", FQDNs: []string{"api.example.com"}},
+	}, nil, nil, 81, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, got, "default_server")
+}
+
 // TestRenderHealthOnly: an ingress with only health endpoints (no TLS, no apps)
 // renders a minimal http block — no ACME issuer, no :80 redirect server, no stream.
 func TestRenderHealthOnly(t *testing.T) {

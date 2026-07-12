@@ -52,8 +52,9 @@ A service may declare `health_probes_port` — the **backend** port it serves he
 only when at least one referencing service declares its own. nginx surfaces health as plain-HTTP
 `http{}` servers on that port, demuxed **strictly** by `server_name` (the service's canonical
 `naming.ServiceFQDN`, the request `Host`) and reverse-proxied to `backend:<health_probes_port>`. A
-missing/wrong Host returns 404 — there is no `default_server`, so the mapping is unambiguous across
-regions. Health is plain HTTP (no ACME cert dragged into probes) and shares the `http{}` block; an
+missing/wrong Host returns 404 — the port carries an explicit `default_server` that returns 404 and
+nothing else, so no service's health server can become nginx's implicit default and the mapping is
+unambiguous across regions. Health is plain HTTP (no ACME cert dragged into probes) and shares the `http{}` block; an
 ingress with only health endpoints renders a minimal `http{}` (no ACME issuer, no `:80` server).
 
 The same field name `health_probes_port` is used on both the ingress (public listener) and the
