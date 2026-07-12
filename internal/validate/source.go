@@ -1,9 +1,7 @@
 package validate
 
 import (
-	"fmt"
-	"regexp"
-	"strings"
+	"github.com/wardnet/inforge/internal/yamldoc"
 )
 
 // SourceKind distinguishes the forms of a secrets source.
@@ -44,38 +42,40 @@ type Source struct {
 	LiteralValue string
 }
 
-var refPattern = regexp.MustCompile(`^ref:(database|compute)/(.+)\.([^.]+)$`)
-
-// ParseSource parses a secrets source DSL value into its structured form. It
-// only checks grammar; whether a ref resolves to a real resource/output is
-// checked separately during cross-resource validation.
+// ParseSource parses a secrets source DSL value into its structured form for
+// VALIDATION. It only checks grammar; whether a ref resolves to a real
+// resource/output is checked separately during cross-resource validation, which is
+// this package's real job and needs the whole resource graph — not something a
+// resolver can know.
 //
-// Source DSL:
-//
-//	ref:<database|compute>/<name>.<output>   — resource FK reference
-//	vault:<KEY>                              — encrypted store key
-//	env:<VAR>                                — deploy-time environment variable
-//	<anything else>                          — literal value (plaintext in git)
+// The grammar itself lives in internal/yamldoc, with the reader: it is ONE DSL,
+// shared by every file, and the deploy program dispatches on the same schemes to
+// build a service's values (program/secretresolve.go). This function does not
+// re-implement it — it names the same schemes and reuses the same parsers, so the
+// thing validate accepts and the thing deploy resolves can never drift apart.
 func ParseSource(s string) (Source, error) {
-	if m := refPattern.FindStringSubmatch(s); m != nil {
+	if ref, ok, err := yamldoc.ParseRef(s); ok {
+		if err != nil {
+			return Source{}, err
+		}
 		return Source{
 			Kind:      SourceRef,
-			RefType:   m[1],
-			RefName:   m[2],
-			RefOutput: m[3],
+			RefType:   ref.Type,
+			RefName:   ref.Name,
+			RefOutput: ref.Output,
 		}, nil
 	}
-	if v, ok := strings.CutPrefix(s, "vault:"); ok {
-		if v == "" {
-			return Source{}, fmt.Errorf("invalid source %q: vault: requires a key name, e.g. vault:MY_KEY", s)
+	if key, ok, err := yamldoc.ParseKey(yamldoc.VaultScheme, s); ok {
+		if err != nil {
+			return Source{}, err
 		}
-		return Source{Kind: SourceVault, VaultKey: v}, nil
+		return Source{Kind: SourceVault, VaultKey: key}, nil
 	}
-	if v, ok := strings.CutPrefix(s, "env:"); ok {
-		if v == "" {
-			return Source{}, fmt.Errorf("invalid source %q: env: requires a variable name, e.g. env:MY_VAR", s)
+	if name, ok, err := yamldoc.ParseKey(yamldoc.EnvScheme, s); ok {
+		if err != nil {
+			return Source{}, err
 		}
-		return Source{Kind: SourceEnv, EnvName: v}, nil
+		return Source{Kind: SourceEnv, EnvName: name}, nil
 	}
 	// Any other string is a literal value.
 	return Source{Kind: SourceLiteral, LiteralValue: s}, nil
