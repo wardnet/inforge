@@ -10,8 +10,21 @@ import (
 func TestMarkdownCounts(t *testing.T) {
 	md := Markdown("inforge deploy — prd", map[string]int{"create": 14, "update": 2}, nil)
 	assert.Contains(t, md, "## inforge deploy — prd")
-	assert.Contains(t, md, "| 14 | 2 | 0 | 0 |")
+	assert.Contains(t, md, "| 14 | 2 | 0 | 0 | 0 |")
 	assert.NotContains(t, md, "### Failed")
+}
+
+// TestMarkdownCountsReplacements: a run that only REPLACED resources must not
+// report all-zeroes — Pulumi splits a replacement into create-replacement +
+// delete-replaced, and the report must account for both (as the streamed
+// summary does), or it silently disagrees with the run it describes.
+func TestMarkdownCountsReplacements(t *testing.T) {
+	md := Markdown("inforge deploy — prd",
+		map[string]int{"create-replacement": 3, "delete-replaced": 3},
+		nil,
+	)
+	assert.Contains(t, md, "| 0 | 0 | 3 | 3 | 0 |")
+	assert.NotContains(t, md, "| 0 | 0 | 0 | 0 |", "a replacement-only run must not read as no changes")
 }
 
 func TestMarkdownFailures(t *testing.T) {
@@ -19,7 +32,7 @@ func TestMarkdownFailures(t *testing.T) {
 		map[string]int{"create": 14},
 		[]Failure{{Type: "infisical:InfisicalIdentity", Name: "wardnet-prd-use1-identity-bridge", Message: "HTTP 404"}},
 	)
-	assert.Contains(t, md, "| 14 | 0 | 0 | 1 |")
+	assert.Contains(t, md, "| 14 | 0 | 0 | 0 | 1 |")
 	assert.Contains(t, md, "### Failed")
 	assert.Contains(t, md, "`infisical:InfisicalIdentity` wardnet-prd-use1-identity-bridge — HTTP 404")
 	assert.Contains(t, md, "were skipped", "the abort note explains absence != applied")
