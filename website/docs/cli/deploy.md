@@ -21,7 +21,6 @@ The environment is a required positional argument (e.g. `prd`) — it is the Pul
 | `--stack-config` | `inforge.<env>.yaml` | Path to the stack config file (optional; a missing default file means no extra config) |
 | `--yes` / `-y` | `false` | Auto-approve without interactive prompt |
 | `--output` / `-o` | `""` (human) | Output format: `""` for human-readable, `json` for structured JSON |
-| `--allow-multiple` | `false` | Allow running when multiple environments have changes |
 | `--ssh-key` | `$INFORGE_DEPLOY_KEY` | SSH deploy key used by the post-deploy [mesh baseline](#mesh-baseline) trigger (only needed when the env has mesh services) |
 | `--config` / `-c` | `./inforge.yaml` | Path to the project config file |
 | `--dir` / `-d` | `./resources` | Path to the resources directory |
@@ -34,7 +33,8 @@ Without `--yes`, inforge prompts:
 Deploy stack "prd"? Type 'yes' to confirm:
 ```
 
-Use `--yes` in CI or scripted contexts.
+Use `--yes` in CI or scripted contexts: when stdin is not a terminal the prompt cannot be answered,
+and `deploy` fails rather than exiting 0 having applied nothing.
 
 ## Secret delivery
 
