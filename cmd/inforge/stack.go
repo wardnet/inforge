@@ -222,6 +222,35 @@ func createStack(ctx context.Context, stackName string, projCfg projectConfig) (
 	return s, nil
 }
 
+// selectStack SELECTS an existing Pulumi stack, failing if it does not exist.
+// The ephemeral teardown paths must never create a stack: an upsert on a typo'd
+// slug would mint an empty stack that no `up` owns and no `reap` can classify
+// (it carries neither ephemeral nor expires_at), permanently burning that slug —
+// createStack would then refuse it forever. Ephemeral commands require an
+// object-store backend, so upsertStack's git-branch state path is unreachable here.
+func selectStack(ctx context.Context, stackName string, projCfg projectConfig) (auto.Stack, error) {
+	backendURL, err := projCfg.backendURL()
+	if err != nil {
+		return auto.Stack{}, err
+	}
+	proj := workspace.Project{
+		Name:    tokens.PackageName(projCfg.Name),
+		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
+		Backend: &workspace.ProjectBackend{URL: backendURL},
+	}
+	s, err := auto.SelectStackInlineSource(ctx, stackName, projCfg.Name, program.Run,
+		auto.Project(proj),
+		auto.WorkDir("."),
+	)
+	if err != nil {
+		if auto.IsSelectStack404Error(err) {
+			return auto.Stack{}, fmt.Errorf("no stack named %q exists — check the slug (`inforge ephemeral reap --dry-run` lists the live ephemeral envs)", stackName)
+		}
+		return auto.Stack{}, fmt.Errorf("select stack %q: %w", stackName, err)
+	}
+	return s, nil
+}
+
 // stackConfigValue reads a plain config key from a stack's config map, tolerating
 // the project-namespace prefix the backend stores keys under (e.g. "ephemeral" is
 // persisted as "<project>:ephemeral"). It returns "" when the key is absent.

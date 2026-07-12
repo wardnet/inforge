@@ -102,7 +102,7 @@ func runEphemeralReap(ctx context.Context, configPath string, dryRun bool) error
 	var failures []string
 	for _, c := range candidates {
 		fmt.Printf("reaping %s (source %s, %s)\n", c.name, c.srcEnv, c.deadlineNote())
-		if err := reapStack(ctx, c); err != nil {
+		if err := reapStack(ctx, c, projCfg); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", c.name, err))
 		}
 	}
@@ -175,7 +175,7 @@ func reapDecision(ephemeralVal, expiresRaw string, now time.Time) (expires time.
 // source tree, and without it the loaders would default to resources/<slug>/
 // (which never existed) and fail mid-destroy, leaving a billable orphan retried
 // on every reap. Surfacing it as a failure forces a manual teardown instead.
-func reapStack(ctx context.Context, c reapCandidate) error {
+func reapStack(ctx context.Context, c reapCandidate, projCfg projectConfig) error {
 	if c.srcEnv == "" {
 		return fmt.Errorf("ephemeral but has no %s config — refusing to auto-destroy (its source tree can't be resolved); tear it down manually", cfgKeySourceEnvironment)
 	}
@@ -186,7 +186,7 @@ func reapStack(ctx context.Context, c reapCandidate) error {
 	}); err != nil {
 		return fmt.Errorf("re-assert config: %w", err)
 	}
-	return destroyEphemeralStack(ctx, c.stack, c.name)
+	return destroyEphemeralStack(ctx, c.stack, projCfg, c.name)
 }
 
 // deadlineNote renders a candidate's expiry for display: the lapsed deadline, or

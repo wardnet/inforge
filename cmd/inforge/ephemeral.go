@@ -170,3 +170,18 @@ func checkSourceDefined(dir, srcEnv string) error {
 	}
 	return nil
 }
+
+// checkSlugFree is the inverse of checkSourceDefined: a slug naming a PERMANENT
+// env (one with a resources/<slug>/ tree) is refused. The stack-name collision
+// guard in createStack only bites once that env's stack exists — a permanent env
+// defined but not yet deployed would otherwise let `up` create its stack, stamp
+// ephemeral+expires_at onto that identity, and hand the real env's name to the
+// reaper. The identity slug must therefore never be the name of a defined env.
+func checkSlugFree(dir, slug string) error {
+	if _, err := os.Stat(filepath.Join(dir, slug)); err == nil {
+		return fmt.Errorf("slug %q names a defined env (%s exists) — an ephemeral identity must not take a permanent env's name; pick a different --slug", slug, filepath.Join(dir, slug))
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}

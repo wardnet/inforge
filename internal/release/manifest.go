@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -168,6 +169,51 @@ func (s *Store) PinnedSHAs(ctx context.Context, service string) (map[string]bool
 		token = out.NextContinuationToken
 	}
 	return pinned, nil
+}
+
+// DeleteEnvManifests removes every workload's manifest for env
+// (<workload>/manifest.<env>.yaml) across the whole bucket, returning the keys it
+// deleted. It exists for ephemeral teardown (ADR-0028): PinnedSHAs unions the SHAs
+// of every manifest under a workload's prefix, so a torn-down env's manifest left
+// behind would pin its SHAs against pruning forever. Only manifests are matched —
+// artifacts are env-agnostic and are never deleted here.
+func (s *Store) DeleteEnvManifests(ctx context.Context, env string) ([]string, error) {
+	if env == "" {
+		return nil, errors.New("delete manifests: empty env")
+	}
+	suffix := "/manifest." + env + ".yaml"
+	var keys []string
+	var token *string
+	for {
+		out, err := s.s3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list manifests for env %s: %w", env, err)
+		}
+		for _, obj := range out.Contents {
+			if key := aws.ToString(obj.Key); strings.HasSuffix(key, suffix) {
+				keys = append(keys, key)
+			}
+		}
+		if out.IsTruncated == nil || !*out.IsTruncated {
+			break
+		}
+		token = out.NextContinuationToken
+	}
+	sort.Strings(keys)
+	deleted := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if _, err := s.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(key),
+		}); err != nil {
+			return deleted, fmt.Errorf("delete manifest %s: %w", key, err)
+		}
+		deleted = append(deleted, key)
+	}
+	return deleted, nil
 }
 
 func (s *Store) getManifestByKey(ctx context.Context, key string) (Manifest, error) {

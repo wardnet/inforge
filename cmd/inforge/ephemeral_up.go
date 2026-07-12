@@ -72,6 +72,9 @@ func runEphemeralUp(ctx context.Context, configPath, dir, from, slugFlag, ttlFla
 	if slug == from {
 		return fmt.Errorf("slug %q must differ from the source env %q — the ephemeral identity is distinct from its config source", slug, from)
 	}
+	if err := checkSlugFree(dir, slug); err != nil {
+		return err
+	}
 
 	maxTTL, err := projCfg.Ephemeral.maxTTL()
 	if err != nil {
@@ -139,22 +142,36 @@ func runEphemeralUp(ctx context.Context, configPath, dir, from, slugFlag, ttlFla
 		return err
 	}
 
-	// The mesh leaf baseline (ADR-0035) under the ephemeral identity: mint the
-	// clone's mesh material (source config, slug identity) and SSH-push it
-	// directly to each ephemeral mesh host, so the replicated services below
-	// start against proxies already holding real leaves.
-	if err := meshBaseline(ctx, dir, from, slug, sshKeyPath, os.Stdout); err != nil {
-		return err
-	}
-
-	// Replicate the source's live releases onto the freshly provisioned clone.
-	if err := replicateReleases(ctx, s, projCfg, dir, from, slug, sshKeyPath); err != nil {
+	if err := ephemeralPostUp(ctx, s, projCfg, dir, from, slug, sshKeyPath); err != nil {
 		return err
 	}
 
 	fmt.Printf("\nephemeral env %q is up (source %q, expires_at %s).\n", slug, from, expiresAt)
 	fmt.Printf("tear down early with: inforge ephemeral down %s\n", slug)
 	return nil
+}
+
+// ephemeralPostUp is everything `up` does over SSH once the clone is provisioned:
+// the mesh leaf baseline (ADR-0035) under the ephemeral identity — mint the
+// clone's mesh material (source config, slug identity) and push it to each
+// ephemeral mesh host, so the replicated services start against proxies already
+// holding real leaves — then the replication of the source's live releases.
+//
+// The one SSH key both halves use is resolved through resolveDeployKeyFile, not
+// the bare resolveSSHKey: the stack config `deploy_private_key` copied from the
+// source stack is program.Run's first material source and, in the standard CI
+// setup, the ONLY place the key lives — resolving without it would fail every
+// `up` after the whole env had been provisioned.
+func ephemeralPostUp(ctx context.Context, s auto.Stack, projCfg projectConfig, dir, from, slug, sshKeyPath string) error {
+	key, cleanupKey, err := resolveDeployKeyFile(ctx, s, sshKeyPath)
+	defer cleanupKey()
+	if err != nil {
+		return err
+	}
+	if err := meshBaseline(ctx, dir, from, slug, key, os.Stdout); err != nil {
+		return err
+	}
+	return replicateReleases(ctx, s, projCfg, dir, from, slug, key)
 }
 
 // runStackUp runs a Pulumi up on s, rendering the engine event stream through the
@@ -188,7 +205,8 @@ func runStackUp(ctx context.Context, s auto.Stack, label string) error {
 // source (no manifest entry) rather than failing the `up` — an undeployed app
 // keeps its placeholder seed. Genuine delivery failures (a missing artifact, an
 // SSH error) are collected and returned so CI sees a non-zero exit, while the
-// env stays up (and TTL-reapable).
+// env stays up (and TTL-reapable). sshKeyPath is the already-resolved deploy key
+// file (ephemeralPostUp owns the resolution, including the stack-config key).
 func replicateReleases(ctx context.Context, s auto.Stack, projCfg projectConfig, dir, srcEnv, slug, sshKeyPath string) error {
 	sw, err := loadSourceWorkloads(dir, srcEnv)
 	if err != nil {
@@ -219,12 +237,6 @@ func replicateReleases(ctx context.Context, s auto.Stack, projCfg projectConfig,
 	}
 	svcByName := groupBy(svcTargets, func(t service.DeployTarget) string { return t.Service })
 	appByName := groupBy(appTargets, func(t iapp.DeployTarget) string { return t.App })
-
-	sshKeyPath, cleanupKey, err := resolveSSHKey(sshKeyPath)
-	if err != nil {
-		return err
-	}
-	defer cleanupKey()
 
 	fmt.Printf("\nreplicating source releases (%d service(s), %d app(s)) onto %q:\n", len(services), len(sw.apps), slug)
 	var failures []string
