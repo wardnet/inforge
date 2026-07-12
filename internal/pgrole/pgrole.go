@@ -35,32 +35,94 @@ func QuoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
+// ReaderGroup and WriterGroup name the two NOLOGIN group roles that carry a database's
+// ro/rw privileges on objects created after a mint. They exist because ALTER DEFAULT
+// PRIVILEGES entries are keyed to BOTH the creating role (defaclrole) and the grantee:
+// the tables of a service are created by ITS rw login role (it runs the migrations and
+// must own them to keep DDL), while the grantees are other services' login roles that
+// may be minted before or after it. Naming each side of that pair after the database —
+// the one identity both mints share — makes the two mints order-independent: an rw mint
+// declares its defaults for the groups, an ro mint just joins the reader group.
+func ReaderGroup(database string) string { return database + "_ro" }
+func WriterGroup(database string) string { return database + "_rw" }
+
+// EnsureGroupRolesSQL returns idempotent statements creating a database's reader and
+// writer group roles (NOLOGIN, own nothing, hold no password — pure privilege carriers).
+func EnsureGroupRolesSQL(database string) []string {
+	return []string{
+		EnsureRoleNoLoginSQL(ReaderGroup(database)),
+		EnsureRoleNoLoginSQL(WriterGroup(database)),
+	}
+}
+
+// EnsureRoleNoLoginSQL returns an idempotent statement that ensures a NOLOGIN role
+// exists — the shape shared by the database owner role and the two group roles: it
+// carries privileges/ownership but nothing ever connects as it, so it needs no
+// password. It is a single anonymous DO block, safe to re-run.
+func EnsureRoleNoLoginSQL(role string) string {
+	return fmt.Sprintf(`DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = %s) THEN
+    CREATE ROLE %s NOLOGIN;
+  END IF;
+END
+$$`, QuoteLiteral(role), QuoteIdent(role))
+}
+
+// CheckGroupRoleNames rejects a (role, database, owner) triple whose derived group-role
+// names collide with the login role or the database owner. The database owner is
+// operator-authored free text (database/<name>'s owner:), so nothing stops it being
+// named `<database>_rw` — and then the mint's `GRANT <writer-group> TO <login role>`
+// would quietly make the service a member of the role that OWNS the database and every
+// object in it (DROP DATABASE, DROP TABLE), collapsing the ro/rw split into
+// superuser-of-this-database. Fail the mint instead. `inforge validate` rejects the
+// same collision up front; this is the enforcement point.
+func CheckGroupRoleNames(role, database, owner string) error {
+	for _, group := range []string{ReaderGroup(database), WriterGroup(database)} {
+		if owner == group {
+			return fmt.Errorf("pgrole: database %q: owner role %q collides with the derived group role of the same name; rename the owner (a service granted rw would inherit ownership of the database)", database, owner)
+		}
+		if role == group {
+			return fmt.Errorf("pgrole: database %q: login role %q collides with the derived group role of the same name", database, role)
+		}
+	}
+	return nil
+}
+
 // GrantSQL returns the ordered statements that grant role the ro/rw privileges on
-// schema public of database, run as the database owner (or a superuser). ALTER
-// DEFAULT PRIVILEGES covers tables/sequences the owner creates later. rw additionally
-// grants CREATE on the schema so the service can run its own migrations; ro is
-// read-only. An unknown permission is an error.
+// schema public of database, run as a superuser (the self-hosted mint connects as
+// `postgres` over local peer auth). Beyond the privileges on the objects that exist
+// today, the role joins the database's reader (ro) or writer (rw) group; an rw role
+// additionally declares ALTER DEFAULT PRIVILEGES FOR ROLE <itself> — the only correct
+// defaclrole, since it is the role that creates the service's tables — so every table
+// and sequence it creates later reaches both groups. rw grants CREATE on the schema so
+// the service can run its own migrations; ro is read-only. An unknown permission is an
+// error.
 func GrantSQL(permission, role, database string) ([]string, error) {
 	r := QuoteIdent(role)
 	db := QuoteIdent(database)
+	ro := QuoteIdent(ReaderGroup(database))
+	rw := QuoteIdent(WriterGroup(database))
 	switch permission {
 	case "ro":
 		return []string{
 			fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`, db, r),
 			fmt.Sprintf(`GRANT USAGE ON SCHEMA public TO %s`, r),
+			fmt.Sprintf(`GRANT %s TO %s`, ro, r),
 			fmt.Sprintf(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO %s`, r),
 			fmt.Sprintf(`GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO %s`, r),
-			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO %s`, r),
-			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON SEQUENCES TO %s`, r),
 		}, nil
 	case "rw":
 		return []string{
 			fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`, db, r),
 			fmt.Sprintf(`GRANT USAGE, CREATE ON SCHEMA public TO %s`, r),
+			fmt.Sprintf(`GRANT %s TO %s`, rw, r),
 			fmt.Sprintf(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s`, r),
 			fmt.Sprintf(`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO %s`, r),
-			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s`, r),
-			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO %s`, r),
+			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT ON TABLES TO %s`, r, ro),
+			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT ON SEQUENCES TO %s`, r, ro),
+			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s`, r, rw),
+			fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO %s`, r, rw),
 		}, nil
 	default:
 		return nil, fmt.Errorf("pgrole: unknown grant permission %q (want ro or rw)", permission)
@@ -71,50 +133,94 @@ func GrantSQL(permission, role, database string) ([]string, error) {
 // role exists with the given password: it creates the role if absent, else resets its
 // password (the password is stable across deploys, so a re-run converges without
 // rotating it). It is a single anonymous DO block so it is safe to re-run.
+//
+// INHERIT is stated explicitly on both branches, not left to the CREATE ROLE default:
+// every privilege this role holds on objects created after its mint arrives through
+// membership of a group role (the database's reader/writer groups; pg_monitor for the
+// collector role), and a NOINHERIT role holds those privileges only after an explicit
+// SET ROLE — which no service issues. A role that reached NOINHERIT any other way (an
+// operator ALTER ROLE, a restored cluster) would silently read zero rows; the mint
+// reconciles it back.
 func CreateRoleLoginSQL(role, password string) string {
 	return fmt.Sprintf(`DO $$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = %s) THEN
-    CREATE ROLE %s LOGIN PASSWORD %s;
+    CREATE ROLE %s LOGIN INHERIT PASSWORD %s;
   ELSE
-    ALTER ROLE %s WITH LOGIN PASSWORD %s;
+    ALTER ROLE %s WITH LOGIN INHERIT PASSWORD %s;
   END IF;
 END
 $$`, QuoteLiteral(role), QuoteIdent(role), QuoteLiteral(password), QuoteIdent(role), QuoteLiteral(password))
 }
 
 // RevokeAllSQL returns the statements that strip every privilege a per-service role
-// currently holds on database — its schema-public table/sequence privileges, the
-// schema and database privileges, and the default privileges for future objects. It
-// is run before re-applying the current permission's GRANTs so a re-mint is fully
+// currently holds on database — its schema-public table/sequence privileges, the schema
+// and database privileges, its membership of the database's ro/rw group roles, and the
+// default privileges for future objects (both the entries keyed to the role itself and
+// the historical, mis-keyed superuser entries earlier inforge versions minted). It is
+// run before re-applying the current permission's GRANTs so a re-mint is fully
 // declarative: downgrading a grant from rw to ro actually drops the write privileges
 // instead of leaving them in place (a REVOKE for a privilege the role never held is a
-// harmless no-op). Run as the database owner / superuser.
+// harmless no-op). It cannot reach privileges the role holds by OWNERSHIP — see
+// MintRoleSQL, which reassigns those first. Run as a superuser.
 func RevokeAllSQL(role, database string) []string {
 	r := QuoteIdent(role)
 	db := QuoteIdent(database)
+	ro := QuoteIdent(ReaderGroup(database))
+	rw := QuoteIdent(WriterGroup(database))
 	return []string{
 		fmt.Sprintf(`REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM %s`, r),
 		fmt.Sprintf(`REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM %s`, r),
 		fmt.Sprintf(`REVOKE ALL PRIVILEGES ON SCHEMA public FROM %s`, r),
 		fmt.Sprintf(`REVOKE ALL PRIVILEGES ON DATABASE %s FROM %s`, db, r),
+		fmt.Sprintf(`REVOKE %s, %s FROM %s`, ro, rw, r),
 		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM %s`, r),
 		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM %s`, r),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public REVOKE ALL ON TABLES FROM %s, %s`, r, ro, rw),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public REVOKE ALL ON SEQUENCES FROM %s, %s`, r, ro, rw),
 	}
 }
 
-// MintRoleSQL is the full self-hosted role-provisioning statement list: ensure the
-// LOGIN role exists with password, revoke every privilege it currently holds, then
-// apply its ro/rw GRANTs on database. The revoke-then-grant makes the mint
-// declarative — a permission downgrade (rw→ro) drops the stale write grants rather
-// than accumulating privileges across deploys. It is the unit the on-host psql script
-// executes for a grant (ADR-0036).
-func MintRoleSQL(role, password, database, permission string) ([]string, error) {
+// MintRoleSQL is the full self-hosted role-provisioning statement list for one grant,
+// executed against database (the on-host psql script connects with `-d database`, which
+// is what makes the per-database statements below — the reassign and the schema-public
+// grants — hit the right catalog). It ensures the database's ro/rw group roles and the
+// LOGIN role exist, reconciles ownership, revokes every privilege the role currently
+// holds, then applies its ro/rw GRANTs. The revoke-then-grant makes the mint declarative
+// — a permission downgrade (rw→ro) drops the stale write grants rather than accumulating
+// privileges across deploys (ADR-0036).
+//
+// A downgraded role additionally has the objects it owns REASSIGNed to owner (the
+// database's NOLOGIN owner role) BEFORE the revokes: ownership privileges are implicit
+// and unreachable by REVOKE, so an ex-rw role would otherwise keep full write + DDL on
+// every table it ever created. The reassign runs first so the following REVOKEs also
+// clear any explicit ACL entries left on those objects, and the GRANTs then re-add
+// exactly the ro set. An rw role is NOT reassigned: it must own its tables to run its
+// own migrations (ALTER/DROP require ownership).
+//
+// The reassign is a ONE-WAY door, deliberately: the objects land on the NOLOGIN owner
+// role, which no login role is a member of, so a grant flipped back rw→ro→rw leaves the
+// restored rw role with DML (via the writer group) and CREATE on schema public but
+// unable to ALTER/DROP the tables it used to own — its migrations will fail loudly on
+// the first ALTER. That is the intended trade: an ro grant that quietly retains write +
+// DDL is a security hole, while a re-upgrade that needs a one-off `ALTER TABLE … OWNER
+// TO <role>` is a visible, recoverable operation.
+func MintRoleSQL(role, password, database, owner, permission string) ([]string, error) {
 	grants, err := GrantSQL(permission, role, database)
 	if err != nil {
 		return nil, err
 	}
-	stmts := []string{CreateRoleLoginSQL(role, password)}
+	if err := CheckGroupRoleNames(role, database, owner); err != nil {
+		return nil, err
+	}
+	if permission == "ro" && owner == "" {
+		return nil, fmt.Errorf("pgrole: role %q: ro mint needs the database owner to reassign owned objects to", role)
+	}
+	stmts := EnsureGroupRolesSQL(database)
+	stmts = append(stmts, CreateRoleLoginSQL(role, password))
+	if permission == "ro" {
+		stmts = append(stmts, fmt.Sprintf(`REASSIGN OWNED BY %s TO %s`, QuoteIdent(role), QuoteIdent(owner)))
+	}
 	stmts = append(stmts, RevokeAllSQL(role, database)...)
 	return append(stmts, grants...), nil
 }

@@ -31,14 +31,7 @@ func psqlScript(port int, database string, stmts []string) string {
 // as it — per-service login roles are minted separately, so the owner needs no
 // password).
 func EnsureOwnerScript(port int, owner string) string {
-	do := fmt.Sprintf(`DO $$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = %s) THEN
-    CREATE ROLE %s NOLOGIN;
-  END IF;
-END
-$$`, pgrole.QuoteLiteral(owner), pgrole.QuoteIdent(owner))
-	return psqlScript(port, "", []string{do})
+	return psqlScript(port, "", []string{pgrole.EnsureRoleNoLoginSQL(owner)})
 }
 
 // EnsureDatabaseScript renders shell that creates the logical database owned by owner
@@ -61,11 +54,14 @@ func EnsureDatabaseScript(port int, database, owner string) string {
 
 // MintRoleScript renders shell that mints (create-or-update) a per-service LOGIN role
 // with password and applies its ro/rw GRANTs on database — the self-hosted analogue of
-// the Neon RoleProvisioner, run on the host over local peer auth. The password appears
-// in the rendered SQL (quoted), so the caller wraps the whole command as a Pulumi
-// secret. Returns an error for an unknown permission.
-func MintRoleScript(port int, role, password, database, permission string) (string, error) {
-	stmts, err := pgrole.MintRoleSQL(role, password, database, permission)
+// the Neon RoleProvisioner, run on the host over local peer auth. It runs connected to
+// database (psql -d), which the per-database statements (REASSIGN OWNED, the
+// schema-public grants) depend on. owner is the database's NOLOGIN owner role, the
+// target of the downgrade reassign. The password appears in the rendered SQL (quoted),
+// so the caller wraps the whole command as a Pulumi secret. Returns an error for an
+// unknown permission.
+func MintRoleScript(port int, role, password, database, owner, permission string) (string, error) {
+	stmts, err := pgrole.MintRoleSQL(role, password, database, owner, permission)
 	if err != nil {
 		return "", err
 	}
@@ -85,7 +81,21 @@ func MintMonitorRoleScript(port int, role, password string, databases []string) 
 
 // DropRoleScript renders shell that reassigns the role's owned objects to owner, drops
 // its privileges, then drops the role — run at role teardown over local peer auth.
-func DropRoleScript(port int, role, owner string) string {
+//
+// It connects to database, and that is load-bearing: REASSIGN OWNED and DROP OWNED are
+// PER-DATABASE (they only see the current database's catalog, plus shared objects), so
+// running them from the cluster's default `postgres` database leaves every object and
+// ACL the role owns in its own database untouched — and the DROP ROLE that follows then
+// fails with `role "…" cannot be dropped because some objects depend on it`, failing the
+// teardown (and, since the mint command is DeleteBeforeReplace, any re-mint that
+// replaces it, e.g. an rw→ro permission change). A per-service role is bound to exactly
+// one database, so that database is the only catalog it can hold anything in. DROP ROLE
+// itself is cluster-wide and runs fine from there.
+//
+// database may be empty for a role that is scoped to no single database and owns nothing
+// — the monitor role (ADR-0037), whose pg_monitor membership and CONNECT grants are
+// cluster-level / shared-object privileges that DROP OWNED reaches from any database.
+func DropRoleScript(port int, role, owner, database string) string {
 	stmts := append(pgrole.ReassignDropSQL(role, owner), pgrole.DropRoleSQL(role))
-	return psqlScript(port, "", stmts)
+	return psqlScript(port, database, stmts)
 }

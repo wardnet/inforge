@@ -1833,3 +1833,26 @@ func TestCheckVanityZone(t *testing.T) {
 		assert.False(t, r.failed)
 	})
 }
+
+// The mint derives the group roles <db>_ro/<db>_rw from the database name. An owner:
+// colliding with one of them would be GRANTed to the service holding that permission,
+// making it a member of the role that owns the database and everything in it.
+func TestCheckDatabaseRejectsOwnerCollidingWithGroupRole(t *testing.T) {
+	ctx := regionContext{clusterNames: map[string]bool{"pg": true}}
+	disabled := false
+	base := types.DatabaseSpec{Cluster: "pg", Database: "app", Backup: types.BackupPolicy{Enabled: &disabled}}
+
+	for _, owner := range []string{"app_ro", "app_rw"} {
+		s := base
+		s.Owner = owner
+		errs, _ := checkDatabase(s, ctx)
+		if len(errs) == 0 {
+			t.Errorf("owner %q must be rejected (it is a derived group role)", owner)
+		}
+	}
+	ok := base
+	ok.Owner = "app_owner"
+	if errs, _ := checkDatabase(ok, ctx); len(errs) != 0 {
+		t.Errorf("a non-colliding owner must validate, got %v", errs)
+	}
+}
