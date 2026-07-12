@@ -165,3 +165,25 @@ func TestReservedNamespaceIsolated(t *testing.T) {
 	// The same-named service is untouched by the reserved delete.
 	assert.Equal(t, []string{"SVC_TOKEN"}, s.Keys("observability"))
 }
+
+// The store is read through the one reader now. A corrupt file must still fail with an
+// error that NAMES the subsystem — an operator hitting this at 3am needs to know it is
+// the secret store, not just "some yaml".
+func TestLoadMalformedStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.enc.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("recipient: [unclosed\n"), 0o600))
+
+	_, err := secretstore.Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secrets.enc.yaml")
+}
+
+// A structurally valid document whose types do not match the store fails at decode.
+func TestLoadStoreTypeMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.enc.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("recipient:\n  - a list, not a string\n"), 0o600))
+
+	_, err := secretstore.Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse secret store")
+}

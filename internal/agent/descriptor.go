@@ -14,11 +14,10 @@
 package agent
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 
-	"gopkg.in/yaml.v3"
+	"github.com/wardnet/inforge/internal/yamldoc"
 )
 
 // SupportedVersion is the descriptor schema major this agent understands.
@@ -122,11 +121,14 @@ func LoadDescriptor(path string) (Descriptor, error) {
 // descriptor fails fast rather than silently dropping a key. An unsupported
 // schema version is rejected before any other validation.
 func ParseDescriptor(b []byte) (Descriptor, error) {
-	dec := yaml.NewDecoder(bytes.NewReader(b))
-	dec.KnownFields(true)
-
+	doc, err := yamldoc.Parse("descriptor", b)
+	if err != nil {
+		return Descriptor{}, err
+	}
+	// STRICT: an unknown key is an error, never a silently dropped value. A descriptor
+	// is machine-written and carries no references, so it decodes literally.
 	var d Descriptor
-	if err := dec.Decode(&d); err != nil {
+	if err := doc.DecodeStrict(&d); err != nil {
 		return Descriptor{}, fmt.Errorf("parse descriptor: %w", err)
 	}
 	if d.Version != SupportedVersion {

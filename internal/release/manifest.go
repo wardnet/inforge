@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	smithy "github.com/aws/smithy-go"
+	"github.com/wardnet/inforge/internal/yamldoc"
 	"gopkg.in/yaml.v3"
 )
 
@@ -79,9 +80,13 @@ func (s *Store) LoadManifest(ctx context.Context, service, env string) (Manifest
 	if err != nil {
 		return Manifest{}, "", false, fmt.Errorf("read manifest body %s/%s: %w", service, env, err)
 	}
+	doc, err := yamldoc.Parse(fmt.Sprintf("%s/%s manifest", service, env), data)
+	if err != nil {
+		return Manifest{}, "", false, err
+	}
 	var m Manifest
-	if err := yaml.Unmarshal(data, &m); err != nil {
-		return Manifest{}, "", false, fmt.Errorf("parse manifest %s/%s: %w", service, env, err)
+	if err := doc.Decode(&m); err != nil {
+		return Manifest{}, "", false, fmt.Errorf("parse release manifest: %w", err)
 	}
 	if m.Deployments == nil {
 		m.Deployments = map[string]Deployment{}
@@ -178,9 +183,13 @@ func (s *Store) getManifestByKey(ctx context.Context, key string) (Manifest, err
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read manifest body %s: %w", key, err)
 	}
+	doc, err := yamldoc.Parse(key, data)
+	if err != nil {
+		return Manifest{}, err
+	}
 	var m Manifest
-	if err := yaml.Unmarshal(data, &m); err != nil {
-		return Manifest{}, fmt.Errorf("parse manifest %s: %w", key, err)
+	if err := doc.Decode(&m); err != nil {
+		return Manifest{}, fmt.Errorf("parse release manifest: %w", err)
 	}
 	return m, nil
 }

@@ -32,8 +32,8 @@ import (
 	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/sizes"
 	"github.com/wardnet/inforge/internal/types"
+	"github.com/wardnet/inforge/internal/yamldoc"
 	"github.com/wardnet/inforge/schemas"
-	"gopkg.in/yaml.v3"
 )
 
 // reporter accumulates pass/fail state while printing per-file results.
@@ -134,13 +134,23 @@ func readFolders[T any](dir string) ([]fileOf[T], []string, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("read %s: %w", manifest, err)
 		}
-		if err := yaml.Unmarshal(b, &f.raw); err != nil {
+		doc, err := yamldoc.Parse(manifest, b)
+		if err != nil {
 			f.parseErr = err
 			out = append(out, f)
 			folders = append(folders, folder)
 			continue
 		}
-		if err := yaml.Unmarshal(b, &f.spec); err != nil {
+		// Both views come from ONE parse: the untyped map (for unknown-key checks) and
+		// the typed spec. Decoded literally — validation reads shape, never values, so
+		// it needs no environment and cannot be tripped by an unresolvable reference.
+		if err := doc.Decode(&f.raw); err != nil {
+			f.parseErr = err
+			out = append(out, f)
+			folders = append(folders, folder)
+			continue
+		}
+		if err := doc.Decode(&f.spec); err != nil {
 			f.parseErr = err
 		}
 		out = append(out, f)

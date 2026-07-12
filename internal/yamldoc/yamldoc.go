@@ -1,6 +1,10 @@
-// Package yamldoc is the single YAML reader for every operator-authored file in
-// a project. It parses a file into a document of nodes whose leaves are Scalars
-// — not strings — and it NEVER resolves anything on its own.
+// Package yamldoc is the single YAML reader in inforge. EVERY YAML file — the ones an
+// operator authors and the ones inforge writes itself — is parsed here, into a document
+// of nodes whose leaves are Scalars rather than strings. Nothing else in the codebase
+// calls yaml.Unmarshal; TestYamldocIsTheOnlyReader enforces that, because a claim in a
+// doc comment is not a guarantee.
+//
+// The reader NEVER resolves anything on its own.
 //
 // Resolution happens when a consumer asks for a real value, and only then. A
 // Scalar is handed to a Chain of Resolvers; the first Resolver whose scheme claims
@@ -26,11 +30,19 @@
 // verbatim, because nothing asked for a resolved value. Reading and resolving are
 // separate acts.
 //
-// Three ways out of a Document:
+// Four ways out of a Document, and picking one is where a caller says what a file's
+// references may reach:
 //
 //	doc.Decode(&v)                       // leaves as written
+//	doc.DecodeStrict(&v)                 // as written, and an unknown key is an error
 //	doc.DecodeResolved(ctx, chain, &v)   // resolve every leaf it decodes — fail-fast, whole file
 //	doc.At("base_domain")                // one leaf, resolved on demand
+//
+// Most files take Decode: a resource manifest, an encrypted store, a Grafana dashboard
+// carrying its own ${DS_FOO} syntax, a descriptor inforge wrote — none of them resolve
+// anything, and their leaves come back verbatim. Only variables.yaml and regions.yaml
+// are decoded resolved (by the deploy program, which needs real credentials), and only
+// a service's environment.yaml values go through a chain of their own.
 //
 // A command that touches real infrastructure decodes the whole file resolved, so
 // a missing value is reported before anything is created. A command that reads
@@ -39,6 +51,7 @@
 package yamldoc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -176,6 +189,38 @@ func (d Document) Decode(out any) error {
 		return nil // absent or empty file: leave out at its zero value
 	}
 	if err := d.root.Decode(out); err != nil {
+		return fmt.Errorf("decode %s: %w", d.path, err)
+	}
+	return nil
+}
+
+// DecodeStrict is Decode, but REJECTS unknown fields: a key the target type does not
+// declare is an error rather than a silently dropped value. Use it where a typo must
+// fail loudly — a hand-placed host descriptor, or an older agent handed a newer schema
+// it does not understand.
+//
+// yaml.Node.Decode cannot enforce that, so the node is re-encoded and fed to a
+// KnownFields decoder. Re-encoding rather than keeping the source bytes means a
+// Document never carries the file twice.
+//
+// A present-but-EMPTY document is an ERROR here, not a zero value: a caller that asks
+// for strict decoding wants a typo to fail, and a truncated or blank file is the
+// loudest typo there is. (An ABSENT file is still the caller's business — Exists()
+// reports it and this returns nil, same as Decode.)
+func (d Document) DecodeStrict(out any) error {
+	if !d.exists {
+		return nil
+	}
+	if d.root == nil {
+		return fmt.Errorf("decode %s: empty document", d.path)
+	}
+	b, err := yaml.Marshal(d.root)
+	if err != nil {
+		return fmt.Errorf("decode %s: %w", d.path, err)
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil {
 		return fmt.Errorf("decode %s: %w", d.path, err)
 	}
 	return nil

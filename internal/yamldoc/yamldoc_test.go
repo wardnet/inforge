@@ -278,3 +278,84 @@ func TestQuotingDecidesTheResolvedType(t *testing.T) {
 	assert.True(t, out.Enabled)
 	assert.Equal(t, "1698762", out.Token, "a quoted reference stays a string, digits and all")
 }
+
+// --- DecodeStrict ---
+
+type strictTarget struct {
+	Version string `yaml:"version"`
+	Name    string `yaml:"name"`
+}
+
+func TestDecodeStrictAcceptsKnownFields(t *testing.T) {
+	d, err := Parse("d.yaml", []byte("version: v1\nname: edge\n"))
+	require.NoError(t, err)
+	var v strictTarget
+	require.NoError(t, d.DecodeStrict(&v))
+	assert.Equal(t, "v1", v.Version)
+	assert.Equal(t, "edge", v.Name)
+}
+
+// The guarantee the migration had to preserve: a key the target does not declare is
+// an error, so an operator typo or a newer schema fails loudly instead of silently
+// dropping the value.
+func TestDecodeStrictRejectsUnknownFields(t *testing.T) {
+	d, err := Parse("d.yaml", []byte("version: v1\nbogus: 1\n"))
+	require.NoError(t, err)
+	var v strictTarget
+	err = d.DecodeStrict(&v)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "d.yaml")
+}
+
+// A present-but-empty document is an error under strict decoding: a caller asking for
+// strictness wants a truncated or blank file to fail, not to decode as a zero value.
+// Both an empty file and a comments-only one are "no document".
+func TestDecodeStrictRejectsAnEmptyDocument(t *testing.T) {
+	for _, src := range []string{"", "# only a comment\n"} {
+		d, err := Parse("d.yaml", []byte(src))
+		require.NoError(t, err)
+		var v strictTarget
+		err = d.DecodeStrict(&v)
+		require.Error(t, err, "an empty document must not decode as a zero value")
+	}
+}
+
+// An ABSENT file is the caller's business, not a decode failure — Exists() reports it.
+func TestDecodeStrictAbsentFileIsNotAnError(t *testing.T) {
+	d, err := Read(filepath.Join(t.TempDir(), "nope.yaml"))
+	require.NoError(t, err)
+	require.False(t, d.Exists())
+	var v strictTarget
+	require.NoError(t, d.DecodeStrict(&v))
+	assert.Equal(t, strictTarget{}, v)
+}
+
+// --- error paths of the reader itself ---
+
+func TestParseMalformedYAML(t *testing.T) {
+	_, err := Parse("bad.yaml", []byte("key: [unclosed\n"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bad.yaml")
+}
+
+func TestDecodeTypeMismatch(t *testing.T) {
+	d, err := Parse("d.yaml", []byte("version: [a, b]\n"))
+	require.NoError(t, err)
+	var v strictTarget
+	err = d.Decode(&v)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "d.yaml")
+}
+
+func TestReadUnreadablePath(t *testing.T) {
+	// A directory is not a file: Read must surface the read error, not pretend absence.
+	_, err := Read(t.TempDir())
+	require.Error(t, err)
+}
+
+func TestDecodeResolvedOnAbsentDocumentIsNoop(t *testing.T) {
+	d, err := Read(filepath.Join(t.TempDir(), "nope.yaml"))
+	require.NoError(t, err)
+	var v strictTarget
+	require.NoError(t, d.DecodeResolved(context.Background(), env(nil), &v))
+}

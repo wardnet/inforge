@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/wardnet/inforge/internal/types"
-	"gopkg.in/yaml.v3"
+	"github.com/wardnet/inforge/internal/yamldoc"
 )
 
 // CustomDashboard is one Grafana-exported dashboard file discovered under an env's
@@ -85,16 +85,15 @@ func LoadCustomDashboards(env, dir string) ([]CustomDashboard, error) {
 // an error: an env may manage dashboards/alerts without custom routing.
 func LoadNotifications(env, dir string) (types.NotificationsSpec, error) {
 	var spec types.NotificationsSpec
-	path := filepath.Join(envDir(env, dir), "observability", "notifications.yaml")
-	data, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
+	doc, err := yamldoc.Read(filepath.Join(envDir(env, dir), "observability", "notifications.yaml"))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return spec, nil
-		}
-		return spec, fmt.Errorf("loader: read notifications.yaml: %w", err)
+		return spec, err
 	}
-	if err := yaml.Unmarshal(data, &spec); err != nil {
-		return spec, fmt.Errorf("loader: parse notifications.yaml: %w", err)
+	if !doc.Exists() {
+		return spec, nil
+	}
+	if err := doc.Decode(&spec); err != nil {
+		return spec, err
 	}
 	return spec, nil
 }
@@ -104,16 +103,15 @@ func LoadNotifications(env, dir string) (types.NotificationsSpec, error) {
 // not an error. Free-text fields are trimmed.
 func LoadAlerts(env, dir string) (types.AlertsSpec, error) {
 	var spec types.AlertsSpec
-	path := filepath.Join(envDir(env, dir), "observability", "alerts.yaml")
-	data, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
+	doc, err := yamldoc.Read(filepath.Join(envDir(env, dir), "observability", "alerts.yaml"))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return spec, nil
-		}
-		return spec, fmt.Errorf("loader: read alerts.yaml: %w", err)
+		return spec, err
 	}
-	if err := yaml.Unmarshal(data, &spec); err != nil {
-		return spec, fmt.Errorf("loader: parse alerts.yaml: %w", err)
+	if !doc.Exists() {
+		return spec, nil
+	}
+	if err := doc.Decode(&spec); err != nil {
+		return spec, err
 	}
 	for i := range spec.Alerts {
 		a := &spec.Alerts[i]

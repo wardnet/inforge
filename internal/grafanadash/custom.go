@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"gopkg.in/yaml.v3"
+	"github.com/wardnet/inforge/internal/yamldoc"
 )
 
 // Custom normalizes a Grafana-exported dashboard (ADR-0038) into the JSON body the
@@ -24,8 +24,16 @@ import (
 func Custom(name, uid string, raw []byte, isYAML bool) (string, error) {
 	var model map[string]any
 	if isYAML {
-		if err := yaml.Unmarshal(raw, &model); err != nil {
-			return "", fmt.Errorf("grafanadash: custom dashboard %q: parse YAML: %w", name, err)
+		// Through the one reader, decoded LITERALLY — and that is the whole point. A
+		// dashboard is full of Grafana's OWN ${DS_FOO} template syntax; no resolver
+		// claims it, nothing asks to resolve it, and it survives verbatim. Reading is
+		// not resolving.
+		doc, err := yamldoc.Parse(name, raw)
+		if err != nil {
+			return "", fmt.Errorf("grafanadash: custom dashboard %q: %w", name, err)
+		}
+		if err := doc.Decode(&model); err != nil {
+			return "", fmt.Errorf("grafanadash: custom dashboard %q: %w", name, err)
 		}
 	} else {
 		if err := json.Unmarshal(raw, &model); err != nil {

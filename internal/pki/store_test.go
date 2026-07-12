@@ -179,3 +179,22 @@ func TestNamesGetSet(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, pki.TopologyRootOnly, p.Topology)
 }
+
+// Read through the one reader; a corrupt store still names itself.
+func TestLoadMalformedPkiStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pki.enc.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("recipient: [unclosed\n"), 0o600))
+
+	_, err := pki.Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pki.enc.yaml")
+}
+
+func TestLoadPkiStoreTypeMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pki.enc.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("recipient:\n  - not a string\n"), 0o600))
+
+	_, err := pki.Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse pki store")
+}

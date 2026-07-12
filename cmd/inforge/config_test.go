@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -178,4 +179,66 @@ func TestValidateBuckets(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+}
+
+// inforge.yaml is read through the one reader now: a corrupt file must fail with its
+// path, and an absent one with the actionable "run from the repo root" message.
+func TestLoadProjectConfigMalformed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inforge.yaml")
+	if err := os.WriteFile(path, []byte("name: [unclosed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := mustErr(t, func() error { _, e := loadProjectConfig(path); return e })
+	if !strings.Contains(err.Error(), "inforge.yaml") {
+		t.Errorf("error must name the file: %v", err)
+	}
+}
+
+func TestLoadProjectConfigTypeMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inforge.yaml")
+	if err := os.WriteFile(path, []byte("name:\n  - not a string\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = mustErr(t, func() error { _, e := loadProjectConfig(path); return e })
+}
+
+func TestLoadProjectConfigAbsent(t *testing.T) {
+	err := mustErr(t, func() error {
+		_, e := loadProjectConfig(filepath.Join(t.TempDir(), "inforge.yaml"))
+		return e
+	})
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("an absent config must say so: %v", err)
+	}
+}
+
+func TestLoadStackConfigMalformed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stack.yaml")
+	if err := os.WriteFile(path, []byte("config: [unclosed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := mustErr(t, func() error { _, e := loadStackConfig(path); return e })
+	if !strings.Contains(err.Error(), "stack.yaml") {
+		t.Errorf("error must name the file: %v", err)
+	}
+}
+
+func TestLoadStackConfigAbsent(t *testing.T) {
+	err := mustErr(t, func() error {
+		_, e := loadStackConfig(filepath.Join(t.TempDir(), "stack.yaml"))
+		return e
+	})
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("an absent stack config must say so: %v", err)
+	}
+}
+
+// mustErr runs fn, fails the test if it succeeds, and returns the error.
+func mustErr(t *testing.T, fn func() error) error {
+	t.Helper()
+	err := fn()
+	if err == nil {
+		t.Fatal("expected an error, got none")
+	}
+	return err
 }

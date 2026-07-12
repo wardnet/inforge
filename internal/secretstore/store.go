@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wardnet/inforge/internal/yamldoc"
 	"gopkg.in/yaml.v3"
 )
 
@@ -70,9 +71,16 @@ func Load(path string) (*Store, error) {
 		}
 		return nil, fmt.Errorf("read secret store: %w", err)
 	}
+	// Read through the one reader, and decode LITERALLY. The store is machine-written:
+	// its leaves are age ciphertext, not references, and nothing must ever try to
+	// resolve them. Reading is not resolving.
+	doc, err := yamldoc.Parse(path, b)
+	if err != nil {
+		return nil, err
+	}
 	var s Store
-	if err := yaml.Unmarshal(b, &s); err != nil {
-		return nil, fmt.Errorf("parse secret store %s: %w", path, err)
+	if err := doc.Decode(&s); err != nil {
+		return nil, fmt.Errorf("parse secret store: %w", err)
 	}
 	if s.Recipient == "" {
 		return nil, fmt.Errorf("secret store %s has no recipient — the file is corrupt or was not created by `inforge secret init`", path)
