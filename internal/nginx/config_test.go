@@ -33,6 +33,8 @@ events {
     worker_connections 1024;
 }
 http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
     resolver 1.1.1.1 8.8.8.8 valid=300s;
     acme_issuer letsencrypt {
         uri https://acme-v02.api.letsencrypt.org/directory;
@@ -98,6 +100,8 @@ events {
     worker_connections 1024;
 }
 http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
     resolver 1.1.1.1 8.8.8.8 valid=300s;
     acme_issuer letsencrypt {
         uri https://acme-v02.api.letsencrypt.org/directory;
@@ -203,6 +207,8 @@ events {
     worker_connections 1024;
 }
 http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
     resolver 1.1.1.1 8.8.8.8 valid=300s;
     acme_issuer letsencrypt {
         uri https://acme-v02.api.letsencrypt.org/directory;
@@ -278,6 +284,24 @@ func TestRenderAppOnly(t *testing.T) {
 	assert.Contains(t, got, "try_files $uri $uri/ /index.html;")
 	assert.Contains(t, got, "listen 80;")
 	assert.NotContains(t, got, "stream {")
+}
+
+// TestRenderIncludesMimeTypes guards the Content-Type of every static byte an
+// app serves. We render nginx.conf whole (no stock conf.d include), so nothing
+// pulls in mime.types for us — and nginx's built-in default_type is text/plain.
+// Without the include, an app's index-*.js came back as text/plain and the
+// browser refused it outright ("Expected a JavaScript-or-Wasm module script but
+// the server responded with a MIME type of text/plain"), which breaks every
+// React app we serve, since strict MIME checking applies to ES modules.
+func TestRenderIncludesMimeTypes(t *testing.T) {
+	got, err := Render(nil, []types.IngressApp{
+		{Name: "my", FQDN: "my.wardnet.network", Root: "/srv/wardnet/app/my/current", Spa: true},
+	}, nil, 0, nil)
+	require.NoError(t, err)
+	assert.Contains(t, got, "include "+mimeTypesPath+";")
+	// The fallback for an unmapped extension must be a byte stream, not text —
+	// nginx's built-in text/plain default is what mislabels a JS bundle.
+	assert.Contains(t, got, "default_type application/octet-stream;")
 }
 
 // TestRenderAppEmptyRootErrors: an app with no resolved document root fails loud

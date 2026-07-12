@@ -239,7 +239,15 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway, gatewayRegexOf map[string]string, listenDir func(int) *crossplane.Directive, anyMixed bool) *crossplane.Directive {
 	terminatesTLS := len(terminate) > 0 || len(apps) > 0 || len(gateways) > 0
 
-	var children crossplane.Directives
+	// Content-Type for everything served off disk. Unconditional: nginx's built-in
+	// default_type is text/plain, so without this an app's JS bundle is labelled
+	// text/plain and the browser refuses to execute it as a module. The
+	// application/octet-stream fallback (nginx's own convention) keeps an unmapped
+	// extension a byte stream rather than something a browser might render.
+	children := crossplane.Directives{
+		dir("include", mimeTypesPath),
+		dir("default_type", "application/octet-stream"),
+	}
 	if len(gateways) > 0 {
 		// WebSocket upgrade support for the gateway's mesh-bound locations: a daemon
 		// WS handshake crosses gateway → gateway-mesh → callee-mesh, and every hop
