@@ -236,9 +236,10 @@ func TestCompromisedValueGuidance(t *testing.T) {
 	assert.Equal(t, []string{
 		"inforge secret set prd api API_TOKEN",
 		"inforge secret set prd api SESSION_KEY",
-		// A stale entry gets a COMMENT, not a command: `secret set` would reject an
-		// undeclared service, and a line that errors mid-incident is worse than none.
-		`# service "ghost" is not declared in this env — remove the stale entry: inforge secret rm prd ghost TOKEN`,
+		// A stale entry gets a COMMENT, not a command — and NOT a `secret rm` line
+		// either: the CLI refuses to address an undeclared service, so any command
+		// offered here would hard-fail mid-incident. The entry is deleted by hand.
+		`# ghost/TOKEN: service "ghost" is not declared — delete this entry from secrets.enc.yaml by hand`,
 		// web's own copy of the same KEY is a DISTINCT value that must be reissued
 		// separately — the point of service scoping.
 		"inforge secret set prd web API_TOKEN",

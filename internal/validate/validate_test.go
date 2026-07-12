@@ -20,6 +20,18 @@ import (
 
 const testdataDir = "testdata"
 
+// lineContaining returns the first line of out holding substr (empty if none),
+// so a test can assert on the advice attached to ONE specific error rather than
+// on the whole captured report.
+func lineContaining(out, substr string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, substr) {
+			return line
+		}
+	}
+	return ""
+}
+
 // captureStdout redirects os.Stdout for the duration of fn and returns what was
 // written. The reporter prints per-resource OK/FAIL lines to stdout, so a test can
 // assert a specific validation message fired (the returned error is only the
@@ -184,6 +196,16 @@ func TestCheckSecretStoreEntries(t *testing.T) {
 	assert.Contains(t, out, `no service named "bridge" is declared`)
 	assert.Contains(t, out, "services.web.API_TOKEN")
 	assert.NotContains(t, out, "services.api.API_TOKEN", "a correctly-placed entry must not be flagged")
+
+	// The advice must be RUNNABLE. `inforge secret rm` calls requireService, so it
+	// refuses an undeclared service — offering it for the "bridge" orphan would
+	// send the operator to a command that exits 1. That entry is a hand edit; only
+	// the "web" orphan (a real service) may be pointed at `secret rm`.
+	bridgeLine := lineContaining(out, `no service named "bridge"`)
+	assert.NotContains(t, bridgeLine, "inforge secret rm", "the CLI cannot remove an entry for an undeclared service")
+	assert.Contains(t, bridgeLine, "by hand")
+	assert.Contains(t, lineContaining(out, "services.web.API_TOKEN"), "inforge secret rm",
+		"web IS declared, so the CLI can remove its orphaned key")
 }
 
 // TestSecretStoreStateUnreadableIsNotAbsent: a store that EXISTS but cannot be

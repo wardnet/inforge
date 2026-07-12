@@ -454,7 +454,9 @@ func compromisedValueGuidance(dir, env string, store *secretstore.Store) []strin
 	for _, service := range services {
 		for _, key := range store.Keys(service) {
 			if !declared[service] {
-				lines = append(lines, fmt.Sprintf("# service %q is not declared in this env — remove the stale entry: inforge secret rm %s %s %s", service, env, service, key))
+				// Not a `secret rm` line: the CLI refuses to address an undeclared
+				// service (requireService), so this entry is deleted by hand.
+				lines = append(lines, fmt.Sprintf("# %s/%s: service %q is not declared — delete this entry from %s by hand", service, key, service, secretstore.FileName))
 				continue
 			}
 			lines = append(lines, fmt.Sprintf("inforge secret set %s %s %s", env, service, key))

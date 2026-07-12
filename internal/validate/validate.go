@@ -618,13 +618,19 @@ func checkSecretStoreEntries(r *reporter, st secretStoreState, regional, global 
 	for _, name := range services {
 		keys, ok := declared[name]
 		if !ok {
+			// Deliberately NOT `inforge secret rm`: the CLI refuses to address a
+			// service the env does not declare (requireService), so an entry under an
+			// undeclared name is removed by editing the store — the same hand edit the
+			// container→service migration is (ADR-0040).
 			r.fail(storePath, fmt.Sprintf(
-				"services.%s: no service named %q is declared in this environment — remove the entry (`inforge secret rm <env> %s <KEY>`), or fix the name if it is a typo",
-				name, name, name))
+				"services.%s: no service named %q is declared in this environment — delete the `%s:` entry from %s by hand (the CLI will not address an undeclared service), or fix the name if it is a typo",
+				name, name, name, secretstore.FileName))
 			continue
 		}
 		for _, key := range store.Keys(name) {
 			if !keys[key] {
+				// Here the service DOES exist, so the CLI can address it and `secret rm`
+				// is the right advice.
 				r.fail(storePath, fmt.Sprintf(
 					"services.%s.%s: service %q declares no `vault:%s` secret, so nothing would ever read this value — declare it in the service's environment, or remove the entry with `inforge secret rm <env> %s %s`",
 					name, key, name, key, name, key))
