@@ -13,7 +13,6 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
-	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/program"
 )
 
@@ -129,67 +128,71 @@ func requireObjectBackend(projCfg projectConfig) error {
 	}
 }
 
-// configSetter is the slice of auto.Stack the stack-config injectors below use.
-// auto.Stack satisfies it; the interface keeps the injectors exercisable without a
-// Pulumi workspace.
+// The stack-config keys the CLI derives for program.Run — the resources tree the
+// root --dir selects, plus the inforge.yaml values program.Run needs without the
+// project file (ADR-0036's backup destination, the provider defaults).
+const (
+	cfgKeyDir              = "dir"
+	cfgKeyProviderDefaults = "provider_defaults"
+	cfgKeyBackupsBucket    = "backups_bucket"
+	cfgKeyBackupsEndpoint  = "backups_endpoint"
+)
+
+// configSetter is the slice of auto.Stack setDerivedStackConfig uses. auto.Stack
+// satisfies it (pointer receiver — call sites pass &s); the interface keeps the
+// writer exercisable without a Pulumi workspace.
 type configSetter interface {
-	SetConfig(ctx context.Context, key string, val auto.ConfigValue) error
+	SetAllConfig(ctx context.Context, cfg auto.ConfigMap) error
 }
 
-// setProviderDefaults injects the project-level provider defaults into stack config
-// so program.Run can resolve effective providers without the project file.
+// setDerivedStackConfig writes every stack-config key the CLI derives for program.Run:
 //
-// It ALWAYS writes the key (the marshalled zero value when nothing is configured)
-// rather than no-op'ing on an empty block, for the same reason setBackups does:
-// stack config persists across runs, so dropping the `providers:` block must clear
-// the previously-set defaults instead of silently re-applying them. program.Run
-// decodes the zero value back to "no defaults configured".
-func setProviderDefaults(ctx context.Context, s configSetter, d types.ProviderDefaults) error {
-	b, err := json.Marshal(d)
+//   - dir — the resources tree (root --dir). Without it the flag is inert: the program
+//     would always load ./resources while the CLI-side steps (the mesh baseline) read
+//     the requested tree.
+//   - provider_defaults — the project-level defaults, so the program can resolve
+//     effective providers without the project file.
+//   - backups_bucket / backups_endpoint — the Postgres backup destination (ADR-0036),
+//     so the program can render each cluster host's backup timer. The endpoint is
+//     resolved CLI-side so a missing CLOUDFLARE_ACCOUNT_ID fails the command up front
+//     rather than mid-apply on the host.
+//
+// Every key is ALWAYS written, even when unconfigured (the marshalled zero value /
+// the empty string): stack config PERSISTS across runs, so dropping `providers:` or
+// `backups:` from inforge.yaml — or running without --dir after a run that used it —
+// must CLEAR the stale value instead of silently re-applying it. program.Run decodes
+// each zero value back to "not configured".
+//
+// One SetAllConfig (a single `pulumi config set-all`) rather than a SetConfig per key:
+// each SetConfig is its own workspace round-trip, and a failure part-way through would
+// leave the stack with some derived keys updated and others stale.
+//
+// Call it AFTER applyStackConfig, so these derived values win over a same-named key in
+// a stack-config file (an ephemeral stack must read exactly the tree its `up` verified,
+// not one its SOURCE env's stack config named).
+func setDerivedStackConfig(ctx context.Context, s configSetter, dir string, projCfg projectConfig) error {
+	defaults, err := json.Marshal(projCfg.Providers)
 	if err != nil {
 		return fmt.Errorf("marshal provider defaults: %w", err)
 	}
-	return s.SetConfig(ctx, "provider_defaults", auto.ConfigValue{Value: string(b)})
-}
 
-// setResourcesDir injects the resources directory (root --dir) into stack config —
-// the key program.Run reads to locate the resource tree. Without it the flag is
-// inert: the program would always load ./resources while the CLI-side steps (the
-// mesh baseline) read the requested tree.
-//
-// It ALWAYS writes the key, for the same persistence reason as setBackups: a run
-// without --dir must reset a tree stamped by an earlier run rather than keep
-// deploying it.
-func setResourcesDir(ctx context.Context, s configSetter, dir string) error {
-	if dir == "" {
-		dir = defaultResourcesDir
-	}
-	return s.SetConfig(ctx, "dir", auto.ConfigValue{Value: dir})
-}
-
-// setBackups injects the Postgres backup destination (ADR-0036) into stack config so
-// program.Run can render each cluster host's backup timer without the project file:
-// the bucket name and the resolved R2 endpoint. Resolving the endpoint here (CLI-side)
-// validates CLOUDFLARE_ACCOUNT_ID up front, so a misconfiguration fails the command
-// rather than mid-apply on the host.
-//
-// It ALWAYS writes both keys (empty when unconfigured) rather than no-op'ing on an
-// absent block: stack config persists across runs, so removing the `backups:` block
-// must clear the previously-set values — otherwise program.Run keeps reading a stale
-// bucket and cannot be turned off. program.Run treats an empty bucket as unconfigured.
-func setBackups(ctx context.Context, s configSetter, b backupsConfig) error {
 	var bucket, endpoint string
-	if b.configured() {
-		var err error
-		bucket, endpoint, err = b.resolve()
-		if err != nil {
+	if projCfg.Backups.configured() {
+		if bucket, endpoint, err = projCfg.Backups.resolve(); err != nil {
 			return fmt.Errorf("backups: %w", err)
 		}
 	}
-	if err := s.SetConfig(ctx, "backups_bucket", auto.ConfigValue{Value: bucket}); err != nil {
-		return err
+
+	if dir == "" {
+		dir = defaultResourcesDir
 	}
-	return s.SetConfig(ctx, "backups_endpoint", auto.ConfigValue{Value: endpoint})
+
+	return s.SetAllConfig(ctx, auto.ConfigMap{
+		cfgKeyDir:              {Value: dir},
+		cfgKeyProviderDefaults: {Value: string(defaults)},
+		cfgKeyBackupsBucket:    {Value: bucket},
+		cfgKeyBackupsEndpoint:  {Value: endpoint},
+	})
 }
 
 // ephemeralWorkspace builds a Pulumi LocalWorkspace bound to the project's

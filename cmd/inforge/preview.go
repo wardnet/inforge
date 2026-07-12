@@ -65,16 +65,10 @@ func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, dir
 		return fmt.Errorf("set stack config: %w", err)
 	}
 
-	if err := setResourcesDir(ctx, &s, dir); err != nil {
-		return fmt.Errorf("set resources dir: %w", err)
-	}
-
-	if err := setProviderDefaults(ctx, &s, projCfg.Providers); err != nil {
-		return fmt.Errorf("set provider defaults: %w", err)
-	}
-
-	if err := setBackups(ctx, &s, projCfg.Backups); err != nil {
-		return fmt.Errorf("set backups config: %w", err)
+	// The CLI-derived keys program.Run reads — `dir` included, so a --dir preview
+	// plans the tree it was pointed at rather than ./resources.
+	if err := setDerivedStackConfig(ctx, &s, dir, projCfg); err != nil {
+		return fmt.Errorf("set derived stack config: %w", err)
 	}
 
 	// A single Printer renders the engine's event stream (per-resource lines plus
