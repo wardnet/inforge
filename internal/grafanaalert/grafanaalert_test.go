@@ -1,6 +1,7 @@
 package grafanaalert
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -77,22 +78,30 @@ func TestBuiltInsPostgresGroupByCluster(t *testing.T) {
 		byName[a.Rule.Name] = a
 	}
 
-	conns := byName["Postgres Connections High"]
-	require.NotEmpty(t, conns.Rule.Name)
+	// get fails the test rather than panicking on Data[0] if a built-in is renamed away.
+	get := func(name string) Alert {
+		a, ok := byName[name]
+		require.True(t, ok, "built-in %q missing", name)
+		require.NotEmpty(t, a.Rule.Data, name)
+		return a
+	}
+
+	conns := get("Postgres Connections High")
 	assert.Contains(t, conns.Rule.Data[0].Model, `sum by (db_cluster_name) (postgresql_backends`)
 	assert.Contains(t, conns.Rule.Data[0].Model, `max by (db_cluster_name) (postgresql_connection_max`)
 	assert.Contains(t, conns.Rule.Annotations["summary"], "{{ $labels.db_cluster_name }}")
 
-	roll := byName["Postgres High Rollback Ratio"]
-	require.NotEmpty(t, roll.Rule.Name)
+	roll := get("Postgres High Rollback Ratio")
 	assert.Contains(t, roll.Rule.Data[0].Model, `sum by (db_cluster_name) (rate(postgresql_rollbacks_total`)
 	assert.Contains(t, roll.Rule.Data[0].Model, `sum by (db_cluster_name) (rate(postgresql_commits_total`)
 	assert.Contains(t, roll.Rule.Annotations["summary"], "{{ $labels.db_cluster_name }}")
 
-	// No Postgres built-in may group or label by host.
+	// No Postgres built-in may group or label by host. Matched as a pattern, not a
+	// literal, so `by(instance)` and `by (instance, db_cluster_name)` are caught too.
+	byInstance := regexp.MustCompile(`\b(by|without)\s*\(\s*[^)]*\binstance\b`)
 	for _, name := range []string{"Postgres Connections High", "Postgres High Rollback Ratio", "Postgres Metrics Missing"} {
-		a := byName[name]
-		assert.NotContains(t, a.Rule.Data[0].Model, "by (instance)", name)
+		a := get(name)
+		assert.NotRegexp(t, byInstance, a.Rule.Data[0].Model, name)
 		assert.NotContains(t, a.Rule.Annotations["summary"], "$labels.instance", name)
 	}
 }
