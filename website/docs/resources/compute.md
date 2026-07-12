@@ -91,6 +91,11 @@ Two conditions must hold for the deploy account to come up: `ssh.deployPublicKey
 deploy fails fast if a `deploy_user` host has none), and any `cloud_init` template must be a **shell
 script** (the provision step is appended as shell — a `#cloud-config` template would silently skip it).
 
+`deploy_user.name` must be a portable login name — `^[a-z_][a-z0-9_-]*$` — and `ssh.deployPublicKey`
+must be a single-line OpenSSH public key (`<type> <base64> [comment]`). Both are substituted into the
+root-run first-boot script, so `inforge validate` rejects a name outside that charset and the deploy
+fails fast on a malformed key rather than booting a host with an account nobody asked for.
+
 ```yaml
 deploy_user:
   name: deploy
