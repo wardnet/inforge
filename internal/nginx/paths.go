@@ -19,6 +19,14 @@ const (
 	// block cannot live inside the http{} include the stock nginx.conf provides.
 	ConfigPath = "/etc/nginx/nginx.conf"
 
+	// mimeTypesPath is nginx's stock extension → Content-Type table, shipped by
+	// the nginx.org package next to nginx.conf. Because we render the whole config
+	// (see ConfigPath) we get none of the stock file's includes, so http{} must
+	// pull this in explicitly or every static file an app serves falls back to
+	// nginx's built-in default_type of text/plain — which a browser refuses to
+	// execute as an ES module.
+	mimeTypesPath = "/etc/nginx/mime.types"
+
 	// acmeModule is the dynamic ACME module shipped by the nginx.org repo
 	// (package nginx-module-acme), loaded from nginx's modules directory.
 	acmeModule = "modules/ngx_http_acme_module.so"
