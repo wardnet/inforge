@@ -22,6 +22,14 @@ on an operator workstation that holds `INFORGE_PKI_ROOT_KEY`; operations that mi
 CI (or from the infra repo) with `INFORGE_SECRETS_KEY`. The runbooks below say which posture each step
 needs.
 
+The CI master identity is shared with the [secret store](/cli/secret): `pki.enc.yaml`'s `recipient:`
+is the same recipient `secrets.enc.yaml` uses. That is why
+[`inforge secret rotate`](/cli/secret#it-re-keys-the-pki-store-too) re-keys **both** files — the CI-held
+intermediate keys (and a root-only PKI's root key) travel with the master key pair. The cold root does
+not: it is encrypted to the store's separate `rootRecipient`. If `INFORGE_SECRETS_KEY` leaked, rotating
+it is not enough — the intermediate keys leaked with it, so
+[recover each intermediate](/runbooks/pki-recover-intermediate) afterwards.
+
 ## How trust actually anchors (read this once)
 
 The mesh's trust model drives every rotation decision:
