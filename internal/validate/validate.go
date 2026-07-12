@@ -28,6 +28,7 @@ import (
 	"github.com/wardnet/inforge/internal/pathglob"
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/postgres"
+	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/secretstore"
 	"github.com/wardnet/inforge/internal/sizes"
 	"github.com/wardnet/inforge/internal/types"
@@ -438,16 +439,15 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 	// validation checks the region/provider structure, not credential values, and
 	// must not be tripped by an unset credential (e.g. an unresolved zone ref must
 	// not read as an empty, "missing", zone).
-	rawRegions, err := loader.LoadRegionsRaw(env, dir)
+	regionTable, global, err := loader.RegionsLiteral(env, dir)
 	if err != nil {
 		return err
 	}
-	regionTable, global := rawRegions.Table, rawRegions.Global
 	sizeTable, err := loader.LoadSizeTable(env, dir)
 	if err != nil {
 		return err
 	}
-	vars, err := loader.LoadVariablesRaw(env, dir)
+	vars, err := loader.VariablesLiteral(env, dir)
 	if err != nil {
 		return err
 	}
@@ -1277,7 +1277,7 @@ func availableProviders(providers map[string]map[string]any) map[string]bool {
 // checkVariables validates variables.yaml, now slimmed to base_domain + ssh.
 // Region selection and provider config moved to regions.yaml (see
 // checkRegionsFile).
-func checkVariables(r *reporter, vars loader.RawVariables, path string) {
+func checkVariables(r *reporter, vars types.EnvironmentVariables, path string) {
 	var errs []string
 	if strings.TrimSpace(vars.BaseDomain) == "" {
 		errs = append(errs, "base_domain: required")
@@ -1289,7 +1289,7 @@ func checkVariables(r *reporter, vars loader.RawVariables, path string) {
 // and a non-empty providers block, and (when present) a global block carrying
 // providers. Per-resource provider availability is checked against each region's
 // own providers set in checkProviderAvailability.
-func checkRegionsFile(r *reporter, table loader.RawTable, global *loader.RawGlobal, path string) {
+func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, path string) {
 	var errs []string
 	if len(table) == 0 {
 		errs = append(errs, "regions: at least one region must be defined")
@@ -1409,7 +1409,7 @@ func refsOf[T any](dir string, providerOf func(T) string) ([]providerRef, error)
 // the region-independent once-pass (validateResourceSet), and keying these on the
 // same path would print a contradictory OK and FAIL for one file. Regions and the
 // files within each are reported in sorted order for deterministic output.
-func checkProviderAvailability(r *reporter, base string, table loader.RawTable, defaults types.ProviderDefaults) error {
+func checkProviderAvailability(r *reporter, base string, table regions.Table, defaults types.ProviderDefaults) error {
 	refs, err := collectProviderRefs(base, defaults)
 	if err != nil {
 		return err
@@ -1446,7 +1446,7 @@ func checkProviderAvailability(r *reporter, base string, table loader.RawTable, 
 // service's, from each region's intermediate (the regional set deploys to every
 // region). Deploy (#108) cannot mint a leaf without that intermediate, so a
 // missing one fails here — the "silent miss" guard.
-func checkPKI(r *reporter, globalBase, regionalBase string, regionTable loader.RawTable, store *pki.Store) {
+func checkPKI(r *reporter, globalBase, regionalBase string, regionTable regions.Table, store *pki.Store) {
 	regionScopes := make([]string, 0, len(regionTable))
 	for name := range regionTable {
 		regionScopes = append(regionScopes, name)
@@ -1530,7 +1530,7 @@ func pkiMembershipErrors(pkiName string, scopes []string, store *pki.Store) []st
 	return errs
 }
 
-func checkGlobalProviderAvailability(r *reporter, globalBase string, global *loader.RawGlobal, defaults types.ProviderDefaults) error {
+func checkGlobalProviderAvailability(r *reporter, globalBase string, global *regions.Global, defaults types.ProviderDefaults) error {
 	refs, err := collectProviderRefs(globalBase, defaults)
 	if err != nil {
 		return err

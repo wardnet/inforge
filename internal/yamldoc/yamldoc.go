@@ -1,0 +1,255 @@
+// Package yamldoc is the single YAML reader for every operator-authored file in
+// a project. It parses a file into a document of nodes whose leaves are Scalars
+// — not strings — and it NEVER resolves anything on its own.
+//
+// Resolution happens when a consumer asks for a real value, and only then. A
+// Scalar is handed to a Chain of Resolvers; the first Resolver whose pattern
+// matches the raw text resolves it, and a Scalar no Resolver claims is simply a
+// static literal. Today the only Resolver expands ${ENV_VAR} against the process
+// environment, but the interface is deliberately open: environment.yaml's
+// env:/vault:/ref: sources are the same idea (match a pattern, fetch a value)
+// and become Resolvers too, as could one that fetches from an API.
+//
+// This is why the reader needs no exceptions, no lenient mode and no opt-out.
+// A file whose leaves nobody resolves — an encrypted store, a Grafana dashboard
+// carrying Grafana's own ${DS_FOO} template syntax, a descriptor inforge wrote
+// itself — is read through the same reader and comes back verbatim, because
+// nothing asked for a resolved value. Reading and resolving are separate acts.
+//
+// Three ways out of a Document:
+//
+//	doc.Decode(&v)                       // leaves as written
+//	doc.DecodeResolved(ctx, chain, &v)   // resolve every leaf it decodes — fail-fast, whole file
+//	doc.At("base_domain")                // one leaf, resolved on demand
+//
+// A command that touches real infrastructure decodes the whole file resolved, so
+// a missing value is reported before anything is created. A command that reads
+// one field resolves one field, and cannot be failed by a variable it never
+// reads.
+package yamldoc
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Resolver turns the raw text of a leaf into its real value. Matches declares the
+// pattern the Resolver claims — it is what makes a Chain work without the reader
+// knowing anything about any particular syntax.
+type Resolver interface {
+	// Name identifies the resolver in errors ("env").
+	Name() string
+	// Matches reports whether raw carries this resolver's pattern.
+	Matches(raw string) bool
+	// Resolve returns the real value. It is only called when Matches is true.
+	Resolve(ctx context.Context, raw string) (string, error)
+}
+
+// Chain is an ordered set of Resolvers. The first one whose pattern matches a
+// leaf resolves it; a leaf no Resolver claims is a static literal and is returned
+// as written. An empty Chain therefore resolves nothing — every leaf is literal.
+type Chain []Resolver
+
+// Resolve runs raw through the chain.
+func (c Chain) Resolve(ctx context.Context, raw string) (string, error) {
+	for _, r := range c {
+		if r.Matches(raw) {
+			v, err := r.Resolve(ctx, raw)
+			if err != nil {
+				return "", fmt.Errorf("%s: %w", r.Name(), err)
+			}
+			return v, nil
+		}
+	}
+	return raw, nil
+}
+
+// Scalar is a leaf of a Document: the raw text as written, plus where it came
+// from. It is deliberately NOT a string — a caller cannot use a leaf's value
+// without deciding whether to resolve it, because the compiler will not let them.
+type Scalar struct {
+	raw  string
+	path string // dotted path within the document, for errors
+	line int
+}
+
+// Literal returns the leaf exactly as written, patterns unexpanded. Use it when
+// the text IS the value (an encrypted blob, a dashboard's own ${} template).
+func (s Scalar) Literal() string { return s.raw }
+
+// Path returns the leaf's dotted path within its document.
+func (s Scalar) Path() string { return s.path }
+
+// Resolve returns the leaf's real value, running it through the chain. A leaf no
+// resolver claims comes back as its literal.
+func (s Scalar) Resolve(ctx context.Context, chain Chain) (string, error) {
+	v, err := chain.Resolve(ctx, s.raw)
+	if err != nil {
+		return "", fmt.Errorf("%s:%d: %s: %w", s.path, s.line, s.raw, err)
+	}
+	return v, nil
+}
+
+// Document is a parsed YAML file: a tree of nodes with Scalar leaves.
+type Document struct {
+	path   string
+	root   *yaml.Node
+	exists bool
+}
+
+// Read parses the YAML file at path. A file that does not exist yields a
+// Document reporting Exists() == false and no error — an absent optional file is
+// the caller's business, not a parse failure.
+func Read(path string) (Document, error) {
+	b, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
+	if os.IsNotExist(err) {
+		return Document{path: path}, nil
+	}
+	if err != nil {
+		return Document{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	return Parse(path, b)
+}
+
+// Parse is Read for bytes already in hand.
+func Parse(path string, b []byte) (Document, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(b, &root); err != nil {
+		return Document{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	// An empty file decodes to a zero node: a valid, empty document.
+	if root.Kind == 0 {
+		return Document{path: path, exists: true}, nil
+	}
+	return Document{path: path, root: &root, exists: true}, nil
+}
+
+// Exists reports whether the file was present.
+func (d Document) Exists() bool { return d.exists }
+
+// Path returns the file's path.
+func (d Document) Path() string { return d.path }
+
+// Decode decodes the document into out with every leaf exactly as written. No
+// resolver runs, so a ${...} stays a ${...}.
+func (d Document) Decode(out any) error {
+	if d.root == nil {
+		return nil // absent or empty file: leave out at its zero value
+	}
+	if err := d.root.Decode(out); err != nil {
+		return fmt.Errorf("decode %s: %w", d.path, err)
+	}
+	return nil
+}
+
+// DecodeResolved decodes the document into out, resolving EVERY leaf it decodes
+// through the chain first. This is the fail-fast path: a command that is about to
+// touch real infrastructure resolves the whole file up front, so a missing value
+// is reported before anything is created rather than part-way through.
+//
+// A leaf no resolver claims decodes as its literal, so a file with no patterns in
+// it behaves exactly as Decode.
+func (d Document) DecodeResolved(ctx context.Context, chain Chain, out any) error {
+	if d.root == nil {
+		return nil
+	}
+	resolved, err := resolveNode(ctx, chain, d.root, "")
+	if err != nil {
+		return fmt.Errorf("%s: %w", d.path, err)
+	}
+	if err := resolved.Decode(out); err != nil {
+		return fmt.Errorf("decode %s: %w", d.path, err)
+	}
+	return nil
+}
+
+// At navigates to a leaf by its path through mapping keys and returns it. The
+// second result is false when the path is absent — an unset optional field, which
+// is not an error.
+//
+// This is what lets a command resolve ONE field: it reads the leaf it needs and
+// never touches the rest of the document, so a variable it does not read can
+// never fail it.
+func (d Document) At(path ...string) (Scalar, bool) {
+	node := d.root
+	if node != nil && node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	for _, key := range path {
+		if node == nil || node.Kind != yaml.MappingNode {
+			return Scalar{}, false
+		}
+		var next *yaml.Node
+		// A mapping's Content alternates key, value.
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == key {
+				next = node.Content[i+1]
+				break
+			}
+		}
+		if next == nil {
+			return Scalar{}, false
+		}
+		node = next
+	}
+	if node == nil || node.Kind != yaml.ScalarNode {
+		return Scalar{}, false
+	}
+	return Scalar{raw: node.Value, path: strings.Join(path, "."), line: node.Line}, true
+}
+
+// resolveNode returns a copy of node with every string leaf resolved. Only !!str
+// scalars are resolved: a pattern is text, and expanding an int or bool node would
+// change its type. Mapping KEYS are left alone — a pattern belongs in a value.
+func resolveNode(ctx context.Context, chain Chain, node *yaml.Node, path string) (*yaml.Node, error) {
+	if node == nil {
+		return nil, nil
+	}
+	out := *node
+	out.Content = nil
+
+	if node.Kind == yaml.ScalarNode {
+		if node.Tag != "!!str" {
+			return &out, nil
+		}
+		leaf := Scalar{raw: node.Value, path: path, line: node.Line}
+		v, err := leaf.Resolve(ctx, chain)
+		if err != nil {
+			return nil, err
+		}
+		out.Value = v
+		return &out, nil
+	}
+
+	for i, child := range node.Content {
+		childPath := path
+		if node.Kind == yaml.MappingNode {
+			if i%2 == 0 {
+				// A key: carry it through untouched, and use it to name its value.
+				k := *child
+				out.Content = append(out.Content, &k)
+				continue
+			}
+			childPath = join(path, node.Content[i-1].Value)
+		} else if node.Kind == yaml.SequenceNode {
+			childPath = fmt.Sprintf("%s[%d]", path, i)
+		}
+		rc, err := resolveNode(ctx, chain, child, childPath)
+		if err != nil {
+			return nil, err
+		}
+		out.Content = append(out.Content, rc)
+	}
+	return &out, nil
+}
+
+func join(path, key string) string {
+	if path == "" {
+		return key
+	}
+	return path + "." + key
+}

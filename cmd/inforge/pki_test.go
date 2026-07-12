@@ -295,7 +295,7 @@ func TestRenewMeshCertsAsIgnoresUnrelatedVariables(t *testing.T) {
 	// exactly the shape of a real variables.yaml in CI's release job.
 	t.Setenv("SSH_AUTHORIZED_KEYS", "")
 	t.Setenv("DEPLOY_PUBLIC_KEY", "")
-	const varsDoc = `base_domain: wardnet.network
+	const varsDoc = `base_domain: example.invalid
 ssh:
   authorizedKeys: ${SSH_AUTHORIZED_KEYS}
   deployPublicKey: ${DEPLOY_PUBLIC_KEY}
@@ -337,7 +337,7 @@ global:
 	// block and the provider credentials unresolvable. That is the fix.
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "push leaf.age", "the mint completed and only the SSH push failed")
-	assert.Contains(t, err.Error(), "edge.vm.prd.wardnet.network", "base_domain resolved into the host FQDN")
+	assert.Contains(t, err.Error(), "edge.vm.prd.example.invalid", "base_domain resolved into the host FQDN")
 	assert.NotContains(t, err.Error(), "SSH_AUTHORIZED_KEYS", "the mint must not require an ssh variable it never reads")
 	assert.NotContains(t, err.Error(), "DEPLOY_PUBLIC_KEY")
 	assert.NotContains(t, err.Error(), "HCLOUD_TOKEN", "the mint builds no provider and must not require a credential")

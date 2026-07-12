@@ -38,6 +38,7 @@ import (
 	"github.com/wardnet/inforge/internal/service"
 	"github.com/wardnet/inforge/internal/tags"
 	"github.com/wardnet/inforge/internal/types"
+	"github.com/wardnet/inforge/internal/yamldoc"
 	"gopkg.in/yaml.v3"
 )
 
@@ -87,12 +88,8 @@ func Run(ctx *pulumi.Context) error {
 	// the first resource is registered. Resolve the whole of variables.yaml and
 	// regions.yaml here, up front: a missing env var is reported now, with nothing
 	// created, rather than part-way through an apply.
-	resolver := loader.NewResolver()
-	rawVars, err := loader.LoadVariablesRaw(srcEnv, dir)
-	if err != nil {
-		return err
-	}
-	vars, err := resolver.Variables(rawVars)
+	chain := yamldoc.Chain{yamldoc.Env()}
+	vars, err := loader.Variables(ctx.Context(), chain, srcEnv, dir)
 	if err != nil {
 		return err
 	}
@@ -121,11 +118,7 @@ func Run(ctx *pulumi.Context) error {
 		inforgeVersion = "dev"
 	}
 
-	rawRegions, err := loader.LoadRegionsRaw(srcEnv, dir)
-	if err != nil {
-		return err
-	}
-	regionTable, globalBlock, err := resolver.Regions(rawRegions)
+	regionTable, globalBlock, err := loader.Regions(ctx.Context(), chain, srcEnv, dir)
 	if err != nil {
 		return err
 	}

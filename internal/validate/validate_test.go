@@ -558,7 +558,7 @@ func TestCheckRegionsFile(t *testing.T) {
 
 	t.Run("valid", func(t *testing.T) {
 		r := &reporter{}
-		checkRegionsFile(r, loader.RawTable{
+		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Slug: "use1", Providers: withProviders},
 		}, nil, "regions.yaml")
 		assert.False(t, r.failed)
@@ -566,13 +566,13 @@ func TestCheckRegionsFile(t *testing.T) {
 
 	t.Run("empty table", func(t *testing.T) {
 		r := &reporter{}
-		checkRegionsFile(r, loader.RawTable{}, nil, "regions.yaml")
+		checkRegionsFile(r, regions.Table{}, nil, "regions.yaml")
 		assert.True(t, r.failed)
 	})
 
 	t.Run("missing slug", func(t *testing.T) {
 		r := &reporter{}
-		checkRegionsFile(r, loader.RawTable{
+		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Providers: withProviders},
 		}, nil, "regions.yaml")
 		assert.True(t, r.failed)
@@ -580,7 +580,7 @@ func TestCheckRegionsFile(t *testing.T) {
 
 	t.Run("empty providers block", func(t *testing.T) {
 		r := &reporter{}
-		checkRegionsFile(r, loader.RawTable{
+		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Slug: "use1"},
 		}, nil, "regions.yaml")
 		assert.True(t, r.failed)
@@ -588,39 +588,39 @@ func TestCheckRegionsFile(t *testing.T) {
 
 	t.Run("global without providers", func(t *testing.T) {
 		r := &reporter{}
-		checkRegionsFile(r, loader.RawTable{
+		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Slug: "use1", Providers: withProviders},
-		}, &loader.RawGlobal{PlacementRegion: "us-east-1"}, "regions.yaml")
+		}, &regions.Global{PlacementRegion: "us-east-1"}, "regions.yaml")
 		assert.True(t, r.failed)
 	})
 
 	t.Run("global missing placementRegion", func(t *testing.T) {
 		r := &reporter{}
-		checkRegionsFile(r, loader.RawTable{
+		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Slug: "use1", Providers: withProviders},
-		}, &loader.RawGlobal{Providers: withProviders}, "regions.yaml")
+		}, &regions.Global{Providers: withProviders}, "regions.yaml")
 		assert.True(t, r.failed)
 	})
 
 	t.Run("global unknown placementRegion", func(t *testing.T) {
 		r := &reporter{}
-		checkRegionsFile(r, loader.RawTable{
+		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Slug: "use1", Providers: withProviders},
-		}, &loader.RawGlobal{PlacementRegion: "eu-west-1", Providers: withProviders}, "regions.yaml")
+		}, &regions.Global{PlacementRegion: "eu-west-1", Providers: withProviders}, "regions.yaml")
 		assert.True(t, r.failed)
 	})
 
 	t.Run("global with providers and placementRegion", func(t *testing.T) {
 		r := &reporter{}
-		checkRegionsFile(r, loader.RawTable{
+		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Slug: "use1", Providers: withProviders},
-		}, &loader.RawGlobal{PlacementRegion: "us-east-1", Providers: withProviders}, "regions.yaml")
+		}, &regions.Global{PlacementRegion: "us-east-1", Providers: withProviders}, "regions.yaml")
 		assert.False(t, r.failed)
 	})
 
 	t.Run("dns authority with provider and zone", func(t *testing.T) {
 		r := &reporter{}
-		checkRegionsFile(r, loader.RawTable{
+		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Slug: "use1", Providers: withProviders,
 				Dns: &regions.DnsAuthority{Provider: "cloudflare", Zone: "z1"}},
 		}, nil, "regions.yaml")
@@ -629,7 +629,7 @@ func TestCheckRegionsFile(t *testing.T) {
 
 	t.Run("dns authority missing zone fails", func(t *testing.T) {
 		r := &reporter{}
-		checkRegionsFile(r, loader.RawTable{
+		checkRegionsFile(r, regions.Table{
 			"us-east-1": {Slug: "use1", Providers: withProviders,
 				Dns: &regions.DnsAuthority{Provider: "cloudflare"}},
 		}, nil, "regions.yaml")
@@ -649,7 +649,7 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 
 	t.Run("all providers in every region", func(t *testing.T) {
 		r := &reporter{}
-		table := loader.RawTable{
+		table := regions.Table{
 			"us-east-1":    {Slug: "use1", Providers: full},
 			"eu-central-1": {Slug: "euc1", Providers: full},
 		}
@@ -663,7 +663,7 @@ func TestCheckProviderAvailabilityPerRegion(t *testing.T) {
 		noNeon := map[string]map[string]any{
 			"hetzner": {}, "cloudflare": {},
 		}
-		table := loader.RawTable{
+		table := regions.Table{
 			"us-east-1":    {Slug: "use1", Providers: full},
 			"eu-central-1": {Slug: "euc1", Providers: noNeon},
 		}

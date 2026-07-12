@@ -1,6 +1,7 @@
 package loader
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,99 +9,80 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/types"
+	"github.com/wardnet/inforge/internal/yamldoc"
 )
 
 // testdataDir reuses the validate package's fixture environments.
 var testdataDir = filepath.Join("..", "validate", "testdata")
 
-func TestResolverStringExpandsPlaceholders(t *testing.T) {
-	r := NewResolverFrom(func(k string) (string, bool) {
-		if k == "INFORGE_TEST_TOKEN" {
-			return "sekret", true
-		}
-		return "", false
-	})
-	got, err := r.String("providers.hetzner.apiToken", "prefix-${INFORGE_TEST_TOKEN}")
+// Reading never resolves: the document keeps its patterns and needs no
+// environment. Resolution is a separate act, performed by a consumer that wants
+// a real value.
+func TestVariablesLiteralKeepsPatterns(t *testing.T) {
+	vars, err := VariablesLiteral("ok", testdataDir)
 	require.NoError(t, err)
-	assert.Equal(t, "prefix-sekret", got)
+	assert.Equal(t, "example.com", vars.BaseDomain)
+	assert.Equal(t, "ssh-ed25519 AAAA...authorized", vars.SSH.AuthorizedKeys)
 }
 
-// A missing variable is an error, and the error names BOTH the config field that
-// wanted it and the env var that was absent — the old message named only the var.
-func TestResolverStringMissingNamesFieldAndVar(t *testing.T) {
-	r := NewResolverFrom(func(string) (string, bool) { return "", false })
-	_, err := r.String("ssh.authorizedKeys", "${INFORGE_DEFINITELY_UNSET_VAR}")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing required env var")
-	assert.Contains(t, err.Error(), "INFORGE_DEFINITELY_UNSET_VAR")
-	assert.Contains(t, err.Error(), "ssh.authorizedKeys")
-}
-
-// An env var set to the empty string is treated as absent: a blank credential is
-// never a legitimate value.
-func TestResolverStringEmptyIsMissing(t *testing.T) {
-	r := NewResolverFrom(func(string) (string, bool) { return "", true })
-	_, err := r.String("base_domain", "${INFORGE_TEST_BLANK}")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing required env var")
-}
-
-// A field with no placeholder never consults the environment at all.
-func TestResolverStringLiteralNeedsNoEnv(t *testing.T) {
-	r := NewResolverFrom(func(string) (string, bool) {
-		t.Fatal("a literal must not be looked up in the environment")
-		return "", false
-	})
-	got, err := r.String("base_domain", "example.com")
-	require.NoError(t, err)
-	assert.Equal(t, "example.com", got)
-}
-
-// Loading never expands: the raw document keeps its placeholders and requires no
-// environment. This is what lets a command resolve only the fields it reads.
-func TestLoadVariablesRawKeepsPlaceholders(t *testing.T) {
-	raw, err := LoadVariablesRaw("ok", testdataDir)
-	require.NoError(t, err)
-	assert.Equal(t, "example.com", raw.BaseDomain)
-	assert.Equal(t, "ssh-ed25519 AAAA...authorized", raw.SSH.AuthorizedKeys)
-}
-
-func TestResolverVariablesResolvesWholeDocument(t *testing.T) {
-	raw := RawVariables{BaseDomain: "${INFORGE_TEST_DOMAIN}"}
-	raw.SSH.AuthorizedKeys = "${INFORGE_TEST_KEYS}"
-	r := NewResolverFrom(func(k string) (string, bool) {
+// The whole-file resolved decode: the deploy program's path. Every leaf goes
+// through the chain, so a missing value is reported before anything is created.
+func TestVariablesResolvesEveryLeaf(t *testing.T) {
+	dir := writeVariablesYAML(t, `base_domain: ${INFORGE_TEST_DOMAIN}
+ssh:
+  authorizedKeys: ${INFORGE_TEST_KEYS}
+`)
+	chain := yamldoc.Chain{yamldoc.EnvFrom(func(k string) (string, bool) {
 		return map[string]string{
 			"INFORGE_TEST_DOMAIN": "example.com",
 			"INFORGE_TEST_KEYS":   "ssh-ed25519 AAAA",
 		}[k], true
-	})
-	vars, err := r.Variables(raw)
+	})}
+
+	vars, err := Variables(context.Background(), chain, "prd", dir)
 	require.NoError(t, err)
 	assert.Equal(t, "example.com", vars.BaseDomain)
 	assert.Equal(t, "ssh-ed25519 AAAA", vars.SSH.AuthorizedKeys)
 }
 
-// THE REGRESSION TEST. Minting a mesh leaf reads base_domain and nothing else, so
-// an unset SSH_AUTHORIZED_KEYS must not fail it. Under the old eager loader the
-// whole document was expanded on load, and `inforge pki renew` / `inforge releases
-// deploy` died with "missing required env var: SSH_AUTHORIZED_KEYS" on a code path
-// that never reads an SSH key — which is exactly how a tunneller release broke in
-// production while ddns (no mtls_files, so no leaf mint) sailed through.
-func TestResolvingOneFieldIgnoresUnsetVarsInOtherFields(t *testing.T) {
-	raw := RawVariables{BaseDomain: "wardnet.network"}
-	raw.SSH.AuthorizedKeys = "${SSH_AUTHORIZED_KEYS}" // unset in the environment
-	raw.SSH.DeployPublicKey = "${DEPLOY_PUBLIC_KEY}"  // unset in the environment
-	r := NewResolverFrom(func(string) (string, bool) { return "", false })
+// THE REGRESSION TEST. A consumer that reads ONE leaf cannot be failed by a
+// pattern in a leaf it never reads. Under the old eager loader the whole document
+// was expanded on load, so `inforge pki renew` and `inforge releases deploy` died
+// with "missing required env var: SSH_AUTHORIZED_KEYS" while minting a leaf — a
+// code path that reads base_domain and nothing else. Only tunneller broke, because
+// mtls_files: is what makes a release mint a leaf at all.
+func TestReadingOneLeafIgnoresPatternsInOtherLeaves(t *testing.T) {
+	dir := writeVariablesYAML(t, `base_domain: wardnet.network
+ssh:
+  authorizedKeys: ${SSH_AUTHORIZED_KEYS}
+  deployPublicKey: ${DEPLOY_PUBLIC_KEY}
+`)
+	// Nothing is set in the environment.
+	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "", false })}
 
-	baseDomain, err := r.String("base_domain", raw.BaseDomain)
-	require.NoError(t, err, "resolving base_domain must not require the ssh block")
-	assert.Equal(t, "wardnet.network", baseDomain)
+	doc, err := VariablesDoc("prd", dir)
+	require.NoError(t, err)
 
-	// ...and the same document still fails loudly when a caller DOES need the
-	// field whose variable is unset.
-	_, err = r.Variables(raw)
+	leaf, ok := doc.At("base_domain")
+	require.True(t, ok)
+	got, err := leaf.Resolve(context.Background(), chain)
+	require.NoError(t, err, "reading base_domain must not require the ssh block")
+	assert.Equal(t, "wardnet.network", got)
+
+	// ...and the same document still fails loudly for a consumer that DOES want the
+	// leaf whose variable is unset.
+	_, err = Variables(context.Background(), chain, "prd", dir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ssh.authorizedKeys")
+	assert.Contains(t, err.Error(), "SSH_AUTHORIZED_KEYS")
+}
+
+func writeVariablesYAML(t *testing.T, doc string) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "variables.yaml"), []byte(doc), 0o644))
+	return dir
 }
 
 func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
@@ -196,18 +178,16 @@ func TestLoadGlobalResourcesMissing(t *testing.T) {
 	assert.Empty(t, global.Network)
 }
 
-// TestLoadRegionsRawFromFile exercises the nested regions.yaml: the per-region
-// slug + provider config under `regions:`, plus the optional `global:` block.
-// The ok fixture's dns.zone is an ${ENV_VAR} ref, and the raw load needs no env
-// var set for it — the placeholder simply survives.
-func TestLoadRegionsRawFromFile(t *testing.T) {
-	raw, err := LoadRegionsRaw("ok", testdataDir)
+// The literal read of regions.yaml: the ok fixture's dns.zone is a ${...} ref and
+// no env var need be set — the pattern simply survives.
+func TestRegionsLiteralFromFile(t *testing.T) {
+	rt, global, err := RegionsLiteral("ok", testdataDir)
 	require.NoError(t, err)
-	slug, err := raw.Table.Slug("us-east-1")
+	slug, err := rt.Slug("us-east-1")
 	require.NoError(t, err)
 	assert.Equal(t, "use1", slug)
-	assert.Contains(t, raw.Table["us-east-1"].Providers, "hetzner")
-	assert.Nil(t, raw.Global, "the ok fixture declares no global slot")
+	assert.Contains(t, rt["us-east-1"].Providers, "hetzner")
+	assert.Nil(t, global, "the ok fixture declares no global slot")
 
 	st, err := LoadSizeTable("ok", testdataDir)
 	require.NoError(t, err)
@@ -216,17 +196,17 @@ func TestLoadRegionsRawFromFile(t *testing.T) {
 
 // An absent regions.yaml yields an empty table (regions.yaml is the deploy
 // authority — there is no built-in fallback region set), with no error.
-func TestLoadRegionsRawMissing(t *testing.T) {
+func TestRegionsMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
-	raw, err := LoadRegionsRaw("prd", dir)
+	rt, global, err := RegionsLiteral("prd", dir)
 	require.NoError(t, err)
-	assert.Empty(t, raw.Table)
-	assert.Nil(t, raw.Global)
+	assert.Empty(t, rt)
+	assert.Nil(t, global)
 }
 
 // writeRegionsYAML writes a regions.yaml with a ${ENV_VAR} provider credential
-// into a temp env dir and returns the dir, for the resolution tests below.
+// into a temp env dir and returns the dir.
 func writeRegionsYAML(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -242,40 +222,33 @@ func writeRegionsYAML(t *testing.T) string {
 	return dir
 }
 
-// The regression guard for the credential bug: a ${ENV_VAR} in regions.yaml must
-// be expanded before it reaches a provider, never passed through as the literal
-// string "${...}".
-func TestResolverRegionsSubstitutesCredentials(t *testing.T) {
-	raw, err := LoadRegionsRaw("prd", writeRegionsYAML(t))
+// The regression guard for the credential bug: a ${ENV_VAR} must be resolved
+// before it reaches a provider, never passed through as the literal "${...}".
+func TestRegionsResolvesCredentials(t *testing.T) {
+	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "real-token-value", true })}
+	rt, _, err := Regions(context.Background(), chain, "prd", writeRegionsYAML(t))
 	require.NoError(t, err)
-	r := NewResolverFrom(func(string) (string, bool) { return "real-token-value", true })
-
-	table, _, err := r.Regions(raw)
-	require.NoError(t, err)
-	assert.Equal(t, "real-token-value", table["us-east-1"].Providers["hetzner"]["apiToken"],
-		"the credential ${ENV_VAR} must be resolved, not passed through literally")
+	assert.Equal(t, "real-token-value", rt["us-east-1"].Providers["hetzner"]["apiToken"],
+		"the credential must be resolved, not passed through literally")
 }
 
-// Resolving fails clearly when a referenced credential is unset, rather than
-// handing the provider a literal "${...}" — and the error names the field.
-func TestResolverRegionsMissingCredentialErrors(t *testing.T) {
-	raw, err := LoadRegionsRaw("prd", writeRegionsYAML(t))
-	require.NoError(t, err)
-	r := NewResolverFrom(func(string) (string, bool) { return "", false })
-
-	_, _, err = r.Regions(raw)
+// Resolving fails clearly when a referenced credential is unset — and names the
+// leaf, not just the variable.
+func TestRegionsMissingCredentialErrors(t *testing.T) {
+	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "", false })}
+	_, _, err := Regions(context.Background(), chain, "prd", writeRegionsYAML(t))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required env var")
 	assert.Contains(t, err.Error(), "regions.us-east-1.providers.hetzner.apiToken")
 }
 
-// The raw load (what validation uses) leaves a ${ENV_VAR} as a literal even when
-// the var is unset, so structural validation runs without credentials and an
+// The literal read (what validation uses) leaves a ${ENV_VAR} as written even
+// with the var unset, so structural validation runs without credentials and an
 // unresolved credential never reads as an (empty) missing value.
-func TestLoadRegionsRawKeepsCredentialLiteral(t *testing.T) {
-	raw, err := LoadRegionsRaw("prd", writeRegionsYAML(t))
+func TestRegionsLiteralKeepsCredentialAsWritten(t *testing.T) {
+	rt, _, err := RegionsLiteral("prd", writeRegionsYAML(t))
 	require.NoError(t, err)
-	assert.Equal(t, "${INFORGE_TEST_HCLOUD_TOKEN}", raw.Table["us-east-1"].Providers["hetzner"]["apiToken"])
+	assert.Equal(t, "${INFORGE_TEST_HCLOUD_TOKEN}", rt["us-east-1"].Providers["hetzner"]["apiToken"])
 }
 
 // TestLoadSizeTableFromFile exercises the on-disk size table: a YAML list of
