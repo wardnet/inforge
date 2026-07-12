@@ -172,7 +172,14 @@ Commit and merge — `inforge deploy` pushes the new value and restarts the serv
    mechanical; externally-issued credentials must also be reissued at their vendor.
 3. **Treat every CI-held PKI key as compromised.** The leaked identity decrypted the old
    `pki.enc.yaml` in git history too, so the mesh intermediate keys (and any root-only issuer key)
-   are out. Re-keying them to a clean recipient does not un-expose them: re-mint each scope's
-   intermediate with a fresh key —
-   [`inforge pki recover-intermediate <env> <name> <scope>`](/runbooks/pki-recover-intermediate) —
-   then `inforge pki renew <env>` to replace every leaf it signed.
+   are out. Re-keying them to a clean recipient does not un-expose them:
+   - **Two-tier (mesh) intermediates** — re-mint each scope's intermediate with a fresh key
+     ([`inforge pki recover-intermediate <env> <name> <scope>`](/runbooks/pki-recover-intermediate),
+     offline root custody), then `inforge pki renew <env>` to replace every leaf it signed. The cold
+     root is unaffected: CI never held it.
+   - **Root-only (issuer) PKIs** — the leaked key *is* the root, and there is no in-place rotation
+     for it (`pki rotate --root` is two-tier only: a root-only PKI has no intermediate to re-sign,
+     so every consumer must move to a new trust anchor anyway). Delete the PKI's entry from
+     `pki.enc.yaml`, re-add it (`inforge pki add <env> <name> --topology root-only`), and
+     redistribute the new root cert to everything that verifies with it — every token or
+     certificate the old root signed is untrusted from that moment.

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -398,6 +400,25 @@ func runSecretRotate(dir, env, recipient string) error {
 	}
 	newRecipient := strings.TrimSpace(recipient)
 
+	// A GENERATED identity exists only in this process's memory until it is
+	// printed. From the first store write on, material is encrypted to it, so a
+	// write failure that returned the error alone would strand ciphertext whose
+	// only key was just dropped on the floor (and make the documented "re-run
+	// with --recipient <new>" resume impossible — the operator never saw the
+	// identity). Any failure past this point therefore prints it.
+	failed := func(err error) error {
+		if newIdentity == "" {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "\nrotation FAILED, but a new master identity was already generated and may have\n"+
+			"encrypted material in the store files (check `git diff`/`git status`). It is shown ONCE,\n"+
+			"below: keep it, then re-run `inforge secret rotate %s --recipient %s` with the OLD\n"+
+			"%s to finish the rotation (already-rotated stores are skipped). If no store file\n"+
+			"changed, discard it.\n\n", env, newRecipient, secretstore.IdentityEnvVar)
+		fmt.Println(newIdentity)
+		return err
+	}
+
 	// The PKI store's CI-held key material (intermediate keys, root-only root
 	// keys) is encrypted to the SAME recipient, so it must be re-keyed in the
 	// same operation — otherwise the new master identity cannot decrypt it and
@@ -407,12 +428,12 @@ func runSecretRotate(dir, env, recipient string) error {
 	// a no-op once its recipient already matches).
 	pkiCount, err := rekeyPKIStore(dir, env, identity, store.Recipient, newRecipient)
 	if err != nil {
-		return err
+		return failed(err)
 	}
 
 	store.Recipient = newRecipient
 	if err := store.Save(path); err != nil {
-		return err
+		return failed(err)
 	}
 
 	fmt.Fprintf(os.Stderr, "re-encrypted %d secret(s) to recipient %s\n", n, store.Recipient)
@@ -482,9 +503,15 @@ func rekeyPKIStore(dir, env, identity, oldRecipient, newRecipient string) (int, 
 	n := 0
 	for _, name := range store.Names() {
 		p, _ := store.Get(name)
-		// A root-only PKI's root key is the CI-held issuer key (RootKeyRecipient);
-		// a two-tier root is cold and stays encrypted to rootRecipient.
-		if store.RootKeyRecipient(p.Topology) == oldRecipient && p.Root.Key != "" {
+		// A root-only PKI's root key is the CI-held issuer key (the encrypt-side
+		// rule in Store.RootKeyRecipient); a two-tier root — active or retained in
+		// PreviousRoots — is cold, encrypted to the store's separate
+		// rootRecipient, and must be left byte-identical. Keying off the topology
+		// rather than comparing recipients keeps that true even in the degenerate
+		// store where rootRecipient == recipient, where a recipient comparison
+		// would re-encrypt the cold root without advancing the rootRecipient
+		// header and thereby orphan it.
+		if p.Topology == pki.TopologyRootOnly && p.Root.Key != "" {
 			ciphertext, err := rekey(p.Root.Key, fmt.Sprintf("PKI %q root key", name))
 			if err != nil {
 				return 0, err
@@ -492,7 +519,7 @@ func rekeyPKIStore(dir, env, identity, oldRecipient, newRecipient string) (int, 
 			p.Root.Key = ciphertext
 			n++
 		}
-		for _, scope := range sortedScopes(p.Intermediates) {
+		for _, scope := range slices.Sorted(maps.Keys(p.Intermediates)) {
 			m := p.Intermediates[scope]
 			ciphertext, err := rekey(m.Key, fmt.Sprintf("PKI %q intermediate for scope %q", name, scope))
 			if err != nil {
@@ -509,15 +536,6 @@ func rekeyPKIStore(dir, env, identity, oldRecipient, newRecipient string) (int, 
 		return 0, err
 	}
 	return n, nil
-}
-
-func sortedScopes(m map[string]pki.Material) []string {
-	scopes := make([]string, 0, len(m))
-	for s := range m {
-		scopes = append(scopes, s)
-	}
-	sort.Strings(scopes)
-	return scopes
 }
 
 // compromisedValueGuidance returns one ready-to-paste `inforge secret set`
