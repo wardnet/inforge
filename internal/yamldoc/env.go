@@ -7,15 +7,6 @@ import (
 	"strings"
 )
 
-// EnvScheme is the prefix claiming a leaf whose value comes from the process
-// environment: `authorizedKeys: env:SSH_AUTHORIZED_KEYS`.
-//
-// It is the first implementation of the one authoring DSL every file shares —
-// `<scheme>:<key>`, whole-value, never interpolated. environment.yaml has spoken
-// it for years (env:, vault:, ref:); variables.yaml and regions.yaml now speak it
-// too, and vault:/ref: join this chain next.
-const EnvScheme = "env:"
-
 // EnvResolver resolves `env:NAME` against the environment.
 type EnvResolver struct {
 	// lookup is the environment. Injectable so a caller — or a test — can resolve
@@ -41,9 +32,9 @@ func (EnvResolver) Matches(raw string) bool { return strings.HasPrefix(raw, EnvS
 // set to the empty string: a blank credential is never a legitimate value, and
 // passing "" on to a provider fails far from the cause.
 func (e EnvResolver) Resolve(_ context.Context, raw string) (string, error) {
-	key := strings.TrimSpace(strings.TrimPrefix(raw, EnvScheme))
-	if key == "" {
-		return "", fmt.Errorf("%s has no variable name", EnvScheme)
+	key, _, err := ParseKey(EnvScheme, raw)
+	if err != nil {
+		return "", err
 	}
 	v, ok := e.lookup(key)
 	if !ok || v == "" {

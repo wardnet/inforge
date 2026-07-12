@@ -48,25 +48,35 @@ import (
 )
 
 // Resolver turns the raw text of a leaf into its real value. Matches declares the
-// pattern the Resolver claims — it is what makes a Chain work without the reader
+// scheme the Resolver claims — it is what makes a Chain work without the reader
 // knowing anything about any particular syntax.
-type Resolver interface {
-	// Name identifies the resolver in errors ("env").
+//
+// It is generic in the value it produces, because different consumers of the SAME
+// DSL need different values. A config file resolves to a string. The deploy program
+// resolves a service's environment.yaml to a pulumi.StringOutput: a
+// ref:compute/edge.publicIp is not known until the host exists, and a vault: value
+// is marked secret so its plaintext is encrypted in Pulumi state. The grammar and
+// the dispatch are shared; the value type is the consumer's.
+type Resolver[T any] interface {
+	// Name identifies the resolver in errors ("env", "vault", "ref").
 	Name() string
-	// Matches reports whether raw carries this resolver's pattern.
+	// Matches reports whether raw carries this resolver's scheme.
 	Matches(raw string) bool
 	// Resolve returns the real value. It is only called when Matches is true.
-	Resolve(ctx context.Context, raw string) (string, error)
+	Resolve(ctx context.Context, raw string) (T, error)
 }
 
-// Chain is an ordered set of Resolvers. The first one whose pattern matches a
-// leaf resolves it; a leaf no Resolver claims is a static literal and is returned
-// as written. An empty Chain therefore resolves nothing — every leaf is literal.
-type Chain []Resolver
+// Chain is an ordered set of Resolvers. The first one whose scheme claims a leaf
+// resolves it; a leaf no Resolver claims is a static literal.
+//
+// The chain IS the capability: a vault: reference in a document decoded with an
+// env-only chain resolves to nothing, because nothing claims it. What a file may
+// reach is decided by its caller, not by which file it is.
+type Chain[T any] []Resolver[T]
 
-// Claim returns the first resolver whose pattern matches raw, if any. No match
-// means the leaf is a static value, not a reference.
-func (c Chain) Claim(raw string) (Resolver, bool) {
+// Claim returns the first resolver whose scheme matches raw, if any. No match means
+// the leaf is a static value, not a reference.
+func (c Chain[T]) Claim(raw string) (Resolver[T], bool) {
 	for _, r := range c {
 		if r.Matches(raw) {
 			return r, true
@@ -75,18 +85,19 @@ func (c Chain) Claim(raw string) (Resolver, bool) {
 	return nil, false
 }
 
-// Resolve runs raw through the chain. A leaf no resolver claims is returned as
-// written.
-func (c Chain) Resolve(ctx context.Context, raw string) (string, error) {
+// Resolve runs raw through the chain. claimed reports whether any resolver owned
+// it; when false, v is the zero value and the caller decides what a static literal
+// means for its value type (a string is itself; a pulumi value is pulumi.String).
+func (c Chain[T]) Resolve(ctx context.Context, raw string) (v T, claimed bool, err error) {
 	r, ok := c.Claim(raw)
 	if !ok {
-		return raw, nil
+		return v, false, nil
 	}
-	v, err := r.Resolve(ctx, raw)
+	v, err = r.Resolve(ctx, raw)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", r.Name(), err)
+		return v, true, fmt.Errorf("%s: %w", r.Name(), err)
 	}
-	return v, nil
+	return v, true, nil
 }
 
 // Scalar is a leaf of a Document: the raw text as written, plus where it came
@@ -107,10 +118,13 @@ func (s Scalar) Path() string { return s.path }
 
 // Resolve returns the leaf's real value, running it through the chain. A leaf no
 // resolver claims comes back as its literal.
-func (s Scalar) Resolve(ctx context.Context, chain Chain) (string, error) {
-	v, err := chain.Resolve(ctx, s.raw)
+func (s Scalar) Resolve(ctx context.Context, chain Chain[string]) (string, error) {
+	v, claimed, err := chain.Resolve(ctx, s.raw)
 	if err != nil {
 		return "", fmt.Errorf("%s:%d: %s: %w", s.path, s.line, s.raw, err)
+	}
+	if !claimed {
+		return s.raw, nil // a static value is itself
 	}
 	return v, nil
 }
@@ -174,7 +188,7 @@ func (d Document) Decode(out any) error {
 //
 // A leaf no resolver claims decodes as its literal, so a file with no patterns in
 // it behaves exactly as Decode.
-func (d Document) DecodeResolved(ctx context.Context, chain Chain, out any) error {
+func (d Document) DecodeResolved(ctx context.Context, chain Chain[string], out any) error {
 	if d.root == nil {
 		return nil
 	}
@@ -246,7 +260,7 @@ func deref(node *yaml.Node) *yaml.Node {
 // Only string leaves are resolved: a pattern is text, and a resolver has nothing to
 // say about an int. Mapping KEYS are carried through untouched — a reference
 // belongs in a value.
-func resolveNode(ctx context.Context, chain Chain, node *yaml.Node, path string, seen map[*yaml.Node]*yaml.Node) (*yaml.Node, error) {
+func resolveNode(ctx context.Context, chain Chain[string], node *yaml.Node, path string, seen map[*yaml.Node]*yaml.Node) (*yaml.Node, error) {
 	if node == nil {
 		return nil, nil
 	}

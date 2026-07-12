@@ -768,7 +768,7 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 	// — never the ssh block, never a provider credential. Resolving the whole
 	// document here is what used to make `inforge pki renew` and `inforge releases
 	// deploy` fail on an unset SSH_AUTHORIZED_KEYS or HCLOUD_TOKEN they never read.
-	chain := yamldoc.Chain{yamldoc.Env()}
+	chain := yamldoc.Chain[string]{yamldoc.Env()}
 	varsDoc, err := loader.VariablesDoc(configEnv, dir)
 	if err != nil {
 		return 0, err

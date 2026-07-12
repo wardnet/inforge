@@ -32,7 +32,7 @@ func TestVariablesResolvesEveryLeaf(t *testing.T) {
 ssh:
   authorizedKeys: env:INFORGE_TEST_KEYS
 `)
-	chain := yamldoc.Chain{yamldoc.EnvFrom(func(k string) (string, bool) {
+	chain := yamldoc.Chain[string]{yamldoc.EnvFrom(func(k string) (string, bool) {
 		return map[string]string{
 			"INFORGE_TEST_DOMAIN": "example.com",
 			"INFORGE_TEST_KEYS":   "ssh-ed25519 AAAA",
@@ -58,7 +58,7 @@ ssh:
   deployPublicKey: env:DEPLOY_PUBLIC_KEY
 `)
 	// Nothing is set in the environment.
-	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "", false })}
+	chain := yamldoc.Chain[string]{yamldoc.EnvFrom(func(string) (string, bool) { return "", false })}
 
 	doc, err := VariablesDoc("prd", dir)
 	require.NoError(t, err)
@@ -225,7 +225,7 @@ func writeRegionsYAML(t *testing.T) string {
 // The regression guard for the credential bug: a env:ENV_VAR must be resolved
 // before it reaches a provider, never passed through as the literal "${...}".
 func TestRegionsResolvesCredentials(t *testing.T) {
-	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "real-token-value", true })}
+	chain := yamldoc.Chain[string]{yamldoc.EnvFrom(func(string) (string, bool) { return "real-token-value", true })}
 	rt, _, err := Regions(context.Background(), chain, "prd", writeRegionsYAML(t))
 	require.NoError(t, err)
 	assert.Equal(t, "real-token-value", rt["us-east-1"].Providers["hetzner"]["apiToken"],
@@ -235,7 +235,7 @@ func TestRegionsResolvesCredentials(t *testing.T) {
 // Resolving fails clearly when a referenced credential is unset — and names the
 // leaf, not just the variable.
 func TestRegionsMissingCredentialErrors(t *testing.T) {
-	chain := yamldoc.Chain{yamldoc.EnvFrom(func(string) (string, bool) { return "", false })}
+	chain := yamldoc.Chain[string]{yamldoc.EnvFrom(func(string) (string, bool) { return "", false })}
 	_, _, err := Regions(context.Background(), chain, "prd", writeRegionsYAML(t))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required env var")

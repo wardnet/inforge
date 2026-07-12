@@ -53,7 +53,7 @@ func VariablesDoc(env, dir string) (yamldoc.Document, error) {
 // Variables reads variables.yaml and resolves every leaf through the chain. This
 // is the fail-fast whole-file path — the deploy program's, which needs every
 // value and needs it before the first resource is registered.
-func Variables(ctx context.Context, chain yamldoc.Chain, env, dir string) (types.EnvironmentVariables, error) {
+func Variables(ctx context.Context, chain yamldoc.Chain[string], env, dir string) (types.EnvironmentVariables, error) {
 	var vars types.EnvironmentVariables
 	doc, err := VariablesDoc(env, dir)
 	if err != nil {
@@ -99,7 +99,7 @@ func RegionsDoc(env, dir string) (yamldoc.Document, error) {
 // Regions reads regions.yaml and resolves every leaf through the chain —
 // notably the provider credentials and the DNS authority's zone. Only a command
 // that builds a provider needs this.
-func Regions(ctx context.Context, chain yamldoc.Chain, env, dir string) (regions.Table, *regions.Global, error) {
+func Regions(ctx context.Context, chain yamldoc.Chain[string], env, dir string) (regions.Table, *regions.Global, error) {
 	doc, err := RegionsDoc(env, dir)
 	if err != nil {
 		return nil, nil, err

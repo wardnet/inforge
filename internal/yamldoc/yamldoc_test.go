@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func env(pairs map[string]string) Chain {
-	return Chain{EnvFrom(func(k string) (string, bool) {
+func env(pairs map[string]string) Chain[string] {
+	return Chain[string]{EnvFrom(func(k string) (string, bool) {
 		v, ok := pairs[k]
 		return v, ok
 	})}
@@ -158,26 +158,28 @@ func TestReadMissingFile(t *testing.T) {
 // knows what a pattern looks like — which is what lets environment.yaml's
 // env:/vault:/ref: sources, or an API-backed resolver, join the chain later.
 func TestChainFirstMatchWinsAndUnclaimedIsLiteral(t *testing.T) {
-	chain := Chain{prefixResolver{"vault:"}, prefixResolver{"ref:"}}
+	chain := Chain[string]{prefixResolver{"vault:"}, prefixResolver{"ref:"}}
 
-	got, err := chain.Resolve(context.Background(), "vault:STRIPE_KEY")
+	got, claimed, err := chain.Resolve(context.Background(), "vault:STRIPE_KEY")
 	require.NoError(t, err)
+	assert.True(t, claimed)
 	assert.Equal(t, "resolved-by-vault:-STRIPE_KEY", got)
 
-	got, err = chain.Resolve(context.Background(), "ref:database/main.url")
+	got, claimed, err = chain.Resolve(context.Background(), "ref:database/main.url")
 	require.NoError(t, err)
+	assert.True(t, claimed)
 	assert.Equal(t, "resolved-by-ref:-database/main.url", got)
 
 	// No resolver claims it → it is a value, not a reference.
-	got, err = chain.Resolve(context.Background(), "just-a-string")
+	_, claimed, err = chain.Resolve(context.Background(), "just-a-string")
 	require.NoError(t, err)
-	assert.Equal(t, "just-a-string", got)
+	assert.False(t, claimed, "an unclaimed leaf is a static literal")
 }
 
 // A resolver's failure is reported with its name, so an operator knows which
 // mechanism could not produce the value.
 func TestChainNamesTheFailingResolver(t *testing.T) {
-	_, err := Chain{EnvFrom(func(string) (string, bool) { return "", false })}.
+	_, _, err := Chain[string]{EnvFrom(func(string) (string, bool) { return "", false })}.
 		Resolve(context.Background(), "env:NOPE")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "env:")
@@ -186,7 +188,7 @@ func TestChainNamesTheFailingResolver(t *testing.T) {
 // An env var set to the empty string is treated as absent: a blank credential is
 // never a legitimate value, and passing "" to a provider fails far from the cause.
 func TestEnvEmptyIsMissing(t *testing.T) {
-	_, err := env(map[string]string{"BLANK": ""}).Resolve(context.Background(), "env:BLANK")
+	_, _, err := env(map[string]string{"BLANK": ""}).Resolve(context.Background(), "env:BLANK")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required env var")
 }
