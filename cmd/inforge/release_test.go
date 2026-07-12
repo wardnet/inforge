@@ -264,7 +264,7 @@ func TestDeliverToTargetRemovesPayloadOnApplyFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var removed bool
+	var removed, removeHadDeadline bool
 	var removeCtxErr error
 	withFakeTransport(t,
 		func(context.Context, []string) ([]byte, error) { return nil, nil },
@@ -272,6 +272,7 @@ func TestDeliverToTargetRemovesPayloadOnApplyFailure(t *testing.T) {
 			cmd := args[len(args)-1]
 			if strings.HasPrefix(cmd, "rm -f") {
 				removed, removeCtxErr = true, c.Err()
+				_, removeHadDeadline = c.Deadline()
 				return nil, nil
 			}
 			cancel() // the apply died with the context (e.g. operator ^C)
@@ -284,6 +285,33 @@ func TestDeliverToTargetRemovesPayloadOnApplyFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "remote deploy to h1")
 	assert.True(t, removed, "the uploaded payload must be removed even when the apply failed")
 	assert.NoError(t, removeCtxErr, "cleanup must not inherit the cancelled context")
+	assert.True(t, removeHadDeadline, "the uncancellable cleanup must carry its own deadline, or an unreachable host hangs the CLI")
+}
+
+// TestParseMktempPath: only a path this template could have produced is accepted,
+// and a chatty remote shell (bash sources ~/.bashrc for a non-interactive ssh
+// command, so an rc-file banner lands on stdout ahead of mktemp's output) must
+// not corrupt the path handed to scp and the apply script.
+func TestParseMktempPath(t *testing.T) {
+	got, err := parseMktempPath("/tmp/inforge-payload.AbC123xyz9\n")
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/inforge-payload.AbC123xyz9", got)
+
+	got, err = parseMktempPath("Welcome to host-01!\nhave a nice day\n/tmp/inforge-payload.AbC123xyz9\n\n")
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/inforge-payload.AbC123xyz9", got, "an rc-file banner ahead of mktemp's output must be ignored")
+
+	for _, bad := range []string{
+		"",
+		"\n \n",
+		"/tmp/inforge-payload.",    // template with no unique suffix
+		"/etc/passwd",              // not our path at all
+		"/tmp/inforge-payload.a b", // whitespace would break scp's remote path
+		"/tmp/inforge-payload.ok\nmktemp: failed", // failure line printed last
+	} {
+		_, err := parseMktempPath(bad)
+		require.Error(t, err, "must reject %q", bad)
+	}
 }
 
 // TestDeliverToTargetNoPayloadSkipsUpload: an app rollback carries no payload —

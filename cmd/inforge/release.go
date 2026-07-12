@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -145,12 +146,41 @@ func remoteMktempPayload(ctx context.Context, account, sshKeyPath string) (strin
 	if err != nil {
 		return "", fmt.Errorf("create remote payload path on %s: %w", account, err)
 	}
-	path := strings.TrimSpace(string(out))
-	if path == "" {
-		return "", fmt.Errorf("create remote payload path on %s: mktemp returned no path", account)
+	path, err := parseMktempPath(string(out))
+	if err != nil {
+		return "", fmt.Errorf("create remote payload path on %s: %w", account, err)
 	}
 	return path, nil
 }
+
+// parseMktempPath extracts the created path from a remote `mktemp` run's stdout
+// and refuses anything that isn't one. Stdout is NOT trustworthy as a whole: an
+// SSH remote command runs through the deploy user's shell, and bash sources
+// ~/.bashrc for a non-interactive remote command, so any host whose rc file
+// echoes a banner prepends lines to the output. Taking the whole (trimmed)
+// stdout there would hand a multi-line, whitespace-carrying string to scp's
+// remote-path argument and to the apply script — so we take the LAST non-empty
+// line and require it to be a path this template could actually have produced.
+func parseMktempPath(stdout string) (string, error) {
+	prefix := strings.TrimSuffix(remotePayloadTemplate, "XXXXXXXXXX")
+	for _, line := range slices.Backward(strings.Split(stdout, "\n")) {
+		path := strings.TrimSpace(line)
+		if path == "" {
+			continue
+		}
+		if !strings.HasPrefix(path, prefix) || len(path) <= len(prefix) || strings.ContainsAny(path, " \t") {
+			return "", fmt.Errorf("mktemp printed %q, which is not a %s* path", path, prefix)
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("mktemp returned no path")
+}
+
+// removeRemotePayloadTimeout bounds the cleanup SSH. The cleanup deliberately
+// survives the caller's context (see removeRemotePayload), so it must carry a
+// deadline of its own — a WithoutCancel context has none, and an unreachable
+// host would otherwise hang the CLI in ssh's TCP timeout with no way to abort.
+const removeRemotePayloadTimeout = 30 * time.Second
 
 // removeRemotePayload drops the uploaded payload from the target. It runs on
 // every exit path — including a failed apply — and on a cancelled context (the
@@ -158,8 +188,10 @@ func remoteMktempPayload(ctx context.Context, account, sshKeyPath string) (strin
 // leftover payload can never be picked up by a later run. A cleanup failure is a
 // warning, never the error the caller sees.
 func removeRemotePayload(ctx context.Context, account, sshKeyPath, path string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeRemotePayloadTimeout)
+	defer cancel()
 	args := append(append([]string{}, sshArgs(sshKeyPath)...), account, "rm -f "+remote.Quote(path))
-	if out, err := runSSH(context.WithoutCancel(ctx), args); err != nil {
+	if out, err := runSSH(ctx, args); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: remove payload %s on %s: %v\n%s\n", path, account, err, out)
 	}
 }
