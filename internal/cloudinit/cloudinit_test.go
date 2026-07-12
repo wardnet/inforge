@@ -146,6 +146,7 @@ func TestVarsValidate(t *testing.T) {
 		{"multi-line key", Vars{DeployUser: "deploy", DeployPublicKey: goodKey + "\nssh-rsa AAAA attacker"}, "single-line OpenSSH public key"},
 		{"garbage key", Vars{DeployUser: "deploy", DeployPublicKey: "not-a-key"}, "single-line OpenSSH public key"},
 		{"trailing newline tolerated", Vars{DeployUser: "deploy", DeployPublicKey: goodKey + "\n"}, ""},
+		{"quote in key comment", Vars{DeployUser: "deploy", DeployPublicKey: `ssh-ed25519 AAAAC3Nza op@pedro's-laptop`}, "single-line OpenSSH public key"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -158,4 +159,20 @@ func TestVarsValidate(t *testing.T) {
 			assert.Contains(t, err.Error(), c.wantErr)
 		})
 	}
+}
+
+// placeholders() escapes for a single-quoted shell run (provision.sh), but it also
+// substitutes into the PROJECT's cloud_init template, whose context is unknown (a
+// #cloud-config template embeds the key in YAML, not in shell). So the escape must be
+// an IDENTITY on everything Validate accepts — otherwise a legal value lands mangled
+// in that template. Validate is what makes that true (no quote survives it).
+func TestValidatedDeployMaterialIsSubstitutedVerbatim(t *testing.T) {
+	v := Vars{DeployUser: "deploy", DeployPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabcdef+/0123456789= op@host"}
+	require.NoError(t, v.Validate())
+
+	out := Render("#cloud-config\nssh_authorized_keys:\n  - {{deploy_public_key}}\nusers: [{{deploy_user}}]\n", v)
+
+	assert.Contains(t, out, "  - "+v.DeployPublicKey+"\n", "a validated key must reach the project template verbatim")
+	assert.Contains(t, out, "users: ["+v.DeployUser+"]", "a validated deploy user must reach the project template verbatim")
+	assert.NotContains(t, out, `'\''`, "no escaping artefact may appear for a validated value")
 }

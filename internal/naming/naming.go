@@ -190,10 +190,21 @@ func ExpandVanity(vanity, env, regionSlug, baseDomain string) string {
 	return r.Replace(vanity)
 }
 
+// InZone reports whether fqdn lies inside baseDomain's zone (the apex itself, or
+// any name under it). It is ZoneRelative's PRECONDITION: the DNS provider is handed
+// a zone-relative name and appends the zone itself, so ZoneRelative on an
+// out-of-zone FQDN returns that FQDN unchanged and the record silently lands as
+// "<fqdn>.<baseDomain>". Callers that accept an authored FQDN (a route vanity) must
+// gate on this — the single home for the rule, shared by the validator and the
+// realization path so the two can never disagree on what "in the zone" means.
+func InZone(fqdn, baseDomain string) bool {
+	return fqdn == baseDomain || strings.HasSuffix(fqdn, "."+baseDomain)
+}
+
 // ZoneRelative returns a record's zone-relative name: the FQDN with the trailing
 // base domain (the DNS authority's zone) removed. The zone apex (fqdn ==
 // baseDomain) becomes "@". Cloudflare appends the zone, so providers consume this
-// form rather than the absolute FQDN.
+// form rather than the absolute FQDN. fqdn MUST be InZone(fqdn, baseDomain).
 func ZoneRelative(fqdn, baseDomain string) string {
 	if fqdn == baseDomain {
 		return "@"

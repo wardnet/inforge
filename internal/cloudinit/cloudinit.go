@@ -60,8 +60,14 @@ var deployUserRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 
 // deployKeyRe is the accepted deploy public key form: one OpenSSH authorized_keys
 // entry ("<type> <base64>[ <comment>]"). A multi-line value would otherwise install
-// extra keys into the deploy account's authorized_keys.
-var deployKeyRe = regexp.MustCompile(`^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+=*( [^\n]*)?$`)
+// extra keys into the deploy account's authorized_keys. The comment excludes the
+// single quote — the ONE byte escapeSingleQuoted rewrites — so escaping is an
+// identity on every value that passes Validate. That matters because placeholders()
+// also substitutes the key into the PROJECT's cloud_init template, which need not be
+// a single-quoted shell run (a #cloud-config template embeds it in YAML): a quote in
+// the comment would be escaped for a context that template does not have, and the
+// key would land there as "…'\''…". A key comment is a label; it has no need of one.
+var deployKeyRe = regexp.MustCompile(`^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+=*( [^\n']*)?$`)
 
 // Validate rejects deploy material provision.sh must not be handed: a deploy user
 // outside the login-name charset and a public key that is not a single-line OpenSSH
@@ -73,7 +79,7 @@ func (v Vars) Validate() error {
 		return fmt.Errorf("deploy_user name %q is not a valid login name (allowed: %s)", v.DeployUser, deployUserRe)
 	}
 	if v.DeployPublicKey != "" && !deployKeyRe.MatchString(strings.TrimRight(v.DeployPublicKey, "\n")) {
-		return fmt.Errorf(`ssh.deployPublicKey is not a single-line OpenSSH public key ("<type> <base64> [comment]")`)
+		return fmt.Errorf(`ssh.deployPublicKey is not a single-line OpenSSH public key ("<type> <base64> [comment]", no quote in the comment)`)
 	}
 	return nil
 }

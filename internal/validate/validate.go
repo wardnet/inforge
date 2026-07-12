@@ -696,36 +696,37 @@ func checkCrossScopeNames(r *reporter, regional, global types.Resources, regiona
 	}
 }
 
+// vanityEnv/vanitySlug are the sentinel {ENV}/{REGION_SLUG} expansions used to check
+// a vanity's zone. The resource set is shared by every region, and the placeholders
+// can only move the FQDN's tail out of the zone if a vanity ENDS in one — which no
+// zone-relative name does — so any label does, and a sentinel keeps the check
+// env/region-independent.
+const (
+	vanityEnv  = "env"
+	vanitySlug = "slug"
+)
+
 // checkVanityZone rejects a route vanity FQDN that is not under base_domain. Records
 // are created zone-relative in the DNS authority's zone (naming.ZoneRelative strips
 // the base domain and hands the rest to the provider), so an out-of-zone literal like
 // "shop.example.com" is NOT created on example.com — it becomes the record
 // "shop.example.com" inside the base_domain zone, i.e. the host
-// shop.example.com.<base_domain>, whose ACME cert can never issue. A derived (bare
-// token) vanity is in-zone by construction, and so is a {BASE_DOMAIN} template.
+// shop.example.com.<base_domain>, whose ACME cert can never issue. Expansion goes
+// through naming.ExpandVanity — the same derivation the realization path uses — so a
+// bare token (derived under base_domain) and a {BASE_DOMAIN} template are in-zone by
+// construction, and the two can never disagree on what a vanity resolves to.
 func checkVanityZone(r *reporter, res types.Resources, base, baseDomain string) {
 	// base_domain is read literally at validate time; an unresolved ${VAR} ref carries
 	// no zone to compare against, so there is nothing to check.
 	if baseDomain == "" || strings.Contains(baseDomain, "${") {
 		return
 	}
-	// The env/slug placeholders can only affect the FQDN's tail if a vanity ends in
-	// one, which no zone-relative name does; a sentinel label keeps the expansion
-	// region-independent (the resource set is shared by every region).
-	expand := strings.NewReplacer(
-		"{BASE_DOMAIN}", baseDomain,
-		"{ENV}", "env",
-		"{REGION_SLUG}", "slug",
-	)
 	for _, s := range res.Service {
 		var errs []string
 		for _, rt := range s.Routes {
 			for _, v := range rt.Vanity {
-				if !strings.ContainsAny(v, ".{") {
-					continue // a bare token is derived under base_domain
-				}
-				fqdn := expand.Replace(v)
-				if fqdn == baseDomain || strings.HasSuffix(fqdn, "."+baseDomain) {
+				fqdn := naming.ExpandVanity(v, vanityEnv, vanitySlug, baseDomain)
+				if naming.InZone(fqdn, baseDomain) {
 					continue
 				}
 				errs = append(errs, fmt.Sprintf("routes: vanity %q resolves to %q, which is not under base_domain %q — a record is created inside the DNS authority's zone, so an out-of-zone name would deploy as %q and its ACME cert could never issue", v, fqdn, baseDomain, fqdn+"."+baseDomain))
