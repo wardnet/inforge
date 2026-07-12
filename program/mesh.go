@@ -3,6 +3,7 @@ package program
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/wardnet/inforge/internal/agent"
@@ -40,35 +41,50 @@ const meshGatewayCaller = "gateway"
 // calleeScope is the callee's scope (a region name or pki.ScopeGlobal). regions is every
 // deploying region name. regionalMesh / globalMesh are the sets of mesh-member service
 // names in the regional and global resource sets. The result is sorted and de-duplicated.
-func expandAllowedCallers(allowed []string, calleeScope string, regions []string, regionalMesh, globalMesh map[string]bool) []string {
+//
+// dropped names an authored caller that expanded to NO identity — it would be silently
+// absent from the rendered allow-list and 403 at the callee. Validation already resolves
+// every entry to a mesh member in a permitted direction, so a non-empty dropped means the
+// renderer was fed the wrong membership sets; realizeMesh fails the deploy on it rather
+// than shipping a quietly under-admitting mesh.
+func expandAllowedCallers(allowed []string, calleeScope string, regions []string, regionalMesh, globalMesh map[string]bool) (out, dropped []string) {
 	set := map[string]bool{}
 	for _, name := range allowed {
+		var ids []string
 		switch {
 		case name == meshGatewayCaller:
-			set[calleeScope+"/"+meshGatewayCaller] = true
+			ids = []string{calleeScope + "/" + meshGatewayCaller}
 		case calleeScope != pki.ScopeGlobal:
 			// Regional callee — same-region caller only.
-			set[calleeScope+"/"+name] = true
+			ids = []string{calleeScope + "/" + name}
 		default:
 			// Global callee — a regional caller may reach it from any region; a global
 			// caller is global-scoped. Guarded by the mesh-membership sets so a name that
 			// is one but not the other expands only where it exists.
 			if regionalMesh[name] {
 				for _, r := range regions {
-					set[r+"/"+name] = true
+					ids = append(ids, r+"/"+name)
 				}
 			}
 			if globalMesh[name] {
-				set[pki.ScopeGlobal+"/"+name] = true
+				ids = append(ids, pki.ScopeGlobal+"/"+name)
 			}
 		}
+		if len(ids) == 0 {
+			dropped = append(dropped, name)
+			continue
+		}
+		for _, id := range ids {
+			set[id] = true
+		}
 	}
-	out := make([]string, 0, len(set))
+	out = make([]string, 0, len(set))
 	for id := range set {
 		out = append(out, id)
 	}
 	sort.Strings(out)
-	return out
+	sort.Strings(dropped)
+	return out, dropped
 }
 
 // meshHostInputs is a host's local (callee) and egress (caller) mesh renderer inputs,
@@ -223,6 +239,36 @@ func meshMembers(res types.Resources) map[string]bool {
 	return out
 }
 
+// meshCallerUniverse is the pair of mesh-member sets an allow-list expands over, and the
+// single seam where that universe is assembled: each half comes from its OWN resource
+// set. They are deliberately NOT derived from the scope being rendered — for a global
+// scope the rendering resource set IS globalRes, so using it as the regional universe
+// empties that half and every regional caller is silently dropped from the allow-list
+// (403 on all regional→global traffic). Built once per scope: the sets are the same for
+// every callee in it.
+type meshCallerUniverse struct {
+	regional map[string]bool
+	global   map[string]bool
+}
+
+func newMeshCallerUniverse(regionalRes, globalRes types.Resources) meshCallerUniverse {
+	return meshCallerUniverse{
+		regional: meshMembers(regionalRes),
+		global:   meshMembers(globalRes),
+	}
+}
+
+// allowedFor expands one callee's authored allow-list to the caller identities its mesh
+// ingress admits. dropped carries any authored name that expanded to nothing; the caller
+// fails the deploy on it. A pki: service with no mesh: block is an outbound-only caller —
+// it receives nothing, so it admits no one and has no allow-list to expand.
+func (u meshCallerUniverse) allowedFor(svc types.ServiceSpec, meshScope string, regionNames []string) (callers, dropped []string) {
+	if svc.Mesh == nil {
+		return nil, nil
+	}
+	return expandAllowedCallers(svc.Mesh.AllowedServices, meshScope, regionNames, u.regional, u.global)
+}
+
 // realizeMesh installs the east-west mesh proxy (the second, private nginx) on
 // every host in a scope that runs ≥1 pki: service (ADR-0032). It mirrors
 // realizeIngress: it derives the per-host renderer inputs (meshInputsByHost) and
@@ -230,14 +276,17 @@ func meshMembers(res types.Resources) map[string]bool {
 // address and each target's Addr from compute IPs inside the provider's apply and
 // installs + configures the mesh nginx.
 //
-// scopeRes is the scope's resource set; globalRes is the global slice (for the
-// cross-scope targets a regional mesh reaches over the internet). computeOut is
-// the full region-keyed compute output map — the scope's own outputs supply
-// same-scope private IPs and this host's listen address, and computeOut[global]
-// supplies a cross-scope target's public IP. scopeKey is the scope's output-map
-// key (a region name or globalScope); regionNames is every deploying region (for
-// the global-callee allow-list expansion).
-func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, globalRes types.Resources, computeOut map[string]map[string]types.ComputeOutputs, scopeKey, slug string, regionNames []string, gates map[string]pulumi.Resource, deployPrivateKey, env string, defaults types.ProviderDefaults) error {
+// scopeRes is the scope's resource set. regionalRes and globalRes are the regional
+// and global resource sets themselves — the two halves of the caller universe the
+// allow-list expands over, passed independently of which scope is rendering (for a
+// global scope, scopeRes IS globalRes, so scopeRes cannot stand in for the regional
+// members). globalRes doubles as the source of the cross-scope targets a regional
+// mesh reaches over the internet. computeOut is the full region-keyed compute output
+// map — the scope's own outputs supply same-scope private IPs and this host's listen
+// address, and computeOut[global] supplies a cross-scope target's public IP. scopeKey
+// is the scope's output-map key (a region name or globalScope); regionNames is every
+// deploying region (for the global-callee allow-list expansion).
+func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, regionalRes, globalRes types.Resources, computeOut map[string]map[string]types.ComputeOutputs, scopeKey, slug string, regionNames []string, gates map[string]pulumi.Resource, deployPrivateKey, env string, defaults types.ProviderDefaults) error {
 	isGlobal := scopeKey == globalScope
 	// The mesh scope is the region name, or the literal ScopeGlobal for the global
 	// slice — the segment in the leaf SNI and the caller identity.
@@ -245,13 +294,25 @@ func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, g
 
 	scopeCanonical := naming.CanonicalComputeKeys(scopeRes.Compute)
 	globalCanonical := naming.CanonicalComputeKeys(globalRes.Compute)
-	regionalMesh := meshMembers(scopeRes)
-	globalMesh := meshMembers(globalRes)
 
+	// An authored caller that expands to no identity would be silently missing from the
+	// rendered allow-list and 403 at the callee. Validation has already resolved every
+	// entry to a mesh member in a permitted direction, so this can only mean the renderer
+	// holds the wrong membership sets — fail the deploy loudly instead of under-admitting.
+	universe := newMeshCallerUniverse(regionalRes, globalRes)
+	var dropErrs []string
 	allowedFor := func(svc types.ServiceSpec) []string {
-		return expandAllowedCallers(svc.Mesh.AllowedServices, meshScope, regionNames, regionalMesh, globalMesh)
+		callers, dropped := universe.allowedFor(svc, meshScope, regionNames)
+		for _, name := range dropped {
+			dropErrs = append(dropErrs, fmt.Sprintf("service %q (scope %s): mesh.allowed_services caller %q expands to no mesh identity", svc.Name, meshScope, name))
+		}
+		return callers
 	}
 	inputsByHost := meshInputsByHost(scopeRes, scopeCanonical, meshScope, allowedFor)
+	if len(dropErrs) > 0 {
+		sort.Strings(dropErrs)
+		return fmt.Errorf("mesh allow-list expansion dropped callers:\n  %s", strings.Join(dropErrs, "\n  "))
+	}
 	if len(inputsByHost) == 0 {
 		return nil
 	}
