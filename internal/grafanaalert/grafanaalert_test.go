@@ -68,6 +68,35 @@ func TestBuiltInsGateDatabase(t *testing.T) {
 	assert.Equal(t, NoDataOK, wm["Host CPU Saturated"].Rule.NoDataState)
 }
 
+// Postgres built-ins must aggregate by cluster identity, not by host: a host can run
+// several clusters, and grouping by `instance` sums their backends while dividing by one
+// cluster's max_connections. The grouping must match the Database dashboard's.
+func TestBuiltInsPostgresGroupByCluster(t *testing.T) {
+	byName := map[string]Alert{}
+	for _, a := range BuiltIns("prd", true) {
+		byName[a.Rule.Name] = a
+	}
+
+	conns := byName["Postgres Connections High"]
+	require.NotEmpty(t, conns.Rule.Name)
+	assert.Contains(t, conns.Rule.Data[0].Model, `sum by (db_cluster_name) (postgresql_backends`)
+	assert.Contains(t, conns.Rule.Data[0].Model, `max by (db_cluster_name) (postgresql_connection_max`)
+	assert.Contains(t, conns.Rule.Annotations["summary"], "{{ $labels.db_cluster_name }}")
+
+	roll := byName["Postgres High Rollback Ratio"]
+	require.NotEmpty(t, roll.Rule.Name)
+	assert.Contains(t, roll.Rule.Data[0].Model, `sum by (db_cluster_name) (rate(postgresql_rollbacks_total`)
+	assert.Contains(t, roll.Rule.Data[0].Model, `sum by (db_cluster_name) (rate(postgresql_commits_total`)
+	assert.Contains(t, roll.Rule.Annotations["summary"], "{{ $labels.db_cluster_name }}")
+
+	// No Postgres built-in may group or label by host.
+	for _, name := range []string{"Postgres Connections High", "Postgres High Rollback Ratio", "Postgres Metrics Missing"} {
+		a := byName[name]
+		assert.NotContains(t, a.Rule.Data[0].Model, "by (instance)", name)
+		assert.NotContains(t, a.Rule.Annotations["summary"], "$labels.instance", name)
+	}
+}
+
 func TestBuiltInMathNode(t *testing.T) {
 	a := BuiltIns("prd", false)[0] // Host CPU Saturated, "> 90"
 	// The condition node is a math expression over the reduced series.

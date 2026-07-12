@@ -56,16 +56,20 @@ func BuiltIns(env string, includeDatabase bool) []Alert {
 	}
 
 	if includeDatabase {
+		// Postgres series are keyed by cluster identity, not by host: one host can run
+		// several clusters, so grouping by `instance` would sum backends across clusters
+		// and divide by a single cluster's max_connections. Group by db_cluster_name —
+		// the same label the Database dashboard groups by (ADR-0038 slice 4).
 		alerts = append(alerts,
 			b("Postgres Connections High",
-				fmt.Sprintf(`100 * sum by (instance) (postgresql_backends{%s}) / clamp_min(max by (instance) (postgresql_connection_max{%s}), 1)`, e, e),
+				fmt.Sprintf(`100 * sum by (db_cluster_name) (postgresql_backends{%s}) / clamp_min(max by (db_cluster_name) (postgresql_connection_max{%s}), 1)`, e, e),
 				"> 80", "10m", SeverityWarning,
-				"Postgres {{ $labels.instance }} connection usage above 80% ({{ $value }}%).", NoDataOK),
+				"Postgres {{ $labels.db_cluster_name }} connection usage above 80% ({{ $value }}%).", NoDataOK),
 
 			b("Postgres High Rollback Ratio",
-				fmt.Sprintf(`100 * sum by (instance) (rate(postgresql_rollbacks_total{%s}[5m])) / clamp_min(sum by (instance) (rate(postgresql_commits_total{%s}[5m]) + rate(postgresql_rollbacks_total{%s}[5m])), 1)`, e, e, e),
+				fmt.Sprintf(`100 * sum by (db_cluster_name) (rate(postgresql_rollbacks_total{%s}[5m])) / clamp_min(sum by (db_cluster_name) (rate(postgresql_commits_total{%s}[5m]) + rate(postgresql_rollbacks_total{%s}[5m])), 1)`, e, e, e),
 				"> 25", "15m", SeverityWarning,
-				"Postgres {{ $labels.instance }} rollback ratio above 25% ({{ $value }}%).", NoDataOK),
+				"Postgres {{ $labels.db_cluster_name }} rollback ratio above 25% ({{ $value }}%).", NoDataOK),
 
 			b("Postgres Metrics Missing",
 				fmt.Sprintf(`count(postgresql_backends{%s})`, e),
