@@ -261,6 +261,20 @@ func TestValidateResourcesIngressAppOK(t *testing.T) {
 	assert.NoError(t, err, "regional and global ingress/app referencing same-scope hosts should validate cleanly")
 }
 
+// TestValidateResourcesForwardOn80WithApp: an ingress host that terminates TLS
+// only because it serves an APP (no tls-termination route anywhere) still owns
+// :80 — nginx renders the ACME HTTP-01/redirect server there. A forward on :80
+// on that ingress is a stream bind on the same socket, so nginx would refuse to
+// start; validation must reject it.
+func TestValidateResourcesForwardOn80WithApp(t *testing.T) {
+	var err error
+	out := captureStdout(t, func() {
+		err = ValidateResources("forward-80-app", testdataDir, types.ProviderDefaults{})
+	})
+	require.Error(t, err, "a forward on :80 on a host serving an app should fail validation")
+	assert.Contains(t, out, "ACME owns :80")
+}
+
 // TestValidateResourcesAppBadIngress: an app whose ingress: foreign key names no
 // ingress resource in its scope fails validation (the same-scope FK rule).
 func TestValidateResourcesAppBadIngress(t *testing.T) {
@@ -359,6 +373,70 @@ func TestCheckCrossScopeNamesAllowsDistinctNames(t *testing.T) {
 	assert.False(t, r.failed)
 }
 
+// TestCheckNetworkSubnetNamesUniqueAcrossNetworks: a subnet's provider resource
+// name derives from the subnet name alone, so two networks of one scope reusing
+// a subnet name collide on one URN at deploy. Validation rejects it — including
+// the same name declared twice by one network — while distinct names pass.
+func TestCheckNetworkSubnetNamesUniqueAcrossNetworks(t *testing.T) {
+	ctx := baseCtx()
+	corenet := types.NetworkSpec{
+		Name: "corenet", Container: "core", Provider: "hetzner", CIDR: "10.0.0.0/16",
+		Subnets: []types.SubnetSpec{{Name: "app", CIDR: "10.0.1.0/24"}},
+	}
+	edgenet := types.NetworkSpec{
+		Name: "edgenet", Container: "edge", Provider: "hetzner", CIDR: "10.1.0.0/16",
+		Subnets: []types.SubnetSpec{{Name: "app", CIDR: "10.1.1.0/24"}},
+	}
+	ctx.networks = map[string]types.NetworkSpec{"corenet": corenet, "edgenet": edgenet}
+
+	errs, _ := checkNetwork(edgenet, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), `"app" is also declared by network "corenet"`)
+
+	// The collision is reported ONCE per colliding subnet, even when the other
+	// network declares the name more than once.
+	corenet.Subnets = append(corenet.Subnets, types.SubnetSpec{Name: "app", CIDR: "10.0.2.0/24"})
+	ctx.networks["corenet"] = corenet
+	errs, _ = checkNetwork(edgenet, ctx)
+	assert.Len(t, errs, 1)
+	corenet.Subnets = corenet.Subnets[:1]
+	ctx.networks["corenet"] = corenet
+
+	// A distinct name in the second network passes.
+	edgenet.Subnets = []types.SubnetSpec{{Name: "edge-app", CIDR: "10.1.1.0/24"}}
+	ctx.networks["edgenet"] = edgenet
+	errs, _ = checkNetwork(edgenet, ctx)
+	assert.Empty(t, errs)
+
+	// A name repeated within one network is rejected too.
+	edgenet.Subnets = append(edgenet.Subnets, types.SubnetSpec{Name: "edge-app", CIDR: "10.1.2.0/24"})
+	ctx.networks["edgenet"] = edgenet
+	errs, _ = checkNetwork(edgenet, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "declared twice by this network")
+}
+
+// TestCheckNetworkContainerCIDRAgreement: a container is realized as ONE cloud
+// network, with the CIDR of the first spec that reached it — so two networks
+// sharing a container must agree on the CIDR, or the later spec's subnets land
+// out of range.
+func TestCheckNetworkContainerCIDRAgreement(t *testing.T) {
+	ctx := baseCtx()
+	first := types.NetworkSpec{Name: "first", Container: "edge", Provider: "hetzner", CIDR: "10.0.0.0/16"}
+	second := types.NetworkSpec{Name: "second", Container: "edge", Provider: "hetzner", CIDR: "10.1.0.0/16"}
+	ctx.networks = map[string]types.NetworkSpec{"first": first, "second": second}
+
+	errs, _ := checkNetwork(second, ctx)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), `both share container "edge"`)
+
+	// Agreeing CIDRs pass.
+	second.CIDR = "10.0.0.0/16"
+	ctx.networks["second"] = second
+	errs, _ = checkNetwork(second, ctx)
+	assert.Empty(t, errs)
+}
+
 // TestCheckComputeGlobalNetworkRejected: a compute attaching to a global network
 // is recognized but rejected (cross-region networking not supported yet).
 func TestCheckComputeGlobalNetworkRejected(t *testing.T) {
@@ -447,6 +525,24 @@ func TestCheckIngressUnknownHostRejected(t *testing.T) {
 	errs, _ := checkIngress(types.IngressSpec{Name: "web", Host: "ghost"}, ingressCtx())
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "does not resolve to a compute")
+}
+
+// TestCheckIngressHealthPortCollidesWithTLSBind: an app (or the scope gateway) on
+// the ingress host binds :443 without a route listen entry, so the public health
+// port must not be 443 — the health servers are plain HTTP and their port carries
+// the listener's default_server, so the collision would both double-bind the socket
+// and hand :443's default server to a plain-HTTP 404.
+func TestCheckIngressHealthPortCollidesWithTLSBind(t *testing.T) {
+	ctx := ingressCtx()
+	ctx.nginxBindsByHost = map[string]map[int]string{"bridge-01": {443: "app TLS listener"}}
+	errs, _ := checkIngress(types.IngressSpec{Name: "web", Host: "bridge", HealthProbesPort: 443}, ctx)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "already bound on this ingress host by nginx (app TLS listener)")
+
+	// The health listener's OWN registered bind is not a collision with itself.
+	ctx.nginxBindsByHost = map[string]map[int]string{"bridge-01": {80: "ACME HTTP-01 challenge/redirect", 81: bindReasonHealth}}
+	errs, _ = checkIngress(types.IngressSpec{Name: "web", Host: "bridge", HealthProbesPort: 81}, ctx)
+	assert.Empty(t, errs)
 }
 
 // TestCheckAppGlobalIngressRejected: an app referencing a global ingress is
@@ -634,6 +730,35 @@ func TestCheckRegionsFile(t *testing.T) {
 				Dns: &regions.DnsAuthority{Provider: "cloudflare"}},
 		}, nil, "regions.yaml")
 		assert.True(t, r.failed)
+	})
+
+	// The global slice's DNS authority is the placement region's, but its providers
+	// come from the global block: the credentials must be in BOTH, or the global DNS
+	// provider is registered with an empty token and every global record fails at apply.
+	t.Run("global providers missing the dns authority's provider", func(t *testing.T) {
+		r := &reporter{}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: map[string]map[string]any{
+				"hetzner":    {"apiToken": "t"},
+				"cloudflare": {"apiToken": "t"},
+			}, Dns: &regions.DnsAuthority{Provider: "cloudflare", Zone: "z1"}},
+		}, &regions.Global{PlacementRegion: "us-east-1", Providers: map[string]map[string]any{
+			"hetzner": {"apiToken": "t"},
+		}}, "regions.yaml")
+		assert.True(t, r.failed)
+	})
+
+	t.Run("global providers carry the dns authority's provider", func(t *testing.T) {
+		r := &reporter{}
+		full := map[string]map[string]any{
+			"hetzner":    {"apiToken": "t"},
+			"cloudflare": {"apiToken": "t"},
+		}
+		checkRegionsFile(r, regions.Table{
+			"us-east-1": {Slug: "use1", Providers: full,
+				Dns: &regions.DnsAuthority{Provider: "cloudflare", Zone: "z1"}},
+		}, &regions.Global{PlacementRegion: "us-east-1", Providers: full}, "regions.yaml")
+		assert.False(t, r.failed)
 	})
 }
 
@@ -1645,4 +1770,66 @@ func TestCheckServiceUser(t *testing.T) {
 	errs, _ := checkService(types.ServiceSpec{Host: "bridge", Type: "raw"}, ctx)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "must declare the no-login user")
+}
+
+// A deploy_user name lands unquoted in file paths and a sudoers rule inside the
+// root-run first-boot script, so anything outside the login-name charset is an
+// author error, not something to escape and boot with.
+func TestCheckComputeDeployUserCharset(t *testing.T) {
+	ctx := baseCtx()
+	ctx.sizeTable = sizes.DefaultTable()
+	ctx.networks = map[string]types.NetworkSpec{"corenet": {Name: "corenet"}}
+	base := types.ComputeSpec{Provider: "hetzner", Network: "corenet", Size: "SMALL", Kind: "vm"}
+
+	ok := base
+	ok.DeployUser = &types.DeployUserSpec{Name: "deploy"}
+	errs, _ := checkCompute(ok, ctx)
+	assert.Empty(t, errs)
+
+	for _, name := range []string{`deploy'; touch /pwn; '`, "de ploy", "Deploy", "1deploy", "deploy\nroot"} {
+		bad := base
+		bad.DeployUser = &types.DeployUserSpec{Name: name}
+		errs, _ := checkCompute(bad, ctx)
+		require.NotEmpty(t, errs, "deploy_user %q must be rejected", name)
+		assert.Contains(t, strings.Join(errs, "\n"), "deploy_user:")
+	}
+}
+
+// A vanity FQDN on another domain is not a record on that domain: records are
+// created zone-relative inside the DNS authority's zone, so it deploys as
+// "<fqdn>.<base_domain>" — a wrong hostname whose ACME cert can never issue.
+func TestCheckVanityZone(t *testing.T) {
+	svc := func(vanity ...string) types.Resources {
+		return types.Resources{Service: []types.ServiceSpec{{
+			Name:   "api",
+			Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: vanity}},
+		}}}
+	}
+
+	cases := []struct {
+		name   string
+		vanity []string
+		fail   bool
+	}{
+		{"bare token is derived in-zone", []string{"api"}, false},
+		{"literal under base_domain", []string{"account.example.com"}, false},
+		{"the apex itself", []string{"example.com"}, false},
+		{"base_domain template", []string{"account.{ENV}.{BASE_DOMAIN}"}, false},
+		{"out-of-zone literal", []string{"shop.other.net"}, true},
+		{"look-alike suffix", []string{"shop.notexample.com"}, true},
+		{"one bad among good", []string{"account.example.com", "shop.other.net"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := &reporter{}
+			checkVanityZone(r, svc(c.vanity...), "regional", "example.com")
+			assert.Equal(t, c.fail, r.failed)
+		})
+	}
+
+	t.Run("unresolved base_domain is not checked", func(t *testing.T) {
+		r := &reporter{}
+		checkVanityZone(r, svc("shop.other.net"), "regional", "${BASE_DOMAIN}")
+		assert.False(t, r.failed)
+	})
 }

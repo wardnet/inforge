@@ -13,7 +13,6 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
-	"github.com/wardnet/inforge/internal/types"
 	"github.com/wardnet/inforge/program"
 )
 
@@ -38,16 +37,25 @@ func upsertStack(ctx context.Context, stackName string, projCfg projectConfig) (
 		pushFn = push
 	}
 
-	proj := workspace.Project{
+	s, err := auto.UpsertStackInlineSource(ctx, stackName, projCfg.Name, program.Run,
+		auto.Project(inlineProject(projCfg, backendURL)),
+		auto.WorkDir("."),
+	)
+	return s, pushFn, err
+}
+
+// inlineProject is the Pulumi project settings every inline-source workspace in
+// this CLI runs under (Go runtime, project name, state backend). It is the one
+// definition shared by upsertStack, createStack, selectStack, and
+// ephemeralWorkspace, so the four entry points can never drift into configuring
+// different projects against the same state. backendURL is passed in rather than
+// re-derived because upsertStack rewrites it for the git-branch backend.
+func inlineProject(projCfg projectConfig, backendURL string) workspace.Project {
+	return workspace.Project{
 		Name:    tokens.PackageName(projCfg.Name),
 		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
 		Backend: &workspace.ProjectBackend{URL: backendURL},
 	}
-	s, err := auto.UpsertStackInlineSource(ctx, stackName, projCfg.Name, program.Run,
-		auto.Project(proj),
-		auto.WorkDir("."),
-	)
-	return s, pushFn, err
 }
 
 // setupGitBranchBackend fetches the remote state branch and extracts it into
@@ -129,43 +137,71 @@ func requireObjectBackend(projCfg projectConfig) error {
 	}
 }
 
-// setProviderDefaults injects the project-level provider defaults into stack config
-// so program.Run can resolve effective providers without the project file. It is a
-// no-op when no defaults are configured, matching applyStackConfig's empty-guard.
-func setProviderDefaults(ctx context.Context, s auto.Stack, d types.ProviderDefaults) error {
-	if d.Compute == "" && len(d.Database) == 0 {
-		return nil
-	}
-	b, err := json.Marshal(d)
+// The stack-config keys the CLI derives for program.Run — the resources tree the
+// root --dir selects, plus the inforge.yaml values program.Run needs without the
+// project file (ADR-0036's backup destination, the provider defaults).
+const (
+	cfgKeyDir              = "dir"
+	cfgKeyProviderDefaults = "provider_defaults"
+	cfgKeyBackupsBucket    = "backups_bucket"
+	cfgKeyBackupsEndpoint  = "backups_endpoint"
+)
+
+// configSetter is the slice of auto.Stack setDerivedStackConfig uses. auto.Stack
+// satisfies it (pointer receiver — call sites pass &s); the interface keeps the
+// writer exercisable without a Pulumi workspace.
+type configSetter interface {
+	SetAllConfig(ctx context.Context, cfg auto.ConfigMap) error
+}
+
+// setDerivedStackConfig writes every stack-config key the CLI derives for program.Run:
+//
+//   - dir — the resources tree (root --dir). Without it the flag is inert: the program
+//     would always load ./resources while the CLI-side steps (the mesh baseline) read
+//     the requested tree.
+//   - provider_defaults — the project-level defaults, so the program can resolve
+//     effective providers without the project file.
+//   - backups_bucket / backups_endpoint — the Postgres backup destination (ADR-0036),
+//     so the program can render each cluster host's backup timer. The endpoint is
+//     resolved CLI-side so a missing CLOUDFLARE_ACCOUNT_ID fails the command up front
+//     rather than mid-apply on the host.
+//
+// Every key is ALWAYS written, even when unconfigured (the marshalled zero value /
+// the empty string): stack config PERSISTS across runs, so dropping `providers:` or
+// `backups:` from inforge.yaml — or running without --dir after a run that used it —
+// must CLEAR the stale value instead of silently re-applying it. program.Run decodes
+// each zero value back to "not configured".
+//
+// One SetAllConfig (a single `pulumi config set-all`) rather than a SetConfig per key:
+// each SetConfig is its own workspace round-trip, and a failure part-way through would
+// leave the stack with some derived keys updated and others stale.
+//
+// Call it AFTER applyStackConfig, so these derived values win over a same-named key in
+// a stack-config file (an ephemeral stack must read exactly the tree its `up` verified,
+// not one its SOURCE env's stack config named).
+func setDerivedStackConfig(ctx context.Context, s configSetter, dir string, projCfg projectConfig) error {
+	defaults, err := json.Marshal(projCfg.Providers)
 	if err != nil {
 		return fmt.Errorf("marshal provider defaults: %w", err)
 	}
-	return s.SetConfig(ctx, "provider_defaults", auto.ConfigValue{Value: string(b)})
-}
 
-// setBackups injects the Postgres backup destination (ADR-0036) into stack config so
-// program.Run can render each cluster host's backup timer without the project file:
-// the bucket name and the resolved R2 endpoint. Resolving the endpoint here (CLI-side)
-// validates CLOUDFLARE_ACCOUNT_ID up front, so a misconfiguration fails the command
-// rather than mid-apply on the host.
-//
-// It ALWAYS writes both keys (empty when unconfigured) rather than no-op'ing on an
-// absent block: stack config persists across runs, so removing the `backups:` block
-// must clear the previously-set values — otherwise program.Run keeps reading a stale
-// bucket and cannot be turned off. program.Run treats an empty bucket as unconfigured.
-func setBackups(ctx context.Context, s auto.Stack, b backupsConfig) error {
 	var bucket, endpoint string
-	if b.configured() {
-		var err error
-		bucket, endpoint, err = b.resolve()
-		if err != nil {
+	if projCfg.Backups.configured() {
+		if bucket, endpoint, err = projCfg.Backups.resolve(); err != nil {
 			return fmt.Errorf("backups: %w", err)
 		}
 	}
-	if err := s.SetConfig(ctx, "backups_bucket", auto.ConfigValue{Value: bucket}); err != nil {
-		return err
+
+	if dir == "" {
+		dir = defaultResourcesDir
 	}
-	return s.SetConfig(ctx, "backups_endpoint", auto.ConfigValue{Value: endpoint})
+
+	return s.SetAllConfig(ctx, auto.ConfigMap{
+		cfgKeyDir:              {Value: dir},
+		cfgKeyProviderDefaults: {Value: string(defaults)},
+		cfgKeyBackupsBucket:    {Value: bucket},
+		cfgKeyBackupsEndpoint:  {Value: endpoint},
+	})
 }
 
 // ephemeralWorkspace builds a Pulumi LocalWorkspace bound to the project's
@@ -178,13 +214,8 @@ func ephemeralWorkspace(ctx context.Context, projCfg projectConfig) (auto.Worksp
 	if err != nil {
 		return nil, err
 	}
-	proj := workspace.Project{
-		Name:    tokens.PackageName(projCfg.Name),
-		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
-		Backend: &workspace.ProjectBackend{URL: backendURL},
-	}
 	return auto.NewLocalWorkspace(ctx,
-		auto.Project(proj),
+		auto.Project(inlineProject(projCfg, backendURL)),
 		auto.Program(program.Run),
 		auto.WorkDir("."),
 	)
@@ -204,13 +235,8 @@ func createStack(ctx context.Context, stackName string, projCfg projectConfig) (
 	if err != nil {
 		return auto.Stack{}, err
 	}
-	proj := workspace.Project{
-		Name:    tokens.PackageName(projCfg.Name),
-		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
-		Backend: &workspace.ProjectBackend{URL: backendURL},
-	}
 	s, err := auto.NewStackInlineSource(ctx, stackName, projCfg.Name, program.Run,
-		auto.Project(proj),
+		auto.Project(inlineProject(projCfg, backendURL)),
 		auto.WorkDir("."),
 	)
 	if err != nil {
@@ -218,6 +244,30 @@ func createStack(ctx context.Context, stackName string, projCfg projectConfig) (
 			return auto.Stack{}, fmt.Errorf("a stack named %q already exists — `up` creates a NEW ephemeral env and will not adopt an existing stack (a permanent env or a live ephemeral one); pick a different --slug, or run `inforge ephemeral down %s` first", stackName, stackName)
 		}
 		return auto.Stack{}, fmt.Errorf("create ephemeral stack %q: %w", stackName, err)
+	}
+	return s, nil
+}
+
+// selectStack SELECTS an existing Pulumi stack, failing if it does not exist.
+// The ephemeral teardown paths must never create a stack: an upsert on a typo'd
+// slug would mint an empty stack that no `up` owns and no `reap` can classify
+// (it carries neither ephemeral nor expires_at), permanently burning that slug —
+// createStack would then refuse it forever. Ephemeral commands require an
+// object-store backend, so upsertStack's git-branch state path is unreachable here.
+func selectStack(ctx context.Context, stackName string, projCfg projectConfig) (auto.Stack, error) {
+	backendURL, err := projCfg.backendURL()
+	if err != nil {
+		return auto.Stack{}, err
+	}
+	s, err := auto.SelectStackInlineSource(ctx, stackName, projCfg.Name, program.Run,
+		auto.Project(inlineProject(projCfg, backendURL)),
+		auto.WorkDir("."),
+	)
+	if err != nil {
+		if auto.IsSelectStack404Error(err) {
+			return auto.Stack{}, fmt.Errorf("no stack named %q exists — check the slug (`inforge ephemeral reap --dry-run` lists the live ephemeral envs)", stackName)
+		}
+		return auto.Stack{}, fmt.Errorf("select stack %q: %w", stackName, err)
 	}
 	return s, nil
 }

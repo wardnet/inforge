@@ -1,8 +1,8 @@
 # subnet CIDR is outside the network CIDR -> FAIL.
 name: private
-container: ingress
+container: private
 provider: hetzner
 cidr: 10.9.0.0/24
 subnets:
-  - name: main
+  - name: private
     cidr: 10.8.0.0/24

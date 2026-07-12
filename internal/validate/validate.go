@@ -19,6 +19,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	"github.com/wardnet/inforge/internal/agent"
+	"github.com/wardnet/inforge/internal/cloudinit"
 	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/meshcert"
@@ -220,6 +221,11 @@ func globalNeedsDNS(g types.Resources) bool {
 
 // regionContext holds the foreign-key targets and tables a region's semantic
 // checks resolve against.
+// bindReasonHealth is the nginxBindsByHost reason for the public health listener —
+// the one implicit nginx bind checkIngress must NOT read as a collision with the
+// health port it is validating (it is that port's own registration).
+const bindReasonHealth = "public health listener"
+
 type regionContext struct {
 	available        map[string]bool
 	sizeTable        sizes.Table
@@ -300,7 +306,8 @@ type regionContext struct {
 	// (route target, backend health, exposed_ports, mesh.port) that lands on one of
 	// these fails at runtime with EADDRINUSE, so nginxBindErr rejects it at validate
 	// time. Kept separate from portUsersByHost so the ingress health-port check
-	// (checkIngress) does not self-collide against its own registered bind.
+	// (checkIngress) can tell its own registered bind (bindReasonHealth) from a
+	// foreign one and not self-collide.
 	nginxBindsByHost map[string]map[int]string
 	// meshHosts marks each canonical compute specKey that runs a mesh proxy — every
 	// host with >=1 service (pki: is required on every service) plus the gateway
@@ -338,9 +345,11 @@ type regionContext struct {
 	// only with another service's udp exposed port. TCP exposed ports share
 	// targetUsersByHost with route targets and health ports.
 	udpExposedUsersByHost map[string]map[int][]string
-	// tlsTermIngressByHost marks a canonical INGRESS host specKey that has at least
-	// one tls-termination route across the services it fronts — so a forward on :80
-	// (which ACME needs) can be rejected.
+	// tlsTermIngressByHost marks a canonical INGRESS host specKey whose edge nginx
+	// terminates TLS — a tls-termination route across the services it fronts, an app
+	// it serves, or the scope gateway co-hosted on it. Every one of those provisions
+	// an ACME cert, so nginx binds :80 there for HTTP-01 (+ the redirect) and a
+	// forward on :80 (a stream bind on the same socket) can be rejected.
 	tlsTermIngressByHost map[string]bool
 	// gatewayScopeCount is the number of gateway resources declared in this scope.
 	// A gateway is a scope singleton (≤1 per scope): it is the scope's one public
@@ -566,6 +575,16 @@ func ValidateResources(env, dir string, defaults types.ProviderDefaults, opts ..
 		checkSecretStoreEntries(r, encStore, regionalRes, globalRes, secretstore.Path(dir, env))
 	}
 
+	// Every derived DNS record is created INSIDE the authority's zone (the provider
+	// is handed a zone-relative name), so a literal vanity FQDN on another domain is
+	// not a record on that domain — it lands as "<that.fqdn>.<base_domain>". Reject
+	// it here; the deploy would otherwise create a wrong hostname whose ACME cert can
+	// never issue.
+	checkVanityZone(r, globalRes, globalBase, vars.BaseDomain)
+	if regionalLoadErr == nil {
+		checkVanityZone(r, regionalRes, regionalBase, vars.BaseDomain)
+	}
+
 	// Mesh PKI references: a global service's leaf comes from the global
 	// intermediate; a regional service's leaf, from each region's intermediate.
 	checkPKI(r, globalBase, regionalBase, regionTable, pkiStore)
@@ -681,6 +700,48 @@ func checkCrossScopeNames(r *reporter, regional, global types.Resources, regiona
 				"app name %q is declared in both the global scope and the regional scope (%s) — "+
 					"app names must be unique across the whole environment for the same reason as service names",
 				a.Name, filepath.Join(regionalBase, "app", a.Name)))
+		}
+	}
+}
+
+// vanityEnv/vanitySlug are the sentinel {ENV}/{REGION_SLUG} expansions used to check
+// a vanity's zone. The resource set is shared by every region, and the placeholders
+// can only move the FQDN's tail out of the zone if a vanity ENDS in one — which no
+// zone-relative name does — so any label does, and a sentinel keeps the check
+// env/region-independent.
+const (
+	vanityEnv  = "env"
+	vanitySlug = "slug"
+)
+
+// checkVanityZone rejects a route vanity FQDN that is not under base_domain. Records
+// are created zone-relative in the DNS authority's zone (naming.ZoneRelative strips
+// the base domain and hands the rest to the provider), so an out-of-zone literal like
+// "shop.example.com" is NOT created on example.com — it becomes the record
+// "shop.example.com" inside the base_domain zone, i.e. the host
+// shop.example.com.<base_domain>, whose ACME cert can never issue. Expansion goes
+// through naming.ExpandVanity — the same derivation the realization path uses — so a
+// bare token (derived under base_domain) and a {BASE_DOMAIN} template are in-zone by
+// construction, and the two can never disagree on what a vanity resolves to.
+func checkVanityZone(r *reporter, res types.Resources, base, baseDomain string) {
+	// base_domain is read literally at validate time; an unresolved ${VAR} ref carries
+	// no zone to compare against, so there is nothing to check.
+	if baseDomain == "" || strings.Contains(baseDomain, "${") {
+		return
+	}
+	for _, s := range res.Service {
+		var errs []string
+		for _, rt := range s.Routes {
+			for _, v := range rt.Vanity {
+				fqdn := naming.ExpandVanity(v, vanityEnv, vanitySlug, baseDomain)
+				if naming.InZone(fqdn, baseDomain) {
+					continue
+				}
+				errs = append(errs, fmt.Sprintf("routes: vanity %q resolves to %q, which is not under base_domain %q — a record is created inside the DNS authority's zone, so an out-of-zone name would deploy as %q and its ACME cert could never issue", v, fqdn, baseDomain, fqdn+"."+baseDomain))
+			}
+		}
+		if len(errs) > 0 {
+			r.fail(filepath.Join(base, "service", s.Name), errs...)
 		}
 	}
 }
@@ -1068,27 +1129,29 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			ctx.nginxBindsByHost[host][port] = reason
 		}
 	}
-	// A tls-termination route provisions an ACME cert, so nginx binds :80 (HTTP-01
-	// challenge + redirect) on its ingress host. Its :443 listen is a route listen,
-	// already in portUsersByHost.
-	for host := range ctx.tlsTermIngressByHost {
-		addNginxBind(host, 80, "ACME HTTP-01 challenge/redirect")
-	}
 	// An app's server block binds :443 and provisions a cert (-> :80) on its ingress's
-	// host, with no route listen entry of its own.
+	// host, with no route listen entry of its own. The host terminates TLS all the
+	// same, so it joins tlsTermIngressByHost — an app-only (routeless) ingress host
+	// still owns :80 for ACME.
 	for _, f := range appFiles {
 		if f.parseErr != nil {
 			continue
 		}
 		if host := ctx.ingressHost[f.spec.Ingress]; host != "" {
+			ctx.tlsTermIngressByHost[host] = true
 			addNginxBind(host, 443, "app TLS listener")
-			addNginxBind(host, 80, "ACME HTTP-01 challenge/redirect")
 		}
 	}
-	// The gateway host binds :443 (daemon edge) + :80 (ACME).
+	// The gateway host binds :443 (daemon edge) and terminates TLS there (-> :80).
 	if ctx.gatewayHostKey != "" {
+		ctx.tlsTermIngressByHost[ctx.gatewayHostKey] = true
 		addNginxBind(ctx.gatewayHostKey, 443, "gateway TLS listener")
-		addNginxBind(ctx.gatewayHostKey, 80, "ACME HTTP-01 challenge/redirect")
+	}
+	// Anything terminating TLS on a host provisions an ACME cert, so nginx binds :80
+	// (HTTP-01 challenge + redirect) there. Its :443 listen is a route listen (already
+	// in portUsersByHost) or the app/gateway bind registered above.
+	for host := range ctx.tlsTermIngressByHost {
+		addNginxBind(host, 80, "ACME HTTP-01 challenge/redirect")
 	}
 	// One pass over services for the two per-service derivations:
 	//   - the public health listener nginx binds where a service surfaces health: an
@@ -1104,9 +1167,9 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 		}
 		if f.spec.HealthProbesPort != 0 {
 			if host, ok := ctx.ingressHost[f.spec.Ingress]; ok && f.spec.Ingress != "" {
-				addNginxBind(host, ctx.ingressHealthPort[f.spec.Ingress], "public health listener")
+				addNginxBind(host, ctx.ingressHealthPort[f.spec.Ingress], bindReasonHealth)
 			} else if f.spec.Ingress == "" && ctx.gatewayServiceTargets[f.spec.Name] {
-				addNginxBind(ctx.gatewayHostKey, ctx.gatewayHealthPort, "public health listener")
+				addNginxBind(ctx.gatewayHostKey, ctx.gatewayHealthPort, bindReasonHealth)
 			}
 		}
 		if f.spec.Pki != "" {
@@ -1333,10 +1396,26 @@ func checkRegionsFile(r *reporter, table regions.Table, global *regions.Global, 
 		if len(global.Providers) == 0 {
 			errs = append(errs, "global: providers block required when global is defined")
 		}
-		if strings.TrimSpace(global.PlacementRegion) == "" {
+		switch {
+		case strings.TrimSpace(global.PlacementRegion) == "":
 			errs = append(errs, "global.placementRegion: required when a global block is present")
-		} else if _, err := table.Slug(global.PlacementRegion); err != nil {
-			errs = append(errs, fmt.Sprintf("global.placementRegion: %q is not a defined region", global.PlacementRegion))
+		default:
+			pr, ok := table[global.PlacementRegion]
+			if !ok {
+				errs = append(errs, fmt.Sprintf("global.placementRegion: %q is not a defined region", global.PlacementRegion))
+				break
+			}
+			// The global slice realizes DNS records against the PLACEMENT REGION's
+			// authority (ADR-0023) but registers its providers from the GLOBAL block, so
+			// the authority's credentials must exist there too — the two halves come from
+			// different blocks. Without them the global DNS provider is built with an empty
+			// token and every global record fails (or, worse, is created against Pulumi's
+			// ambient default provider) mid-apply.
+			if pr.Dns != nil {
+				if p := strings.TrimSpace(pr.Dns.Provider); p != "" && len(global.Providers[p]) == 0 {
+					errs = append(errs, fmt.Sprintf("global.providers: no %q block, but the global slice's DNS authority is placementRegion %q's (provider %q) — the global slice registers its providers from this block, so it must carry that provider's credentials (regions.yaml commonly reuses the region's block with a YAML anchor)", p, global.PlacementRegion, p))
+				}
+			}
 		}
 	}
 	r.report(path, errs, nil)
@@ -1586,6 +1665,12 @@ func resolvedProviderErr(specProvider, class, engine string, ctx regionContext) 
 	return nil
 }
 
+// checkNetwork validates one network: its provider resolves, every subnet CIDR
+// sits inside the network CIDR, every subnet name is unique across the scope's
+// networks (a subnet's provider resource name — and thus its URN — derives from
+// the subnet name alone, so a cross-network reuse collides at deploy), and every
+// network sharing a container agrees on the CIDR (a container is realized as ONE
+// cloud network, with the first spec's CIDR).
 func checkNetwork(s types.NetworkSpec, ctx regionContext) (errs, warns []string) {
 	errs = append(errs, resolvedProviderErr(s.Provider, "network", "", ctx)...)
 
@@ -1593,12 +1678,43 @@ func checkNetwork(s types.NetworkSpec, ctx regionContext) (errs, warns []string)
 	if err != nil {
 		errs = append(errs, err.Error())
 	}
+
+	// One deterministic pass over the scope's OTHER networks builds both
+	// cross-network facts this check needs: which network already claims a subnet
+	// name (first in sorted order wins, so a name claimed twice by one other
+	// network still yields exactly one error here), and whether a network sharing
+	// this one's container disagrees on the CIDR.
+	subnetOwner := map[string]string{}
+	for _, other := range sortedKeys(ctx.networks) {
+		if other == s.Name {
+			continue
+		}
+		o := ctx.networks[other]
+		for _, osub := range o.Subnets {
+			if _, taken := subnetOwner[osub.Name]; !taken {
+				subnetOwner[osub.Name] = other
+			}
+		}
+		if o.Container == s.Container && o.CIDR != s.CIDR {
+			errs = append(errs, fmt.Sprintf("cidr: %q disagrees with network %q's cidr %q; both share container %q, which is realized as one cloud network", s.CIDR, other, o.CIDR, s.Container))
+		}
+	}
+
+	seen := map[string]bool{}
 	for i, sub := range s.Subnets {
 		subnet, serr := parseCIDR(fmt.Sprintf("subnets[%d].cidr", i), sub.CIDR)
 		if serr != nil {
 			errs = append(errs, serr.Error())
 		} else if cidr != nil && !cidrContains(cidr, subnet) {
 			errs = append(errs, fmt.Sprintf("subnets[%d].cidr: %q is not within cidr %q", i, sub.CIDR, s.CIDR))
+		}
+		if seen[sub.Name] {
+			errs = append(errs, fmt.Sprintf("subnets[%d].name: %q is declared twice by this network; subnet names must be unique within a scope", i, sub.Name))
+			continue
+		}
+		seen[sub.Name] = true
+		if owner, taken := subnetOwner[sub.Name]; taken {
+			errs = append(errs, fmt.Sprintf("subnets[%d].name: %q is also declared by network %q; subnet names must be unique across the networks of a scope", i, sub.Name, owner))
 		}
 	}
 	return errs, warns
@@ -1640,6 +1756,15 @@ func checkCompute(s types.ComputeSpec, ctx regionContext) (errs, warns []string)
 	if s.CloudInit != "" {
 		if _, err := os.Stat(s.CloudInit); err != nil {
 			errs = append(errs, fmt.Sprintf("cloud_init: file not found: %s", s.CloudInit))
+		}
+	}
+	// The deploy user's name is interpolated into the root-run first-boot script
+	// (useradd, /home/<name>, /etc/sudoers.d/<name>), so it must be a login name and
+	// nothing else — a name carrying shell metacharacters is rejected here rather
+	// than merely escaped at render time.
+	if s.DeployUser != nil {
+		if err := (cloudinit.Vars{DeployUser: s.DeployUser.Name}).Validate(); err != nil {
+			errs = append(errs, "deploy_user: "+err.Error())
 		}
 	}
 	return errs, warns
@@ -1924,9 +2049,10 @@ func checkService(s types.ServiceSpec, ctx regionContext) (errs, warns []string)
 					errs = append(errs, fmt.Sprintf("routes: forward on listen %d is single-service-exclusive (one passthrough per port), but that port on ingress %q already has a forward from %s", rt.Listen, s.Ingress, who))
 				}
 				// ACME owns :80 on the ingress host for HTTP-01 challenges, so a
-				// forward there collides with any tls-termination on the same ingress.
+				// forward there collides with anything terminating TLS on that host —
+				// a tls-termination route, an app, or the scope gateway.
 				if rt.Listen == 80 && ctx.tlsTermIngressByHost[ingHost] {
-					errs = append(errs, fmt.Sprintf("routes: forward on :80 conflicts with a tls-termination on ingress %q (ACME owns :80 for HTTP-01 challenges)", s.Ingress))
+					errs = append(errs, fmt.Sprintf("routes: forward on :80 conflicts with TLS termination (a tls-termination route, an app, or the gateway) on ingress %q's host (ACME owns :80 for HTTP-01 challenges)", s.Ingress))
 				}
 			}
 		}
@@ -2209,9 +2335,10 @@ func checkIngress(s types.IngressSpec, ctx regionContext) (errs, warns []string)
 	}
 
 	// The public health port nginx exposes (health_probes_port, default 81) must not
-	// collide with anything else nginx binds on this host: :80 (ACME HTTP-01) or any
-	// service route's public listen port. The backend health port is validated on the
-	// service (checkService), since that is where the service binds it.
+	// collide with anything else nginx binds on this host: :80 (ACME HTTP-01), the
+	// :443 an app or the scope gateway terminates TLS on, or any service route's
+	// public listen port. The backend health port is validated on the service
+	// (checkService), since that is where the service binds it.
 	healthPort := s.EffectiveHealthProbesPort()
 	if healthPort == 80 {
 		errs = append(errs, "health_probes_port: must not be 80 (ACME HTTP-01 owns :80 on the ingress host)")
@@ -2234,6 +2361,15 @@ func checkIngress(s types.IngressSpec, ctx regionContext) (errs, warns []string)
 	if hostKey != "" {
 		if users := ctx.portUsersByHost[hostKey][healthPort]; len(users) > 0 {
 			errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with a route listen port on this ingress host (used by service(s) %s); pick a distinct health port", healthPort, strings.Join(users, ", ")))
+		}
+		// The other public ports this host's nginx binds implicitly — the :443 an app
+		// or the scope gateway terminates TLS on (nginxBindsByHost; a route listen is
+		// covered above). The health servers are plain HTTP, and their port carries the
+		// listener's default_server, so sharing :443 with a TLS server block would both
+		// double-bind the socket and hand the port's default server to a plain-HTTP 404.
+		// The health listener's own bind on this port is not a collision with itself.
+		if reason, ok := ctx.nginxBindsByHost[hostKey][healthPort]; ok && reason != bindReasonHealth && healthPort != 80 {
+			errs = append(errs, fmt.Sprintf("health_probes_port: %d is already bound on this ingress host by nginx (%s); pick a distinct health port", healthPort, reason))
 		}
 	}
 	return errs, warns

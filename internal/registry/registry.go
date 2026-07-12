@@ -47,6 +47,7 @@ type registry struct {
 
 	hetznerProviderOnce sync.Once
 	hetznerProvider     *hcloud.Provider
+	hetznerProviderErr  error
 
 	hetznerNetOnce sync.Once
 	hetznerNet     *hetzner.HetznerNetwork
@@ -62,6 +63,7 @@ type registry struct {
 
 	cfProviderOnce sync.Once
 	cfProvider     *cf.Provider
+	cfProviderErr  error
 
 	cfDnsOnce sync.Once
 	cfDns     *cfprovider.CloudflareDns
@@ -101,8 +103,13 @@ func NewSSHKeyCache() *hetzner.SSHKeyCache {
 }
 
 // hetznerProv lazily creates the shared hcloud.Provider for the Hetzner
-// provider implementations. Subsequent calls return the cached instance.
-func (r *registry) hetznerProv() *hcloud.Provider {
+// provider implementations. Subsequent calls return the cached instance. A
+// registration failure is cached and returned to every caller: a nil provider
+// would silently degrade every resource built with it onto Pulumi's ambient
+// default provider (a different, unconfigured account), so the run must fail.
+// A nil ctx (a registry built outside a Pulumi program, e.g. in tests) yields a
+// nil provider and no error — nothing is registered.
+func (r *registry) hetznerProv() (*hcloud.Provider, error) {
 	r.hetznerProviderOnce.Do(func() {
 		if r.ctx == nil {
 			return
@@ -113,20 +120,28 @@ func (r *registry) hetznerProv() *hcloud.Provider {
 		// the region-less global slice — does not register two providers under the
 		// same URN (pulumi:providers:hcloud::hcloud). r.region is "global" for the
 		// global slice and the region name otherwise, so it is always unique.
-		p, _ := hcloud.NewProvider(r.ctx, fmt.Sprintf("hcloud-%s", r.region), &hcloud.ProviderArgs{
+		p, err := hcloud.NewProvider(r.ctx, fmt.Sprintf("hcloud-%s", r.region), &hcloud.ProviderArgs{
 			Token: pulumi.String(token),
 		})
+		if err != nil {
+			r.hetznerProviderErr = fmt.Errorf("register hetzner provider for scope %q: %w", r.region, err)
+			return
+		}
 		r.hetznerProvider = p
 	})
-	return r.hetznerProvider
+	return r.hetznerProvider, r.hetznerProviderErr
 }
 
 func (r *registry) Network(name string) (types.NetworkProvider, error) {
 	switch name {
 	case "hetzner":
+		prov, err := r.hetznerProv()
+		if err != nil {
+			return nil, err
+		}
 		r.hetznerNetOnce.Do(func() {
 			realizations := hetzner.ExtractRegionConfigs(r.region, r.config)
-			r.hetznerNet = hetzner.New(r.hetznerProv(), r.project, r.slug, r.eph, realizations)
+			r.hetznerNet = hetzner.New(prov, r.project, r.slug, r.eph, realizations)
 		})
 		return r.hetznerNet, nil
 	default:
@@ -138,14 +153,18 @@ func (r *registry) Network(name string) (types.NetworkProvider, error) {
 // Compute and Storage — the same instance implements ComputeProvider and
 // StorageProvider, so a volume attaches to a server the same provider created (it holds
 // the h.servers map).
-func (r *registry) hetznerCompute() *hetzner.HetznerCompute {
+func (r *registry) hetznerCompute() (*hetzner.HetznerCompute, error) {
+	prov, err := r.hetznerProv()
+	if err != nil {
+		return nil, err
+	}
 	r.hetznerCompOnce.Do(func() {
 		realizations := hetzner.ExtractRegionConfigs(r.region, r.config)
 		r.hetznerComp = hetzner.NewCompute(
 			r.ssh.AuthorizedKeys,
 			r.ssh.DeployPublicKey,
 			providerCfgString(r.config, "hetzner", "apiToken"),
-			r.hetznerProv(),
+			prov,
 			r.project,
 			r.slug,
 			r.eph,
@@ -153,13 +172,17 @@ func (r *registry) hetznerCompute() *hetzner.HetznerCompute {
 			r.sshKeys,
 		)
 	})
-	return r.hetznerComp
+	return r.hetznerComp, nil
 }
 
 func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 	switch name {
 	case "hetzner":
-		return r.hetznerCompute(), nil
+		c, err := r.hetznerCompute()
+		if err != nil {
+			return nil, err
+		}
+		return c, nil
 	default:
 		return nil, unknownProvider(name)
 	}
@@ -171,7 +194,11 @@ func (r *registry) Compute(name string) (types.ComputeProvider, error) {
 func (r *registry) Storage(name string) (types.StorageProvider, error) {
 	switch name {
 	case "hetzner":
-		return r.hetznerCompute(), nil
+		c, err := r.hetznerCompute()
+		if err != nil {
+			return nil, err
+		}
+		return c, nil
 	default:
 		return nil, unknownProvider(name)
 	}
@@ -207,7 +234,10 @@ func (r *registry) Mesh(name string) (types.MeshProvider, error) {
 	}
 }
 
-func (r *registry) cfProv() *cf.Provider {
+// cfProv lazily creates the shared cf.Provider. Like hetznerProv, a registration
+// failure is cached and surfaced rather than swallowed — a nil provider would send
+// every DNS record to Pulumi's ambient default provider.
+func (r *registry) cfProv() (*cf.Provider, error) {
 	r.cfProviderOnce.Do(func() {
 		if r.ctx == nil {
 			return
@@ -216,17 +246,25 @@ func (r *registry) cfProv() *cf.Provider {
 		// Scoped by region for the same reason as the hcloud provider: each scope's
 		// registry registers its own provider, and a shared name would collide on
 		// URN once more than one scope realizes DNS records.
-		p, _ := cf.NewProvider(r.ctx, fmt.Sprintf("cloudflare-%s", r.region), &cf.ProviderArgs{
+		p, err := cf.NewProvider(r.ctx, fmt.Sprintf("cloudflare-%s", r.region), &cf.ProviderArgs{
 			ApiToken: pulumi.StringPtr(token),
 		})
+		if err != nil {
+			r.cfProviderErr = fmt.Errorf("register cloudflare provider for scope %q: %w", r.region, err)
+			return
+		}
 		r.cfProvider = p
 	})
-	return r.cfProvider
+	return r.cfProvider, r.cfProviderErr
 }
 
 func (r *registry) DNS(name string) (types.DnsProvider, error) {
 	switch name {
 	case "cloudflare":
+		prov, err := r.cfProv()
+		if err != nil {
+			return nil, err
+		}
 		r.cfDnsOnce.Do(func() {
 			// The zone comes from the region's DNS authority (regions.yaml dns block),
 			// not the providers credentials block.
@@ -237,7 +275,7 @@ func (r *registry) DNS(name string) (types.DnsProvider, error) {
 			// Record tagging defaults on; non-Enterprise zones must set
 			// providers.cloudflare.tagRecords: false (record tags are Enterprise-only).
 			tagRecords := providerCfgBool(r.config, "cloudflare", "tagRecords", true)
-			r.cfDns = cfprovider.New(zoneID, r.project, r.env, r.slug, tagRecords, r.cfProv())
+			r.cfDns = cfprovider.New(zoneID, r.project, r.env, r.slug, tagRecords, prov)
 		})
 		return r.cfDns, nil
 	default:

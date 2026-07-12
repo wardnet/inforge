@@ -14,9 +14,8 @@ import (
 	"github.com/wardnet/inforge/internal/output"
 )
 
-func newPreviewCmd(configPath *string) *cobra.Command {
+func newPreviewCmd(configPath, dir *string) *cobra.Command {
 	var stackConfig, format, report string
-	var allowMultiple bool
 
 	cmd := &cobra.Command{
 		Use:           "preview <env>",
@@ -25,18 +24,17 @@ func newPreviewCmd(configPath *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPreview(cmd.Context(), args[0], stackConfig, *configPath, format, report, allowMultiple)
+			return runPreview(cmd.Context(), args[0], stackConfig, *configPath, *dir, format, report)
 		},
 	}
 
 	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to stack config (default: inforge.<env>.yaml)")
 	cmd.Flags().StringVarP(&format, "output", "o", "", "output format: '' (default human) or 'json'")
 	cmd.Flags().StringVar(&report, "report", "", "write a markdown run report to this path (default: a temp file)")
-	cmd.Flags().BoolVar(&allowMultiple, "allow-multiple", false, "allow running when multiple environments have changes")
 	return cmd
 }
 
-func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, format, reportPath string, allowMultiple bool) error {
+func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, dir, format, reportPath string) error {
 	projCfg, err := loadProjectConfig(configPath)
 	if err != nil {
 		return err
@@ -65,12 +63,10 @@ func runPreview(ctx context.Context, stackName, stackConfigPath, configPath, for
 		return fmt.Errorf("set stack config: %w", err)
 	}
 
-	if err := setProviderDefaults(ctx, s, projCfg.Providers); err != nil {
-		return fmt.Errorf("set provider defaults: %w", err)
-	}
-
-	if err := setBackups(ctx, s, projCfg.Backups); err != nil {
-		return fmt.Errorf("set backups config: %w", err)
+	// The CLI-derived keys program.Run reads — `dir` included, so a --dir preview
+	// plans the tree it was pointed at rather than ./resources.
+	if err := setDerivedStackConfig(ctx, &s, dir, projCfg); err != nil {
+		return fmt.Errorf("set derived stack config: %w", err)
 	}
 
 	// A single Printer renders the engine's event stream (per-resource lines plus

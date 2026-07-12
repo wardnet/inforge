@@ -220,6 +220,15 @@ func (h *HetznerCompute) Create(
 		Instance:        instance,
 		Manifest:        manifest,
 	}
+	// The deploy material is substituted into a script run as root at first boot.
+	// It is escaped there, but a name or key that is not what it claims to be must
+	// never reach a booting server at all. Only a declared deploy_user consumes it
+	// (provision.sh no-ops without one).
+	if deployUserName != "" {
+		if err := ciVars.Validate(); err != nil {
+			return types.ComputeOutputs{}, fmt.Errorf("compute %q: %w", spec.Name, err)
+		}
+	}
 	switch {
 	case spec.CloudInit != "":
 		// A project cloud_init template: assemble it (and append the provision

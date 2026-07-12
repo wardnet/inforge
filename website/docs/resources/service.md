@@ -374,6 +374,12 @@ To serve additional public names on a `tls-termination` entry, list them under `
   `key-broker.<baseDomain>`, or `key-broker.inforge.wardnet.network` used as-is;
 - available placeholders: `{BASE_DOMAIN}`, `{ENV}`, `{REGION_SLUG}`.
 
+Every vanity must resolve **under `base_domain`**. Records are created zone-relative in the DNS
+authority's zone, so a vanity on another domain (`shop.other.net`) would not be a record on that
+domain — it would deploy as `shop.other.net.<baseDomain>`, a wrong hostname whose ACME certificate
+could never issue. `inforge validate` rejects it, and `preview`/`deploy` fail before any record is
+written.
+
 Each `tls-termination` FQDN (auto + vanity) gets a DNS record and is listed in the service's ACME
 certificate (`server_name`). A `forward` entry gets the `<svc>.svc` DNS record but no certificate (the
 backend owns TLS).

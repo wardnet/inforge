@@ -93,3 +93,44 @@ func TestPinnedSHAsUnionAcrossEnvs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]bool{"shaP": true, "shaQ": true}, pinned)
 }
+
+// TestDeleteEnvManifestsRemovesOnlyThatEnv is the ephemeral-teardown contract: a
+// torn-down env's manifests are deleted across every workload — otherwise their
+// SHAs stay pinned by PinnedSHAs forever — while other envs' manifests and every
+// artifact object survive.
+func TestDeleteEnvManifestsRemovesOnlyThatEnv(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+
+	require.NoError(t, s.SetDeployment(ctx, "bridge", "prd", "bridge-01", "sha1", "amd64", testNow()))
+	require.NoError(t, s.SetDeployment(ctx, "bridge", "eph-7f3k", "bridge-01", "sha2", "amd64", testNow()))
+	require.NoError(t, s.SetDeployment(ctx, "account-app", "eph-7f3k", "edge-01", "sha3", "", testNow()))
+	require.NoError(t, s.PutArtifact(ctx, "bridge", "sha2", "amd64", strings.NewReader("payload")))
+
+	deleted, err := s.DeleteEnvManifests(ctx, "eph-7f3k")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"account-app/manifest.eph-7f3k.yaml", "bridge/manifest.eph-7f3k.yaml"}, deleted)
+
+	// The reaped env's SHA is no longer pinned, so prune can reclaim it...
+	pinned, err := s.PinnedSHAs(ctx, "bridge")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"sha1": true}, pinned)
+	// ...while the permanent env's manifest and the artifact object are untouched.
+	_, _, exists, err := s.LoadManifest(ctx, "bridge", "prd")
+	require.NoError(t, err)
+	assert.True(t, exists)
+	ok, err := s.ArtifactExists(ctx, "bridge", "sha2", "amd64")
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	// A second teardown of the same env is a no-op, not an error.
+	deleted, err = s.DeleteEnvManifests(ctx, "eph-7f3k")
+	require.NoError(t, err)
+	assert.Empty(t, deleted)
+}
+
+func TestDeleteEnvManifestsRejectsEmptyEnv(t *testing.T) {
+	_, err := newStoreWithAPI(newFakeS3(), "artifacts").DeleteEnvManifests(context.Background(), "")
+	require.Error(t, err)
+}

@@ -2,12 +2,114 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 )
+
+func TestConfirmDeployNonInteractiveStdin(t *testing.T) {
+	// A piped/redirected stdin can never answer the prompt. Reading EOF must not
+	// look like "cancelled" (exit 0) — a CI job that forgot --yes would report a
+	// green deploy having applied nothing.
+	regular, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = regular.Close() }()
+
+	// /dev/null is the shape a CI runner actually hands a step as stdin, and it is
+	// a CHARACTER DEVICE — an os.ModeCharDevice check calls it a terminal and waves
+	// it straight through to the EOF-as-"cancelled" false green. It must be refused
+	// exactly like the redirected file.
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = devNull.Close() }()
+
+	for name, in := range map[string]*os.File{"regular file": regular, "os.DevNull": devNull} {
+		t.Run(name, func(t *testing.T) {
+			confirmed, err := confirmDeploy(in, "prd")
+			if err == nil {
+				t.Fatal("expected an error for non-interactive stdin, got nil")
+			}
+			if confirmed {
+				t.Error("confirmed = true, want false")
+			}
+			if !strings.Contains(err.Error(), "--yes") {
+				t.Errorf("error = %q, want it to point at --yes", err)
+			}
+		})
+	}
+}
+
+func TestPromptYes(t *testing.T) {
+	// Only the literal "yes" (modulo surrounding space) approves; everything else
+	// cancels, and a read error is NOT an answer — it must not read as "cancelled".
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"yes\n", true},
+		{"  yes  \n", true},
+		{"y\n", false},
+		{"no\n", false},
+		{"", false}, // EOF (Ctrl-D)
+	} {
+		got, err := promptYes(strings.NewReader(tc.in), "prd")
+		if err != nil {
+			t.Fatalf("promptYes(%q) errored: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Errorf("promptYes(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+
+	readErr := errors.New("tty exploded")
+	confirmed, err := promptYes(iotest.ErrReader(readErr), "prd")
+	if !errors.Is(err, readErr) {
+		t.Errorf("err = %v, want the read error wrapped", err)
+	}
+	if confirmed {
+		t.Error("confirmed = true on a read error, want false")
+	}
+}
+
+func TestPersistStatePushesPartialCheckpoint(t *testing.T) {
+	upErr := errors.New("boom")
+
+	// A partially-failed up still created resources: the checkpoint must be pushed.
+	pushed := false
+	err := persistState(upErr, func() error { pushed = true; return nil })
+	if !pushed {
+		t.Error("pushState was not called after a failed up — the partial checkpoint is lost")
+	}
+	if !errors.Is(err, upErr) {
+		t.Errorf("err = %v, want the up error wrapped", err)
+	}
+
+	// Both failing: BOTH must stay matchable — a caller checking for either the
+	// engine error or the push failure has to find it.
+	pushErr := errors.New("push exploded")
+	err = persistState(upErr, func() error { return pushErr })
+	if !errors.Is(err, upErr) || !errors.Is(err, pushErr) {
+		t.Errorf("err = %v, want both the up and push failures wrapped", err)
+	}
+
+	// A clean up with a failing push reports the push.
+	err = persistState(nil, func() error { return pushErr })
+	if !errors.Is(err, pushErr) {
+		t.Errorf("err = %v, want the push error wrapped", err)
+	}
+
+	if err := persistState(nil, func() error { return nil }); err != nil {
+		t.Errorf("err = %v, want nil", err)
+	}
+}
 
 func TestWriteTempKeyFile(t *testing.T) {
 	// Material without a trailing newline must gain one (OpenSSH rejects a key file

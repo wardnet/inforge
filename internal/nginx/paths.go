@@ -27,6 +27,13 @@ const (
 	// execute as an ES module.
 	mimeTypesPath = "/etc/nginx/mime.types"
 
+	// acmePort is the public port the ACME HTTP-01 challenge/redirect server binds
+	// in http{} whenever the host terminates TLS (a tls-termination route, an app,
+	// or the scope gateway). It is nginx's, not a service's: a forward (a stream{}
+	// server) on the same port is rejected — by validation at authoring time, and
+	// by Render as a last line of defence.
+	acmePort = 80
+
 	// acmeModule is the dynamic ACME module shipped by the nginx.org repo
 	// (package nginx-module-acme), loaded from nginx's modules directory.
 	acmeModule = "modules/ngx_http_acme_module.so"

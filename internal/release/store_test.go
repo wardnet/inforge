@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -184,6 +185,54 @@ func TestPruneNeverDeletesPinnedDashSHA(t *testing.T) {
 	ok, err := s.ArtifactExists(ctx, "myapp", "preview-42", NoArch)
 	require.NoError(t, err)
 	assert.True(t, ok, "the pinned dash-containing SHA must survive prune")
+}
+
+// TestPruneSeesPinWrittenDuringSweep models the deploy/prune interleaving: a
+// `releases deploy` pins a SHA (writes its manifest) in the window between
+// Prune's two reads. Prune lists the artifact objects FIRST and reads the
+// pinned set second, so a pin landing in that window is observed and the SHA is
+// retained, instead of being deleted out from under a live host (ADR-0016).
+// Reading pins first would miss it and delete shaA.
+func TestPruneSeesPinWrittenDuringSweep(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeS3()
+	s := newStoreWithAPI(fake, "artifacts")
+
+	for _, sha := range []string{"shaA", "shaB", "shaC"} {
+		require.NoError(t, s.PutArtifact(ctx, "bridge", sha, NoArch, strings.NewReader(sha)))
+	}
+
+	// The concurrent deploy lands right after Prune's first list returns: it
+	// rolls shaA (the oldest, so far unpinned) out to a host.
+	var once sync.Once
+	fired := false
+	fake.listDoneHook = func(call int) {
+		if call != 1 {
+			return
+		}
+		once.Do(func() {
+			fired = true
+			require.NoError(t, s.SetDeployment(ctx, "bridge", "prd", "bridge-01", "shaA", NoArch, testNow()))
+		})
+	}
+
+	// keep=1: without the concurrent pin, shaA and shaB would both be victims.
+	deleted, err := s.Prune(ctx, "bridge", 1)
+	require.NoError(t, err)
+
+	// Guard the seam itself: the injection is keyed on Prune's FIRST list, and
+	// this test only means anything if that list is the artifact list and the pin
+	// read is a LATER one. Pinning before both reads would also produce a green
+	// assertion below while exercising nothing, so pin the shape: the hook ran,
+	// and Prune made exactly its two list calls (artifacts, then manifests).
+	require.True(t, fired, "the concurrent pin was never injected — the race is not being exercised")
+	assert.Equal(t, 2, fake.listCalls, "Prune must list artifacts first and read pins after")
+
+	assert.Equal(t, []string{"shaB"}, deleted, "only the unpinned surplus is deleted")
+
+	ok, err := s.ArtifactExists(ctx, "bridge", "shaA", NoArch)
+	require.NoError(t, err)
+	assert.True(t, ok, "a SHA pinned during the sweep must survive it")
 }
 
 // TestPruneDeletesEveryArchVariant asserts a victim SHA pushed under both archs

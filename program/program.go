@@ -2353,6 +2353,11 @@ func assembleManifest(spec types.ComputeSpec, env, region, slug string) (string,
 type derivedRecord struct {
 	rec     types.DnsRecord
 	hostKey string
+	// fqdn is the absolute name rec was derived from, kept so createDNSRecords can
+	// reject an out-of-zone one: rec.RecordName is zone-relative and an out-of-zone
+	// FQDN survives ZoneRelative unchanged, i.e. is indistinguishable from a legal
+	// multi-label record once stripped.
+	fqdn string
 }
 
 // derivedRecords derives every A-record for a region: one "<compute>.vm" host
@@ -2373,6 +2378,7 @@ func derivedRecords(res types.Resources, env, slug, baseDomain, ephemeralSlug st
 				Container:  container,
 			},
 			hostKey: hostKey,
+			fqdn:    fqdn,
 		})
 	}
 	// A-records are port-independent, so a service with several ingress entries
@@ -2453,6 +2459,15 @@ func createDNSRecords(ctx *pulumi.Context, reg registry.ProviderRegistry, author
 	// claimed twice on one host is a cert conflict, caught by routesByHost.)
 	seen := map[string]string{}
 	for _, dr := range derivedRecords(res, env, slug, baseDomain, ephemeralSlug) {
+		// Defence in depth for the validate-time guard (checkVanityZone): `inforge
+		// deploy`/`preview` run this program WITHOUT running the validator, so an
+		// out-of-zone vanity FQDN would otherwise reach the provider here. Records are
+		// created zone-relative INSIDE the authority's zone, so "shop.other.net" is not
+		// a record on other.net — it deploys as shop.other.net.<base_domain>, a wrong
+		// hostname whose ACME cert can never issue. Fail before any record is written.
+		if !naming.InZone(dr.fqdn, baseDomain) {
+			return fmt.Errorf("dns: %q is not under base_domain %q — records are created inside the DNS authority's zone, so it would deploy as %q; a vanity FQDN must be in-zone", dr.fqdn, baseDomain, dr.fqdn+"."+baseDomain)
+		}
 		if prev, dup := seen[dr.rec.RecordName]; dup {
 			return fmt.Errorf("dns: record %q is derived more than once (%s and %s); a DNS name must resolve to one host", dr.rec.RecordName, prev, dr.rec.Name)
 		}

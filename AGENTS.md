@@ -384,7 +384,10 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
 - **Slice D realization (`cmd/inforge/release.go`):** `inforge release app <env> <name>` delivers an
   app bundle to its ingress host and atomically swaps the served root. The **delivery-adapter seam**
   (`deliverRelease`) is the workload-agnostic transport — resolve targets → fetch by SHA from the R2
-  store → scp + apply on each host → record the per-env manifest. The **service** path
+  store → per host: scp to a freshly `mktemp`'d remote path (never a fixed `/tmp` name; removed again
+  on every exit path, failures included) → record the per-env manifest → apply. The manifest pin
+  precedes the apply on purpose: the apply restarts the host onto the SHA, so pinning afterwards
+  leaves a window in which a live SHA is unpinned and `Prune` may delete its artifact. The **service** path
   (`inforge releases deploy`) is refactored behind it as adapter #1 (`serviceApplyScript`, behaviour
   unchanged); the **app** path is adapter #2 (`appReleaseScript`: extract into `<sha>` dir → atomic
   `current` swap → `nginx -t && reload` → GC old bundles beyond `app.KeepReleases`). `--bundle <dir>`

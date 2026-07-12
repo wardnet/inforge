@@ -258,3 +258,34 @@ func TestGlobalServiceRealizesRegionLess(t *testing.T) {
 		assert.NotContains(t, name, "-use1-", "global realization names must be region-less")
 	}
 }
+
+// An out-of-zone vanity FQDN must never reach the DNS provider. The validate-time
+// guard (checkVanityZone) does not run on the `inforge deploy`/`preview` path — only
+// `inforge validate` calls it — so the realization path carries the same guard:
+// records are created ZONE-RELATIVE inside the authority's zone, so "shop.other.net"
+// is not a record on other.net, it deploys as shop.other.net.<base_domain>, a wrong
+// hostname whose ACME cert can never issue. Fail before any record is written.
+func TestCreateDNSRecordsRejectsOutOfZoneVanity(t *testing.T) {
+	res := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "edge", Container: "core", InstanceCount: 1}},
+		Ingress: []types.IngressSpec{{Name: "web", Host: "edge"}},
+		Service: []types.ServiceSpec{
+			{Name: "api", Container: "core", Host: "edge-01", Ingress: "web", Routes: []types.RouteSpec{
+				{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Vanity: []string{"shop.other.net"}},
+			}},
+		},
+	}
+	computeOut := map[string]types.ComputeOutputs{"edge-01": {PublicIP: pulumi.String("1.2.3.4").ToStringOutput()}}
+	authority := &regions.DnsAuthority{Provider: "cloudflare", Zone: "zone-id"}
+
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		reg := registry.BuildRegistry(ctx, map[string]map[string]any{
+			"cloudflare": {"apiToken": "t"},
+		}, authority, types.SSHConfig{}, regions.Table{}, "proj", "prd", globalScope, tags.Ephemeral{}, nil)
+		return createDNSRecords(ctx, reg, authority, res, computeOut, "prd", "", "wardnet.network", "")
+	}, pulumi.WithMocks("project", "stack", &infraMocks{}))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shop.other.net")
+	assert.Contains(t, err.Error(), "not under base_domain")
+}

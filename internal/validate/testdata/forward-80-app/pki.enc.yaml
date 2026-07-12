@@ -1,0 +1,20 @@
+# managed by `inforge pki` — do not edit by hand
+rootRecipient: age1testrootrecipient000000000000000000000000000000000000
+recipient: age1testcirecipient00000000000000000000000000000000000000000
+pkis:
+  # The mesh the fixture's one service (regional/service/relay) is a leaf of. Its
+  # material must exist: a service naming a pki: with no generated intermediate for
+  # its scope is a validation error, which would mask the forward-on-:80 error this
+  # fixture exists to assert.
+  wardnet-mesh:
+    topology: two-tier
+    root:
+      cert: "TESTDATA-ROOT-CERT-PEM"
+      key: "TESTDATA-ROOT-KEY-AGE"
+    intermediates:
+      global:
+        cert: "TESTDATA-INT-CERT-PEM"
+        key: "TESTDATA-INT-KEY-AGE"
+      us-east-1:
+        cert: "TESTDATA-INT-CERT-PEM"
+        key: "TESTDATA-INT-KEY-AGE"

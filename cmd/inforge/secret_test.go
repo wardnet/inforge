@@ -3,11 +3,13 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/secretstore"
 )
 
@@ -246,4 +248,166 @@ func TestCompromisedValueGuidance(t *testing.T) {
 		// reserved secrets have no service handle — reissue with --reserved.
 		"inforge secret set prd observability otlp_auth --reserved",
 	}, compromisedValueGuidance(dir, "prd", store))
+}
+
+// TestRunSecretRotateRekeysPKIStore is the regression the rotate/PKI coupling
+// exists for: the PKI store's intermediate keys — and a root-only PKI's root key
+// — are encrypted to the SAME CI recipient as the secret store, so a rotation
+// that skips them leaves material only the OLD (leaked) identity can read,
+// breaking every deploy and `inforge pki renew`. The two-tier cold root belongs
+// to the offline root recipient and must be left exactly as it was.
+func TestRunSecretRotateRekeysPKIStore(t *testing.T) {
+	dir := secretFixture(t)
+	oldIdentity, oldRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	rootIdentity, rootRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	require.NoError(t, runSecretInit(dir, "prd", oldRecipient))
+	require.NoError(t, runSecretWrite(dir, "prd", "api", "API_TOKEN", true, false))
+
+	require.NoError(t, runPkiInit(dir, "prd", oldRecipient, rootRecipient))
+	require.NoError(t, runPkiAdd(dir, "prd", "wardnet-mesh", pki.TopologyTwoTier, ""))
+	require.NoError(t, runPkiAdd(dir, "prd", "wardnet-daemon", pki.TopologyRootOnly, "global"))
+	t.Setenv(pki.RootIdentityEnvVar, rootIdentity)
+	require.NoError(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "global"))
+	require.NoError(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "eu-central"))
+
+	before, err := pki.Load(pki.Path(dir, "prd"))
+	require.NoError(t, err)
+	mesh, _ := before.Get("wardnet-mesh")
+	coldRootKey := mesh.Root.Key
+
+	newIdentity, newRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	t.Setenv(secretstore.IdentityEnvVar, oldIdentity)
+	require.NoError(t, runSecretRotate(dir, "prd", newRecipient))
+
+	store, err := pki.Load(pki.Path(dir, "prd"))
+	require.NoError(t, err)
+	assert.Equal(t, newRecipient, store.Recipient)
+	assert.Equal(t, rootRecipient, store.RootRecipient, "the offline root recipient is untouched")
+
+	mesh, ok := store.Get("wardnet-mesh")
+	require.True(t, ok)
+	for _, scope := range []string{"global", "eu-central"} {
+		mat := mesh.Intermediates[scope]
+		_, err = secretstore.Decrypt(mat.Key, newIdentity)
+		require.NoError(t, err, "scope %q intermediate key must decrypt with the NEW master identity", scope)
+		_, err = secretstore.Decrypt(mat.Key, oldIdentity)
+		require.Error(t, err, "scope %q intermediate key must no longer decrypt with the old identity", scope)
+	}
+	assert.Equal(t, coldRootKey, mesh.Root.Key, "the cold root is encrypted to the offline recipient — rotate must not touch it")
+	_, err = secretstore.Decrypt(mesh.Root.Key, rootIdentity)
+	require.NoError(t, err, "the cold root must still decrypt with the offline root identity")
+
+	// The root-only PKI's root key IS the CI-held issuer key, so it rotates too.
+	daemon, ok := store.Get("wardnet-daemon")
+	require.True(t, ok)
+	_, err = secretstore.Decrypt(daemon.Root.Key, newIdentity)
+	require.NoError(t, err, "a root-only PKI's root key is CI-held and must be re-encrypted")
+	_, err = secretstore.Decrypt(daemon.Root.Key, oldIdentity)
+	require.Error(t, err)
+
+	// Re-runnable: rotating again to the same recipient is a PKI no-op (the
+	// completion path when a rotate died between the two store writes).
+	t.Setenv(secretstore.IdentityEnvVar, newIdentity)
+	n, err := rekeyPKIStore(dir, "prd", newIdentity, newRecipient, newRecipient)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+}
+
+// A PKI store encrypted to a recipient other than the secret store's cannot be
+// re-keyed with the current master identity — say so instead of writing a store
+// whose keys nothing can decrypt.
+func TestRunSecretRotateForeignPKIRecipientFails(t *testing.T) {
+	dir := secretFixture(t)
+	oldIdentity, oldRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	_, otherRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	_, rootRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	require.NoError(t, runSecretInit(dir, "prd", oldRecipient))
+	require.NoError(t, runPkiInit(dir, "prd", otherRecipient, rootRecipient))
+
+	_, newRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	t.Setenv(secretstore.IdentityEnvVar, oldIdentity)
+	err = runSecretRotate(dir, "prd", newRecipient)
+	require.ErrorContains(t, err, "is encrypted to recipient")
+
+	// Nothing was written: the secret store still holds the old recipient.
+	store, err := secretstore.Load(secretstore.Path(dir, "prd"))
+	require.NoError(t, err)
+	assert.Equal(t, oldRecipient, store.Recipient)
+}
+
+// A GENERATED master identity lives only in memory until it is printed, and the
+// PKI store is re-encrypted to it BEFORE the secret store is written. If that
+// second write fails and rotate returned the error alone, pki.enc.yaml would be
+// encrypted to a key pair nobody holds — and the documented "re-run with
+// --recipient <new>" resume would be impossible, since the operator never saw
+// the identity. The failure path must print it.
+func TestRunSecretRotatePrintsGeneratedIdentityWhenAWriteFails(t *testing.T) {
+	if os.Geteuid() == 0 { // root ignores the mode bits this test relies on
+		t.Skip("cannot make a file unwritable as root")
+	}
+	dir := secretFixture(t)
+	oldIdentity, oldRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	_, rootRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	require.NoError(t, runSecretInit(dir, "prd", oldRecipient))
+	require.NoError(t, runSecretWrite(dir, "prd", "api", "API_TOKEN", true, false))
+	require.NoError(t, runPkiInit(dir, "prd", oldRecipient, rootRecipient))
+	require.NoError(t, runPkiAdd(dir, "prd", "wardnet-daemon", pki.TopologyRootOnly, "global"))
+
+	// The PKI store rewrite succeeds; the secret-store rewrite cannot.
+	secretPath := secretstore.Path(dir, "prd")
+	require.NoError(t, os.Chmod(secretPath, 0o400))
+	t.Cleanup(func() { _ = os.Chmod(secretPath, 0o600) })
+
+	t.Setenv(secretstore.IdentityEnvVar, oldIdentity)
+	// "" → rotate generates the key pair, so the identity exists only in memory.
+	out, err := captureStdout(t, func() error { return runSecretRotate(dir, "prd", "") })
+	require.Error(t, err)
+
+	printed := strings.TrimSpace(out)
+	require.NotEmpty(t, printed, "the generated identity must be printed when a store write fails")
+
+	// The printed identity is the real one: it decrypts the PKI material rotate
+	// already re-encrypted before the failure.
+	store, err := pki.Load(pki.Path(dir, "prd"))
+	require.NoError(t, err)
+	daemon, ok := store.Get("wardnet-daemon")
+	require.True(t, ok)
+	_, err = secretstore.Decrypt(daemon.Root.Key, printed)
+	require.NoError(t, err, "the printed identity must decrypt the already-rotated PKI key")
+
+	// And the rotation is resumable with it: the secret store is still on the old
+	// recipient, so re-running with the old identity + the new recipient finishes.
+	require.NoError(t, os.Chmod(secretPath, 0o600))
+	require.NoError(t, runSecretRotate(dir, "prd", store.Recipient))
+	secrets, err := secretstore.Load(secretPath)
+	require.NoError(t, err)
+	assert.Equal(t, store.Recipient, secrets.Recipient)
+	ciphertext, ok := secrets.Get("api", "API_TOKEN")
+	require.True(t, ok)
+	_, err = secretstore.Decrypt(ciphertext, printed)
+	require.NoError(t, err, "after the resume, the secret store decrypts with the new identity")
+}
+
+// No PKI store at all (an env that never ran `inforge pki init`) is not an
+// error — rotate stays a secret-store-only operation there.
+func TestRunSecretRotateWithoutPKIStore(t *testing.T) {
+	dir := secretFixture(t)
+	oldIdentity, oldRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	require.NoError(t, runSecretInit(dir, "prd", oldRecipient))
+	require.NoError(t, runSecretWrite(dir, "prd", "api", "API_TOKEN", true, false))
+
+	_, newRecipient, err := secretstore.GenerateIdentity()
+	require.NoError(t, err)
+	t.Setenv(secretstore.IdentityEnvVar, oldIdentity)
+	require.NoError(t, runSecretRotate(dir, "prd", newRecipient))
 }

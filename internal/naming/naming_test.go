@@ -188,3 +188,28 @@ func TestZoneRelative(t *testing.T) {
 		})
 	}
 }
+
+// InZone is ZoneRelative's precondition: an out-of-zone FQDN survives ZoneRelative
+// unchanged and would be created as "<fqdn>.<baseDomain>" inside the authority's
+// zone, so callers taking an authored FQDN (a route vanity) gate on it. The
+// look-alike suffix case is the one a naive HasSuffix without the dot would miss.
+func TestInZone(t *testing.T) {
+	cases := []struct {
+		fqdn string
+		want bool
+	}{
+		{"bridge.svc.prd.use1.wardnet.network", true},
+		{"account.wardnet.network", true},
+		{"wardnet.network", true}, // the apex
+		{"shop.other.net", false},
+		{"shop.notwardnet.network", false}, // look-alike suffix, not a subdomain
+		{"wardnet.network.evil.com", false},
+	}
+	for _, c := range cases {
+		t.Run(c.fqdn, func(t *testing.T) {
+			if got := InZone(c.fqdn, "wardnet.network"); got != c.want {
+				t.Errorf("InZone(%q) = %v, want %v", c.fqdn, got, c.want)
+			}
+		})
+	}
+}

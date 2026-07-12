@@ -1,0 +1,3 @@
+name: edge
+container: bridge
+host: bridge

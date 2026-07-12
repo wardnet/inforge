@@ -45,6 +45,11 @@ type fakeS3 struct {
 	headErrHook func(key string) error // non-nil short-circuits HeadObject with that error (non-404 failure injection)
 	getErrHook  func(key string) error // non-nil short-circuits GetObject with that error (non-404 failure injection)
 	listErrHook func() error           // non-nil short-circuits ListObjectsV2 with that error
+	// listDoneHook is invoked (outside the lock) after each ListObjectsV2 has
+	// snapshotted its result, with the 1-based call count: the seam for injecting
+	// a concurrent writer into the window BETWEEN two of a caller's list calls.
+	listDoneHook func(call int)
+	listCalls    int
 }
 
 func newFakeS3() *fakeS3 {
@@ -130,7 +135,6 @@ func (f *fakeS3) ListObjectsV2(_ context.Context, in *s3.ListObjectsV2Input, _ .
 		}
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	prefix := aws.ToString(in.Prefix)
 	keys := make([]string, 0, len(f.objs))
 	for k := range f.objs {
@@ -143,6 +147,13 @@ func (f *fakeS3) ListObjectsV2(_ context.Context, in *s3.ListObjectsV2Input, _ .
 	for _, k := range keys {
 		lm := f.objs[k].lastMod
 		contents = append(contents, s3types.Object{Key: aws.String(k), LastModified: aws.Time(lm)})
+	}
+	f.listCalls++
+	call := f.listCalls
+	f.mu.Unlock()
+
+	if f.listDoneHook != nil {
+		f.listDoneHook(call)
 	}
 	return &s3.ListObjectsV2Output{Contents: contents}, nil
 }

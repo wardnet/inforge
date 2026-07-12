@@ -20,7 +20,6 @@ The environment is a required positional argument (e.g. `prd`) — it is the Pul
 |------|---------|-------------|
 | `--stack-config` | `inforge.<env>.yaml` | Path to the stack config file (optional; a missing default file means no extra config) |
 | `--output` / `-o` | `""` (human) | Output format: `""` for human-readable, `json` for structured JSON |
-| `--allow-multiple` | `false` | Allow running when multiple environments have changes detected |
 | `--config` / `-c` | `./inforge.yaml` | Path to the project config file |
 | `--dir` / `-d` | `./resources` | Path to the resources directory |
 
