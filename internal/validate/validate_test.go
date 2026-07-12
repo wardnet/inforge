@@ -261,6 +261,20 @@ func TestValidateResourcesIngressAppOK(t *testing.T) {
 	assert.NoError(t, err, "regional and global ingress/app referencing same-scope hosts should validate cleanly")
 }
 
+// TestValidateResourcesForwardOn80WithApp: an ingress host that terminates TLS
+// only because it serves an APP (no tls-termination route anywhere) still owns
+// :80 — nginx renders the ACME HTTP-01/redirect server there. A forward on :80
+// on that ingress is a stream bind on the same socket, so nginx would refuse to
+// start; validation must reject it.
+func TestValidateResourcesForwardOn80WithApp(t *testing.T) {
+	var err error
+	out := captureStdout(t, func() {
+		err = ValidateResources("forward-80-app", testdataDir, types.ProviderDefaults{})
+	})
+	require.Error(t, err, "a forward on :80 on a host serving an app should fail validation")
+	assert.Contains(t, out, "ACME owns :80")
+}
+
 // TestValidateResourcesAppBadIngress: an app whose ingress: foreign key names no
 // ingress resource in its scope fails validation (the same-scope FK rule).
 func TestValidateResourcesAppBadIngress(t *testing.T) {

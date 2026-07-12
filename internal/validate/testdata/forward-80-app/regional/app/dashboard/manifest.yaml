@@ -1,0 +1,7 @@
+# The app is the ONLY thing terminating TLS on edge's host: no service declares a
+# tls-termination route. Its ACME cert still makes nginx bind :80 there.
+name: dashboard
+container: bridge
+ingress: edge
+subdomain: my
+spa: true

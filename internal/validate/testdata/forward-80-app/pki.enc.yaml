@@ -1,0 +1,27 @@
+# managed by `inforge pki` — do not edit by hand
+rootRecipient: age1testrootrecipient000000000000000000000000000000000000
+recipient: age1testcirecipient00000000000000000000000000000000000000000
+pkis:
+  wardnet-mesh:
+    topology: two-tier
+    root:
+      cert: "TESTDATA-ROOT-CERT-PEM"
+      key: "TESTDATA-ROOT-KEY-AGE"
+    intermediates:
+      global:
+        cert: "TESTDATA-INT-CERT-PEM"
+        key: "TESTDATA-INT-KEY-AGE"
+      us-east-1:
+        cert: "TESTDATA-INT-CERT-PEM"
+        key: "TESTDATA-INT-KEY-AGE"
+  # The root-only CA behind the `pki/daemon` grant in regional/service/api. A PKI
+  # resource manifest only declares that a CA should exist; its material is
+  # generated separately (`inforge pki add … --topology root-only`) and a grant on a
+  # declared-but-ungenerated PKI is a validation error — so the ok fixture must
+  # carry the material, not just the manifest.
+  daemon:
+    topology: root-only
+    scope: global
+    root:
+      cert: "TESTDATA-DAEMON-CERT-PEM"
+      key: "TESTDATA-DAEMON-KEY-AGE"
