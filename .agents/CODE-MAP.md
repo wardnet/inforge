@@ -32,9 +32,9 @@
 
 **Where:** `internal/loader/`, `internal/types/`, `.github/workflows/deploy-raw.yml`
 
-**Summary:** Projects are structured as `inforge.yaml` (config) + `resources/<env>/variables.yaml` (env-level variables + region/provider declarations) + per-region subdirectories containing YAML specs for network, compute, dns, database, secrets, service. The loader reads and parses these files, applies defaults, substitutes `${ENV_VAR}` references, and returns typed structs. No explicit config file reading in program.go yet—it reads `dir` from Pulumi config context, not `inforge.yaml`.
+**Summary:** Projects are structured as `inforge.yaml` (config) + `resources/<env>/variables.yaml` (env-level variables + region/provider declarations) + per-region subdirectories containing YAML specs for network, compute, dns, database, secrets, service. The loader reads and parses these files, applies defaults, and returns typed structs. It does NOT expand `${ENV_VAR}` references: variables.yaml and regions.yaml load *raw* (`LoadVariablesRaw`/`LoadRegionsRaw`, placeholders intact) and expansion is an explicit second step through a `loader.Resolver`, so each command requires only the variables it actually reads. The raw types are distinct from the resolved ones, so an unexpanded credential cannot reach a provider. No explicit config file reading in program.go yet—it reads `dir` from Pulumi config context, not `inforge.yaml`.
 
-**Entry points:** `internal/loader/loader.go` (exported: `LoadVariables`, `LoadRegionTable`, `LoadResources`, `NormalizeNetwork`, `NormalizeCompute`, `NormalizeDatabase`, `NormalizeService`), `internal/types/types.go` (resource specs: `NetworkSpec`, `ComputeSpec`, `DnsSpec`, `DatabaseSpec`, `SecretsSpec`, `ServiceSpec`)
+**Entry points:** `internal/loader/loader.go` (exported: `LoadVariablesRaw`, `LoadRegionsRaw`, `NewResolver`, `LoadResources`, `NormalizeNetwork`, `NormalizeCompute`, `NormalizeDatabase`, `NormalizeService`), `internal/types/types.go` (resource specs: `NetworkSpec`, `ComputeSpec`, `DnsSpec`, `DatabaseSpec`, `SecretsSpec`, `ServiceSpec`)
 
 **Tracked files:**
 - `internal/loader/loader.go` (blob: `801ef6fed59052b502fb2d68e442d08c0168ef6d`)

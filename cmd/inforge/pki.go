@@ -761,19 +761,38 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 	if err != nil {
 		return 0, err
 	}
-	vars, err := loader.LoadVariables(configEnv, dir)
+	// Minting a mesh leaf reads exactly two things from config: the base domain (it
+	// goes in the leaf's SNI and the host FQDNs this pushes to) and each region's
+	// slug. It builds no provider and calls no cloud API, so it resolves ONLY those
+	// — never the ssh block, never a provider credential. Resolving the whole
+	// document here is what used to make `inforge pki renew` and `inforge releases
+	// deploy` fail on an unset SSH_AUTHORIZED_KEYS or HCLOUD_TOKEN they never read.
+	resolver := loader.NewResolver()
+	rawVars, err := loader.LoadVariablesRaw(configEnv, dir)
 	if err != nil {
 		return 0, err
 	}
-	regionTable, globalBlock, err := loader.LoadRegionTable(configEnv, dir)
+	baseDomain, err := resolver.String("base_domain", rawVars.BaseDomain)
 	if err != nil {
 		return 0, err
 	}
-	allRegions := make([]string, 0, len(regionTable))
-	for r := range regionTable {
-		allRegions = append(allRegions, r)
+	rawRegions, err := loader.LoadRegionsRaw(configEnv, dir)
+	if err != nil {
+		return 0, err
 	}
-	sort.Strings(allRegions)
+	globalBlock := rawRegions.Global
+	allRegions := rawRegions.Table.Names()
+	// A slug is a literal in every real config (it names cloud resources), so this
+	// costs nothing — but resolving it rather than reading it raw means a slug that
+	// DOES carry a placeholder can never reach a hostname unexpanded.
+	slugOf := make(map[string]string, len(allRegions))
+	for _, region := range allRegions {
+		slug, err := resolver.String(fmt.Sprintf("regions.%s.slug", region), rawRegions.Table[region].Slug)
+		if err != nil {
+			return 0, err
+		}
+		slugOf[region] = slug
+	}
 
 	// Decrypt each (pki, scope) intermediate at most once per run — many services
 	// in a scope mint from the same one.
@@ -803,7 +822,7 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 		if err != nil {
 			return "", "", fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
 		}
-		leafPEM, keyPEM, err = meshcert.MintLeaf(interCert, interKey, vars.BaseDomain, identityEnv, scope, svc.Name)
+		leafPEM, keyPEM, err = meshcert.MintLeaf(interCert, interKey, baseDomain, identityEnv, scope, svc.Name)
 		if err != nil {
 			return "", "", fmt.Errorf("service %q scope %q: %w", svc.Name, scope, err)
 		}
@@ -844,7 +863,7 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 			if user == "" {
 				user = defaultSSHUser
 			}
-			hostDNS := naming.HostFQDN(identityEnv, slug, naming.BareComputeName(hostKey), vars.BaseDomain)
+			hostDNS := naming.HostFQDN(identityEnv, slug, naming.BareComputeName(hostKey), baseDomain)
 			return fmt.Sprintf("%s@%s", user, hostDNS)
 		}
 
@@ -945,8 +964,7 @@ func renewMeshCertsAs(ctx context.Context, dir, configEnv, identityEnv string, g
 	// Regional services: one leaf per region, scope = region, per-region slug.
 	if renewScopeHasWork(regional, only) {
 		for _, region := range allRegions {
-			ar := regionTable[region]
-			renewSet(regional, region, ar.Slug)
+			renewSet(regional, region, slugOf[region])
 		}
 	}
 	return count, errors.Join(errs...)

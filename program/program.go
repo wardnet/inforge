@@ -82,7 +82,17 @@ func Run(ctx *pulumi.Context) error {
 		ephemeralSlug = env
 	}
 
-	vars, err := loader.LoadVariables(srcEnv, dir)
+	// The deploy program builds providers, provisions hosts and talks to real
+	// clouds, so it needs every value in both config files — and needs them BEFORE
+	// the first resource is registered. Resolve the whole of variables.yaml and
+	// regions.yaml here, up front: a missing env var is reported now, with nothing
+	// created, rather than part-way through an apply.
+	resolver := loader.NewResolver()
+	rawVars, err := loader.LoadVariablesRaw(srcEnv, dir)
+	if err != nil {
+		return err
+	}
+	vars, err := resolver.Variables(rawVars)
 	if err != nil {
 		return err
 	}
@@ -111,7 +121,11 @@ func Run(ctx *pulumi.Context) error {
 		inforgeVersion = "dev"
 	}
 
-	regionTable, globalBlock, err := loader.LoadRegionTable(srcEnv, dir)
+	rawRegions, err := loader.LoadRegionsRaw(srcEnv, dir)
+	if err != nil {
+		return err
+	}
+	regionTable, globalBlock, err := resolver.Regions(rawRegions)
 	if err != nil {
 		return err
 	}

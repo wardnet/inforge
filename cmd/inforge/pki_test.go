@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/wardnet/inforge/internal/pki"
 	"github.com/wardnet/inforge/internal/secretstore"
+	"github.com/wardnet/inforge/internal/types"
 )
 
 // pkiFixture builds a resources dir whose env already has a secret store, so
@@ -265,4 +267,78 @@ func TestRunPkiLsShowsIntermediate(t *testing.T) {
 	out, err := captureStdout(t, func() error { return runPkiLs(dir, "prd") })
 	require.NoError(t, err)
 	assert.Contains(t, out, "intermediates: global")
+}
+
+// TestRenewMeshCertsAsIgnoresUnrelatedVariables is the regression guard for the
+// production failure that motivated the lazy variable resolver: `inforge releases
+// deploy tunneller` (and `inforge pki renew`) died with
+//
+//	error: mint mesh leaf for tunneller: variables.yaml: missing required env var: SSH_AUTHORIZED_KEYS
+//
+// Minting a leaf reads base_domain and the region slugs — never the ssh block, never
+// a provider credential. The old eager loader expanded the whole document on load, so
+// an unrelated unset variable failed a code path that does not read it. Only tunneller
+// broke because mtls_files: is what makes a release mint a leaf at all; ddns and
+// tenants never enter this path.
+//
+// The mint still needs SSH material to PUSH the leaf, so this does not assert overall
+// success — it asserts that whatever happens, it is never the unrelated variable that
+// stops us.
+func TestRenewMeshCertsAsIgnoresUnrelatedVariables(t *testing.T) {
+	dir, rootIdentity, ciIdentity := twoTierFixture(t)
+	t.Setenv(pki.RootIdentityEnvVar, rootIdentity)
+	require.NoError(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "global"))
+	require.NoError(t, runPkiIntermediate(dir, "prd", "wardnet-mesh", "eu-central"))
+	t.Setenv(secretstore.IdentityEnvVar, ciIdentity)
+
+	// base_domain is a literal; the ssh block references variables that are NOT set —
+	// exactly the shape of a real variables.yaml in CI's release job.
+	t.Setenv("SSH_AUTHORIZED_KEYS", "")
+	t.Setenv("DEPLOY_PUBLIC_KEY", "")
+	const varsDoc = `base_domain: wardnet.network
+ssh:
+  authorizedKeys: ${SSH_AUTHORIZED_KEYS}
+  deployPublicKey: ${DEPLOY_PUBLIC_KEY}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "variables.yaml"), []byte(varsDoc), 0o644))
+
+	// regions.yaml's provider credentials are unset too. The mint builds no provider
+	// and calls no cloud API, so it must not require them either — the same bug on the
+	// credentials side, which broke `inforge pki renew` for anyone without a Hetzner
+	// token in the environment.
+	t.Setenv("HCLOUD_TOKEN", "")
+	const regionsDoc = `regions:
+  eu-central:
+    slug: euc
+    providers:
+      hetzner:
+        apiToken: ${HCLOUD_TOKEN}
+global:
+  placementRegion: eu-central
+  providers:
+    hetzner:
+      apiToken: ${HCLOUD_TOKEN}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "prd", "regions.yaml"), []byte(regionsDoc), 0o644))
+
+	// An mtls_files service is the only kind that mints its own leaf on release.
+	global := types.Resources{
+		Compute: []types.ComputeSpec{{Name: "edge", InstanceCount: 1}},
+		Service: []types.ServiceSpec{
+			{Name: "tunneller", Pki: "wardnet-mesh", MtlsFiles: true, Host: "edge"},
+		},
+	}
+
+	_, err := renewMeshCertsAs(context.Background(), dir, "prd", "prd", global, types.Resources{}, "tunneller", "", io.Discard)
+
+	// The leaf IS minted — we get all the way to pushing it, and only fail there
+	// because no host answers SSH in a unit test. Reaching the push proves the mint
+	// completed: it resolved base_domain into the host FQDN below, with both the ssh
+	// block and the provider credentials unresolvable. That is the fix.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "push leaf.age", "the mint completed and only the SSH push failed")
+	assert.Contains(t, err.Error(), "edge.vm.prd.wardnet.network", "base_domain resolved into the host FQDN")
+	assert.NotContains(t, err.Error(), "SSH_AUTHORIZED_KEYS", "the mint must not require an ssh variable it never reads")
+	assert.NotContains(t, err.Error(), "DEPLOY_PUBLIC_KEY")
+	assert.NotContains(t, err.Error(), "HCLOUD_TOKEN", "the mint builds no provider and must not require a credential")
 }

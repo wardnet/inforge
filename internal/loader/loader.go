@@ -2,16 +2,22 @@
 // environment: variables.yaml, the optional per-env region/size tables, and
 // the folder-based resource set under resources/<env>/regional/<type>/<name>/
 // manifest.yaml (plus sidecars), instantiated into every region. It applies the
-// defaults that yaml.v3 cannot, substitutes ${ENV_VAR} references in
-// variables.yaml, loads each service's environment.yaml sidecar, and resolves
-// cloud-init paths. Cross-resource and semantic validation lives in internal/validate.
+// defaults that yaml.v3 cannot, loads each service's environment.yaml sidecar,
+// and resolves cloud-init paths. Cross-resource and semantic validation lives in
+// internal/validate.
+//
+// Loading never expands the ${ENV_VAR} references variables.yaml and regions.yaml
+// carry: the two loaders return RAW documents (RawVariables, RawRegions) with the
+// placeholders intact, and expansion is an explicit second step through a Resolver
+// (see resolve.go). A command therefore requires exactly the variables it reads
+// and no others — the deploy program resolves the whole document up front and
+// fails before it touches a cloud, while a leaf mint resolves base_domain alone.
 package loader
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/wardnet/inforge/internal/postgres"
@@ -21,158 +27,69 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// envVarPattern matches ${NAME} references substituted in variables.yaml.
-var envVarPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
-
 // envDir returns the directory holding one environment's definitions.
 func envDir(env, dir string) string {
 	return filepath.Join(dir, env)
 }
 
-// substituteEnvVars walks a decoded YAML value and replaces ${NAME} in every
-// string with the corresponding environment variable. When lenient is false,
-// an unset or empty variable is an error; when true, the reference is replaced
-// with an empty string so structural validation can proceed without credentials.
-func substituteEnvVars(v any, lenient bool) (any, error) {
-	switch t := v.(type) {
-	case string:
-		var subErr error
-		out := envVarPattern.ReplaceAllStringFunc(t, func(m string) string {
-			key := strings.TrimSuffix(strings.TrimPrefix(m, "${"), "}")
-			val := os.Getenv(key)
-			if val == "" && !lenient {
-				subErr = fmt.Errorf("missing required env var: %s", key)
-			}
-			return val
-		})
-		if subErr != nil {
-			return nil, subErr
-		}
-		return out, nil
-	case []any:
-		for i, e := range t {
-			ne, err := substituteEnvVars(e, lenient)
-			if err != nil {
-				return nil, err
-			}
-			t[i] = ne
-		}
-		return t, nil
-	case map[string]any:
-		for k, e := range t {
-			ne, err := substituteEnvVars(e, lenient)
-			if err != nil {
-				return nil, err
-			}
-			t[k] = ne
-		}
-		return t, nil
-	default:
-		return v, nil
-	}
-}
-
-func loadVariables(env, dir string, lenient bool) (types.EnvironmentVariables, error) {
-	var vars types.EnvironmentVariables
+// LoadVariablesRaw reads and parses <dir>/<env>/variables.yaml WITHOUT expanding
+// its ${ENV_VAR} references — the placeholders survive into RawVariables, and no
+// environment variable is required to load the file.
+//
+// Expansion is a separate, explicit step: pass the result to a Resolver and ask
+// for the fields you need (Resolver.Variables for the whole document, or
+// Resolver.String for one field). This is what lets a command require only the
+// variables it actually reads — `inforge pki renew` and `inforge releases deploy`
+// resolve base_domain and nothing else, so an unset SSH_AUTHORIZED_KEYS no longer
+// fails a leaf mint that never looks at an SSH key.
+func LoadVariablesRaw(env, dir string) (RawVariables, error) {
+	var vars RawVariables
 	path := filepath.Join(envDir(env, dir), "variables.yaml")
 	b, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
 	if err != nil {
 		return vars, fmt.Errorf("read variables: %w", err)
 	}
-	var raw any
-	if err := yaml.Unmarshal(b, &raw); err != nil {
-		return vars, fmt.Errorf("parse variables: %w", err)
-	}
-	subbed, err := substituteEnvVars(raw, lenient)
-	if err != nil {
-		return vars, fmt.Errorf("%s: %w", path, err)
-	}
-	rb, err := yaml.Marshal(subbed)
-	if err != nil {
-		return vars, fmt.Errorf("re-encode variables: %w", err)
-	}
-	if err := yaml.Unmarshal(rb, &vars); err != nil {
+	if err := yaml.Unmarshal(b, &vars); err != nil {
 		return vars, fmt.Errorf("decode variables: %w", err)
 	}
 	return vars, nil
 }
 
-// LoadVariables reads and parses <dir>/<env>/variables.yaml, substituting
-// ${ENV_VAR} references. Missing variables are an error; use LoadVariablesLenient
-// for contexts where credentials are not available (e.g. schema validation).
-func LoadVariables(env, dir string) (types.EnvironmentVariables, error) {
-	return loadVariables(env, dir, false)
-}
-
-// LoadVariablesLenient is like LoadVariables but silently replaces missing env
-// vars with an empty string rather than returning an error. Use this for
-// structural validation that doesn't require actual credential values.
-func LoadVariablesLenient(env, dir string) (types.EnvironmentVariables, error) {
-	return loadVariables(env, dir, true)
-}
-
-// loadRegionTable parses resources/<env>/regions.yaml: the per-region table and
-// optional global block. When substitute is true, ${ENV_VAR} references in every
-// value (notably the provider credentials) are resolved — the same substitution
-// loadVariables applies to variables.yaml — and a missing/empty referenced env
-// var is an error; without it a literal `apiToken: ${HCLOUD_TOKEN}` would reach
-// the provider verbatim. When substitute is false, the references are left as
-// literals: structural validation reads only the shape (slugs, providers, dns
-// authority presence), not credential values, so it must not require — nor be
-// tripped by the absence of — a real env var. A missing file yields an empty
-// table and nil global.
-func loadRegionTable(env, dir string, substitute bool) (regions.Table, *regions.Global, error) {
+// LoadRegionsRaw parses an environment's resources/<env>/regions.yaml — the
+// per-region table (slug + provider config) under the top-level `regions:` key,
+// plus the optional region-less `global:` block — WITHOUT expanding its
+// ${ENV_VAR} references. regions.yaml is the single authority for which regions
+// deploy and all provider config. A missing file yields an empty table and nil
+// global.
+//
+// As with LoadVariablesRaw, expansion is the Resolver's job. The raw table is a
+// distinct type from regions.Table precisely so an unexpanded
+// `apiToken: ${HCLOUD_TOKEN}` cannot be handed to a provider: the registry takes
+// a resolved regions.Table, and the compiler rejects the raw one. Structural
+// validation reads the raw form directly — it checks the region/provider shape
+// without needing, or being tripped by the absence of, real credentials.
+func LoadRegionsRaw(env, dir string) (RawRegions, error) {
 	path := filepath.Join(envDir(env, dir), "regions.yaml")
 	b, err := os.ReadFile(path) // #nosec G304 -- path derives from operator-supplied --dir/env
 	if os.IsNotExist(err) {
-		return regions.Table{}, nil, nil
+		return RawRegions{Table: RawTable{}}, nil
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("read regions table: %w", err)
-	}
-	var raw any
-	if err := yaml.Unmarshal(b, &raw); err != nil {
-		return nil, nil, fmt.Errorf("parse regions table: %w", err)
-	}
-	if substitute {
-		raw, err = substituteEnvVars(raw, false)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", path, err)
-		}
-	}
-	rb, err := yaml.Marshal(raw)
-	if err != nil {
-		return nil, nil, fmt.Errorf("re-encode regions table: %w", err)
+		return RawRegions{}, fmt.Errorf("read regions table: %w", err)
 	}
 	var f regions.File
-	if err := yaml.Unmarshal(rb, &f); err != nil {
-		return nil, nil, fmt.Errorf("decode regions table: %w", err)
+	if err := yaml.Unmarshal(b, &f); err != nil {
+		return RawRegions{}, fmt.Errorf("decode regions table: %w", err)
 	}
-	if f.Regions == nil {
-		f.Regions = regions.Table{}
+	out := RawRegions{Table: RawTable{}}
+	for name, ar := range f.Regions {
+		out.Table[name] = ar
 	}
-	return f.Regions, f.Global, nil
-}
-
-// LoadRegionTable parses an environment's resources/<env>/regions.yaml: the
-// per-region table (slug + provider config) under the top-level `regions:` key,
-// plus the optional region-less `global:` block. regions.yaml is the single
-// authority for which regions deploy and all provider config. ${ENV_VAR}
-// references (e.g. provider credentials) are substituted; a missing one is an
-// error. Use LoadRegionTableRaw for credential-free structural validation.
-func LoadRegionTable(env, dir string) (regions.Table, *regions.Global, error) {
-	return loadRegionTable(env, dir, true)
-}
-
-// LoadRegionTableRaw is like LoadRegionTable but leaves ${ENV_VAR} references as
-// literals instead of substituting them. Use this for structural validation,
-// which checks the region/provider shape (including that a declared dns
-// authority carries a zone) without needing — or being tripped by the absence
-// of — real credential values: an unset `zone: ${CLOUDFLARE_ZONE_ID}` stays a
-// non-empty literal and passes the presence check, while a genuinely empty zone
-// is still caught.
-func LoadRegionTableRaw(env, dir string) (regions.Table, *regions.Global, error) {
-	return loadRegionTable(env, dir, false)
+	if f.Global != nil {
+		g := RawGlobal(*f.Global)
+		out.Global = &g
+	}
+	return out, nil
 }
 
 // LoadSizeTable returns the size table for an environment: the per-env

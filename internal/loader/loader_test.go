@@ -13,38 +13,94 @@ import (
 // testdataDir reuses the validate package's fixture environments.
 var testdataDir = filepath.Join("..", "validate", "testdata")
 
-func TestSubstituteEnvVarsPresent(t *testing.T) {
-	t.Setenv("INFORGE_TEST_TOKEN", "sekret")
-	out, err := substituteEnvVars(map[string]any{
-		"token": "${INFORGE_TEST_TOKEN}",
-		"nested": []any{
-			"plain",
-			"prefix-${INFORGE_TEST_TOKEN}",
-		},
-	}, false)
+func TestResolverStringExpandsPlaceholders(t *testing.T) {
+	r := NewResolverFrom(func(k string) (string, bool) {
+		if k == "INFORGE_TEST_TOKEN" {
+			return "sekret", true
+		}
+		return "", false
+	})
+	got, err := r.String("providers.hetzner.apiToken", "prefix-${INFORGE_TEST_TOKEN}")
 	require.NoError(t, err)
-	m := out.(map[string]any)
-	assert.Equal(t, "sekret", m["token"])
-	assert.Equal(t, []any{"plain", "prefix-sekret"}, m["nested"])
+	assert.Equal(t, "prefix-sekret", got)
 }
 
-func TestSubstituteEnvVarsMissing(t *testing.T) {
-	_, err := substituteEnvVars("${INFORGE_DEFINITELY_UNSET_VAR}", false)
+// A missing variable is an error, and the error names BOTH the config field that
+// wanted it and the env var that was absent — the old message named only the var.
+func TestResolverStringMissingNamesFieldAndVar(t *testing.T) {
+	r := NewResolverFrom(func(string) (string, bool) { return "", false })
+	_, err := r.String("ssh.authorizedKeys", "${INFORGE_DEFINITELY_UNSET_VAR}")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing required env var")
+	assert.Contains(t, err.Error(), "INFORGE_DEFINITELY_UNSET_VAR")
+	assert.Contains(t, err.Error(), "ssh.authorizedKeys")
+}
+
+// An env var set to the empty string is treated as absent: a blank credential is
+// never a legitimate value.
+func TestResolverStringEmptyIsMissing(t *testing.T) {
+	r := NewResolverFrom(func(string) (string, bool) { return "", true })
+	_, err := r.String("base_domain", "${INFORGE_TEST_BLANK}")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required env var")
 }
 
-func TestSubstituteEnvVarsLenient(t *testing.T) {
-	out, err := substituteEnvVars("${INFORGE_DEFINITELY_UNSET_VAR}", true)
+// A field with no placeholder never consults the environment at all.
+func TestResolverStringLiteralNeedsNoEnv(t *testing.T) {
+	r := NewResolverFrom(func(string) (string, bool) {
+		t.Fatal("a literal must not be looked up in the environment")
+		return "", false
+	})
+	got, err := r.String("base_domain", "example.com")
 	require.NoError(t, err)
-	assert.Equal(t, "", out)
+	assert.Equal(t, "example.com", got)
 }
 
-func TestLoadVariables(t *testing.T) {
-	vars, err := LoadVariables("ok", testdataDir)
+// Loading never expands: the raw document keeps its placeholders and requires no
+// environment. This is what lets a command resolve only the fields it reads.
+func TestLoadVariablesRawKeepsPlaceholders(t *testing.T) {
+	raw, err := LoadVariablesRaw("ok", testdataDir)
+	require.NoError(t, err)
+	assert.Equal(t, "example.com", raw.BaseDomain)
+	assert.Equal(t, "ssh-ed25519 AAAA...authorized", raw.SSH.AuthorizedKeys)
+}
+
+func TestResolverVariablesResolvesWholeDocument(t *testing.T) {
+	raw := RawVariables{BaseDomain: "${INFORGE_TEST_DOMAIN}"}
+	raw.SSH.AuthorizedKeys = "${INFORGE_TEST_KEYS}"
+	r := NewResolverFrom(func(k string) (string, bool) {
+		return map[string]string{
+			"INFORGE_TEST_DOMAIN": "example.com",
+			"INFORGE_TEST_KEYS":   "ssh-ed25519 AAAA",
+		}[k], true
+	})
+	vars, err := r.Variables(raw)
 	require.NoError(t, err)
 	assert.Equal(t, "example.com", vars.BaseDomain)
-	assert.Equal(t, "ssh-ed25519 AAAA...authorized", vars.SSH.AuthorizedKeys)
+	assert.Equal(t, "ssh-ed25519 AAAA", vars.SSH.AuthorizedKeys)
+}
+
+// THE REGRESSION TEST. Minting a mesh leaf reads base_domain and nothing else, so
+// an unset SSH_AUTHORIZED_KEYS must not fail it. Under the old eager loader the
+// whole document was expanded on load, and `inforge pki renew` / `inforge releases
+// deploy` died with "missing required env var: SSH_AUTHORIZED_KEYS" on a code path
+// that never reads an SSH key — which is exactly how a tunneller release broke in
+// production while ddns (no mtls_files, so no leaf mint) sailed through.
+func TestResolvingOneFieldIgnoresUnsetVarsInOtherFields(t *testing.T) {
+	raw := RawVariables{BaseDomain: "wardnet.network"}
+	raw.SSH.AuthorizedKeys = "${SSH_AUTHORIZED_KEYS}" // unset in the environment
+	raw.SSH.DeployPublicKey = "${DEPLOY_PUBLIC_KEY}"  // unset in the environment
+	r := NewResolverFrom(func(string) (string, bool) { return "", false })
+
+	baseDomain, err := r.String("base_domain", raw.BaseDomain)
+	require.NoError(t, err, "resolving base_domain must not require the ssh block")
+	assert.Equal(t, "wardnet.network", baseDomain)
+
+	// ...and the same document still fails loudly when a caller DOES need the
+	// field whose variable is unset.
+	_, err = r.Variables(raw)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ssh.authorizedKeys")
 }
 
 func TestLoadResourcesDefaultsAndCloudInit(t *testing.T) {
@@ -140,42 +196,37 @@ func TestLoadGlobalResourcesMissing(t *testing.T) {
 	assert.Empty(t, global.Network)
 }
 
-// TestLoadRegionTableFromFile exercises the nested regions.yaml: the per-region
+// TestLoadRegionsRawFromFile exercises the nested regions.yaml: the per-region
 // slug + provider config under `regions:`, plus the optional `global:` block.
-func TestLoadRegionTableFromFile(t *testing.T) {
-	// The ok fixture's dns.zone is an ${ENV_VAR} ref; the strict (deploy) load
-	// resolves it, so the var must be set here. Validation loads the same fixture
-	// raw and deliberately leaves it unset (see TestValidateResourcesOK).
-	t.Setenv("INFORGE_TEST_OK_ZONE", "test-zone")
-	rt, global, err := LoadRegionTable("ok", testdataDir)
+// The ok fixture's dns.zone is an ${ENV_VAR} ref, and the raw load needs no env
+// var set for it — the placeholder simply survives.
+func TestLoadRegionsRawFromFile(t *testing.T) {
+	raw, err := LoadRegionsRaw("ok", testdataDir)
 	require.NoError(t, err)
-	slug, err := rt.Slug("us-east-1")
+	slug, err := raw.Table.Slug("us-east-1")
 	require.NoError(t, err)
 	assert.Equal(t, "use1", slug)
-	// Provider config now lives per region in regions.yaml.
-	assert.Contains(t, rt["us-east-1"].Providers, "hetzner")
-	// The ok fixture declares no global slot.
-	assert.Nil(t, global)
+	assert.Contains(t, raw.Table["us-east-1"].Providers, "hetzner")
+	assert.Nil(t, raw.Global, "the ok fixture declares no global slot")
 
 	st, err := LoadSizeTable("ok", testdataDir)
 	require.NoError(t, err)
 	require.NoError(t, st.Resolve("SMALL"))
 }
 
-// TestLoadRegionTableMissing confirms an absent regions.yaml yields an empty
-// table (the new model makes regions.yaml the deploy authority — there is no
-// built-in fallback region set), with no error.
-func TestLoadRegionTableMissing(t *testing.T) {
+// An absent regions.yaml yields an empty table (regions.yaml is the deploy
+// authority — there is no built-in fallback region set), with no error.
+func TestLoadRegionsRawMissing(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "prd"), 0o755))
-	rt, global, err := LoadRegionTable("prd", dir)
+	raw, err := LoadRegionsRaw("prd", dir)
 	require.NoError(t, err)
-	assert.Empty(t, rt)
-	assert.Nil(t, global)
+	assert.Empty(t, raw.Table)
+	assert.Nil(t, raw.Global)
 }
 
 // writeRegionsYAML writes a regions.yaml with a ${ENV_VAR} provider credential
-// into a temp env dir and returns the dir, for the substitution tests below.
+// into a temp env dir and returns the dir, for the resolution tests below.
 func writeRegionsYAML(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -191,42 +242,40 @@ func writeRegionsYAML(t *testing.T) string {
 	return dir
 }
 
-// TestLoadRegionTableSubstitutesEnvVars is the regression guard for the bug: a
-// ${ENV_VAR} in regions.yaml (e.g. a provider credential) must be substituted, not
-// passed to the provider as the literal string "${...}".
-func TestLoadRegionTableSubstitutesEnvVars(t *testing.T) {
-	t.Setenv("INFORGE_TEST_HCLOUD_TOKEN", "real-token-value")
-	dir := writeRegionsYAML(t)
-
-	rt, _, err := LoadRegionTable("prd", dir)
+// The regression guard for the credential bug: a ${ENV_VAR} in regions.yaml must
+// be expanded before it reaches a provider, never passed through as the literal
+// string "${...}".
+func TestResolverRegionsSubstitutesCredentials(t *testing.T) {
+	raw, err := LoadRegionsRaw("prd", writeRegionsYAML(t))
 	require.NoError(t, err)
-	assert.Equal(t, "real-token-value", rt["us-east-1"].Providers["hetzner"]["apiToken"],
-		"the credential ${ENV_VAR} must be substituted, not passed through literally")
+	r := NewResolverFrom(func(string) (string, bool) { return "real-token-value", true })
+
+	table, _, err := r.Regions(raw)
+	require.NoError(t, err)
+	assert.Equal(t, "real-token-value", table["us-east-1"].Providers["hetzner"]["apiToken"],
+		"the credential ${ENV_VAR} must be resolved, not passed through literally")
 }
 
-// TestLoadRegionTableMissingEnvVarErrors: strict load fails clearly when a
-// referenced credential env var is unset (rather than handing the provider a
-// literal "${...}").
-func TestLoadRegionTableMissingEnvVarErrors(t *testing.T) {
-	t.Setenv("INFORGE_TEST_HCLOUD_TOKEN", "")
-	dir := writeRegionsYAML(t)
+// Resolving fails clearly when a referenced credential is unset, rather than
+// handing the provider a literal "${...}" — and the error names the field.
+func TestResolverRegionsMissingCredentialErrors(t *testing.T) {
+	raw, err := LoadRegionsRaw("prd", writeRegionsYAML(t))
+	require.NoError(t, err)
+	r := NewResolverFrom(func(string) (string, bool) { return "", false })
 
-	_, _, err := LoadRegionTable("prd", dir)
+	_, _, err = r.Regions(raw)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required env var")
+	assert.Contains(t, err.Error(), "regions.us-east-1.providers.hetzner.apiToken")
 }
 
-// TestLoadRegionTableRaw: the raw load (used by validation) leaves a ${ENV_VAR}
-// reference as a literal — even when the env var is unset — so structural
-// validation runs without credentials and an unresolved credential never reads
-// as an (empty) missing value.
-func TestLoadRegionTableRaw(t *testing.T) {
-	t.Setenv("INFORGE_TEST_HCLOUD_TOKEN", "")
-	dir := writeRegionsYAML(t)
-
-	rt, _, err := LoadRegionTableRaw("prd", dir)
+// The raw load (what validation uses) leaves a ${ENV_VAR} as a literal even when
+// the var is unset, so structural validation runs without credentials and an
+// unresolved credential never reads as an (empty) missing value.
+func TestLoadRegionsRawKeepsCredentialLiteral(t *testing.T) {
+	raw, err := LoadRegionsRaw("prd", writeRegionsYAML(t))
 	require.NoError(t, err)
-	assert.Equal(t, "${INFORGE_TEST_HCLOUD_TOKEN}", rt["us-east-1"].Providers["hetzner"]["apiToken"])
+	assert.Equal(t, "${INFORGE_TEST_HCLOUD_TOKEN}", raw.Table["us-east-1"].Providers["hetzner"]["apiToken"])
 }
 
 // TestLoadSizeTableFromFile exercises the on-disk size table: a YAML list of
