@@ -239,18 +239,34 @@ func meshMembers(res types.Resources) map[string]bool {
 	return out
 }
 
-// meshAllowedCallers expands one callee's authored allow-list against the caller
-// universe, and is the single seam where that universe is assembled: the regional and
-// global member sets each come from their OWN resource set. They are deliberately NOT
-// derived from the scope being rendered — for a global scope the rendering resource set
-// IS globalRes, so using it as the regional universe empties that half and every regional
-// caller is silently dropped from the allow-list (403 on all regional→global traffic).
-// dropped carries any authored name that expanded to nothing; the caller fails on it.
-func meshAllowedCallers(svc types.ServiceSpec, meshScope string, regionNames []string, regionalRes, globalRes types.Resources) (callers, dropped []string) {
-	return expandAllowedCallers(
-		svc.Mesh.AllowedServices, meshScope, regionNames,
-		meshMembers(regionalRes), meshMembers(globalRes),
-	)
+// meshCallerUniverse is the pair of mesh-member sets an allow-list expands over, and the
+// single seam where that universe is assembled: each half comes from its OWN resource
+// set. They are deliberately NOT derived from the scope being rendered — for a global
+// scope the rendering resource set IS globalRes, so using it as the regional universe
+// empties that half and every regional caller is silently dropped from the allow-list
+// (403 on all regional→global traffic). Built once per scope: the sets are the same for
+// every callee in it.
+type meshCallerUniverse struct {
+	regional map[string]bool
+	global   map[string]bool
+}
+
+func newMeshCallerUniverse(regionalRes, globalRes types.Resources) meshCallerUniverse {
+	return meshCallerUniverse{
+		regional: meshMembers(regionalRes),
+		global:   meshMembers(globalRes),
+	}
+}
+
+// allowedFor expands one callee's authored allow-list to the caller identities its mesh
+// ingress admits. dropped carries any authored name that expanded to nothing; the caller
+// fails the deploy on it. A pki: service with no mesh: block is an outbound-only caller —
+// it receives nothing, so it admits no one and has no allow-list to expand.
+func (u meshCallerUniverse) allowedFor(svc types.ServiceSpec, meshScope string, regionNames []string) (callers, dropped []string) {
+	if svc.Mesh == nil {
+		return nil, nil
+	}
+	return expandAllowedCallers(svc.Mesh.AllowedServices, meshScope, regionNames, u.regional, u.global)
 }
 
 // realizeMesh installs the east-west mesh proxy (the second, private nginx) on
@@ -283,9 +299,10 @@ func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, r
 	// rendered allow-list and 403 at the callee. Validation has already resolved every
 	// entry to a mesh member in a permitted direction, so this can only mean the renderer
 	// holds the wrong membership sets — fail the deploy loudly instead of under-admitting.
+	universe := newMeshCallerUniverse(regionalRes, globalRes)
 	var dropErrs []string
 	allowedFor := func(svc types.ServiceSpec) []string {
-		callers, dropped := meshAllowedCallers(svc, meshScope, regionNames, regionalRes, globalRes)
+		callers, dropped := universe.allowedFor(svc, meshScope, regionNames)
 		for _, name := range dropped {
 			dropErrs = append(dropErrs, fmt.Sprintf("service %q (scope %s): mesh.allowed_services caller %q expands to no mesh identity", svc.Name, meshScope, name))
 		}

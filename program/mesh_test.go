@@ -258,7 +258,7 @@ func TestMeshAllowedCallersGlobalCalleeAdmitsRegionalCallers(t *testing.T) {
 	}}
 	tenants := globalRes.Service[0]
 
-	got, dropped := meshAllowedCallers(tenants, pki.ScopeGlobal, []string{"eu-central"}, regionalRes, globalRes)
+	got, dropped := newMeshCallerUniverse(regionalRes, globalRes).allowedFor(tenants, pki.ScopeGlobal, []string{"eu-central"})
 	want := []string{"eu-central/ddns", "eu-central/tunneller", "global/gateway"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("global callee callers = %v, want %v", got, want)
@@ -268,15 +268,25 @@ func TestMeshAllowedCallersGlobalCalleeAdmitsRegionalCallers(t *testing.T) {
 	}
 }
 
-// The same expansion for a REGIONAL callee stays same-region: the global set must not
-// leak a global caller into a regional allow-list (the ADR-0032 direction rule).
-func TestMeshAllowedCallersRegionalCalleeStaysSameRegion(t *testing.T) {
-	regionalRes := types.Resources{Service: []types.ServiceSpec{meshSvc("ddns"), meshSvc("tunneller", "gateway")}}
+// A REGIONAL callee's callers are prefixed with its own scope. NOTE what this does NOT
+// do: the regional branch prefixes ANY authored name without a membership lookup, so a
+// regional callee naming the global service "tenants" expands to "eu-central/tenants" —
+// an identity no leaf ever presents. The renderer does not enforce the ADR-0032
+// direction rule (global may not call regional); validate.go rejects that allow-list at
+// authoring time, and the renderer trusts it. This test pins the renderer's real
+// behaviour so a future reader does not mistake it for the guard.
+func TestMeshAllowedCallersRegionalCalleePrefixesOwnScope(t *testing.T) {
+	regionalRes := types.Resources{Service: []types.ServiceSpec{
+		meshSvc("ddns"), meshSvc("tunneller", "gateway", "ddns", "tenants"),
+	}}
 	globalRes := types.Resources{Service: []types.ServiceSpec{meshSvc("tenants")}}
 
-	got, dropped := meshAllowedCallers(regionalRes.Service[1], "eu-central", []string{"eu-central"}, regionalRes, globalRes)
-	if !reflect.DeepEqual(got, []string{"eu-central/gateway"}) {
-		t.Errorf("regional callee callers = %v, want [eu-central/gateway]", got)
+	got, dropped := newMeshCallerUniverse(regionalRes, globalRes).
+		allowedFor(regionalRes.Service[1], "eu-central", []string{"eu-central", "us-east-1"})
+	// Same-region only: never us-east-1/ddns, never global/tenants.
+	want := []string{"eu-central/ddns", "eu-central/gateway", "eu-central/tenants"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("regional callee callers = %v, want %v", got, want)
 	}
 	if len(dropped) != 0 {
 		t.Errorf("dropped = %v, want none", dropped)
@@ -289,11 +299,23 @@ func TestMeshAllowedCallersRegionalCalleeStaysSameRegion(t *testing.T) {
 func TestMeshAllowedCallersReportsDroppedCaller(t *testing.T) {
 	globalRes := types.Resources{Service: []types.ServiceSpec{meshSvc("tenants", "ghost", "gateway")}}
 
-	got, dropped := meshAllowedCallers(globalRes.Service[0], pki.ScopeGlobal, []string{"eu-central"}, types.Resources{}, globalRes)
+	got, dropped := newMeshCallerUniverse(types.Resources{}, globalRes).
+		allowedFor(globalRes.Service[0], pki.ScopeGlobal, []string{"eu-central"})
 	if !reflect.DeepEqual(got, []string{"global/gateway"}) {
 		t.Errorf("callers = %v, want [global/gateway]", got)
 	}
 	if !reflect.DeepEqual(dropped, []string{"ghost"}) {
 		t.Errorf("dropped = %v, want [ghost]", dropped)
+	}
+}
+
+// An outbound-only mesh member (pki: but no mesh: block) receives nothing, so it has no
+// allow-list to expand. It must not panic on the nil Mesh.
+func TestMeshAllowedCallersOutboundOnlyMember(t *testing.T) {
+	caller := types.ServiceSpec{Name: "worker", Pki: "wardnet-mesh"} // no mesh: block
+	got, dropped := newMeshCallerUniverse(types.Resources{}, types.Resources{}).
+		allowedFor(caller, "eu-central", []string{"eu-central"})
+	if len(got) != 0 || len(dropped) != 0 {
+		t.Errorf("outbound-only member = (%v, %v), want (none, none)", got, dropped)
 	}
 }
