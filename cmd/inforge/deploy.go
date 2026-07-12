@@ -19,7 +19,7 @@ import (
 
 func newDeployCmd(configPath, dir *string) *cobra.Command {
 	var stackConfig, format, report, sshKeyPath string
-	var yes, allowMultiple bool
+	var yes bool
 
 	cmd := &cobra.Command{
 		Use:           "deploy <env>",
@@ -28,7 +28,7 @@ func newDeployCmd(configPath, dir *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeploy(cmd.Context(), args[0], stackConfig, *configPath, *dir, format, report, sshKeyPath, yes, allowMultiple)
+			return runDeploy(cmd.Context(), args[0], stackConfig, *configPath, *dir, format, report, sshKeyPath, yes)
 		},
 	}
 
@@ -37,16 +37,16 @@ func newDeployCmd(configPath, dir *string) *cobra.Command {
 	cmd.Flags().StringVar(&report, "report", "", "write a markdown run report to this path (default: a temp file)")
 	cmd.Flags().StringVar(&sshKeyPath, "ssh-key", "", "path to the SSH deploy key for the mesh baseline trigger (overrides INFORGE_DEPLOY_KEY)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "auto-approve without prompt")
-	cmd.Flags().BoolVar(&allowMultiple, "allow-multiple", false, "allow running when multiple environments have changes")
 	return cmd
 }
 
-func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir, format, reportPath, sshKeyPath string, yes, allowMultiple bool) error {
+func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir, format, reportPath, sshKeyPath string, yes bool) error {
 	if !yes {
-		fmt.Printf("Deploy stack %q? Type 'yes' to confirm: ", stackName)
-		scanner := bufio.NewScanner(os.Stdin)
-		scanner.Scan()
-		if strings.TrimSpace(scanner.Text()) != "yes" {
+		confirmed, err := confirmDeploy(os.Stdin, stackName)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
 			fmt.Println("deploy cancelled")
 			return nil
 		}
@@ -117,17 +117,19 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 	// success or failure, so CI can surface it without any GitHub API call here.
 	writeReport("deploy", stackName, p, reportPath)
 
+	// The checkpoint is pushed on failure too — see persistState.
+	stateErr := persistState(upErr, pushState)
+
 	if upErr != nil {
 		// Still emit the JSON summary on failure so a consumer parsing stdout gets
 		// the counts and the failure list (stdout is otherwise empty).
 		if jsonMode {
 			_ = printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
 		}
-		return fmt.Errorf("deploy: %w", upErr)
+		return stateErr
 	}
-
-	if pushErr := pushState(); pushErr != nil {
-		return fmt.Errorf("push state: %w", pushErr)
+	if stateErr != nil {
+		return stateErr
 	}
 
 	// The mesh leaf baseline (ADR-0035): mint real mesh material and SSH-push it
@@ -167,6 +169,43 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 		}
 	}
 	return baseErr
+}
+
+// confirmDeploy gates a deploy that did not pass --yes on an interactive "yes".
+// A non-interactive stdin (a CI runner, a pipe, </dev/null) can never answer, and
+// reading EOF must NOT read as "cancelled, exit 0" — a CI job that forgot --yes
+// would then report a green deploy having applied nothing. It is a hard error.
+func confirmDeploy(in *os.File, stackName string) (bool, error) {
+	info, err := in.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat stdin: %w", err)
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		return false, fmt.Errorf("deploy %q needs confirmation but stdin is not a terminal — pass --yes to approve non-interactively", stackName)
+	}
+
+	fmt.Printf("Deploy stack %q? Type 'yes' to confirm: ", stackName)
+	scanner := bufio.NewScanner(in)
+	scanner.Scan()
+	return strings.TrimSpace(scanner.Text()) == "yes", nil
+}
+
+// persistState pushes the state checkpoint and folds its error into the up's, if
+// any. It runs even when the up FAILED: a partially-failed up still created real
+// resources, and the checkpoint recording them lives only in the local state dir
+// until pushState commits it. Dropping it on failure orphans those resources — the
+// next deploy sees no state for them and creates them again.
+func persistState(upErr error, pushState func() error) error {
+	pushErr := pushState()
+	switch {
+	case upErr != nil && pushErr != nil:
+		return fmt.Errorf("deploy: %w (push state also failed: %v)", upErr, pushErr)
+	case upErr != nil:
+		return fmt.Errorf("deploy: %w", upErr)
+	case pushErr != nil:
+		return fmt.Errorf("push state: %w", pushErr)
+	}
+	return nil
 }
 
 // resolveDeployKeyFile resolves the SSH deploy key FILE the mesh baseline needs.
