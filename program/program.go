@@ -382,6 +382,9 @@ func Run(ctx *pulumi.Context) error {
 		if err := provisionDatabaseBackups(ctx, sc.res, computeOutputs[sc.key], dbHostTails, backupsBucket, backupsEndpoint, backupsCredsPresent, backupsAccessKey, backupsSecretKey, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
 			return err
 		}
+		if err := checkDBRoleCollisions(sc.res, env, sc.slug); err != nil {
+			return err
+		}
 		all := types.AllOutputs{Compute: computeOutputs, Database: databaseOutputs, Encrypted: encSecrets, PKI: pkiMaterial}
 		serviceSecrets, err := provisionServiceSecrets(ctx, sc.res, all, env, sc.key, sc.slug)
 		if err != nil {
@@ -390,7 +393,7 @@ func Run(ctx *pulumi.Context) error {
 		if err := provisionServices(ctx, sc.res, computeOutputs[sc.key], serviceSecrets, gates, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug, vars.BaseDomain, inforgeVersion); err != nil {
 			return err
 		}
-		if err := provisionObservability(ctx, sc.res, computeOutputs[sc.key], gates, dbHostTails, vars.Observability, obsAuthB64, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
+		if err := provisionObservability(ctx, sc.res, computeOutputs[sc.key], databaseOutputs[sc.key], gates, dbHostTails, vars.Observability, obsAuthB64, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
 			return err
 		}
 	}
@@ -669,7 +672,7 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 // authB64 is the base64 OTLP Basic-auth value, already marked secret by the caller;
 // the credential write is built inside an ApplyT over it so the secret is encrypted
 // in Pulumi state (never written as plaintext), mirroring deliverServiceSecrets.
-func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, dbHostTails map[string]pulumi.Resource, obs types.ObservabilityConfig, authB64 pulumi.StringOutput, deployPrivateKey, env, slug string) error {
+func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, dbOut map[string]types.DatabaseOutputs, gates map[string]pulumi.Resource, dbHostTails map[string]pulumi.Resource, obs types.ObservabilityConfig, authB64 pulumi.StringOutput, deployPrivateKey, env, slug string) error {
 	if obs.OTLPEndpoint == "" {
 		return nil
 	}
@@ -727,7 +730,7 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 				continue
 			}
 			port := ports[hostKey][cluster]
-			roleName := naming.Resource(env, slug, "dbrole", cluster+"-otelmon")
+			roleName := monitorRoleName(env, slug, cluster)
 			pw, err := random.NewRandomPassword(ctx, roleName+"-password", &random.RandomPasswordArgs{
 				Length:  pulumi.Int(32),
 				Special: pulumi.Bool(false),
@@ -742,11 +745,21 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 			if tail := dbHostTails[hostKey]; tail != nil {
 				mintDeps = append(mintDeps, tail)
 			}
+			// Serialize this mint against the per-service grant mints on the SAME cluster:
+			// both run CREATE ROLE / GRANT CONNECT ON DATABASE against catalogs shared by
+			// every database of the cluster (pg_authid, pg_database), and two concurrent
+			// sessions updating one catalog tuple fail with "tuple concurrently updated".
+			// The per-database provisioners already chain their own mints (lastMint); this
+			// hooks the monitor mint onto the end of each of those chains.
+			mintDeps = append(mintDeps, clusterRoleMints(res, dbOut, cluster)...)
 			mintCmd, err := remote.NewCommand(ctx, roleName+"-mint", &remote.CommandArgs{
 				Connection: conn,
 				Create:     mintScript,
 				Update:     mintScript,
-				Triggers:   pulumi.Array{mintScript},
+				// mintScript embeds the monitor role's random password (secret, and unknown
+				// at preview); a raw secret in Triggers breaks preview with
+				// "malformed RPC secret" — safeTrigger hashes + unsecrets it.
+				Triggers: pulumi.Array{safeTrigger(mintScript)},
 				// The monitor role owns no objects, so DROP OWNED just revokes its
 				// pg_monitor membership + CONNECT grants; postgres.OSUser is the bootstrap
 				// superuser the REASSIGN targets (a no-op here).
@@ -801,12 +814,91 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 			Connection: conn,
 			Create:     applyScript,
 			Update:     applyScript,
-			Triggers:   pulumi.Array{applyScript},
+			// applyScript embeds the OTLP credential and every monitor-role password
+			// (secret, and unknown at preview on a fresh cluster) — hash + unsecret it,
+			// same invariant as the mint above.
+			Triggers: pulumi.Array{safeTrigger(applyScript)},
 		}, pulumi.DependsOn(configDeps)); err != nil {
 			return fmt.Errorf("observability: host %q: configure collector: %w", hostKey, err)
 		}
 	}
 	return nil
+}
+
+// dbRoleName derives the per-service database role a grant mints: the consuming
+// service's env+slug scope it, so two regions granting the same (global) database
+// never collide. It is joined with a dash, which is NOT injective on its own — see
+// checkDBRoleCollisions, the check that keeps the derivation unambiguous.
+func dbRoleName(env, slug, service, database string) string {
+	return naming.Resource(env, slug, "dbrole", service+"-"+database)
+}
+
+// monitorRoleName derives a cluster's observability monitoring role (ADR-0037). It
+// shares the dbrole namespace with dbRoleName, so it is covered by the same check.
+func monitorRoleName(env, slug, cluster string) string {
+	return naming.Resource(env, slug, "dbrole", cluster+"-otelmon")
+}
+
+// checkDBRoleCollisions rejects a scope whose derived Postgres role names are not
+// unique. Both derivations dash-join two names (`<service>-<database>`,
+// `<cluster>-otelmon`), and a dash is a legal character in every one of them, so the
+// join is not injective: service `a-b` granting database `c` and service `a` granting
+// database `b-c` derive the SAME role name — one Postgres role, one Pulumi URN, two
+// services silently sharing a login (and a duplicate-URN failure mid-deploy).
+//
+// The check runs instead of re-encoding the name: the derived name is the resource's
+// URN, so changing the encoding would replace every live database role on every
+// existing deployment (drop + re-mint, rotating credentials fleet-wide) to fix a
+// collision no deployment has hit. Failing the deploy with a rename hint is the same
+// guarantee at no migration cost.
+//
+// Grants are same-scope only (validation rejects a cross-scope database grant), so
+// one scope's names are the whole namespace.
+func checkDBRoleCollisions(res types.Resources, env, slug string) error {
+	owner := map[string]string{}
+	claim := func(role, by string) error {
+		if prev, dup := owner[role]; dup {
+			return fmt.Errorf("database role %q is derived by both %s and %s; the derivation dash-joins the two names, so it is ambiguous — rename one of them", role, prev, by)
+		}
+		owner[role] = by
+		return nil
+	}
+	for _, c := range res.DatabaseCluster {
+		if err := claim(monitorRoleName(env, slug, c.Name), fmt.Sprintf("database-cluster %q's monitoring role", c.Name)); err != nil {
+			return err
+		}
+	}
+	for _, svc := range res.Service {
+		for _, g := range svc.Grants {
+			typ, name, ok := strings.Cut(g.Resource, "/")
+			if !ok || typ != grantTypeDatabase {
+				continue
+			}
+			dbName := strings.TrimPrefix(name, types.GlobalPrefix)
+			if err := claim(dbRoleName(env, slug, svc.Name, dbName), fmt.Sprintf("service %q's grant on database %q", svc.Name, dbName)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// clusterRoleMints returns the newest per-service role mint on each of the cluster's
+// databases (the tail of each database's serialized mint chain). A command that mints
+// another role in the same cluster must wait on all of them: role and database-level
+// grants contend on catalogs shared across the cluster, and concurrent sessions
+// updating one tuple fail with "tuple concurrently updated". A database nobody granted
+// has no mint and contributes nothing.
+func clusterRoleMints(res types.Resources, dbOut map[string]types.DatabaseOutputs, cluster string) []pulumi.Resource {
+	var out []pulumi.Resource
+	for _, db := range databasesOfCluster(res, cluster) {
+		p, ok := dbOut[db.Name].RoleProvisioner.(*selfHostedRoleProvisioner)
+		if !ok || p.lastMint == nil {
+			continue
+		}
+		out = append(out, p.lastMint)
+	}
+	return out
 }
 
 // provisionApps seeds each app's on-host folder with a placeholder bundle on its
@@ -980,7 +1072,7 @@ func resolveDatabaseGrants(ctx *pulumi.Context, svc types.ServiceSpec, all types
 		}
 		// Consumer-scoped role identity: the consuming service's env+slug, so two
 		// regions granting the same (global) database never collide on a role.
-		roleName := naming.Resource(env, slug, "dbrole", svc.Name+"-"+dbName)
+		roleName := dbRoleName(env, slug, svc.Name, dbName)
 		gdb := grant.Database{RoleProvisioner: db.RoleProvisioner, RoleName: roleName}
 		fields, err := gdb.Grant(ctx, svc.Name, grant.Permission(g.Permission), env, region)
 		if err != nil {
