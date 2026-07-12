@@ -311,7 +311,7 @@ func TestMintRoleScriptROReassignsInTargetDatabase(t *testing.T) {
 }
 
 func TestDropRoleScript(t *testing.T) {
-	s := DropRoleScript(5432, "svc", "app-owner", "app")
+	s := DropRoleScript(5432, "svc", "app-owner", []string{"app"})
 	for _, want := range []string{
 		// REASSIGN OWNED / DROP OWNED are per-database: run from the cluster default
 		// database they would see none of the role's objects, ACLs or default-privilege
@@ -325,18 +325,47 @@ func TestDropRoleScript(t *testing.T) {
 			t.Errorf("DropRoleScript missing %q in:\n%s", want, s)
 		}
 	}
+	// Pin WHICH database each half connects to — the property the teardown bug turned
+	// on. The clears must target the role's own database, never the default one.
+	clears, drop, ok := strings.Cut(s, "DROP ROLE IF EXISTS")
+	if !ok {
+		t.Fatalf("no DROP ROLE in:\n%s", s)
+	}
+	if !strings.Contains(clears, "psql -p 5432 -w -v ON_ERROR_STOP=1 -d 'app'") {
+		t.Errorf("clears must target the role's database:\n%s", clears)
+	}
+	if strings.Contains(clears, "-d 'postgres'") {
+		t.Errorf("clears must not target the default database:\n%s", clears)
+	}
+	// DROP ROLE is cluster-wide: it runs from the default database, after the clears.
+	if strings.Contains(drop, " -d ") || !strings.Contains(s, "psql -p 5432 -w -v ON_ERROR_STOP=1 <<") {
+		t.Errorf("DROP ROLE must run from the default database:\n%s", s)
+	}
+	// A failed clear must abort the teardown rather than fall through to a DROP ROLE
+	// that would then fail confusingly (or leave a live login).
+	if !strings.HasPrefix(s, "set -e\n") {
+		t.Errorf("teardown must be set -e:\n%s", s)
+	}
 }
 
-// The monitor role is scoped to no single database and owns nothing: its teardown runs
-// from the cluster default (DROP OWNED reaches pg_monitor membership + the CONNECT
-// grants on shared objects from anywhere).
-func TestDropRoleScriptNoDatabase(t *testing.T) {
-	s := DropRoleScript(5432, "otelmon", OSUser, "")
-	if strings.Contains(s, " -d ") {
-		t.Errorf("a database-less teardown must not pass -d:\n%s", s)
+// A role granted on several databases (the ADR-0037 monitor role) must be cleared in
+// every one of them before the cluster-wide DROP ROLE.
+func TestDropRoleScriptMultipleDatabases(t *testing.T) {
+	s := DropRoleScript(5433, "otelmon", "postgres", []string{"tenants", "ddns"})
+	iTenants := strings.Index(s, "-d 'tenants'")
+	iDdns := strings.Index(s, "-d 'ddns'")
+	iDrop := strings.Index(s, `DROP ROLE IF EXISTS "otelmon"`)
+	if iTenants < 0 || iDdns < 0 || iDrop < 0 {
+		t.Fatalf("missing per-database clear or drop:\n%s", s)
 	}
-	if !strings.Contains(s, `DROP ROLE IF EXISTS "otelmon"`) {
-		t.Errorf("DropRoleScript missing the drop:\n%s", s)
+	if iTenants > iDrop || iDdns > iDrop {
+		t.Errorf("every DROP OWNED must precede DROP ROLE:\n%s", s)
+	}
+	if strings.Count(s, `DROP OWNED BY "otelmon"`) != 2 {
+		t.Errorf("want one DROP OWNED per database:\n%s", s)
+	}
+	if !strings.HasPrefix(s, "set -e\n") {
+		t.Errorf("a failed clear must abort the teardown:\n%s", s)
 	}
 }
 

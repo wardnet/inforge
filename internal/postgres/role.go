@@ -73,8 +73,9 @@ func MintRoleScript(port int, role, password, database, owner, permission string
 // grants CONNECT on each scraped database (ADR-0037). It runs on the host over local
 // peer auth from the default database — every statement is cluster-level. The password
 // appears in the rendered SQL (quoted), so the caller wraps the whole command as a
-// Pulumi secret. Teardown reuses DropRoleScript (the monitor role owns no objects, so
-// its DROP OWNED just revokes the pg_monitor membership + CONNECT grants).
+// Pulumi secret. Teardown reuses DropRoleScript over the same database set (the
+// monitor role owns no objects, so its DROP OWNED just revokes the pg_monitor
+// membership + CONNECT grants).
 func MintMonitorRoleScript(port int, role, password string, databases []string) string {
 	return psqlScript(port, "", pgrole.MintMonitorRoleSQL(role, password, databases))
 }
@@ -82,20 +83,25 @@ func MintMonitorRoleScript(port int, role, password string, databases []string) 
 // DropRoleScript renders shell that reassigns the role's owned objects to owner, drops
 // its privileges, then drops the role — run at role teardown over local peer auth.
 //
-// It connects to database, and that is load-bearing: REASSIGN OWNED and DROP OWNED are
-// PER-DATABASE (they only see the current database's catalog, plus shared objects), so
-// running them from the cluster's default `postgres` database leaves every object and
-// ACL the role owns in its own database untouched — and the DROP ROLE that follows then
-// fails with `role "…" cannot be dropped because some objects depend on it`, failing the
-// teardown (and, since the mint command is DeleteBeforeReplace, any re-mint that
-// replaces it, e.g. an rw→ro permission change). A per-service role is bound to exactly
-// one database, so that database is the only catalog it can hold anything in. DROP ROLE
-// itself is cluster-wide and runs fine from there.
+// The database targeting is load-bearing. REASSIGN OWNED and DROP OWNED are
+// PER-DATABASE: they only see the catalog of the database the session is connected to
+// (plus ACLs on shared objects such as the databases themselves). Run from the
+// cluster's default `postgres` database they leave every object, ACL and
+// default-privilege entry the role holds in its own database untouched — and the
+// DROP ROLE that follows then fails with `role "…" cannot be dropped because some
+// objects depend on it`, failing the teardown (and, since the mint command is
+// DeleteBeforeReplace, any re-mint that replaces it, e.g. an rw→ro permission change).
 //
-// database may be empty for a role that is scoped to no single database and owns nothing
-// — the monitor role (ADR-0037), whose pg_monitor membership and CONNECT grants are
-// cluster-level / shared-object privileges that DROP OWNED reaches from any database.
-func DropRoleScript(port int, role, owner, database string) string {
-	stmts := append(pgrole.ReassignDropSQL(role, owner), pgrole.DropRoleSQL(role))
-	return psqlScript(port, database, stmts)
+// So the clears run once per database the role was granted on, against that database:
+// exactly one for a per-service login role, and every scraped database for the
+// multi-database monitor role (ADR-0037). DROP ROLE itself is cluster-wide and runs
+// last from the default database, once every dependent object is cleared; it still
+// fails loudly if the role holds privileges in some database outside databases.
+func DropRoleScript(port int, role, owner string, databases []string) string {
+	parts := []string{"set -e"}
+	for _, db := range databases {
+		parts = append(parts, psqlScript(port, db, pgrole.ReassignDropSQL(role, owner)))
+	}
+	parts = append(parts, psqlScript(port, "", []string{pgrole.DropRoleSQL(role)}))
+	return strings.Join(parts, "\n")
 }

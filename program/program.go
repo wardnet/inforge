@@ -747,12 +747,13 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 				Create:     mintScript,
 				Update:     mintScript,
 				Triggers:   pulumi.Array{mintScript},
-				// The monitor role owns no objects and is scoped to no single database, so
-				// the teardown runs from the cluster default database (empty database
-				// argument): DROP OWNED reaches its pg_monitor membership and its CONNECT
-				// grants (shared objects) from anywhere. postgres.OSUser is the bootstrap
-				// superuser the REASSIGN targets (a no-op here).
-				Delete: pulumi.String(postgres.DropRoleScript(port, roleName, postgres.OSUser, "")),
+				// The monitor role owns no objects, so DROP OWNED just revokes its
+				// pg_monitor membership + CONNECT grants; postgres.OSUser is the bootstrap
+				// superuser the REASSIGN targets (a no-op here). It still runs against every
+				// scraped database — REASSIGN/DROP OWNED are per-database, and clearing the
+				// role everywhere it was granted CONNECT is what lets the final cluster-wide
+				// DROP ROLE succeed.
+				Delete: pulumi.String(postgres.DropRoleScript(port, roleName, postgres.OSUser, dbNames)),
 				// DeleteBeforeReplace: same reasoning as provisionService's
 				// remote.Command — a forced replace with the default
 				// create-before-delete order would mint the role then

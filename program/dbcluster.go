@@ -299,10 +299,11 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 		return postgres.MintRoleScript(p.port, roleName, password, p.database, p.owner, permission)
 	}).(pulumi.StringOutput)
 	// On teardown (grant/service removed) reassign the role's owned objects to the
-	// database owner and drop the role, so a retired service leaves no live login. It
-	// runs connected to THIS database: REASSIGN OWNED / DROP OWNED are per-database, and
-	// the role's objects, ACLs and default-privilege entries all live in this one.
-	dropScript := postgres.DropRoleScript(p.port, roleName, p.owner, p.database)
+	// database owner and drop the role, so a retired service leaves no live login. The
+	// clear runs connected to THIS database: REASSIGN OWNED / DROP OWNED are
+	// per-database, and the role's objects, ACLs and default-privilege entries all live
+	// in this one. DROP ROLE itself is cluster-wide.
+	dropScript := postgres.DropRoleScript(p.port, roleName, p.owner, []string{p.database})
 	// Serialize mints against ONE database: each mint depends on its db-create command
 	// AND the previous mint on this database, so concurrent GRANT/ALTER DEFAULT
 	// PRIVILEGES sessions never contend on the shared catalog. Different databases hold
