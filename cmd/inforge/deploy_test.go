@@ -15,21 +15,35 @@ func TestConfirmDeployNonInteractiveStdin(t *testing.T) {
 	// A piped/redirected stdin can never answer the prompt. Reading EOF must not
 	// look like "cancelled" (exit 0) — a CI job that forgot --yes would report a
 	// green deploy having applied nothing.
-	f, err := os.CreateTemp(t.TempDir(), "stdin")
+	regular, err := os.CreateTemp(t.TempDir(), "stdin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = regular.Close() }()
 
-	confirmed, err := confirmDeploy(f, "prd")
-	if err == nil {
-		t.Fatal("expected an error for non-interactive stdin, got nil")
+	// /dev/null is the shape a CI runner actually hands a step as stdin, and it is
+	// a CHARACTER DEVICE — an os.ModeCharDevice check calls it a terminal and waves
+	// it straight through to the EOF-as-"cancelled" false green. It must be refused
+	// exactly like the redirected file.
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if confirmed {
-		t.Error("confirmed = true, want false")
-	}
-	if !strings.Contains(err.Error(), "--yes") {
-		t.Errorf("error = %q, want it to point at --yes", err)
+	defer func() { _ = devNull.Close() }()
+
+	for name, in := range map[string]*os.File{"regular file": regular, "os.DevNull": devNull} {
+		t.Run(name, func(t *testing.T) {
+			confirmed, err := confirmDeploy(in, "prd")
+			if err == nil {
+				t.Fatal("expected an error for non-interactive stdin, got nil")
+			}
+			if confirmed {
+				t.Error("confirmed = true, want false")
+			}
+			if !strings.Contains(err.Error(), "--yes") {
+				t.Errorf("error = %q, want it to point at --yes", err)
+			}
+		})
 	}
 }
 

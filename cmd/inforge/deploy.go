@@ -15,6 +15,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/output"
+	"golang.org/x/term"
 )
 
 func newDeployCmd(configPath, dir *string) *cobra.Command {
@@ -172,12 +173,15 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 // A non-interactive stdin (a CI runner, a pipe, </dev/null) can never answer, and
 // reading EOF must NOT read as "cancelled, exit 0" — a CI job that forgot --yes
 // would then report a green deploy having applied nothing. It is a hard error.
+//
+// The test is a real isatty(3) (term.IsTerminal), NOT the os.ModeCharDevice bit:
+// /dev/null IS a character device, so the mode check calls it a terminal — and
+// /dev/null is precisely what a CI runner hands a step as stdin (GitHub Actions
+// included). That check would therefore wave through the one case this guard
+// exists for, read EOF, and exit 0 having deployed nothing. A closed or invalid
+// fd is not a terminal either, so this fails closed.
 func confirmDeploy(in *os.File, stackName string) (bool, error) {
-	info, err := in.Stat()
-	if err != nil {
-		return false, fmt.Errorf("stat stdin: %w", err)
-	}
-	if info.Mode()&os.ModeCharDevice == 0 {
+	if !term.IsTerminal(int(in.Fd())) {
 		return false, fmt.Errorf("deploy %q needs confirmation but stdin is not a terminal — pass --yes to approve non-interactively", stackName)
 	}
 
