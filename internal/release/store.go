@@ -280,13 +280,29 @@ func (s *Store) ListArtifacts(ctx context.Context, service string) ([]Artifact, 
 // do not stop the sweep; callers treat them as non-fatal (the upload that
 // triggered the prune already succeeded).
 func (s *Store) Prune(ctx context.Context, service string, keep int) ([]string, error) {
-	pinned, err := s.PinnedSHAs(ctx, service)
-	if err != nil {
-		return nil, fmt.Errorf("collect pinned SHAs for %s: %w", service, err)
-	}
+	// Order is load-bearing: the artifact objects MUST be listed BEFORE the
+	// pinned set is read. A `releases deploy` running concurrently pins a SHA by
+	// writing its manifest, and the two reads are not atomic (S3 gives us no
+	// snapshot), so whichever read comes LAST decides what a concurrent pin is
+	// raced against. Reading pins first meant everything from the pin read to the
+	// end of the sweep was a hole: a SHA pinned there was invisible and got
+	// deleted out from under a live host (ADR-0016's pin invariant). Listing
+	// first shrinks that hole to the pin read itself: a pin landing before it is
+	// seen and retained, and an artifact pushed in the window is simply not a
+	// candidate this sweep.
+	//
+	// This narrows the race, it does not close it — a pin written between
+	// PinnedSHAs' own read and the DeleteObject calls below is still missed.
+	// Closing it needs a lock or a conditional delete the store does not have;
+	// the pin read is deliberately the last thing before the deletes so the
+	// remaining window is as small as it can be.
 	objs, err := s.listArtifactObjects(ctx, service)
 	if err != nil {
 		return nil, err
+	}
+	pinned, err := s.PinnedSHAs(ctx, service)
+	if err != nil {
+		return nil, fmt.Errorf("collect pinned SHAs for %s: %w", service, err)
 	}
 	victims := selectForPrune(coalesceArtifacts(objs), pinned, keep)
 	victimSet := make(map[string]bool, len(victims))
