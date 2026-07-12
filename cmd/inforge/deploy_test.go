@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 )
@@ -32,6 +33,38 @@ func TestConfirmDeployNonInteractiveStdin(t *testing.T) {
 	}
 }
 
+func TestPromptYes(t *testing.T) {
+	// Only the literal "yes" (modulo surrounding space) approves; everything else
+	// cancels, and a read error is NOT an answer — it must not read as "cancelled".
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"yes\n", true},
+		{"  yes  \n", true},
+		{"y\n", false},
+		{"no\n", false},
+		{"", false}, // EOF (Ctrl-D)
+	} {
+		got, err := promptYes(strings.NewReader(tc.in), "prd")
+		if err != nil {
+			t.Fatalf("promptYes(%q) errored: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Errorf("promptYes(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+
+	readErr := errors.New("tty exploded")
+	confirmed, err := promptYes(iotest.ErrReader(readErr), "prd")
+	if !errors.Is(err, readErr) {
+		t.Errorf("err = %v, want the read error wrapped", err)
+	}
+	if confirmed {
+		t.Error("confirmed = true on a read error, want false")
+	}
+}
+
 func TestPersistStatePushesPartialCheckpoint(t *testing.T) {
 	upErr := errors.New("boom")
 
@@ -45,11 +78,12 @@ func TestPersistStatePushesPartialCheckpoint(t *testing.T) {
 		t.Errorf("err = %v, want the up error wrapped", err)
 	}
 
-	// Both failing: the up error stays the wrapped cause, the push failure is reported.
+	// Both failing: BOTH must stay matchable — a caller checking for either the
+	// engine error or the push failure has to find it.
 	pushErr := errors.New("push exploded")
 	err = persistState(upErr, func() error { return pushErr })
-	if !errors.Is(err, upErr) || !strings.Contains(err.Error(), "push exploded") {
-		t.Errorf("err = %v, want both the up and push failures surfaced", err)
+	if !errors.Is(err, upErr) || !errors.Is(err, pushErr) {
+		t.Errorf("err = %v, want both the up and push failures wrapped", err)
 	}
 
 	// A clean up with a failing push reports the push.

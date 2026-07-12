@@ -117,16 +117,14 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 	// success or failure, so CI can surface it without any GitHub API call here.
 	writeReport("deploy", stackName, p, reportPath)
 
-	// The checkpoint is pushed on failure too — see persistState.
+	// The checkpoint is pushed on failure too — see persistState. It is non-nil
+	// whenever upErr is, so it is the single error return for both.
 	stateErr := persistState(upErr, pushState)
 
-	if upErr != nil {
+	if upErr != nil && jsonMode {
 		// Still emit the JSON summary on failure so a consumer parsing stdout gets
 		// the counts and the failure list (stdout is otherwise empty).
-		if jsonMode {
-			_ = printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
-		}
-		return stateErr
+		_ = printChangeSummaryJSON(stackName, p.Changes(), p.Failures())
 	}
 	if stateErr != nil {
 		return stateErr
@@ -184,9 +182,22 @@ func confirmDeploy(in *os.File, stackName string) (bool, error) {
 		return false, fmt.Errorf("deploy %q needs confirmation but stdin is not a terminal — pass --yes to approve non-interactively", stackName)
 	}
 
+	return promptYes(in, stackName)
+}
+
+// promptYes asks for the literal "yes" on an already-known-interactive reader.
+// Split from confirmDeploy's stdin check so the answer handling is testable
+// without a pty.
+func promptYes(in io.Reader, stackName string) (bool, error) {
 	fmt.Printf("Deploy stack %q? Type 'yes' to confirm: ", stackName)
 	scanner := bufio.NewScanner(in)
 	scanner.Scan()
+	// A read error is not an answer: treating it as "not yes" would cancel with
+	// exit 0, the same false-green this function exists to prevent. A clean EOF
+	// (Ctrl-D) leaves Err() nil and correctly cancels.
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("read confirmation: %w", err)
+	}
 	return strings.TrimSpace(scanner.Text()) == "yes", nil
 }
 
@@ -199,7 +210,9 @@ func persistState(upErr error, pushState func() error) error {
 	pushErr := pushState()
 	switch {
 	case upErr != nil && pushErr != nil:
-		return fmt.Errorf("deploy: %w (push state also failed: %v)", upErr, pushErr)
+		// Both are wrapped (%w twice): a caller matching on either — the up's engine
+		// error or the state-push failure — still finds it with errors.Is/As.
+		return fmt.Errorf("deploy: %w (push state also failed: %w)", upErr, pushErr)
 	case upErr != nil:
 		return fmt.Errorf("deploy: %w", upErr)
 	case pushErr != nil:
