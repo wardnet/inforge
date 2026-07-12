@@ -280,13 +280,21 @@ func (s *Store) ListArtifacts(ctx context.Context, service string) ([]Artifact, 
 // do not stop the sweep; callers treat them as non-fatal (the upload that
 // triggered the prune already succeeded).
 func (s *Store) Prune(ctx context.Context, service string, keep int) ([]string, error) {
-	pinned, err := s.PinnedSHAs(ctx, service)
-	if err != nil {
-		return nil, fmt.Errorf("collect pinned SHAs for %s: %w", service, err)
-	}
+	// Order is load-bearing: the artifact objects MUST be listed BEFORE the
+	// pinned set is read. A `releases deploy` running concurrently pins a SHA by
+	// writing its manifest, and the two reads are not atomic — reading pins
+	// first would leave a window where a SHA pinned after that read is still a
+	// prune candidate, deleting an artifact a live host runs (ADR-0016's pin
+	// invariant). Listing first makes the window only ever over-retain: a SHA
+	// pinned in it is seen by the later pin read, and an artifact pushed in it
+	// is simply not a candidate this sweep.
 	objs, err := s.listArtifactObjects(ctx, service)
 	if err != nil {
 		return nil, err
+	}
+	pinned, err := s.PinnedSHAs(ctx, service)
+	if err != nil {
+		return nil, fmt.Errorf("collect pinned SHAs for %s: %w", service, err)
 	}
 	victims := selectForPrune(coalesceArtifacts(objs), pinned, keep)
 	victimSet := make(map[string]bool, len(victims))
