@@ -263,6 +263,22 @@ func Run(ctx *pulumi.Context) error {
 		scopes = append(scopes, scope{key: region, slug: slug, reg: registries[region], authority: regionTable[region].Dns, res: res})
 	}
 
+	// GLOBAL-FIRST IS LOAD-BEARING, not a convention. The mesh-reload accumulation below
+	// (#226) gives a regional service's restart a dependency on the GLOBAL mesh's reload
+	// only because the global scope is realized first — that is the cross-scope hop
+	// (regional caller → global callee) the 403s came from. Reorder these appends and the
+	// race silently returns, with nothing to notice it.
+	//
+	// So assert it here rather than leave it resting on the order of two `append`s twenty
+	// lines apart. A loud failure at deploy beats a quiet 403 storm in production.
+	scopeKeys := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		scopeKeys = append(scopeKeys, sc.key)
+	}
+	if err := requireGlobalScopeFirst(scopeKeys); err != nil {
+		return err
+	}
+
 	// Instantiate each scope's referenceable infrastructure (network, compute,
 	// database) first, in scope order — global before regions, so a regional
 	// ref:database/global/<name> sees the global outputs already populated.
@@ -330,6 +346,20 @@ func Run(ctx *pulumi.Context) error {
 	// scope is load-bearing: DNS records first (ACME HTTP-01 needs the A-record to
 	// exist), then app seeds + ingress (nginx/ACME), then service secrets, then the
 	// services that depend on them.
+	//
+	// meshReloads accumulates every mesh host's nginx-reload resource ACROSS scopes, and
+	// every service restart is ordered after all of them.
+	//
+	// Declaring realizeMesh before provisionServices in this loop is NOT enough, and that
+	// was the bug (#226): Pulumi is a DAG, not a script. Without an explicit edge the
+	// regional service's restart and the global callee's allow-map reload have no ordering
+	// between them and run CONCURRENTLY — so a caller could come up against a callee whose
+	// mesh proxy still held the PREVIOUS allow-map, and be 403'd on every call until the
+	// reload landed. Because scopes realize global-first, accumulating gives a regional
+	// service a dependency on the global mesh's reload — which is exactly the cross-scope
+	// hop (regional caller → global callee) that produced the 403s.
+	var meshReloads []pulumi.Resource
+
 	for _, sc := range scopes {
 		if err := createDNSRecords(ctx, sc.reg, sc.authority, sc.res, computeOutputs[sc.key], env, sc.slug, vars.BaseDomain, ephemeralSlug); err != nil {
 			return err
@@ -364,7 +394,7 @@ func Run(ctx *pulumi.Context) error {
 		// pki: service. It needs the scope's private IPs (attached above) and the
 		// global slice's outputs (realized first, so its public IPs are ready for a
 		// regional scope's cross-scope targets).
-		if err := realizeMesh(ctx, sc.reg, sc.res, res, globalRes, computeOutputs, sc.key, sc.slug, regionNames, gates, vars.SSH.DeployPrivateKey, env, providerDefaults); err != nil {
+		if err := realizeMesh(ctx, sc.reg, sc.res, res, globalRes, computeOutputs, sc.key, sc.slug, regionNames, gates, vars.SSH.DeployPrivateKey, env, providerDefaults, &meshReloads); err != nil {
 			return err
 		}
 		// Self-hosted database clusters (ADR-0036): install Postgres on each cluster's
@@ -391,7 +421,7 @@ func Run(ctx *pulumi.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := provisionServices(ctx, sc.res, computeOutputs[sc.key], serviceSecrets, gates, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug, vars.BaseDomain, inforgeVersion); err != nil {
+		if err := provisionServices(ctx, sc.res, computeOutputs[sc.key], serviceSecrets, gates, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug, vars.BaseDomain, inforgeVersion, meshReloads); err != nil {
 			return err
 		}
 		if err := provisionObservability(ctx, sc.res, computeOutputs[sc.key], databaseOutputs[sc.key], gates, dbHostTails, vars.Observability, obsAuthB64, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
@@ -556,7 +586,7 @@ func attachPrivateNetworks(ctx *pulumi.Context, reg registry.ProviderRegistry, r
 // whole `pulumi up`. The unit is written, daemon-reloaded, and enabled (for
 // boot persistence); release performs the first real start with code present.
 // Connection details and the preview/up guard mirror realizeIngress.
-func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, serviceSecrets map[string]serviceMaterial, gates map[string]pulumi.Resource, deployPrivateKey, env, region, slug, baseDomain, inforgeVersion string) error {
+func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, serviceSecrets map[string]serviceMaterial, gates map[string]pulumi.Resource, deployPrivateKey, env, region, slug, baseDomain, inforgeVersion string, meshReloads []pulumi.Resource) error {
 	if len(res.Service) == 0 {
 		return nil
 	}
@@ -616,8 +646,22 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		// could land inside that window, fail with "Unit not found", and (before the
 		// `|| true` was removed) be swallowed — leaving the service stopped under a
 		// green deploy. That is exactly how tenants went down on 5.5.1 → 5.5.2.
+
+		// MESH ORDERING (#226). deliverServiceSecrets ends in reloadOrRestartScript — the
+		// restart that brings the service up on its new configuration — and that restart must
+		// land AFTER every mesh proxy has reloaded its allow-map. Otherwise the caller comes
+		// up against a callee that does not yet admit it and is 403'd on every call until the
+		// reload catches up.
+		//
+		// EVERY service takes this dependency, and that is not an oversight: `pki:` is a
+		// REQUIRED field on the service schema, so every service is a mesh member. There is no
+		// non-mesh service to exempt, and gating on `svc.Pki != ""` would be dead code
+		// dressed up as an optimization.
+		//
+		// deliverServiceDescriptor writes a file and does NOT restart, so it needs no mesh
+		// ordering at all — only the unit gate.
 		if material := serviceSecrets[svc.Name]; !material.empty() {
-			if err := deliverServiceSecrets(ctx, svc, host, material, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], unit); err != nil {
+			if err := deliverServiceSecrets(ctx, svc, host, material, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], unit, meshReloads); err != nil {
 				return err
 			}
 		} else {
@@ -1169,11 +1213,11 @@ func interpolateGrantOutput(tmpl string, values map[string]pulumi.StringOutput) 
 // descriptor's files: map). Both feed the hash, so rotating a granted PKI's
 // material re-writes secrets.age and restarts the service exactly like a changed
 // secret value.
-func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, material serviceMaterial, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, meshEgressPort int, gate pulumi.Resource) error {
+func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, material serviceMaterial, deployUser, deployPrivateKey, env, region, slug, baseDomain, computeKey string, meshEgressPort int, unit pulumi.Resource, meshReloads []pulumi.Resource) error {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 
-	hostKey, err := readHostPubKey(ctx, conn, name+"-hostkey", gate)
+	hostKey, err := readHostPubKey(ctx, conn, name+"-hostkey", unit)
 	if err != nil {
 		return fmt.Errorf("service %q: read host key: %w", svc.Name, err)
 	}
@@ -1256,7 +1300,7 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 		// a restart from racing the `rm -f <unit>` of a provision replace is
 		// load-bearing enough to state outright rather than leave resting on
 		// hostKey's own dependency edge.
-	}, pulumi.DependsOn([]pulumi.Resource{hostKey, gate}), pulumi.DeleteBeforeReplace(true)); err != nil {
+	}, pulumi.DependsOn(append([]pulumi.Resource{hostKey, unit}, meshReloads...)), pulumi.DeleteBeforeReplace(true)); err != nil {
 		return fmt.Errorf("service %q: write descriptor/secrets: %w", svc.Name, err)
 	}
 	return nil
@@ -2617,4 +2661,28 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// requireGlobalScopeFirst enforces the invariant the #226 fix rests on: if a global scope
+// realizes at all, it must realize BEFORE any regional one.
+//
+// realizeMesh accumulates each scope's mesh-nginx reload into one slice, and every service
+// restart is ordered after everything accumulated SO FAR. A regional service therefore
+// depends on the global mesh's reload only because the global scope came first — and that is
+// precisely the cross-scope hop (regional caller → global callee) that produced the 403s.
+//
+// Nothing else enforces the order. Reversing two `append` calls would silently re-open the
+// race with no test failure and no error, so the invariant is asserted rather than assumed.
+func requireGlobalScopeFirst(keys []string) error {
+	seenRegional := false
+	for _, k := range keys {
+		if k == globalScope {
+			if seenRegional {
+				return fmt.Errorf("internal: the global scope must realize BEFORE every regional scope (got %v) — a regional service's restart is ordered after the global mesh's allow-map reload by accumulation, and reordering silently re-opens the #226 403 race; see .agents/rules/mesh-config-lands-before-callers-restart.md", keys)
+			}
+			continue
+		}
+		seenRegional = true
+	}
+	return nil
 }

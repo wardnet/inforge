@@ -32,7 +32,7 @@ func TestServiceSecretsTriggerIsNotSecret(t *testing.T) {
 		secretEnv := map[string]pulumi.StringOutput{
 			"TOKEN": pulumi.ToSecret(pulumi.String("s3cr3t")).(pulumi.StringOutput),
 		}
-		return deliverServiceSecrets(ctx, svc, host, serviceMaterial{Env: secretEnv}, "deploy", "priv", "prd", "us-east-1", "use1", "example.com", "bridge-01", 0, gate)
+		return deliverServiceSecrets(ctx, svc, host, serviceMaterial{Env: secretEnv}, "deploy", "priv", "prd", "us-east-1", "use1", "example.com", "bridge-01", 0, gate, nil)
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 
