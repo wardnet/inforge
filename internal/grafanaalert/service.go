@@ -24,6 +24,44 @@ type ServiceScope struct {
 	// Database reports whether the service holds a database grant, and so has a connection
 	// pool that can saturate.
 	Database bool
+	// Regions are the region slugs a REGIONAL service deploys to (one instance each). Empty
+	// for a global service, which has a single instance and no region to distinguish.
+	//
+	// Liveness is per (service, region) precisely because of this: a regional service dying
+	// in one region leaves the other region's series alive, so any expression that aggregates
+	// across regions cannot see it.
+	Regions []string
+}
+
+// livenessMatcher is one (service, region) liveness target: the selector to match on, and
+// the region (if any) to name in the alert.
+type livenessMatcher struct {
+	sel    string
+	region string
+}
+
+func (m livenessMatcher) title(svc string) string {
+	if m.region == "" {
+		return svc
+	}
+	return svc + " (" + m.region + ")"
+}
+
+// livenessMatchers yields one matcher per region for a regional service, or a single
+// region-less matcher for a global one.
+func (s ServiceScope) livenessMatchers(env string) []livenessMatcher {
+	base := fmt.Sprintf(`%s, service_name=%q`, env, s.Metric)
+	if len(s.Regions) == 0 {
+		return []livenessMatcher{{sel: base}}
+	}
+	out := make([]livenessMatcher, 0, len(s.Regions))
+	for _, r := range s.Regions {
+		out = append(out, livenessMatcher{
+			sel:    fmt.Sprintf(`%s, region=%q`, base, r),
+			region: r,
+		})
+	}
+	return out
 }
 
 // ServiceBuiltIns returns the golden per-service alert rules for one env.
@@ -73,21 +111,56 @@ func ServiceBuiltIns(env string, services []ServiceScope) []Alert {
 
 	var alerts []Alert
 
-	// ── Liveness: per-service, because fleet-wide would not have caught the outage ──
+	// ── Liveness: per service, PER REGION ──
 	//
 	// The host equivalent (`Host Metrics Missing`) is `count(...) < 1` across the whole env,
-	// so it only fires when EVERY host is gone. The service equivalent of that would not
-	// have caught one service dying — which is exactly what happened. So one rule per
-	// service, with an explicit matcher, and NoDataAlerting: when the series vanishes there
-	// is nothing left to evaluate, and *absence is the signal*.
+	// so it only fires when EVERY host is gone. A per-service `count(...) < 1` repeats that
+	// mistake one level down: a regional service runs one instance per region, so a service
+	// dying in ONE region leaves the other region's series alive, the count never reaches 0,
+	// and a full regional outage is invisible. Prd has one region today, which is the only
+	// reason that would have worked at all. So: one rule per (service, region).
+	//
+	// The expression is `absent_over_time` GATED on the service having been alive recently:
+	//
+	//	absent_over_time(m[5m]) * on() (count(count_over_time(m[24h])) > 0)
+	//
+	// Both halves are load-bearing.
+	//
+	// `absent_over_time` rather than `count(...) < 1`, because a vanished series does not
+	// evaluate to zero — it produces NO SERIES, so `< 1` is never true and the rule can only
+	// fire via NoData. Worse, Grafana's query node is a RANGE query over the last 600s and
+	// Prometheus fills steps from the last sample via its 5m staleness lookback, so the frame
+	// keeps returning the dead service's final sample: the rule would not have gone NoData
+	// for ~15 minutes, and then still owed its 5m `for` — a "Service Down" alert that takes
+	// twenty minutes to fire, sold as the fix for a forty-minute outage. `absent_over_time`
+	// flips positive ~5m after the last sample and is a real series the math node can read.
+	//
+	// The `count_over_time(m[24h]) > 0` gate is what stops a DECLARED-BUT-NEVER-RELEASED
+	// service paging Critical forever. `inforge deploy` creates these rules at Pulumi time,
+	// but a service's binary only lands later (`inforge releases deploy`) — and an ephemeral
+	// preview may skip a workload entirely. Without the gate, every such service pages
+	// immediately and never stops. With it, a service that has never reported simply has no
+	// right-hand series, the product is empty, and the rule stays silent until the thing has
+	// actually run once. This also removes the hard "deploy wardnet-cloud first" ordering
+	// hazard: before the process-metrics release ships, no service has ever reported, so
+	// nothing fires.
+	//
+	// The cost is honest and bounded: a service dead for more than 24h stops alerting. By
+	// then it is not news.
+	//
+	// NoDataOK, deliberately: a HEALTHY service makes `absent_over_time` return nothing, so
+	// No Data is the normal, correct state here. Relying on NoDataAlerting (as the earlier
+	// draft did) would have inverted that.
 	for _, s := range services {
-		alerts = append(alerts, b(
-			fmt.Sprintf("Service Down: %s", s.Name),
-			fmt.Sprintf(`count(process_uptime_seconds{%s, service_name=%q})`, e, s.Metric),
-			"< 1", "5m", SeverityCritical,
-			fmt.Sprintf("%s is not reporting telemetry — the process is gone.", s.Name),
-			NoDataAlerting,
-		))
+		for _, m := range s.livenessMatchers(e) {
+			alerts = append(alerts, b(
+				"Service Down: "+m.title(s.Name),
+				fmt.Sprintf(`absent_over_time(process_uptime_seconds{%s}[5m]) * on() (count(count_over_time(process_uptime_seconds{%s}[24h])) > 0)`, m.sel, m.sel),
+				"> 0", "2m", SeverityCritical,
+				fmt.Sprintf("%s is not reporting telemetry — the process is gone.", m.title(s.Name)),
+				NoDataOK,
+			))
+		}
 	}
 
 	// ── Crash loop ──
@@ -190,14 +263,19 @@ func ServiceBuiltIns(env string, services []ServiceScope) []Alert {
 		NoDataOK,
 	))
 
-	// Leak detection, and the only per-service memory signal that works WITHOUT a cap: RSS
-	// climbing steadily with no plateau. Mirrors `Host Disk Will Fill`. It stays useful after
-	// #232 too — a leak is worth knowing about before it hits the ceiling and gets OOM-killed.
+	// Leak detection, and the only per-service memory signal that works WITHOUT a cap.
+	//
+	// Compares the RECENT FLOOR against the LONGER-TERM FLOOR. `delta()` would be wrong here:
+	// it is last-minus-first over the window, so a service that takes a traffic burst,
+	// climbs 300MB and then sits perfectly FLAT keeps reporting that 300MB delta for the
+	// next five hours — firing a "possible leak" alert about memory that is provably not
+	// growing. The minima ignore spikes, and a plateau makes both minima equal, so a genuine
+	// leak (a floor that keeps rising) is the only thing that trips it.
 	alerts = append(alerts, b(
 		"Service Memory Growing",
-		fmt.Sprintf(`delta(process_memory_usage_bytes{%s}[6h])`, e),
+		fmt.Sprintf(`min_over_time(process_memory_usage_bytes{%s}[1h]) - min_over_time(process_memory_usage_bytes{%s}[6h])`, e, e),
 		"> 268435456", "1h", SeverityWarning,
-		"{{ $labels.service_name }} RSS grew by over 256MB in 6h with no plateau — possible leak.",
+		"{{ $labels.service_name }} RSS floor rose by over 256MB in 6h — memory is not being returned (possible leak).",
 		NoDataOK,
 	))
 

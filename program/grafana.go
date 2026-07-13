@@ -16,6 +16,7 @@ import (
 	"github.com/wardnet/inforge/internal/grafanadash"
 	"github.com/wardnet/inforge/internal/loader"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/regions"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -305,16 +306,40 @@ func toRuleArgs(alerts []grafanaalert.Alert, obs types.ObservabilityConfig, noti
 // could only be a second source of truth that drifts: set wrong, it yields either dead alert
 // rules or a silently unmonitored service. Same idiom as gateway routes being derived from
 // `public_paths` rather than authored.
-func serviceScopes(sets ...types.Resources) []grafanaalert.ServiceScope {
+// regionalSlugs are the region labels a REGIONAL service's instances report; a GLOBAL
+// service passes nil (one instance, no region to distinguish).
+//
+// Liveness is generated per (service, region) because of this: a regional service runs one
+// instance per region, so any expression that aggregates across regions cannot see it die in
+// ONE of them — the surviving region's series keeps the aggregate alive. That is the same
+// blind spot as a fleet-wide host count, moved one level down.
+func serviceScopes(table regions.Table, regional, global types.Resources) []grafanaalert.ServiceScope {
+	slugs := make([]string, 0, len(table))
+	for name := range table {
+		slug, err := table.Slug(name)
+		if err != nil {
+			continue // the table is validated long before here; a bad entry cannot reach us
+		}
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+
 	var out []grafanaalert.ServiceScope
-	for _, res := range sets {
-		for _, s := range res.Service {
+	for _, set := range []struct {
+		res     types.Resources
+		regions []string
+	}{
+		{regional, slugs},
+		{global, nil},
+	} {
+		for _, s := range set.res.Service {
 			out = append(out, grafanaalert.ServiceScope{
 				Name:     s.Name,
 				Metric:   naming.TelemetryServiceName(s.Name),
 				HTTP:     servesHTTP(s),
 				Mesh:     s.Pki != "",
 				Database: hasDatabaseGrant(s),
+				Regions:  set.regions,
 			})
 		}
 	}

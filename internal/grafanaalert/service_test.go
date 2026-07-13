@@ -7,7 +7,9 @@ import (
 
 func scopes() []ServiceScope {
 	return []ServiceScope{
-		{Name: "ddns", Metric: "wardnet-ddns", HTTP: true, Mesh: true, Database: true},
+		// regional: one instance per region, so liveness must be per (service, region)
+		{Name: "ddns", Metric: "wardnet-ddns", HTTP: true, Mesh: true, Database: true, Regions: []string{"euc", "use1"}},
+		// global: a single instance, no region to distinguish
 		{Name: "tenants", Metric: "wardnet-tenants", HTTP: true, Mesh: true, Database: true},
 	}
 }
@@ -63,9 +65,10 @@ func TestOnlyLivenessAlertsAreCritical(t *testing.T) {
 		}
 	}
 	want := map[string]bool{
-		"Service Down: ddns":    true,
-		"Service Down: tenants": true,
-		"Service Crash-Looping": true,
+		"Service Down: ddns (euc)":  true,
+		"Service Down: ddns (use1)": true,
+		"Service Down: tenants":     true,
+		"Service Crash-Looping":     true,
 	}
 	if len(critical) != len(want) {
 		t.Fatalf("critical set drifted.\n got: %v\nwant: %v", critical, want)
@@ -114,18 +117,59 @@ func TestANonHTTPServiceGetsLivenessButNoHTTPAlerts(t *testing.T) {
 // Liveness is PER SERVICE, deliberately. The host equivalent (`Host Metrics Missing`) is a
 // fleet-wide `count(...) < 1`, which only fires when EVERY host is gone — the service
 // equivalent of that would not have caught one service dying, which is exactly what happened.
-func TestLivenessIsPerServiceNotFleetWide(t *testing.T) {
+func TestLivenessIsPerServiceAndPerRegion(t *testing.T) {
 	alerts := ServiceBuiltIns("prd", scopes())
-	for _, svc := range []string{"ddns", "tenants"} {
-		a := find(t, alerts, "Service Down: "+svc)
-		if !strings.Contains(expr(a), `service_name=\"wardnet-`+svc+`\"`) {
-			t.Errorf("%s: expr must match its own service, got: %s", svc, expr(a))
+
+	// A regional service runs one instance PER REGION. Any expression that aggregates across
+	// regions cannot see it die in ONE of them — the surviving region keeps the aggregate
+	// alive. That is the fleet-wide-count blind spot, moved one level down.
+	for _, region := range []string{"euc", "use1"} {
+		a := find(t, alerts, "Service Down: ddns ("+region+")")
+		if !strings.Contains(expr(a), `region=\"`+region+`\"`) {
+			t.Errorf("ddns/%s: the rule must pin its region, got: %s", region, expr(a))
 		}
-		// When the series vanishes there is nothing left to evaluate — ABSENCE is the signal.
-		// NoDataOK here would mean a dead service silently resolves to OK, which is the bug.
-		if a.Rule.NoDataState != NoDataAlerting {
-			t.Errorf("%s: a vanished series must ALERT, not resolve to OK", svc)
+		if !strings.Contains(expr(a), `service_name=\"wardnet-ddns\"`) {
+			t.Errorf("ddns/%s: the rule must pin its service, got: %s", region, expr(a))
 		}
+	}
+
+	// A global service has one instance and no region to distinguish.
+	g := find(t, alerts, "Service Down: tenants")
+	if strings.Contains(expr(g), "region=") {
+		t.Errorf("a global service has no region label to pin: %s", expr(g))
+	}
+}
+
+// `count(...) < 1` cannot work: a vanished series does not evaluate to zero, it produces NO
+// SERIES — so the condition is never true and the rule can only fire via NoData. Grafana's
+// query node is a RANGE query and Prometheus fills steps from the last sample via its 5m
+// staleness lookback, so the frame keeps returning the DEAD service's final sample for ~15
+// minutes. A "Service Down" alert that takes twenty minutes to fire, sold as the fix for a
+// forty-minute outage.
+func TestLivenessUsesAbsentOverTimeNotACount(t *testing.T) {
+	a := find(t, ServiceBuiltIns("prd", scopes()), "Service Down: tenants")
+	if !strings.Contains(expr(a), "absent_over_time(") {
+		t.Errorf("liveness must use absent_over_time — a vanished series is not a zero: %s", expr(a))
+	}
+	if strings.Contains(expr(a), "count(process_uptime_seconds") {
+		t.Error("count(...) < 1 can never be true for a vanished series")
+	}
+	// A HEALTHY service makes absent_over_time return nothing, so No Data is the NORMAL state
+	// here. NoDataAlerting would invert that and page for every healthy service.
+	if a.Rule.NoDataState != NoDataOK {
+		t.Error("with absent_over_time, No Data is the healthy state — alerting on it inverts the rule")
+	}
+}
+
+// The gate that stops a declared-but-never-released service paging Critical forever, and
+// removes the hard "deploy wardnet-cloud first" ordering hazard: inforge creates these rules
+// at Pulumi time, but the binary lands later (`releases deploy`) — and an ephemeral preview
+// may skip a workload entirely. A service that has NEVER reported has no right-hand series,
+// so the product is empty and the rule stays silent until the thing has actually run once.
+func TestLivenessOnlyFiresForAServiceThatHasActuallyRun(t *testing.T) {
+	a := find(t, ServiceBuiltIns("prd", scopes()), "Service Down: tenants")
+	if !strings.Contains(expr(a), "count_over_time(") {
+		t.Errorf("without a has-ever-reported gate, a never-released service pages forever: %s", expr(a))
 	}
 }
 
@@ -135,7 +179,7 @@ func TestLivenessIsPerServiceNotFleetWide(t *testing.T) {
 // dashboard entirely. Building liveness on request metrics would have missed the real outage.
 func TestLivenessRestsOnUptimeNotOnRequestMetrics(t *testing.T) {
 	alerts := ServiceBuiltIns("prd", scopes())
-	for _, name := range []string{"Service Down: ddns", "Service Crash-Looping"} {
+	for _, name := range []string{"Service Down: tenants", "Service Crash-Looping"} {
 		e := expr(find(t, alerts, name))
 		if !strings.Contains(e, "process_uptime_seconds") {
 			t.Errorf("%s: liveness must rest on process_uptime_seconds, got: %s", name, e)
@@ -197,5 +241,20 @@ func TestEveryRuleIsEnvScoped(t *testing.T) {
 		if !strings.Contains(expr(a), `deployment_environment_name=\"prd\"`) {
 			t.Errorf("%s is not env-scoped: %s", a.Rule.Name, expr(a))
 		}
+	}
+}
+
+// `delta()` is last-minus-first over the window, so it CANNOT see a plateau: a service that
+// takes a traffic burst, climbs 300MB and then sits perfectly flat keeps reporting that
+// 300MB delta for the next five hours — firing "possible leak" about memory that is provably
+// not growing. Comparing the recent floor against the longer-term floor makes a plateau
+// equalise the two minima, so only a genuinely rising floor trips it.
+func TestMemoryGrowthComparesFloorsSoAPlateauDoesNotFire(t *testing.T) {
+	a := find(t, ServiceBuiltIns("prd", scopes()), "Service Memory Growing")
+	if strings.Contains(expr(a), "delta(") {
+		t.Error("delta() fires on any step and cannot see a plateau — it contradicts the rule's own summary")
+	}
+	if !strings.Contains(expr(a), "min_over_time(") {
+		t.Errorf("a leak is a RISING FLOOR, not a step: %s", expr(a))
 	}
 }
