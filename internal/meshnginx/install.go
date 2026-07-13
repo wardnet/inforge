@@ -41,11 +41,23 @@ const (
 // or a bad config. It declares NO systemd RuntimeDirectory= — that would let
 // systemd wipe the tmpfs cert dir when the unit stops; the local project +
 // seed own the dir's lifecycle instead.
+//
+// Restart=always + RestartSec=5 + StartLimitIntervalSec=0 are one policy, and all three
+// halves matter (see .agents/rules/daemon-units-restart-on-any-exit.md). A dead mesh proxy
+// is EVERY co-located service's east-west plane, so this unit staying down is among the
+// worst outages the fleet can have: `always` because a daemon has no correct exit;
+// RestartSec=5 rather than systemd's 100ms default so a bad config does not spin nginx ten
+// times a second; StartLimitIntervalSec=0 because the default 5-starts-per-10s limit would
+// park the unit in `failed` and stop retrying — the same permanent death Restart=always
+// exists to prevent. The ExecStartPre chain (project → seed → `nginx -t`) makes each retry
+// cheap and idempotent, and a proxy that failed to start on a bad config recovers by itself
+// the moment a good one is pushed.
 func UnitFile() string {
 	return `[Unit]
 Description=wardnet east-west mesh proxy (nginx)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=forking
@@ -56,7 +68,8 @@ ExecStartPre=` + nginxBin + ` -t -c ` + meshpaths.ConfigPath + `
 ExecStart=` + nginxBin + ` -c ` + meshpaths.ConfigPath + `
 ExecReload=` + nginxBin + ` -s reload -c ` + meshpaths.ConfigPath + `
 ExecStop=` + nginxBin + ` -s quit -c ` + meshpaths.ConfigPath + `
-Restart=on-failure
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

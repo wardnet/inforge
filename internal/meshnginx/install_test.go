@@ -68,3 +68,23 @@ func TestSeedScriptEmpty(t *testing.T) {
 		t.Errorf("empty seed script must still create the dir + bundle\n%s", s)
 	}
 }
+
+// TestUnitFileRestartsOnAnyExit — the mesh proxy is a daemon, and a daemon has no correct
+// exit. `Restart=on-failure` only restarts an exit systemd classifies as a failure, so an
+// nginx that exits in a way systemd records as clean would go inactive (dead) and STAY
+// there: every co-located service's east-west plane down, indefinitely, with no crash-loop
+// to notice. The same policy left a production service down for forty minutes.
+func TestUnitFileRestartsOnAnyExit(t *testing.T) {
+	unit := UnitFile()
+	// All three halves are one policy — any one of them missing lets the proxy end
+	// permanently dead, and a dead mesh proxy is every co-located service's east-west
+	// plane. See .agents/rules/daemon-units-restart-on-any-exit.md.
+	for _, want := range []string{"Restart=always", "RestartSec=5", "StartLimitIntervalSec=0"} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("missing %q: the proxy must restart on ANY exit, back off, and never give up", want)
+		}
+	}
+	if strings.Contains(unit, "Restart=on-failure") {
+		t.Error("on-failure lets a cleanly-exited proxy stay dead forever")
+	}
+}

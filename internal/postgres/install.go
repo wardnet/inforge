@@ -93,6 +93,19 @@ func InitClusterScript(cluster, version string) string {
 // postgres user against the cluster's PGDATA on the given port, and requires the data
 // volume to be mounted first (RequiresMountsFor) so it never starts against an
 // unmounted directory.
+//
+// Restart=always + RestartSec=5 + StartLimitIntervalSec=0 are one policy, and all three
+// halves matter (see .agents/rules/daemon-units-restart-on-any-exit.md):
+//
+//   - always, not on-failure: a daemon has no CORRECT exit. on-failure only restarts an
+//     exit systemd classifies as a failure, so a clean-looking exit leaves the cluster
+//     dead — every database on it unreachable — indefinitely.
+//   - RestartSec=5, not systemd's 100ms default: a postmaster that keeps dying (full disk,
+//     corrupt PGDATA) must not be relaunched ten times a second into the same wall.
+//   - StartLimitIntervalSec=0: without it, systemd's default 5-starts-per-10s limit ends
+//     the retries and parks the unit in `failed` — which is the same permanent death
+//     Restart=always exists to prevent, just reached faster. Recovery is the point; a
+//     cluster must come back the moment its disk or its data is healthy again.
 func UnitFile(cluster, version string, port int) string {
 	return strings.Join([]string{
 		"[Unit]",
@@ -100,6 +113,7 @@ func UnitFile(cluster, version string, port int) string {
 		"After=network-online.target",
 		"Wants=network-online.target",
 		fmt.Sprintf("RequiresMountsFor=%s", MountDir(cluster)),
+		"StartLimitIntervalSec=0",
 		"",
 		"[Service]",
 		"Type=notify",
@@ -109,7 +123,8 @@ func UnitFile(cluster, version string, port int) string {
 		"ExecReload=/bin/kill -HUP $MAINPID",
 		"KillSignal=SIGINT",
 		"TimeoutStartSec=120",
-		"Restart=on-failure",
+		"Restart=always",
+		"RestartSec=5",
 		"",
 		"[Install]",
 		"WantedBy=multi-user.target",
