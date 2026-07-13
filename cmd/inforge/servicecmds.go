@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -90,9 +91,14 @@ func runServiceInstances(ctx context.Context, configPath, env, svc, stackConfigP
 	}
 	defer cleanup()
 
-	instances := collectInstances(ctx, targets, sshKeyPath)
+	return renderInstances(os.Stdout, collectInstances(ctx, targets, sshKeyPath), env, svc)
+}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+// renderInstances prints the instances table. Split from the command so the output —
+// including the STALE call-out, the one line an operator must not miss — is testable
+// without an SSH daemon.
+func renderInstances(out io.Writer, instances []instance, env, svc string) error {
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(w, "HOST\tREGION\tSTATE\tINSTANCE\tSINCE\tRESTARTS\tRUNNING\tINTEGRITY"); err != nil {
 		return err
 	}
@@ -113,8 +119,9 @@ func runServiceInstances(ctx context.Context, configPath, env, svc, stackConfigP
 	// A silent table would let STALE scroll past unread — and STALE is the whole reason
 	// the integrity column exists.
 	if stale > 0 {
-		fmt.Printf("\n%d instance(s) STALE: a newer binary is on disk but the process never restarted onto it.\n", stale)
-		fmt.Printf("Run `inforge service restart %s %s` to pick it up.\n", env, svc)
+		if _, err := fmt.Fprintf(out, "\n%d instance(s) STALE: a newer binary is on disk but the process never restarted onto it.\nRun `inforge service restart %s %s` to pick it up.\n", stale, env, svc); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -187,11 +194,19 @@ func runServiceLogs(ctx context.Context, configPath, env, svc, stackConfigPath, 
 	}
 	defer cleanup()
 
+	return streamLogs(ctx, os.Stdout, targets, sshKeyPath, lines, since, follow, sshRun)
+}
+
+// streamLogs writes each target's journal to out, headed by the host when there is more
+// than one (an unheaded merge of two hosts' logs is unreadable).
+func streamLogs(ctx context.Context, out io.Writer, targets []service.DeployTarget, sshKeyPath string, lines int, since string, follow bool, run sshRunner) error {
 	for _, t := range targets {
 		if len(targets) > 1 {
-			fmt.Printf("\n=== %s (%s)\n", t.HostDNS, t.Scope)
+			if _, err := fmt.Fprintf(out, "\n=== %s (%s)\n", t.HostDNS, t.Scope); err != nil {
+				return err
+			}
 		}
-		if err := sshRun(ctx, sshKeyPath, sshAccount(t), journalScript(t.Unit, lines, since, follow), os.Stdout); err != nil {
+		if err := run(ctx, sshKeyPath, sshAccount(t), journalScript(t.Unit, lines, since, follow), out); err != nil {
 			return err
 		}
 	}
@@ -219,22 +234,33 @@ func newServiceStatusCmd(configPath *string) *cobra.Command {
 				return err
 			}
 			defer cleanup()
-			for _, t := range targets {
-				fmt.Printf("\n=== %s (%s)\n", t.HostDNS, t.Scope)
-				// `systemctl status` exits non-zero for an inactive unit — that is a
-				// finding to print, not an error to abort the sweep on.
-				statusCmd := fmt.Sprintf("sudo systemctl status %s --no-pager --lines=0 || true", remote.Quote(t.Unit))
-				if err := sshRun(cmd.Context(), key, sshAccount(t), statusCmd, os.Stdout); err != nil {
-					return err
-				}
-			}
-			return nil
+			return streamStatus(cmd.Context(), os.Stdout, targets, key, sshRun)
 		},
 	}
 	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to the infra stack config file (default: inforge.<env>.yaml)")
 	cmd.Flags().StringVar(&sshKeyPath, "ssh-key", "", "path to the SSH deploy key (overrides INFORGE_DEPLOY_KEY)")
 	addSelectorFlags(cmd, &sel, false)
 	return cmd
+}
+
+// statusScript builds the remote `systemctl status`. The `|| true` is load-bearing:
+// systemctl exits non-zero for an inactive unit, and a service being DOWN is a finding to
+// print — the very finding you ran this to get — not an error to abort the sweep on.
+func statusScript(unit string) string {
+	return fmt.Sprintf("sudo systemctl status %s --no-pager --lines=0 || true", remote.Quote(unit))
+}
+
+// streamStatus writes each target's unit status to out, headed by the host.
+func streamStatus(ctx context.Context, out io.Writer, targets []service.DeployTarget, sshKeyPath string, run sshRunner) error {
+	for _, t := range targets {
+		if _, err := fmt.Fprintf(out, "\n=== %s (%s)\n", t.HostDNS, t.Scope); err != nil {
+			return err
+		}
+		if err := run(ctx, sshKeyPath, sshAccount(t), statusScript(t.Unit), out); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ── mesh-check ───────────────────────────────────────────────────────────────────
@@ -303,6 +329,16 @@ func meshCheckScript(svc, peer, path string) string {
 	}, "\n")
 }
 
+// meshResult is one host's mesh probe: what its egress is, what came back, and what that
+// means.
+type meshResult struct {
+	Target  service.DeployTarget
+	Egress  string
+	Status  string
+	Verdict string
+	OK      bool
+}
+
 func runServiceMeshCheck(ctx context.Context, configPath, env, svc, stackConfigPath, sshKeyPath string, sel selector, peer, path string) error {
 	targets, err := serviceTargets(ctx, configPath, env, svc, stackConfigPath, sel)
 	if err != nil {
@@ -314,28 +350,52 @@ func runServiceMeshCheck(ctx context.Context, configPath, env, svc, stackConfigP
 	}
 	defer cleanup()
 
-	fmt.Printf("calling %s -> %s (path %s), from %d host(s)\n\n", svc, peer, path, len(targets))
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	results := meshCheck(ctx, targets, sshKeyPath, svc, peer, path, sshRun)
+	return renderMeshCheck(os.Stdout, results, svc, peer, path)
+}
+
+// meshCheck probes the peer from every target host. Like collectInstancesWith, an
+// unreachable host becomes a result rather than aborting the sweep — "it works from one
+// region and not the other" is a finding, and bailing on the first failure would hide it.
+func meshCheck(ctx context.Context, targets []service.DeployTarget, sshKeyPath, svc, peer, path string, run sshRunner) []meshResult {
+	out := make([]meshResult, 0, len(targets))
+	for _, t := range targets {
+		var buf strings.Builder
+		if err := run(ctx, sshKeyPath, sshAccount(t), meshCheckScript(svc, peer, path), &buf); err != nil {
+			out = append(out, meshResult{Target: t, Verdict: "probe failed (host unreachable, or not a mesh member)"})
+			continue
+		}
+		status := statusOf(buf.String())
+		verdict, ok := meshVerdict(status)
+		out = append(out, meshResult{
+			Target:  t,
+			Egress:  parseInspect(buf.String()).Egress,
+			Status:  status,
+			Verdict: verdict,
+			OK:      ok,
+		})
+	}
+	return out
+}
+
+// renderMeshCheck prints the results and fails the command if ANY host could not reach the
+// peer. A per-host result matters: a mesh that works from one region and not another is
+// exactly the shape of the incident this command exists for.
+func renderMeshCheck(out io.Writer, results []meshResult, svc, peer, path string) error {
+	if _, err := fmt.Fprintf(out, "calling %s -> %s (path %s), from %d host(s)\n\n", svc, peer, path, len(results)); err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(w, "HOST\tREGION\tEGRESS\tSTATUS\tVERDICT"); err != nil {
 		return err
 	}
 	failed := false
-	for _, t := range targets {
-		var buf strings.Builder
-		if err := sshRun(ctx, sshKeyPath, sshAccount(t), meshCheckScript(svc, peer, path), &buf); err != nil {
-			failed = true
-			if _, err := fmt.Fprintf(w, "%s\t%s\t-\t-\t%s\n", t.HostDNS, t.Scope, "probe failed"); err != nil {
-				return err
-			}
-			continue
-		}
-		res := parseInspect(buf.String())
-		status := statusOf(buf.String())
-		verdict, ok := meshVerdict(status)
-		if !ok {
+	for _, r := range results {
+		if !r.OK {
 			failed = true
 		}
-		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.HostDNS, t.Scope, dash(res.Egress), dash(status), verdict); err != nil {
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			r.Target.HostDNS, r.Target.Scope, dash(r.Egress), dash(r.Status), r.Verdict); err != nil {
 			return err
 		}
 	}

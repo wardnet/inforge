@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -173,17 +174,26 @@ func parseInspect(out string) instance {
 	return i
 }
 
-// collectInstances probes every target and returns what it found, in target order.
-//
-// A host that cannot be reached yields an instance carrying the error as its state rather
-// than aborting the sweep: `service instances` is a diagnostic, and "one of your five
-// hosts is unreachable" is exactly the finding you called it to get. Failing the whole
-// command on the first bad host would hide the other four.
+// sshRunner runs a remote command and writes its output to w. It is the seam that lets
+// every command in this file be tested without an SSH daemon — production passes sshRun.
+type sshRunner func(ctx context.Context, keyPath, account, remoteCmd string, w io.Writer) error
+
+// collectInstances probes every target over real SSH.
 func collectInstances(ctx context.Context, targets []service.DeployTarget, sshKeyPath string) []instance {
+	return collectInstancesWith(ctx, targets, sshKeyPath, sshRun)
+}
+
+// collectInstancesWith probes every target and returns what it found, in target order.
+//
+// A host that cannot be reached yields an instance carrying "unreachable" as its state
+// rather than aborting the sweep: `service instances` is a diagnostic, and "one of your
+// five hosts is unreachable" is exactly the finding you called it to get. Failing the
+// whole command on the first bad host would hide the other four.
+func collectInstancesWith(ctx context.Context, targets []service.DeployTarget, sshKeyPath string, run sshRunner) []instance {
 	out := make([]instance, 0, len(targets))
 	for _, t := range targets {
 		var buf bytes.Buffer
-		if err := sshRun(ctx, sshKeyPath, sshAccount(t), inspectScript(t.Unit), &buf); err != nil {
+		if err := run(ctx, sshKeyPath, sshAccount(t), inspectScript(t.Unit), &buf); err != nil {
 			out = append(out, instance{Target: t, State: "unreachable"})
 			continue
 		}
