@@ -1,6 +1,7 @@
 package grafanaalert
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -66,6 +67,43 @@ func TestBuiltInsGateDatabase(t *testing.T) {
 	// The "metrics missing" alerts escalate NoData → Alerting; ordinary ones do not.
 	assert.Equal(t, NoDataAlerting, wm["Host Metrics Missing"].Rule.NoDataState)
 	assert.Equal(t, NoDataOK, wm["Host CPU Saturated"].Rule.NoDataState)
+}
+
+// Postgres built-ins must aggregate by cluster identity, not by host: a host can run
+// several clusters, and grouping by `instance` sums their backends while dividing by one
+// cluster's max_connections. The grouping must match the Database dashboard's.
+func TestBuiltInsPostgresGroupByCluster(t *testing.T) {
+	byName := map[string]Alert{}
+	for _, a := range BuiltIns("prd", true) {
+		byName[a.Rule.Name] = a
+	}
+
+	// get fails the test rather than panicking on Data[0] if a built-in is renamed away.
+	get := func(name string) Alert {
+		a, ok := byName[name]
+		require.True(t, ok, "built-in %q missing", name)
+		require.NotEmpty(t, a.Rule.Data, name)
+		return a
+	}
+
+	conns := get("Postgres Connections High")
+	assert.Contains(t, conns.Rule.Data[0].Model, `sum by (db_cluster_name) (postgresql_backends`)
+	assert.Contains(t, conns.Rule.Data[0].Model, `max by (db_cluster_name) (postgresql_connection_max`)
+	assert.Contains(t, conns.Rule.Annotations["summary"], "{{ $labels.db_cluster_name }}")
+
+	roll := get("Postgres High Rollback Ratio")
+	assert.Contains(t, roll.Rule.Data[0].Model, `sum by (db_cluster_name) (rate(postgresql_rollbacks_total`)
+	assert.Contains(t, roll.Rule.Data[0].Model, `sum by (db_cluster_name) (rate(postgresql_commits_total`)
+	assert.Contains(t, roll.Rule.Annotations["summary"], "{{ $labels.db_cluster_name }}")
+
+	// No Postgres built-in may group or label by host. Matched as a pattern, not a
+	// literal, so `by(instance)` and `by (instance, db_cluster_name)` are caught too.
+	byInstance := regexp.MustCompile(`\b(by|without)\s*\(\s*[^)]*\binstance\b`)
+	for _, name := range []string{"Postgres Connections High", "Postgres High Rollback Ratio", "Postgres Metrics Missing"} {
+		a := get(name)
+		assert.NotRegexp(t, byInstance, a.Rule.Data[0].Model, name)
+		assert.NotContains(t, a.Rule.Annotations["summary"], "$labels.instance", name)
+	}
 }
 
 func TestBuiltInMathNode(t *testing.T) {

@@ -40,8 +40,8 @@ func TestGrantSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ro: %v", err)
 	}
-	if len(ro) != 6 {
-		t.Fatalf("ro: got %d statements, want 6", len(ro))
+	if len(ro) != 5 {
+		t.Fatalf("ro: got %d statements, want 5", len(ro))
 	}
 	if ro[0] != `GRANT CONNECT ON DATABASE "app" TO "svc"` {
 		t.Errorf("ro[0] = %q", ro[0])
@@ -51,22 +51,43 @@ func TestGrantSQL(t *testing.T) {
 			t.Errorf("ro must not grant write/create: %q", s)
 		}
 	}
+	// A reader never creates objects, so it declares no default privileges; it reads
+	// future tables through the database's reader group.
+	joinedRO := strings.Join(ro, "\n")
+	if strings.Contains(joinedRO, "ALTER DEFAULT PRIVILEGES") {
+		t.Errorf("ro must declare no default privileges:\n%s", joinedRO)
+	}
+	if !strings.Contains(joinedRO, `GRANT "app_ro" TO "svc"`) {
+		t.Errorf("ro must join the database reader group:\n%s", joinedRO)
+	}
 
 	rw, err := GrantSQL("rw", "svc", "app")
 	if err != nil {
 		t.Fatalf("rw: %v", err)
 	}
-	if len(rw) != 6 {
-		t.Fatalf("rw: got %d statements, want 6", len(rw))
+	if len(rw) != 9 {
+		t.Fatalf("rw: got %d statements, want 9", len(rw))
 	}
-	var sawCreate bool
-	for _, s := range rw {
-		if strings.Contains(s, "USAGE, CREATE ON SCHEMA public") {
-			sawCreate = true
+	joinedRW := strings.Join(rw, "\n")
+	// The rw role creates the service's tables, so IT must be the defaclrole — an
+	// ALTER DEFAULT PRIVILEGES without FOR ROLE keys the entry to the connected
+	// superuser and future tables reach no grantee at all.
+	for _, want := range []string{
+		`GRANT USAGE, CREATE ON SCHEMA public TO "svc"`,
+		`GRANT "app_rw" TO "svc"`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE "svc" IN SCHEMA public GRANT SELECT ON TABLES TO "app_ro"`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE "svc" IN SCHEMA public GRANT SELECT ON SEQUENCES TO "app_ro"`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE "svc" IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "app_rw"`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE "svc" IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO "app_rw"`,
+	} {
+		if !strings.Contains(joinedRW, want) {
+			t.Errorf("rw missing %q in:\n%s", want, joinedRW)
 		}
 	}
-	if !sawCreate {
-		t.Error("rw must grant CREATE ON SCHEMA public")
+	for _, s := range rw {
+		if strings.HasPrefix(s, "ALTER DEFAULT PRIVILEGES IN SCHEMA") {
+			t.Errorf("default privileges must name the creating role via FOR ROLE: %q", s)
+		}
 	}
 
 	if _, err := GrantSQL("admin", "svc", "app"); err == nil {
@@ -79,8 +100,11 @@ func TestCreateRoleLoginSQL(t *testing.T) {
 	// Idempotent shape: guarded create, else alter.
 	for _, want := range []string{
 		"IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'svc-x')",
-		`CREATE ROLE "svc-x" LOGIN PASSWORD 'p''w'`,
-		`ALTER ROLE "svc-x" WITH LOGIN PASSWORD 'p''w'`,
+		// INHERIT is explicit on BOTH branches: every privilege on post-mint objects
+		// arrives through group membership (the db reader/writer groups, pg_monitor), and
+		// a NOINHERIT role would hold none of it without a SET ROLE no service issues.
+		`CREATE ROLE "svc-x" LOGIN INHERIT PASSWORD 'p''w'`,
+		`ALTER ROLE "svc-x" WITH LOGIN INHERIT PASSWORD 'p''w'`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("CreateRoleLoginSQL missing %q in:\n%s", want, s)
@@ -88,23 +112,104 @@ func TestCreateRoleLoginSQL(t *testing.T) {
 	}
 }
 
+// The database owner is operator-authored free text. If it collides with a derived group
+// role, `GRANT <writer group> TO <service>` would make the service a member of the role
+// that OWNS the database and every object in it.
+func TestMintRoleSQLRejectsOwnerCollidingWithGroupRole(t *testing.T) {
+	for _, owner := range []string{"app_ro", "app_rw"} {
+		for _, perm := range []string{"ro", "rw"} {
+			if _, err := MintRoleSQL("svc", "pw", "app", owner, perm); err == nil {
+				t.Errorf("%s mint with owner %q must error (owner is a derived group role)", perm, owner)
+			}
+		}
+	}
+	if err := CheckGroupRoleNames("app_rw", "app", "app-owner"); err == nil {
+		t.Error("a login role named like a group role must error")
+	}
+	if err := CheckGroupRoleNames("svc", "app", "app-owner"); err != nil {
+		t.Errorf("a non-colliding triple must pass: %v", err)
+	}
+}
+
 func TestMintRoleSQL(t *testing.T) {
-	stmts, err := MintRoleSQL("svc", "pw", "app", "rw")
+	stmts, err := MintRoleSQL("svc", "pw", "app", "app-owner", "rw")
 	if err != nil {
 		t.Fatalf("MintRoleSQL: %v", err)
 	}
-	if len(stmts) != 13 { // 1 create + 6 revoke + 6 grants
-		t.Fatalf("got %d statements, want 13", len(stmts))
+	if len(stmts) != 21 { // 2 group + 1 create + 9 revoke + 9 grants
+		t.Fatalf("got %d statements, want 21", len(stmts))
 	}
-	if !strings.HasPrefix(stmts[0], "DO $$") {
-		t.Errorf("first statement should be the create DO block, got %q", stmts[0])
+	if !strings.Contains(stmts[0], `CREATE ROLE "app_ro" NOLOGIN`) || !strings.Contains(stmts[1], `CREATE ROLE "app_rw" NOLOGIN`) {
+		t.Errorf("mint must ensure the database group roles first, got %q, %q", stmts[0], stmts[1])
+	}
+	if !strings.Contains(stmts[2], `CREATE ROLE "svc" LOGIN`) {
+		t.Errorf("third statement should be the login-role DO block, got %q", stmts[2])
 	}
 	// The revoke block precedes the grants so a downgrade drops stale privileges.
-	if !strings.HasPrefix(stmts[1], "REVOKE ALL PRIVILEGES ON ALL TABLES") {
-		t.Errorf("second statement should begin the revoke block, got %q", stmts[1])
+	if !strings.HasPrefix(stmts[3], "REVOKE ALL PRIVILEGES ON ALL TABLES") {
+		t.Errorf("revoke block should follow the create, got %q", stmts[3])
 	}
-	if _, err := MintRoleSQL("svc", "pw", "app", "bogus"); err == nil {
+	// An rw role owns the tables it creates (it runs the migrations): reassigning them
+	// away would strip its DDL rights.
+	for _, s := range stmts {
+		if strings.HasPrefix(s, "REASSIGN OWNED") {
+			t.Errorf("rw mint must not reassign owned objects: %q", s)
+		}
+	}
+
+	if _, err := MintRoleSQL("svc", "pw", "app", "app-owner", "bogus"); err == nil {
 		t.Error("bad permission must propagate an error")
+	}
+	if _, err := MintRoleSQL("svc", "pw", "app", "", "ro"); err == nil {
+		t.Error("ro mint without a database owner must error (nothing to reassign to)")
+	}
+}
+
+// A downgraded rw→ro role keeps write + DDL on every table it created unless its
+// OWNERSHIP is reassigned away: REVOKE cannot reach an owner's implicit privileges.
+func TestMintRoleSQLDowngradeReassignsOwnershipBeforeRevoke(t *testing.T) {
+	stmts, err := MintRoleSQL("svc", "pw", "app", "app-owner", "ro")
+	if err != nil {
+		t.Fatalf("MintRoleSQL: %v", err)
+	}
+	reassign, firstRevoke, firstGrant := -1, -1, -1
+	for i, s := range stmts {
+		switch {
+		case s == `REASSIGN OWNED BY "svc" TO "app-owner"` && reassign < 0:
+			reassign = i
+		case strings.HasPrefix(s, "REVOKE") && firstRevoke < 0:
+			firstRevoke = i
+		case strings.HasPrefix(s, "GRANT") && firstGrant < 0:
+			firstGrant = i
+		}
+	}
+	if reassign < 0 {
+		t.Fatalf("ro mint must reassign owned objects to the database owner:\n%s", strings.Join(stmts, "\n"))
+	}
+	if firstRevoke < 0 || firstGrant < 0 {
+		t.Fatalf("expected revoke and grant blocks:\n%s", strings.Join(stmts, "\n"))
+	}
+	if reassign >= firstRevoke || firstRevoke >= firstGrant {
+		t.Errorf("want REASSIGN (%d) < REVOKE (%d) < GRANT (%d):\n%s", reassign, firstRevoke, firstGrant, strings.Join(stmts, "\n"))
+	}
+}
+
+func TestRevokeAllSQL(t *testing.T) {
+	joined := strings.Join(RevokeAllSQL("svc", "app"), "\n")
+	for _, want := range []string{
+		`REVOKE ALL PRIVILEGES ON DATABASE "app" FROM "svc"`,
+		// Group membership carries the privileges on post-mint objects — a downgrade
+		// that left the writer membership in place would keep granting write.
+		`REVOKE "app_ro", "app_rw" FROM "svc"`,
+		// The role's own default-privilege entries (defaclrole = the role), plus the
+		// mis-keyed superuser entries older inforge versions minted.
+		`ALTER DEFAULT PRIVILEGES FOR ROLE "svc" IN SCHEMA public REVOKE ALL ON TABLES FROM "app_ro", "app_rw"`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE "svc" IN SCHEMA public REVOKE ALL ON SEQUENCES FROM "app_ro", "app_rw"`,
+		`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM "svc"`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("RevokeAllSQL missing %q in:\n%s", want, joined)
+		}
 	}
 }
 
@@ -125,7 +230,7 @@ func TestMintMonitorRoleSQL(t *testing.T) {
 	// Idempotent LOGIN role with the password, pg_monitor membership, and CONNECT on
 	// each scraped database — and NOTHING else (no schema/table grants, no revoke-all).
 	for _, want := range []string{
-		`CREATE ROLE "mon" LOGIN PASSWORD 's3cret'`,
+		`CREATE ROLE "mon" LOGIN INHERIT PASSWORD 's3cret'`,
 		`GRANT pg_monitor TO "mon"`,
 		`GRANT CONNECT ON DATABASE "tenants" TO "mon"`,
 		`GRANT CONNECT ON DATABASE "audit" TO "mon"`,
@@ -138,5 +243,33 @@ func TestMintMonitorRoleSQL(t *testing.T) {
 		if strings.Contains(joined, absent) {
 			t.Errorf("monitor role must be read-only; unexpected %q\n%s", absent, joined)
 		}
+	}
+}
+
+// Postgres truncates identifiers at MaxIdentifierLen bytes, silently. The group roles
+// are derived from the operator's database: value with a 3-byte suffix, so a database
+// name within 3 bytes of the limit renders a group role the server stores under a
+// DIFFERENT name — and two databases whose _rw names share a 63-byte prefix collapse
+// onto ONE real group role, wiring one database's ALTER DEFAULT PRIVILEGES to the other
+// database's grantees. program.checkDBRoleNames applies the same limit to the LOGIN role
+// but never sees these derived names, so the check has to live here.
+func TestCheckGroupRoleNamesRejectsTruncatedIdentifiers(t *testing.T) {
+	// 61 bytes + "_rw" == 64 > 63: the writer group would be truncated.
+	long := strings.Repeat("d", MaxIdentifierLen-2)
+	if err := CheckGroupRoleNames("svc", long, "app"); err == nil {
+		t.Errorf("database %q derives the %d-byte group role %q; must be rejected", long, len(WriterGroup(long)), WriterGroup(long))
+	}
+	// 60 bytes + "_rw" == 63: exactly at the limit, still fine.
+	fits := strings.Repeat("d", MaxIdentifierLen-3)
+	if err := CheckGroupRoleNames("svc", fits, "app"); err != nil {
+		t.Errorf("database %q derives a group role of exactly %d bytes and must be accepted: %v", fits, MaxIdentifierLen, err)
+	}
+	// The owner is a real CREATE ROLE / createdb -O target and truncates the same way.
+	if err := CheckGroupRoleNames("svc", "app", strings.Repeat("o", MaxIdentifierLen+1)); err == nil {
+		t.Error("an over-long owner role must be rejected")
+	}
+	// A too-long database must also fail the mint, not just `inforge validate`.
+	if _, err := MintRoleSQL("svc", "pw", long, "app", "rw"); err == nil {
+		t.Error("MintRoleSQL must reject a database whose derived group roles truncate")
 	}
 }
