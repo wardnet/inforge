@@ -102,16 +102,39 @@ them died.
   3,031 that do not. Note it would *not* have been fixed by a debug toggle: the success path
   logged nothing **at any level**, so `RUST_LOG=debug` would have produced the same silence.
 
-  It is applied to the **tick-level** operations only — the four fetches a reconcile pass
-  opens with (`ddns.provisioner.fetch`, `ddns.reaper.fetch`,
-  `tunneller.abort_reaper.list_owned`, `tunneller.ttl_reaper.reap`). Those are the sites with
+  It is applied to the **tick-level** operations — the eight an interval loop retries
+  forever: `ddns.provisioner.fetch`, `ddns.reaper.fetch`, `tunneller.abort_reaper.list_owned`,
+  `tunneller.ttl_reaper.reap`, `tenants.catalog_sync`, `tenants.tombstone_sweep`,
+  `tenants.subscription_reaper`, `tenants.subscription_reconcile`. Those are the sites with
   the pathology: an unkeyed operation retried forever, whose sustained failure means the loop
-  is doing *nothing at all* while emitting one identical line per tick. The remaining
-  per-item failures (`network_id = …`) are deliberately left one-line-per-occurrence: they
-  are bounded by the queue's real contents, each is individually actionable, and collapsing
-  them would need a per-item keyed tracker whose entries leak when an item leaves the queue.
-  A persistently-failing *item* is a poison-item problem — a different fault with a different
-  fix.
+  is doing *nothing at all* while emitting one identical line per tick. Two operations that
+  merely share a tick (tenants' reaper and reconcile) get **separate** reporters — one can be
+  failing while the other is healthy, and one fault must not mask the other's or reset its run.
+
+  The remaining five sites are **per-item** failures (`network_id = …`), deliberately left
+  one-line-per-occurrence: they are bounded by the queue's real contents, each is individually
+  actionable, and collapsing them would need a per-item keyed tracker whose entries leak when
+  an item leaves the queue. A persistently-failing *item* is a poison-item problem — a
+  different fault with a different fix.
+
+  **Report the outcome of the attempt, once.** Reporting from inside a pagination or retry
+  loop makes a partially-failing attempt alternate success and failure, which flaps a WARN
+  and a *fabricated* recovery every tick — worse than no reporting at all, because the
+  recovery line asserts something untrue. The first implementation did exactly this and had
+  to be fixed: the reporting call must sit at the outcome of the whole operation, which in
+  ddns meant splitting `*_tick` (reports, once, as a single match) from `*_drain` (fetches).
+  Relatedly, a failing run is keyed on **which** error, not merely on "am I failing" — a fault
+  that changes identity mid-run (the 403 you fixed becoming a connection refusal) must warn
+  again rather than be suppressed as more of the old one.
+
+  **Census the pattern, not the phrase.** The first pass grepped for the string
+  `"retry next tick"` — ddns and tunneller's wording — and concluded the pattern spanned nine
+  sites. Tenants words its loops differently, so its four operations were missed entirely and
+  the grep was then reasoned about as if it were a complete survey. It spans **thirteen**. The
+  correct census reviews every `loop {}` and asks which are periodic-retry loops; the ones
+  legitimately left alone are accept loops, stream/parse loops, a bounded resolve-then-insert
+  race retry, and a broadcast-recv loop whose `Lagged` gap is an event rather than a sustained
+  fault run.
 
 - **A mesh ping answered by the mesh proxy, not the service.** A reserved
   `location = /_inforge/ping` in `meshnginx.ingressServer`, **inside the allow guard**,
