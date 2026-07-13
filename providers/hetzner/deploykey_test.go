@@ -37,7 +37,7 @@ func TestRealizeRequiresDeployKey(t *testing.T) {
 	t.Run("mesh", func(t *testing.T) {
 		err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 			h := NewMesh("", "use1")
-			err := h.Realize(ctx, "edge-01", host, "deploy", meshnginx.Config{},
+			_, err := h.Realize(ctx, "edge-01", host, "deploy", meshnginx.Config{},
 				pulumi.String("10.0.0.2"), nil, "prd", nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "no deploy private key configured")

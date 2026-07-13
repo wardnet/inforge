@@ -286,7 +286,14 @@ func (u meshCallerUniverse) allowedFor(svc types.ServiceSpec, meshScope string, 
 // address, and computeOut[global] supplies a cross-scope target's public IP. scopeKey
 // is the scope's output-map key (a region name or globalScope); regionNames is every
 // deploying region (for the global-callee allow-list expansion).
-func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, regionalRes, globalRes types.Resources, computeOut map[string]map[string]types.ComputeOutputs, scopeKey, slug string, regionNames []string, gates map[string]pulumi.Resource, deployPrivateKey, env string, defaults types.ProviderDefaults) error {
+// reloads ACCUMULATES every mesh host's nginx-reload resource, across scopes — the caller
+// passes the same slice into each scope's call. Service restarts are then ordered after all
+// of them, so a mesh caller can never come up against a callee's stale allow-map. Because
+// scopes realize global-first, a regional service's restart depends on the global mesh's
+// reload as well as its own — which is exactly the cross-scope hop (regional caller → global
+// callee) that produced the 403s. See
+// .agents/rules/mesh-config-lands-before-callers-restart.md.
+func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, regionalRes, globalRes types.Resources, computeOut map[string]map[string]types.ComputeOutputs, scopeKey, slug string, regionNames []string, gates map[string]pulumi.Resource, deployPrivateKey, env string, defaults types.ProviderDefaults, reloads *[]pulumi.Resource) error {
 	isGlobal := scopeKey == globalScope
 	// The mesh scope is the region name, or the literal ScopeGlobal for the global
 	// slice — the segment in the leaf SNI and the caller identity.
@@ -371,9 +378,12 @@ func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, r
 		if isGlobal {
 			listenAddr = pulumi.String("0.0.0.0")
 		}
-		if err := mp.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], cfg, listenAddr, targetIPs, env, []pulumi.Resource{gate}); err != nil {
+		reloaded, err := mp.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], cfg, listenAddr, targetIPs, env, []pulumi.Resource{gate})
+		if err != nil {
 			return err
 		}
+		// Hand the reload back so a service restart can be ordered after it.
+		*reloads = append(*reloads, reloaded)
 		// The on-host mesh descriptor (secret-free): the service list is the
 		// egress set — every co-located pki: service, already sorted. There is no
 		// material to deliver here (ADR-0035): the mesh proxy's leaf.age is

@@ -52,7 +52,7 @@ func TestDeliveryDependsOnUnitProvision(t *testing.T) {
 					"bridge-01": {PublicIP: pulumi.String("1.2.3.4").ToStringOutput()},
 				}
 				return provisionServices(ctx, res, computeOut, tc.material, map[string]pulumi.Resource{},
-					"priv", "prd", "us-east-1", "use1", "example.com", "1.2.3")
+					"priv", "prd", "us-east-1", "use1", "example.com", "1.2.3", nil)
 			}, pulumi.WithMocks("project", "stack", mocks))
 			require.NoError(t, err)
 

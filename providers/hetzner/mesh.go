@@ -48,15 +48,15 @@ func (h *HetznerMesh) Realize(
 	targetIPs map[string]pulumi.StringOutput,
 	env string,
 	dependsOn []pulumi.Resource,
-) error {
+) (pulumi.Resource, error) {
 	// The key is checked on a preview too — an empty one previews a spurious
 	// update on every command below. See the same guard in tls.go and, for the
 	// full reasoning, program.resolveDeployKey.
 	if h.deployPrivateKey == "" {
-		return fmt.Errorf("mesh %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", hostKey)
+		return nil, fmt.Errorf("mesh %q: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)", hostKey)
 	}
 	if !ctx.DryRun() && deployUser == "" {
-		return fmt.Errorf("mesh %q: host has no deploy_user; inforge needs one to SSH and realize the mesh proxy", hostKey)
+		return nil, fmt.Errorf("mesh %q: host has no deploy_user; inforge needs one to SSH and realize the mesh proxy", hostKey)
 	}
 
 	conn := iremote.Connection(host.PublicIP, deployUser, h.deployPrivateKey)
@@ -70,7 +70,7 @@ func (h *HetznerMesh) Realize(
 		Create:     pulumi.String(nginx.InstallScript() + "\nsudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y openssl\n"),
 	}, pulumi.DependsOn(dependsOn))
 	if err != nil {
-		return fmt.Errorf("mesh %q: install nginx: %w", hostKey, err)
+		return nil, fmt.Errorf("mesh %q: install nginx: %w", hostKey, err)
 	}
 
 	// 2. Write the seed script + the proxy's systemd unit, then daemon-reload. The
@@ -96,7 +96,7 @@ func (h *HetznerMesh) Realize(
 		Triggers:   pulumi.Array{pulumi.String(unitScript)},
 	}, pulumi.DependsOn([]pulumi.Resource{install}))
 	if err != nil {
-		return fmt.Errorf("mesh %q: write mesh unit: %w", hostKey, err)
+		return nil, fmt.Errorf("mesh %q: write mesh unit: %w", hostKey, err)
 	}
 
 	// 3. Write the rendered mesh config (inside an apply over the listen address +
@@ -110,20 +110,23 @@ func (h *HetznerMesh) Realize(
 		Triggers:   pulumi.Array{writeScript},
 	}, pulumi.DependsOn([]pulumi.Resource{unit}))
 	if err != nil {
-		return fmt.Errorf("mesh %q: write mesh config: %w", hostKey, err)
+		return nil, fmt.Errorf("mesh %q: write mesh config: %w", hostKey, err)
 	}
 
 	// 4. Start the unit FIRST, then validate + reload (see meshReloadCommand).
 	reload := meshReloadCommand()
-	if _, err := remote.NewCommand(ctx, base+"-reload", &remote.CommandArgs{
+	reloaded, err := remote.NewCommand(ctx, base+"-reload", &remote.CommandArgs{
 		Connection: conn,
 		Create:     pulumi.String(reload),
 		Update:     pulumi.String(reload),
 		Triggers:   pulumi.Array{writeScript},
-	}, pulumi.DependsOn([]pulumi.Resource{config})); err != nil {
-		return fmt.Errorf("mesh %q: reload mesh nginx: %w", hostKey, err)
+	}, pulumi.DependsOn([]pulumi.Resource{config}))
+	if err != nil {
+		return nil, fmt.Errorf("mesh %q: reload mesh nginx: %w", hostKey, err)
 	}
-	return nil
+	// THIS is the resource a service restart must wait on: the reload is what makes the new
+	// allow-map live. The config write only puts bytes on disk.
+	return reloaded, nil
 }
 
 // nginxBinPath is the nginx binary the north-south install provides, used to

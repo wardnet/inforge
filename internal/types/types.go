@@ -735,7 +735,14 @@ type IngressProvider interface {
 // seeds placeholder cert material so it starts before real leaves land, writes
 // the config, and reloads — safe to re-run as the mesh topology changes.
 type MeshProvider interface {
-	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, cfg meshnginx.Config, listenAddr pulumi.StringInput, targetIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
+	// Realize returns the resource that makes the host's mesh config LIVE — the nginx
+	// reload, not the config write (which only puts bytes on disk).
+	//
+	// It is returned so a service restart can be ordered AFTER it. Pulumi is a DAG, not a
+	// script: without an explicit edge, a caller's restart and a callee's allow-map reload
+	// run CONCURRENTLY, and a caller that comes up first is 403'd by the stale allow-map.
+	// See .agents/rules/mesh-config-lands-before-callers-restart.md.
+	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, cfg meshnginx.Config, listenAddr pulumi.StringInput, targetIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) (pulumi.Resource, error)
 }
 
 // DatabaseProvider realizes a database-cluster and its logical databases on a
