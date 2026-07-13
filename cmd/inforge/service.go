@@ -10,48 +10,58 @@ import (
 	"github.com/wardnet/inforge/internal/service"
 )
 
-// newServiceCmd operates on already-deployed services over SSH. Its first use
-// is `restart`: after a rotated secret merges and deploys (ADR-0017), services
-// re-fetch their secrets on start, so a restart is what makes a new value live.
+// newServiceCmd operates on already-deployed services over SSH — ADR-0041's SSH plane.
+// `restart` came first (after a rotated secret merges and deploys, services re-fetch
+// their secrets on start, so a restart is what makes a new value live); `instances`,
+// `logs`, `status` and `mesh-check` are the read-only siblings, in servicecmds.go.
+//
+// Everything here is systemd, /proc and the on-host descriptor, reached as the
+// sudo-capable deploy user we already connect as — no service-side code at all.
 func newServiceCmd(configPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "service",
 		Short: "Operate on deployed services",
 	}
-	cmd.AddCommand(newServiceRestartCmd(configPath))
+	cmd.AddCommand(
+		newServiceRestartCmd(configPath),
+		newServiceInstancesCmd(configPath),
+		newServiceLogsCmd(configPath),
+		newServiceStatusCmd(configPath),
+		newServiceMeshCheckCmd(configPath),
+	)
 	return cmd
 }
 
 func newServiceRestartCmd(configPath *string) *cobra.Command {
 	var stackConfig, sshKeyPath string
+	var sel selector
 	cmd := &cobra.Command{
-		Use:           "restart <env> <service>",
-		Short:         "Restart a service's systemd unit on every host it deploys to",
+		Use:   "restart <env> <service>",
+		Short: "Restart a service's systemd unit on every host it deploys to",
+		Long: `Restart a service's systemd unit, then verify it came back up.
+
+--instance asserts WHICH process you are restarting: the id is regenerated on every
+start, so if the service restarted between your last look and this command, the id no
+longer matches and the restart is refused rather than silently acting on a different
+incarnation.`,
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runServiceRestart(cmd.Context(), *configPath, args[0], args[1], stackConfig, sshKeyPath)
+			return runServiceRestart(cmd.Context(), *configPath, args[0], args[1], stackConfig, sshKeyPath, sel)
 		},
 	}
 	cmd.Flags().StringVar(&stackConfig, "stack-config", "", "path to the infra stack config file (default: inforge.<env>.yaml)")
 	cmd.Flags().StringVar(&sshKeyPath, "ssh-key", "", "path to the SSH deploy key (overrides INFORGE_DEPLOY_KEY)")
+	addSelectorFlags(cmd, &sel, true)
 	return cmd
 }
 
-func runServiceRestart(ctx context.Context, configPath, env, svc, stackConfigPath, sshKeyPath string) error {
-	projCfg, err := loadProjectConfig(configPath)
-	if err != nil {
-		return err
-	}
-	stackCfg, err := resolveStackConfig(stackConfigPath, env)
-	if err != nil {
-		return err
-	}
+func runServiceRestart(ctx context.Context, configPath, env, svc, stackConfigPath, sshKeyPath string, sel selector) error {
 	// Hosts, unit names and SSH users come from the deployDescriptor stack
 	// output — the same source `releases deploy` delivers by, so restart can
 	// never disagree with deploy about where a service lives.
-	targets, err := resolveDeployTargets(ctx, projCfg, env, "", stackCfg, svc)
+	targets, err := serviceTargets(ctx, configPath, env, svc, stackConfigPath, sel)
 	if err != nil {
 		return err
 	}
@@ -61,6 +71,16 @@ func runServiceRestart(ctx context.Context, configPath, env, svc, stackConfigPat
 		return err
 	}
 	defer cleanupKey()
+
+	// --instance is a precondition, not a filter: probe the live processes and refuse if
+	// the one named is gone. Skipped entirely when unset, so the common case costs no
+	// extra round-trip.
+	if sel.instance != "" {
+		targets, err = requireInstance(collectInstances(ctx, targets, sshKeyPath), sel.instance)
+		if err != nil {
+			return err
+		}
+	}
 
 	fmt.Printf("restarting %s on %d host(s) (env: %s)\n", svc, len(targets), env)
 	for _, t := range targets {
