@@ -3,6 +3,7 @@ package program
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	grafanasdk "github.com/pulumiverse/pulumi-grafana/sdk/go/grafana"
 	"github.com/pulumiverse/pulumi-grafana/sdk/go/grafana/alerting"
@@ -14,6 +15,7 @@ import (
 	"github.com/wardnet/inforge/internal/grafanaalert"
 	"github.com/wardnet/inforge/internal/grafanadash"
 	"github.com/wardnet/inforge/internal/loader"
+	"github.com/wardnet/inforge/internal/naming"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -27,7 +29,7 @@ import (
 // inforge envs share one Grafana org cleanly. Built-in dashboards and built-in alerts
 // are each opt-out per env (obs.DashboardsEnabled / obs.AlertsEnabled); routing uses
 // per-rule notification settings, so no org-singleton notification policy is touched.
-func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.ObservabilityConfig, hasDatabase, dryRun bool) error {
+func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.ObservabilityConfig, hasDatabase, dryRun bool, services []grafanaalert.ServiceScope) error {
 	if obs.GrafanaURL == "" {
 		return nil
 	}
@@ -106,7 +108,7 @@ func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.Obse
 	}
 
 	// Alert rules + contact points (opt-out per env for the built-ins).
-	if err := realizeGrafanaAlerts(ctx, prov, folder, dir, srcEnv, env, obs, hasDatabase, dryRun); err != nil {
+	if err := realizeGrafanaAlerts(ctx, prov, folder, dir, srcEnv, env, obs, hasDatabase, dryRun, services); err != nil {
 		return err
 	}
 	return nil
@@ -119,7 +121,7 @@ func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.Obse
 // custom alerts. Each rule routes via its own NotificationSettings.ContactPoint —
 // resolved from the alert's profile + severity — so the org notification policy is
 // never touched. A route marked `muted: true` drops the rule.
-func realizeGrafanaAlerts(ctx *pulumi.Context, prov *grafanasdk.Provider, folder *oss.Folder, dir, srcEnv, env string, obs types.ObservabilityConfig, hasDatabase, dryRun bool) error {
+func realizeGrafanaAlerts(ctx *pulumi.Context, prov *grafanasdk.Provider, folder *oss.Folder, dir, srcEnv, env string, obs types.ObservabilityConfig, hasDatabase, dryRun bool, services []grafanaalert.ServiceScope) error {
 	notif, err := loader.LoadNotifications(srcEnv, dir)
 	if err != nil {
 		return err
@@ -159,6 +161,7 @@ func realizeGrafanaAlerts(ctx *pulumi.Context, prov *grafanasdk.Provider, folder
 	var alerts []grafanaalert.Alert
 	if obs.AlertsEnabled() {
 		alerts = append(alerts, grafanaalert.BuiltIns(env, hasDatabase)...)
+		alerts = append(alerts, grafanaalert.ServiceBuiltIns(env, services)...)
 	}
 	customAlerts, err := grafanaalert.Custom(alertsSpec.Alerts)
 	if err != nil {
@@ -295,4 +298,54 @@ func toRuleArgs(alerts []grafanaalert.Alert, obs types.ObservabilityConfig, noti
 		})
 	}
 	return out, nil
+}
+
+// serviceScopes derives each service's alert eligibility from its manifest — never from an
+// authored field. inforge already knows all of this, so a `telemetry:` block on the spec
+// could only be a second source of truth that drifts: set wrong, it yields either dead alert
+// rules or a silently unmonitored service. Same idiom as gateway routes being derived from
+// `public_paths` rather than authored.
+func serviceScopes(sets ...types.Resources) []grafanaalert.ServiceScope {
+	var out []grafanaalert.ServiceScope
+	for _, res := range sets {
+		for _, s := range res.Service {
+			out = append(out, grafanaalert.ServiceScope{
+				Name:     s.Name,
+				Metric:   naming.TelemetryServiceName(s.Name),
+				HTTP:     servesHTTP(s),
+				Mesh:     s.Pki != "",
+				Database: hasDatabaseGrant(s),
+			})
+		}
+	}
+	return out
+}
+
+// servesHTTP reports whether a service emits the RED histogram — i.e. whether it serves HTTP
+// at all. A `mesh:` block means it is a mesh callee, and the mesh plane is plain HTTP. A
+// tls-termination route means it is fronted by the ingress as an HTTP backend.
+//
+// A `forward` route does NOT count: it is L4 TLS passthrough, never terminated, so no HTTP
+// request is ever seen (let alone recorded) by the service. Counting it would generate
+// error-rate and latency rules against series that cannot exist.
+func servesHTTP(s types.ServiceSpec) bool {
+	if s.Mesh != nil && s.Mesh.Port > 0 {
+		return true
+	}
+	for _, r := range s.Routes {
+		if r.Type == types.IngressTypeTLSTermination {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDatabaseGrant reports whether the service holds a connection pool that can saturate.
+func hasDatabaseGrant(s types.ServiceSpec) bool {
+	for _, g := range s.Grants {
+		if strings.HasPrefix(g.Resource, "database/") {
+			return true
+		}
+	}
+	return false
 }

@@ -9,19 +9,19 @@ import "fmt"
 // alerts. Every built-in routes through the env's default_profile (Profile "").
 // includeDatabase gates the Postgres alerts so a DB-less env's "metrics missing"
 // alert can't fire forever.
+// b compiles a built-in; built-in exprs are authored in this package so parseCondition
+// never fails — a panic here would be a programming error, surfaced by tests.
+func b(name, expr, cond, forDur, severity, summary, noData string) Alert {
+	r, err := build(name, expr, cond, forDur, severity, summary, noData, nil)
+	if err != nil {
+		panic(fmt.Sprintf("grafanaalert: built-in %q: %v", name, err))
+	}
+	return Alert{Rule: r, Severity: severity}
+}
+
 func BuiltIns(env string, includeDatabase bool) []Alert {
 	e := envMatcher(env)
 	fs := `type=~"ext4|xfs"`
-
-	// b compiles a built-in; built-in exprs are authored here so parseCondition
-	// never fails — a panic here would be a programming error, surfaced by tests.
-	b := func(name, expr, cond, forDur, severity, summary, noData string) Alert {
-		r, err := build(name, expr, cond, forDur, severity, summary, noData, nil)
-		if err != nil {
-			panic(fmt.Sprintf("grafanaalert: built-in %q: %v", name, err))
-		}
-		return Alert{Rule: r, Severity: severity}
-	}
 
 	alerts := []Alert{
 		b("Host CPU Saturated",
