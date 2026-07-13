@@ -1,6 +1,7 @@
 package program
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
@@ -8,6 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/registry"
+	"github.com/wardnet/inforge/internal/tags"
 	"github.com/wardnet/inforge/internal/types"
 )
 
@@ -133,4 +136,58 @@ func TestGlobalScopeMustRealizeFirst(t *testing.T) {
 	err := requireGlobalScopeFirst([]string{"eu-central", globalScope})
 	require.Error(t, err, "a global scope realized AFTER a region silently re-opens #226")
 	assert.Contains(t, err.Error(), "must realize BEFORE")
+}
+
+// realizeMesh must hand back ONE reload per mesh host, appended to the accumulator the
+// caller threads across scopes. That accumulator is the entire mechanism by which a service
+// restart is ordered after a callee's allow-map goes live — if realizeMesh silently collected
+// nothing, every service would be free to restart against a stale allow-map and #226 would be
+// back with all its tests still green.
+func TestRealizeMeshCollectsOneReloadPerMeshHost(t *testing.T) {
+	mocks := newCommandMocks()
+	var reloads []pulumi.Resource
+
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		reg := registry.BuildRegistry(ctx,
+			map[string]map[string]any{"hetzner": {"apiToken": "x"}},
+			nil, types.SSHConfig{DeployPrivateKey: "priv"}, nil, "proj", "prd", "us-east-1", tags.Ephemeral{}, nil)
+
+		// Two hosts, each running one mesh (pki:) service -> two mesh proxies.
+		res := types.Resources{
+			Compute: []types.ComputeSpec{
+				{Name: "edge", Provider: "hetzner", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
+				{Name: "bridge", Provider: "hetzner", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
+			},
+			Service: []types.ServiceSpec{
+				{Name: "ddns", Container: "edge", Host: "edge", Type: "raw", User: "ddns", Pki: "wardnet-mesh",
+					Mesh: &types.MeshSpec{Port: 8080, AllowedServices: []string{"tunneller"}, InternalPaths: []string{"/v1/x"}}},
+				{Name: "tunneller", Container: "edge", Host: "bridge", Type: "raw", User: "tunneller", Pki: "wardnet-mesh"},
+			},
+		}
+		computeOut := map[string]map[string]types.ComputeOutputs{
+			"us-east-1": {
+				"edge-01":   {PublicIP: pulumi.String("1.2.3.4").ToStringOutput(), PrivateIP: pulumi.String("10.0.0.2").ToStringOutput()},
+				"bridge-01": {PublicIP: pulumi.String("1.2.3.5").ToStringOutput(), PrivateIP: pulumi.String("10.0.0.3").ToStringOutput()},
+			},
+		}
+		return realizeMesh(ctx, reg, res, res, types.Resources{}, computeOut,
+			"us-east-1", "use1", []string{"us-east-1"}, map[string]pulumi.Resource{},
+			"priv", "prd", types.ProviderDefaults{}, &reloads)
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	assert.Len(t, reloads, 2, "one reload per mesh host, or a service can restart against a stale allow-map")
+	for _, r := range reloads {
+		require.NotNil(t, r, "a nil resource in the accumulator nil-derefs pulumi.DependsOn for every service")
+	}
+	// And what was collected must be the RELOAD command — bytes on disk are not a live
+	// allow-map. (providers/hetzner.TestRealizeReturnsTheReloadNotTheConfigWrite pins that
+	// Realize hands back the reload rather than the config write.)
+	reloadCmds := 0
+	for name := range mocks.captured {
+		if strings.HasSuffix(name, "-reload") {
+			reloadCmds++
+		}
+	}
+	assert.Equal(t, 2, reloadCmds, "each mesh host must register a reload command")
 }
