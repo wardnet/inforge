@@ -80,18 +80,32 @@ func LeafPath(name string) string {
 // (no User=): the agent fetches secrets, then drops privilege to the
 // service user itself and execs ExecPath, so systemd supervises the real service
 // PID. StartLimitIntervalSec=0 disables systemd's start-rate limit so a service
-// always recovers once the vault returns (the agent bounds its own retry
-// backoff per start, then exits non-zero to let Restart=on-failure loop).
+// always recovers once a failing dependency returns (the agent bounds its own
+// retry backoff per start, then exits to let Restart= loop).
+//
+// Restart=ALWAYS, not on-failure. These are long-running network services: there is
+// no exit that is CORRECT. If the process is gone, the service is not being provided,
+// whatever exit code it used on the way out. `on-failure` only restarts an exit
+// systemd classifies as a failure — so a process that exits in a way systemd records
+// as `Result=success` goes inactive (dead) and STAYS THERE indefinitely: no restart,
+// no crash-loop, no recovery, and (until service-level alerting lands) no signal that
+// anything is wrong. That is not hypothetical; it took a production service down for
+// forty minutes. `on-failure` encodes an assumption that the process only ever exits
+// on purpose, and every bug that makes it exit cleanly-but-wrongly (a signal with a
+// default-terminate disposition, a select! arm completing, an unwrapped shutdown
+// path) converts silently into a permanent outage instead of a five-second blip.
+//
 // ConditionPathExists= guards the gap between provisioning (which enables the
 // unit for boot-persistence, so a reboot of an already-released service comes
 // back up) and a service's first-ever release: without it, a freshly
 // provisioned host's very first boot auto-starts every enabled unit
 // (WantedBy=multi-user.target), and with no payload yet delivered that means
-// an immediate, permanent crash-loop (Restart=on-failure + the disabled rate
-// limit retry forever) until someone runs `inforge releases deploy`. A failed
-// Condition is not a failure exit, so Restart= never engages — systemd simply
-// skips the start silently, and the release path's own `systemctl restart`
-// re-evaluates the condition and starts normally once the exec path exists.
+// an immediate, permanent crash-loop (Restart= + the disabled rate limit retry
+// forever) until someone runs `inforge releases deploy`. A failed Condition is not a
+// start at all, so Restart= never engages — systemd simply skips the start silently
+// (this is why the guard still holds under Restart=always), and the release path's own
+// `systemctl restart` re-evaluates the condition and starts normally once the exec
+// path exists.
 const unitTemplate = `[Unit]
 Description=wardnet %s
 After=network.target
@@ -104,7 +118,7 @@ WorkingDirectory=%s
 RuntimeDirectory=%s
 RuntimeDirectoryMode=0700
 ExecStart=%s %s
-%sRestart=on-failure
+%sRestart=always
 RestartSec=5
 
 [Install]

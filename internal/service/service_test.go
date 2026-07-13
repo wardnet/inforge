@@ -17,9 +17,27 @@ func TestUnit(t *testing.T) {
 	// the service binary directly — the agent execs that after dropping
 	// privilege.
 	assert.Contains(t, unit, "ExecStart=/usr/local/bin/inforge-agent /etc/wardnet/services/api")
-	assert.Contains(t, unit, "StartLimitIntervalSec=0", "unlimited restarts so a service recovers when the vault returns")
-	assert.Contains(t, unit, "Restart=on-failure")
+	assert.Contains(t, unit, "StartLimitIntervalSec=0", "unlimited restarts so a service recovers once a failing dependency returns")
+	assert.Contains(t, unit, "Restart=always")
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
+}
+
+// TestUnitRestartsOnAnyExit is the regression guard for a production outage.
+//
+// `Restart=on-failure` only restarts an exit systemd CLASSIFIES as a failure. A service
+// that exits in a way systemd records as `Result=success` therefore goes inactive (dead)
+// and stays there indefinitely — no restart, no crash-loop, no recovery. That is exactly
+// what happened: a service took a SIGHUP it had no handler for, systemd recorded a clean
+// exit, `Restart=on-failure` never engaged, and the service stayed down for forty minutes.
+//
+// These are long-running network services. There is no exit that is CORRECT: if the
+// process is gone, the service is not being provided, whatever exit code it used on the
+// way out. Anything that reverts this to `on-failure` re-arms that outage.
+func TestUnitRestartsOnAnyExit(t *testing.T) {
+	unit := Unit(types.ServiceSpec{Name: "api"})
+	assert.Contains(t, unit, "Restart=always",
+		"a daemon has no correct exit — on-failure lets a cleanly-exited service stay dead forever")
+	assert.NotContains(t, unit, "Restart=on-failure")
 }
 
 // TestUnitConditionPathExists guards the gap between provisioning (which

@@ -56,7 +56,7 @@ ExecStartPre=` + nginxBin + ` -t -c ` + meshpaths.ConfigPath + `
 ExecStart=` + nginxBin + ` -c ` + meshpaths.ConfigPath + `
 ExecReload=` + nginxBin + ` -s reload -c ` + meshpaths.ConfigPath + `
 ExecStop=` + nginxBin + ` -s quit -c ` + meshpaths.ConfigPath + `
-Restart=on-failure
+Restart=always
 
 [Install]
 WantedBy=multi-user.target

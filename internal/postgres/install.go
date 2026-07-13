@@ -109,7 +109,7 @@ func UnitFile(cluster, version string, port int) string {
 		"ExecReload=/bin/kill -HUP $MAINPID",
 		"KillSignal=SIGINT",
 		"TimeoutStartSec=120",
-		"Restart=on-failure",
+		"Restart=always",
 		"",
 		"[Install]",
 		"WantedBy=multi-user.target",
