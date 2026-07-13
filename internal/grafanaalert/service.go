@@ -208,10 +208,20 @@ func ServiceBuiltIns(env string, services []ServiceScope) []Alert {
 		// rejected gets 403 on every call to a peer, and before wardnet-cloud metered its
 		// outbound calls there was no metric of that anywhere — only log lines.
 		//
-		// Deliberately WARNING, not critical, and deliberately slow (15m). inforge's own
-		// deploy-ordering race (#226) produces a burst of mesh 403s on EVERY deploy: a
-		// critical, fast alert here would page on every ship and be muted within a week. The
-		// long `for` rides out the deploy window. When #226 is fixed this can tighten.
+		// CRITICAL, and this is the third member of a deliberately tiny critical set (see the
+		// severity note above). It earns its place because #226 is fixed: the deploy-ordering
+		// race that produced a burst of mesh 403s on EVERY ship is gone, so the ONE benign
+		// cause of a sustained mesh failure no longer exists.
+		//
+		// What remains is never benign. A caller that cannot reach its peer is not doing its
+		// job, and — unlike a crash — it will NOT self-heal: a rejected identity, a stale
+		// allow-map, a broken trust chain or an unroutable peer all persist until someone
+		// acts. A service that is up but cannot call its only dependency is as broken as one
+		// that is down, and that is exactly what Critical is for.
+		//
+		// `for: 5m` still absorbs the seconds-long blip while a callee restarts during its own
+		// release. Before #226, this had to be a 15m Warning or it would have paged on every
+		// deploy and been muted within a week.
 		//
 		// 403 (identity rejected), 5xx (peer or its proxy broken) and `error` (transport:
 		// unreachable, TLS refused) mean the mesh path is broken. Other 4xx are the callee's
@@ -219,7 +229,7 @@ func ServiceBuiltIns(env string, services []ServiceScope) []Alert {
 		alerts = append(alerts, b(
 			"Mesh Calls Failing",
 			fmt.Sprintf(`100 * sum by (service_name, mesh_target) (rate(http_client_request_duration_seconds_count{%s, mesh_outcome=~"403|5..|error"}[5m])) / clamp_min(sum by (service_name, mesh_target) (rate(http_client_request_duration_seconds_count{%s}[5m])), 1)`, e, e),
-			"> 10", "15m", SeverityWarning,
+			"> 10", "5m", SeverityCritical,
 			"{{ $labels.service_name }} → {{ $labels.mesh_target }}: {{ $value }}% of mesh calls failing (403 / 5xx / unreachable).",
 			NoDataOK,
 		))

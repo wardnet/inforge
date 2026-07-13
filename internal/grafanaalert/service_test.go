@@ -69,6 +69,12 @@ func TestOnlyLivenessAlertsAreCritical(t *testing.T) {
 		"Service Down: ddns (use1)": true,
 		"Service Down: tenants":     true,
 		"Service Crash-Looping":     true,
+		// The third member, and the only one that is not "the process is gone". It earns its
+		// place because #226 removed the one BENIGN cause of a sustained mesh failure (the
+		// deploy-ordering race that 403'd on every ship). What is left never self-heals — a
+		// rejected identity, a stale allow-map, a broken trust chain — and a service that
+		// cannot call its only dependency is as broken as one that is down.
+		"Mesh Calls Failing": true,
 	}
 	if len(critical) != len(want) {
 		t.Fatalf("critical set drifted.\n got: %v\nwant: %v", critical, want)
@@ -80,16 +86,25 @@ func TestOnlyLivenessAlertsAreCritical(t *testing.T) {
 	}
 }
 
-// The mesh alert must NOT be critical, and the reason is our own bug: inforge's
-// deploy-ordering race (#226) produces a burst of mesh 403s on EVERY deploy. A critical,
-// fast alert here would page on every ship and be muted within a week.
-func TestMeshAlertIsWarningAndSlowEnoughToRideOutADeploy(t *testing.T) {
+// The mesh alert pages, and only because #226 is fixed.
+//
+// Before it, inforge's own deploy-ordering race produced a burst of mesh 403s on EVERY
+// deploy, so this had to be a 15m Warning or it would have paged on every ship and been
+// muted within a week. With the race gone, a sustained mesh failure has no benign cause left:
+// a rejected identity, a stale allow-map, a broken trust chain and an unroutable peer all
+// PERSIST until someone acts. A service that is up but cannot call its only dependency is as
+// broken as one that is down.
+//
+// If this is ever reverted to a Warning, check whether the deploy race came back first.
+func TestMeshAlertPagesButStillAbsorbsACalleeRestart(t *testing.T) {
 	a := find(t, ServiceBuiltIns("prd", scopes()), "Mesh Calls Failing")
-	if a.Severity != SeverityWarning {
-		t.Errorf("mesh failures must not page: every deploy currently causes a transient burst (#226)")
+	if a.Severity != SeverityCritical {
+		t.Error("a caller that cannot reach its peer is not doing its job, and it will not self-heal")
 	}
-	if a.Rule.For != "15m" {
-		t.Errorf("for = %q; the window must ride out the deploy race, not fire inside it", a.Rule.For)
+	// Still long enough to absorb the seconds-long blip while a callee restarts during its
+	// own release — the only remaining transient cause.
+	if a.Rule.For != "5m" {
+		t.Errorf("for = %q; must still ride out a callee's restart, just not a deploy-wide 403 burst", a.Rule.For)
 	}
 }
 

@@ -382,8 +382,12 @@ func realizeMesh(ctx *pulumi.Context, reg registry.ProviderRegistry, scopeRes, r
 		if err != nil {
 			return err
 		}
-		// Hand the reload back so a service restart can be ordered after it.
-		*reloads = append(*reloads, reloaded)
+		// Hand the reload back so a service restart can be ordered after it. A provider that
+		// returns no resource (a no-op mesh) contributes no ordering constraint — but a nil
+		// must never reach pulumi.DependsOn, which would nil-deref for every service.
+		if reloaded != nil {
+			*reloads = append(*reloads, reloaded)
+		}
 		// The on-host mesh descriptor (secret-free): the service list is the
 		// egress set — every co-located pki: service, already sorted. There is no
 		// material to deliver here (ADR-0035): the mesh proxy's leaf.age is
@@ -441,4 +445,28 @@ func renderMeshDescriptor(services []string) (string, error) {
 		return "", fmt.Errorf("marshal mesh descriptor: %w", err)
 	}
 	return string(b), nil
+}
+
+// requireGlobalScopeFirst enforces the invariant the #226 fix rests on: if a global scope
+// realizes at all, it must realize BEFORE any regional one.
+//
+// realizeMesh accumulates each scope's mesh-nginx reload into one slice, and every service
+// restart is ordered after everything accumulated SO FAR. A regional service therefore
+// depends on the global mesh's reload only because the global scope came first — and that is
+// precisely the cross-scope hop (regional caller → global callee) that produced the 403s.
+//
+// Nothing else enforces the order. Reversing two `append` calls would silently re-open the
+// race with no test failure and no error, so the invariant is asserted rather than assumed.
+func requireGlobalScopeFirst(keys []string) error {
+	seenRegional := false
+	for _, k := range keys {
+		if k == globalScope {
+			if seenRegional {
+				return fmt.Errorf("internal: the global scope must realize BEFORE every regional scope (got %v) — a regional service's restart is ordered after the global mesh's allow-map reload by accumulation, and reordering silently re-opens the #226 403 race; see .agents/rules/mesh-config-lands-before-callers-restart.md", keys)
+			}
+			continue
+		}
+		seenRegional = true
+	}
+	return nil
 }

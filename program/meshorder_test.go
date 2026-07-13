@@ -117,3 +117,65 @@ func TestSecretlessDeliveryNeedsNoMeshOrdering(t *testing.T) {
 	assert.False(t, mocks.dependsOn(svc+"-secrets", "mesh-reload"),
 		"the descriptor write does not restart, so it must not be ordered against the mesh")
 }
+
+// The #226 fix rests on the global scope realizing FIRST: meshReloads accumulates across
+// scopes, so a regional service's restart depends on the GLOBAL mesh's reload only because
+// the global scope came first. That is exactly the cross-scope hop the 403s came from.
+//
+// Nothing else enforces it — reversing two `append` calls twenty lines apart would silently
+// re-open the race with no test failure and no error. So the invariant is asserted, and a
+// loud failure at deploy beats a quiet 403 storm in production.
+func TestGlobalScopeMustRealizeFirst(t *testing.T) {
+	assert.NoError(t, requireGlobalScopeFirst([]string{globalScope, "eu-central", "us-east-1"}))
+	assert.NoError(t, requireGlobalScopeFirst([]string{"eu-central"}), "a regional-only env has no global mesh to order against")
+	assert.NoError(t, requireGlobalScopeFirst(nil))
+
+	err := requireGlobalScopeFirst([]string{"eu-central", globalScope})
+	require.Error(t, err, "a global scope realized AFTER a region silently re-opens #226")
+	assert.Contains(t, err.Error(), "must realize BEFORE")
+}
+
+// A service with no `pki:` is not a mesh member: it never dials the mesh and no callee's
+// allow-map has an entry for it, so it CANNOT be 403'd. Ordering it behind every mesh host's
+// nginx install would serialize the deploy behind apt-get runs on machines it has nothing to
+// do with.
+func TestANonMeshServiceIsNotOrderedAgainstTheMesh(t *testing.T) {
+	mocks := newCommandMocks()
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		reload, err := remote.NewCommand(ctx, "mesh-reload", &remote.CommandArgs{
+			Connection: remote.ConnectionArgs{
+				Host:       pulumi.String("1.2.3.4"),
+				User:       pulumi.String("deploy"),
+				PrivateKey: pulumi.String("priv"),
+			},
+			Create: pulumi.String("systemctl reload wardnet-mesh"),
+		})
+		if err != nil {
+			return err
+		}
+		res := types.Resources{
+			Compute: []types.ComputeSpec{
+				{Name: "bridge", InstanceCount: 1, DeployUser: &types.DeployUserSpec{Name: "deploy"}},
+			},
+			Service: []types.ServiceSpec{
+				// No Pki -> not a mesh member.
+				{Name: "ghost", Container: "ghost", Host: "bridge-01", Type: "raw", User: "ghost"},
+			},
+		}
+		computeOut := map[string]types.ComputeOutputs{
+			"bridge-01": {PublicIP: pulumi.String("1.2.3.4").ToStringOutput()},
+		}
+		material := map[string]serviceMaterial{
+			"ghost": {Env: map[string]pulumi.StringOutput{"TOKEN": pulumi.String("t").ToStringOutput()}},
+		}
+		return provisionServices(ctx, res, computeOut, material, map[string]pulumi.Resource{},
+			"priv", "prd", "us-east-1", "use1", "example.com", "1.2.3", []pulumi.Resource{reload})
+	}, pulumi.WithMocks("project", "stack", mocks))
+	require.NoError(t, err)
+
+	svc := naming.Resource("prd", "use1", "svc", "ghost")
+	assert.False(t, mocks.dependsOn(svc+"-secrets", "mesh-reload"),
+		"a non-mesh service cannot be 403'd, so it must not wait on the mesh")
+	// It must still keep the unit ordering it always had.
+	assert.True(t, mocks.dependsOn(svc+"-secrets", svc+"-provision"))
+}

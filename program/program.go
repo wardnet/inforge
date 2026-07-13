@@ -263,6 +263,22 @@ func Run(ctx *pulumi.Context) error {
 		scopes = append(scopes, scope{key: region, slug: slug, reg: registries[region], authority: regionTable[region].Dns, res: res})
 	}
 
+	// GLOBAL-FIRST IS LOAD-BEARING, not a convention. The mesh-reload accumulation below
+	// (#226) gives a regional service's restart a dependency on the GLOBAL mesh's reload
+	// only because the global scope is realized first — that is the cross-scope hop
+	// (regional caller → global callee) the 403s came from. Reorder these appends and the
+	// race silently returns, with nothing to notice it.
+	//
+	// So assert it here rather than leave it resting on the order of two `append`s twenty
+	// lines apart. A loud failure at deploy beats a quiet 403 storm in production.
+	scopeKeys := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		scopeKeys = append(scopeKeys, sc.key)
+	}
+	if err := requireGlobalScopeFirst(scopeKeys); err != nil {
+		return err
+	}
+
 	// Instantiate each scope's referenceable infrastructure (network, compute,
 	// database) first, in scope order — global before regions, so a regional
 	// ref:database/global/<name> sees the global outputs already populated.
@@ -630,15 +646,25 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		// could land inside that window, fail with "Unit not found", and (before the
 		// `|| true` was removed) be swallowed — leaving the service stopped under a
 		// green deploy. That is exactly how tenants went down on 5.5.1 → 5.5.2.
-		// deliverServiceSecrets ends in reloadOrRestartScript — the restart that brings the
-		// service up on its new configuration. It must land AFTER every mesh proxy has
-		// reloaded its allow-map (#226), or the caller comes up against a callee that does
-		// not yet admit it and is 403'd on every call until the reload catches up.
+		// The mesh ordering (#226) applies ONLY to a mesh member. A service with no `pki:`
+		// never dials the mesh and no callee's allow-map has an entry for it, so it cannot be
+		// 403'd — ordering it behind every mesh host's nginx install would serialize the
+		// deploy behind apt-get runs on machines it has nothing to do with.
+		//
+		// For a mesh member, deliverServiceSecrets ends in reloadOrRestartScript — the restart
+		// that brings it up on its new configuration — and that restart must land AFTER every
+		// mesh proxy has reloaded its allow-map, or the caller comes up against a callee that
+		// does not yet admit it and is 403'd on every call until the reload catches up.
 		//
 		// deliverServiceDescriptor writes a file and does NOT restart, so it needs no mesh
-		// ordering — only the unit gate.
+		// ordering at all — only the unit gate.
+		var restartAfter []pulumi.Resource
+		if svc.Pki != "" {
+			restartAfter = meshReloads
+		}
+
 		if material := serviceSecrets[svc.Name]; !material.empty() {
-			if err := deliverServiceSecrets(ctx, svc, host, material, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], unit, meshReloads); err != nil {
+			if err := deliverServiceSecrets(ctx, svc, host, material, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], unit, restartAfter); err != nil {
 				return err
 			}
 		} else {
