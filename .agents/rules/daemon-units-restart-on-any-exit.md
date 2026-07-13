@@ -33,9 +33,26 @@ start silently. The guard holds unchanged under `Restart=always`.
 
 ## Applies to
 
-`internal/service.unitTemplate` (service units) · `internal/meshnginx.UnitFile` (the mesh
-proxy) · `internal/postgres.UnitFile` (the database cluster). **Any new long-running unit
-template must adopt the same policy.**
+Every long-running unit, **whether inforge writes it or merely installs it**:
+
+| | |
+|---|---|
+| `internal/service.unitTemplate` | service units |
+| `internal/meshnginx.UnitFile` | the east-west mesh proxy |
+| `internal/postgres.UnitFile` | the database cluster |
+| `internal/nginx.InstallScript` | the **north-south ingress/gateway nginx** — a **drop-in**, not a unit |
+
+**The drop-in is the easy one to miss, and it guards the most exposed daemon we run.** The
+north-south nginx comes from the nginx.org apt package, and that packaged unit carries **no
+`Restart=` directive at all** — systemd therefore defaults to `Restart=no`, and a dead nginx
+master stays dead. Every app FQDN, gateway route, service route and health listener on the
+host is served by it, so a permanent death there is a total edge outage.
+
+We do not own that unit file (an apt upgrade would overwrite it), so the policy is installed
+as `/etc/systemd/system/nginx.service.d/10-restart.conf` + `systemctl daemon-reload`.
+
+**A unit inforge does not author still runs on inforge's hosts, and is still inforge's
+problem.** Any new long-running unit — written *or* installed — must adopt this policy.
 
 ## Why
 

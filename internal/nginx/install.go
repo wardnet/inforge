@@ -57,6 +57,27 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -
 
 # ACME state (account key + issued certs) must survive reloads.
 sudo install -d -m 0700 -o nginx -g nginx %[2]s
+
+# The north-south nginx runs under the PACKAGED unit from nginx.org, which carries NO
+# Restart= directive at all — so systemd defaults to Restart=no and a dead nginx master
+# STAYS DEAD. This is the most exposed daemon in the fleet: every app FQDN, gateway route,
+# service route and health listener on the host is served by it, so a permanent death here
+# is a total edge outage until a human intervenes.
+#
+# We do not own that unit file (an apt upgrade would overwrite it), so the policy goes in a
+# drop-in. Same three directives, and for the same reasons, as every unit inforge writes
+# itself — see .agents/rules/daemon-units-restart-on-any-exit.md.
+sudo install -d -m 0755 /etc/systemd/system/nginx.service.d
+sudo tee /etc/systemd/system/nginx.service.d/10-restart.conf >/dev/null <<'UNIT'
+# Managed by inforge — a daemon has no correct exit.
+[Unit]
+StartLimitIntervalSec=0
+
+[Service]
+Restart=always
+RestartSec=5
+UNIT
+sudo systemctl daemon-reload
 sudo systemctl enable nginx
 `, aptlock.UpdateCmd(), acmeStatePath)
 }

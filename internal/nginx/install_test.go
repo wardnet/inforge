@@ -44,3 +44,29 @@ func TestInstallScript(t *testing.T) {
 		t.Fatalf("bash -n failed: %v\n%s", err, out)
 	}
 }
+
+// TestInstallScriptRestartsTheEdgeNginxOnAnyExit — the north-south nginx runs under the
+// PACKAGED unit from nginx.org, which carries NO Restart= directive, so systemd defaults to
+// Restart=no and a dead nginx master STAYS DEAD.
+//
+// This is the most exposed daemon in the fleet: every app FQDN, gateway route, service route
+// and health listener on the host is served by it. A permanent death here is a total edge
+// outage — the same class of failure that took a service down for forty minutes, on a much
+// bigger blast radius.
+//
+// We do not own that unit file (apt would overwrite it), so the policy is a drop-in.
+// See .agents/rules/daemon-units-restart-on-any-exit.md.
+func TestInstallScriptRestartsTheEdgeNginxOnAnyExit(t *testing.T) {
+	s := InstallScript()
+	for _, want := range []string{
+		"/etc/systemd/system/nginx.service.d/10-restart.conf",
+		"Restart=always",
+		"RestartSec=5",
+		"StartLimitIntervalSec=0",
+		"systemctl daemon-reload", // a drop-in is inert until systemd re-reads it
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q: the packaged nginx unit has no Restart=, so without this the public edge can die permanently", want)
+		}
+	}
+}
