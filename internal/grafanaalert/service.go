@@ -64,6 +64,35 @@ func (s ServiceScope) livenessMatchers(env string) []livenessMatcher {
 	return out
 }
 
+// Minimum call rates a ratio alert requires before it is allowed to fire. Below these, a
+// ratio is statistically meaningless — one stray error in a quiet window is 100%.
+//
+// They are deliberately LOW (roughly one call every 100-200s), because they gate volume and
+// nothing else. The threshold does the work of deciding what counts as broken.
+const (
+	minRequestRate  = 0.01  // ~1 request per 100s
+	minMeshCallRate = 0.005 // ~1 mesh call per 200s
+)
+
+// ratioWithVolumeGate renders `100 * part/whole`, filtered to series whose `whole` exceeds
+// minRate.
+//
+// The two concerns are separated ON PURPOSE, and getting this wrong is subtle enough to have
+// shipped once. The obvious form — clamping the DENOMINATOR, `100 * part / clamp_min(whole,
+// 1)` — looks like a minimum-volume guard and is not one. When the rate is below 1/s the
+// clamp binds, the expression degenerates to `100 * part`, and the "percentage" is now
+// bounded above by `100 * whole`. So a pair calling at 0.01 req/s can only ever compute 1%,
+// **even when 100% of its calls are failing**, and an alert thresholded above that is
+// mathematically incapable of firing. `tunneller` calls at essentially zero rate — it is the
+// service that was down for forty minutes, and it is exactly the one such an alert cannot see.
+//
+// A TRUE ratio (unclamped) plus an explicit `and` on volume keeps the percentage a
+// percentage. The `and` also disposes of the 0/0 NaN: an idle series fails the volume
+// predicate, produces no right-hand match, and is dropped rather than evaluated.
+func ratioWithVolumeGate(part, whole string, minRate float64) string {
+	return fmt.Sprintf(`(100 * %s / %s) and (%s > %g)`, part, whole, whole, minRate)
+}
+
 // ServiceBuiltIns returns the golden per-service alert rules for one env.
 //
 // # The two tiers, and why the split exists
@@ -182,13 +211,13 @@ func ServiceBuiltIns(env string, services []ServiceScope) []Alert {
 	))
 
 	if anyHTTP {
-		// The `clamp_min(…, 1)` denominator is a MINIMUM-VOLUME GUARD, not a divide-by-zero
-		// nicety. The fleet runs at ~0.1 req/s, so without it a single 500 in a quiet minute
-		// is a 100% error rate and pages on noise. Clamping the denominator to 1 req/s means
-		// a low-traffic service must produce a real, sustained volume of errors to trip it.
 		alerts = append(alerts, b(
 			"Service Error Rate High",
-			fmt.Sprintf(`100 * sum by (service_name) (rate(http_server_request_duration_seconds_count{%s, http_response_status_code=~"5.."}[5m])) / clamp_min(sum by (service_name) (rate(http_server_request_duration_seconds_count{%s}[5m])), 1)`, e, e),
+			ratioWithVolumeGate(
+				fmt.Sprintf(`sum by (service_name) (rate(http_server_request_duration_seconds_count{%s, http_response_status_code=~"5.."}[5m]))`, e),
+				fmt.Sprintf(`sum by (service_name) (rate(http_server_request_duration_seconds_count{%s}[5m]))`, e),
+				minRequestRate,
+			),
 			"> 5", "15m", SeverityWarning,
 			"{{ $labels.service_name }} is returning 5xx for {{ $value }}% of requests.",
 			NoDataOK,
@@ -228,12 +257,23 @@ func ServiceBuiltIns(env string, services []ServiceScope) []Alert {
 		// application answering — which proves the mesh WORKS.
 		alerts = append(alerts, b(
 			"Mesh Calls Failing",
-			fmt.Sprintf(`100 * sum by (service_name, mesh_target) (rate(http_client_request_duration_seconds_count{%s, mesh_outcome=~"403|5..|error"}[5m])) / clamp_min(sum by (service_name, mesh_target) (rate(http_client_request_duration_seconds_count{%s}[5m])), 1)`, e, e),
+			ratioWithVolumeGate(
+				fmt.Sprintf(`sum by (service_name, mesh_target) (rate(http_client_request_duration_seconds_count{%s, mesh_outcome=~"403|5..|error"}[5m]))`, e),
+				fmt.Sprintf(`sum by (service_name, mesh_target) (rate(http_client_request_duration_seconds_count{%s}[5m]))`, e),
+				minMeshCallRate,
+			),
 			"> 10", "5m", SeverityCritical,
 			"{{ $labels.service_name }} → {{ $labels.mesh_target }}: {{ $value }}% of mesh calls failing (403 / 5xx / unreachable).",
 			NoDataOK,
 		))
 	}
+
+	// The three saturation ratios below DO use clamp_min, and that is correct — unlike the
+	// rate ratios above. Their denominators are absolute COUNTS (a pool max of 10, an FD limit
+	// of ~1024, a byte ceiling), all far greater than 1, so the clamp never binds and serves
+	// only as a divide-by-zero guard for a missing series. It is clamping a denominator that
+	// is a RATE — routinely below 1/s — that silently rescales a percentage into nonsense.
+	// See ratioWithVolumeGate.
 
 	if anyDatabase {
 		// Pool exhaustion is invisible from every other angle: the database is healthy, the

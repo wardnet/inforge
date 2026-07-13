@@ -446,27 +446,3 @@ func renderMeshDescriptor(services []string) (string, error) {
 	}
 	return string(b), nil
 }
-
-// requireGlobalScopeFirst enforces the invariant the #226 fix rests on: if a global scope
-// realizes at all, it must realize BEFORE any regional one.
-//
-// realizeMesh accumulates each scope's mesh-nginx reload into one slice, and every service
-// restart is ordered after everything accumulated SO FAR. A regional service therefore
-// depends on the global mesh's reload only because the global scope came first — and that is
-// precisely the cross-scope hop (regional caller → global callee) that produced the 403s.
-//
-// Nothing else enforces the order. Reversing two `append` calls would silently re-open the
-// race with no test failure and no error, so the invariant is asserted rather than assumed.
-func requireGlobalScopeFirst(keys []string) error {
-	seenRegional := false
-	for _, k := range keys {
-		if k == globalScope {
-			if seenRegional {
-				return fmt.Errorf("internal: the global scope must realize BEFORE every regional scope (got %v) — a regional service's restart is ordered after the global mesh's allow-map reload by accumulation, and reordering silently re-opens the #226 403 race; see .agents/rules/mesh-config-lands-before-callers-restart.md", keys)
-			}
-			continue
-		}
-		seenRegional = true
-	}
-	return nil
-}

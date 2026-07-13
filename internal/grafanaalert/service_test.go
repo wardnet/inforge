@@ -218,14 +218,40 @@ func TestCrashLoopDoesNotUseResets(t *testing.T) {
 	}
 }
 
-// The fleet runs at ~0.1 req/s. Without a clamped denominator, ONE 500 in a quiet minute is a
-// 100% error rate — the alert would page on noise and be muted.
-func TestRatioAlertsGuardAgainstLowVolume(t *testing.T) {
+// CLAMPING THE DENOMINATOR IS NOT A VOLUME GUARD, and believing it was shipped a Critical
+// alert that could not fire.
+//
+// `100 * part / clamp_min(whole, 1)` looks like one. But when the rate is below 1/s the clamp
+// binds, the expression degenerates to `100 * part`, and the "percentage" becomes bounded
+// above by `100 * whole`. A mesh pair calling at 0.01 req/s can then only ever compute 1% —
+// EVEN AT 100% FAILURE — so a threshold above that is mathematically unreachable.
+//
+// tunneller calls at essentially zero rate. It is the service that was down for forty
+// minutes, and it is exactly the one such an alert cannot see.
+//
+// A true (unclamped) ratio plus an explicit `and` on volume keeps a percentage a percentage.
+func TestRateRatiosUseATrueRatioWithAVolumeGate(t *testing.T) {
 	alerts := ServiceBuiltIns("prd", scopes())
-	for _, name := range []string{"Service Error Rate High", "Mesh Calls Failing", "Service DB Pool Saturated"} {
-		a := find(t, alerts, name)
-		if !strings.Contains(expr(a), "clamp_min(") {
-			t.Errorf("%s: a ratio needs a minimum-volume guard, got: %s", name, expr(a))
+	for _, name := range []string{"Service Error Rate High", "Mesh Calls Failing"} {
+		e := expr(find(t, alerts, name))
+		if strings.Contains(e, "clamp_min(sum by") {
+			t.Errorf("%s: a clamped RATE denominator caps the ratio at 100*rate%% — it cannot fire for a low-traffic pair:\n%s", name, e)
+		}
+		if !strings.Contains(e, ") and (") {
+			t.Errorf("%s: volume must be gated with an explicit `and`, not folded into the denominator:\n%s", name, e)
+		}
+	}
+}
+
+// The SATURATION ratios do use clamp_min, and that is correct: their denominators are
+// absolute counts (a pool max of 10, an FD limit of ~1024, a byte ceiling), all far above 1,
+// so the clamp never binds and only guards a missing series against divide-by-zero. Clamping
+// a RATE is what breaks; clamping a count does not.
+func TestSaturationRatiosMayClampBecauseTheirDenominatorIsACount(t *testing.T) {
+	alerts := ServiceBuiltIns("prd", scopes())
+	for _, name := range []string{"Service DB Pool Saturated", "Service File Descriptors High", "Service Memory High"} {
+		if !strings.Contains(expr(find(t, alerts, name)), "clamp_min(") {
+			t.Errorf("%s: a missing denominator series must not divide by zero", name)
 		}
 	}
 }

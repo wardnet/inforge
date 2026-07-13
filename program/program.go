@@ -646,25 +646,22 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		// could land inside that window, fail with "Unit not found", and (before the
 		// `|| true` was removed) be swallowed — leaving the service stopped under a
 		// green deploy. That is exactly how tenants went down on 5.5.1 → 5.5.2.
-		// The mesh ordering (#226) applies ONLY to a mesh member. A service with no `pki:`
-		// never dials the mesh and no callee's allow-map has an entry for it, so it cannot be
-		// 403'd — ordering it behind every mesh host's nginx install would serialize the
-		// deploy behind apt-get runs on machines it has nothing to do with.
+
+		// MESH ORDERING (#226). deliverServiceSecrets ends in reloadOrRestartScript — the
+		// restart that brings the service up on its new configuration — and that restart must
+		// land AFTER every mesh proxy has reloaded its allow-map. Otherwise the caller comes
+		// up against a callee that does not yet admit it and is 403'd on every call until the
+		// reload catches up.
 		//
-		// For a mesh member, deliverServiceSecrets ends in reloadOrRestartScript — the restart
-		// that brings it up on its new configuration — and that restart must land AFTER every
-		// mesh proxy has reloaded its allow-map, or the caller comes up against a callee that
-		// does not yet admit it and is 403'd on every call until the reload catches up.
+		// EVERY service takes this dependency, and that is not an oversight: `pki:` is a
+		// REQUIRED field on the service schema, so every service is a mesh member. There is no
+		// non-mesh service to exempt, and gating on `svc.Pki != ""` would be dead code
+		// dressed up as an optimization.
 		//
 		// deliverServiceDescriptor writes a file and does NOT restart, so it needs no mesh
 		// ordering at all — only the unit gate.
-		var restartAfter []pulumi.Resource
-		if svc.Pki != "" {
-			restartAfter = meshReloads
-		}
-
 		if material := serviceSecrets[svc.Name]; !material.empty() {
-			if err := deliverServiceSecrets(ctx, svc, host, material, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], unit, restartAfter); err != nil {
+			if err := deliverServiceSecrets(ctx, svc, host, material, deployUser, deployPrivateKey, env, region, slug, baseDomain, hostKey, meshEgressPorts[svc.Name], unit, meshReloads); err != nil {
 				return err
 			}
 		} else {
@@ -2664,4 +2661,28 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// requireGlobalScopeFirst enforces the invariant the #226 fix rests on: if a global scope
+// realizes at all, it must realize BEFORE any regional one.
+//
+// realizeMesh accumulates each scope's mesh-nginx reload into one slice, and every service
+// restart is ordered after everything accumulated SO FAR. A regional service therefore
+// depends on the global mesh's reload only because the global scope came first — and that is
+// precisely the cross-scope hop (regional caller → global callee) that produced the 403s.
+//
+// Nothing else enforces the order. Reversing two `append` calls would silently re-open the
+// race with no test failure and no error, so the invariant is asserted rather than assumed.
+func requireGlobalScopeFirst(keys []string) error {
+	seenRegional := false
+	for _, k := range keys {
+		if k == globalScope {
+			if seenRegional {
+				return fmt.Errorf("internal: the global scope must realize BEFORE every regional scope (got %v) — a regional service's restart is ordered after the global mesh's allow-map reload by accumulation, and reordering silently re-opens the #226 403 race; see .agents/rules/mesh-config-lands-before-callers-restart.md", keys)
+			}
+			continue
+		}
+		seenRegional = true
+	}
+	return nil
 }
