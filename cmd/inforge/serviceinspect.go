@@ -222,6 +222,10 @@ func sshAccount(t service.DeployTarget) string {
 // between, a plain filter would either silently do nothing or (worse, when combined with
 // --host) act on a DIFFERENT incarnation than the one they were looking at. Compare-and-
 // swap instead: refuse, and say what changed — which is itself the diagnosis.
+// It matches on a PREFIX, like a git short SHA. `service instances` prints a truncated id
+// (the full one is 32 hex chars and unreadable in a table), so an operator copy-pasting what
+// they were shown MUST be able to match — comparing against the full id would mean the
+// documented workflow could never work. An ambiguous prefix is refused rather than guessed.
 func requireInstance(instances []instance, want string) ([]service.DeployTarget, error) {
 	if want == "" {
 		targets := make([]service.DeployTarget, 0, len(instances))
@@ -230,18 +234,44 @@ func requireInstance(instances []instance, want string) ([]service.DeployTarget,
 		}
 		return targets, nil
 	}
+
+	var matched []instance
 	for _, i := range instances {
-		if i.InstanceID == want {
-			return []service.DeployTarget{i.Target}, nil
+		if i.InstanceID != "" && strings.HasPrefix(i.InstanceID, want) {
+			matched = append(matched, i)
 		}
 	}
-	live := make([]string, 0, len(instances))
+	if len(matched) == 1 {
+		return []service.DeployTarget{matched[0].Target}, nil
+	}
+	if len(matched) > 1 {
+		hosts := make([]string, 0, len(matched))
+		for _, i := range matched {
+			hosts = append(hosts, fmt.Sprintf("%s on %s", short(i.InstanceID), i.Target.HostDNS))
+		}
+		sort.Strings(hosts)
+		return nil, fmt.Errorf("instance %q is ambiguous — it matches %s; give more characters", want, strings.Join(hosts, ", "))
+	}
+
+	// No match. Distinguish "the process was replaced" from "we could not see the host":
+	// an SSH failure yields no instance id, and reporting that as a restart would send the
+	// operator hunting a phantom deploy.
+	var live, unreachable []string
 	for _, i := range instances {
-		if i.InstanceID != "" {
+		switch {
+		case i.State == "unreachable":
+			unreachable = append(unreachable, i.Target.HostDNS)
+		case i.InstanceID != "":
 			live = append(live, fmt.Sprintf("%s on %s", short(i.InstanceID), i.Target.HostDNS))
 		}
 	}
 	sort.Strings(live)
+	sort.Strings(unreachable)
+
+	if len(unreachable) > 0 {
+		return nil, fmt.Errorf("instance %s not found, but %d host(s) were unreachable (%s) — it may still be running there; fix the connection before assuming a restart",
+			short(want), len(unreachable), strings.Join(unreachable, ", "))
+	}
 	if len(live) == 0 {
 		return nil, fmt.Errorf("instance %s is gone — no live instance of this service was found (it is not running)", short(want))
 	}

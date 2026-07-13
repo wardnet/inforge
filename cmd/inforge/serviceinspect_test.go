@@ -232,11 +232,14 @@ func TestMeshCheckScriptReadsTheEgressURLFromTheDescriptor(t *testing.T) {
 	if !strings.Contains(got, "/etc/wardnet/services/ddns/descriptor.yaml") {
 		t.Error("the egress URL must be read from the service's on-host descriptor")
 	}
-	if !strings.Contains(got, "X-Mesh-Target: tenants") {
-		t.Error("the peer must be named in X-Mesh-Target")
+	// The peer and path are shell-QUOTED into variables (they are operator input that
+	// reaches a remote shell), so the script carries them as `peer=...` / `path=...` and
+	// the request uses "$peer" / "$path".
+	if !strings.Contains(got, `peer='tenants'`) || !strings.Contains(got, `"X-Mesh-Target: $peer"`) {
+		t.Error("the peer must be quoted into a variable and named in X-Mesh-Target")
 	}
-	if !strings.Contains(got, "/v1/networks") {
-		t.Error("the requested path must reach the call")
+	if !strings.Contains(got, `path='/v1/networks'`) {
+		t.Error("the requested path must be quoted into a variable and reach the call")
 	}
 	if !strings.Contains(got, "%{http_code}") {
 		t.Error("the probe must report the status code and nothing else")
@@ -443,7 +446,7 @@ func TestMeshCheck(t *testing.T) {
 		t.Errorf("403 must fail: %+v", got[1])
 	}
 	// The probe must actually be the mesh call, not something else.
-	if !strings.Contains(f.ran[0], "X-Mesh-Target: tenants") {
+	if !strings.Contains(f.ran[0], `peer='tenants'`) || !strings.Contains(f.ran[0], `"X-Mesh-Target: $peer"`) {
 		t.Errorf("the probe did not address the peer: %s", f.ran[0])
 	}
 }
@@ -609,5 +612,84 @@ func TestStatusScriptToleratesADeadUnit(t *testing.T) {
 	}
 	if !strings.Contains(got, "'wardnet-ddns'") {
 		t.Errorf("the unit must be quoted: %s", got)
+	}
+}
+
+// ── review fixes ─────────────────────────────────────────────────────────────────
+
+// `service instances` prints a TRUNCATED instance id (the full one is 32 hex chars and
+// unreadable in a table). Comparing --instance against the full id would mean an operator
+// copy-pasting what the tool just showed them could NEVER match — the documented workflow
+// would be broken by construction.
+func TestRequireInstanceMatchesTheTruncatedIDTheOperatorWasShown(t *testing.T) {
+	full := "10688865b055b2eaa5e4f7ac3ea9b5d0"
+	live := []instance{{Target: targets()[0], InstanceID: full}}
+
+	shown := short(full) // exactly what `service instances` printed
+	got, err := requireInstance(live, shown)
+	if err != nil {
+		t.Fatalf("the id the tool displayed must be usable as --instance, got: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d targets, want 1", len(got))
+	}
+	// The full id must keep working too.
+	if _, err := requireInstance(live, full); err != nil {
+		t.Errorf("the full id must still match: %v", err)
+	}
+}
+
+func TestRequireInstanceRefusesAnAmbiguousPrefix(t *testing.T) {
+	live := []instance{
+		{Target: targets()[0], InstanceID: "aaaa1111deadbeef"},
+		{Target: targets()[1], InstanceID: "aaaa2222deadbeef"},
+	}
+	_, err := requireInstance(live, "aaaa")
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("an ambiguous prefix must be refused, not guessed: %v", err)
+	}
+}
+
+// An SSH failure yields no instance id. Reporting that as "the service restarted" would send
+// the operator hunting a phantom deploy while the real problem is the connection.
+func TestRequireInstanceDistinguishesUnreachableFromRestarted(t *testing.T) {
+	live := []instance{{Target: targets()[0], State: "unreachable"}}
+	_, err := requireInstance(live, "aaaa1111")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(err.Error(), "unreachable") {
+		t.Errorf("an unreachable host must not be reported as a restart: %v", err)
+	}
+	if strings.Contains(err.Error(), "the service restarted") {
+		t.Errorf("we did not observe a restart — we observed nothing: %v", err)
+	}
+}
+
+// --path and --target come from operator flags and reach a REMOTE SHELL. Splicing them into
+// a double-quoted word lets $, `, " and \ be expanded there — which under `set -u` aborts the
+// probe and is then misreported as an unreachable host.
+func TestMeshCheckScriptQuotesOperatorInput(t *testing.T) {
+	got := meshCheckScript("ddns", "tenants", `/v1/$(id)/"x"`)
+
+	if !strings.Contains(got, `path='/v1/$(id)/"x"'`) {
+		t.Errorf("--path must be shell-quoted into a variable, got:\n%s", got)
+	}
+	if !strings.Contains(got, `peer='tenants'`) {
+		t.Errorf("--target must be shell-quoted into a variable, got:\n%s", got)
+	}
+	// And used via the variables, never spliced into the command word.
+	if !strings.Contains(got, `"$url$path"`) || !strings.Contains(got, `"X-Mesh-Target: $peer"`) {
+		t.Errorf("the quoted variables must be what the request uses, got:\n%s", got)
+	}
+}
+
+// The descriptor's `env:` map is serialized BEFORE the `mesh:` block, so a bare `url:` match
+// plus `head -1` would happily return a service's own environment variable as the mesh egress
+// URL — and then probe it.
+func TestMeshCheckScriptScopesTheURLScrapeToTheMeshBlock(t *testing.T) {
+	got := meshCheckScript("ddns", "tenants", "/")
+	if !strings.Contains(got, `sed -n '/^mesh:/,$p'`) {
+		t.Errorf("the url scrape must be scoped to the mesh block, or an env: value can win:\n%s", got)
 	}
 }

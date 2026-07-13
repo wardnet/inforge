@@ -317,15 +317,23 @@ Pass --path to probe a specific declared endpoint instead.`,
 //
 // -o /dev/null -w '%{http_code}' prints the status and nothing else; a call that never
 // completes prints 000, which is the signal we want (connectivity/TLS, not HTTP).
+// Every interpolated value is shell-quoted, INCLUDING the operator-supplied --path and
+// --target: they reach a remote shell, and a path containing $, ", ` or \ would otherwise be
+// expanded by it — aborting the probe under `set -u` and being misreported as an unreachable
+// host. They are passed as shell variables rather than spliced into the command word.
 func meshCheckScript(svc, peer, path string) string {
 	descriptor := service.DescriptorPath(svc)
 	return strings.Join([]string{
 		`set -u`,
-		fmt.Sprintf(`url=$(sudo sed -n 's/^[[:space:]]*url:[[:space:]]*//p' %s 2>/dev/null | head -1)`, remote.Quote(descriptor)),
+		fmt.Sprintf(`peer=%s`, remote.Quote(peer)),
+		fmt.Sprintf(`path=%s`, remote.Quote(path)),
+		// Scoped to the `mesh:` block. A bare `url:` match would also hit the descriptor's
+		// `env:` map — which is serialized BEFORE `mesh:`, so `head -1` would happily return
+		// a service's own environment variable as the mesh egress URL.
+		fmt.Sprintf(`url=$(sudo sed -n '/^mesh:/,$p' %s 2>/dev/null | sed -n 's/^[[:space:]]*url:[[:space:]]*//p' | head -1)`, remote.Quote(descriptor)),
 		`if [ -z "$url" ]; then echo "no mesh egress url in descriptor — is this service a mesh member (pki:)?" >&2; exit 1; fi`,
 		`printf 'egress=%s\n' "$url"`,
-		fmt.Sprintf(`printf 'status=%%s\n' "$(curl -s -o /dev/null -w '%%{http_code}' --max-time 10 -H %s "$url%s")"`,
-			remote.Quote("X-Mesh-Target: "+peer), path),
+		`printf 'status=%s\n' "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "X-Mesh-Target: $peer" "$url$path")"`,
 	}, "\n")
 }
 
