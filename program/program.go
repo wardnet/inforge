@@ -296,7 +296,7 @@ func Run(ctx *pulumi.Context) error {
 	// built-in dashboards are pushed via the pulumiverse/grafana provider. Org-global, so
 	// realized ONCE here (not per scope) and env-prefixed. A no-op when grafana_url is empty.
 	hasDatabase := len(res.DatabaseCluster) > 0 || len(globalRes.DatabaseCluster) > 0
-	if err := realizeGrafana(ctx, dir, srcEnv, env, vars.Observability, hasDatabase, ctx.DryRun()); err != nil {
+	if err := realizeGrafana(ctx, dir, srcEnv, env, vars.Observability, hasDatabase, ctx.DryRun(), serviceScopes(regionTable, res, globalRes)); err != nil {
 		return err
 	}
 

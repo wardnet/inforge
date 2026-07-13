@@ -2,26 +2,28 @@ package grafanaalert
 
 import "fmt"
 
-// BuiltIns returns inforge's generated alert rules for one env (ADR-0038 slice 3),
-// derived from the host metrics (ADR-0031, system_*) and — when includeDatabase is
-// true — the Postgres metrics (ADR-0037, postgresql_*). Thresholds are fixed; an env
-// that needs different ones opts out (built_in_alerts: false) and authors custom
-// alerts. Every built-in routes through the env's default_profile (Profile "").
-// includeDatabase gates the Postgres alerts so a DB-less env's "metrics missing"
-// alert can't fire forever.
+// b compiles a built-in; built-in exprs are authored in this package so parseCondition
+// never fails — a panic here would be a programming error, surfaced by tests.
+func b(name, expr, cond, forDur, severity, summary, noData string) Alert {
+	r, err := build(name, expr, cond, forDur, severity, summary, noData, nil)
+	if err != nil {
+		panic(fmt.Sprintf("grafanaalert: built-in %q: %v", name, err))
+	}
+	return Alert{Rule: r, Severity: severity}
+}
+
+// BuiltIns returns inforge's generated HOST and DATABASE alert rules for one env
+// (ADR-0038 slice 3), derived from the host metrics (ADR-0031, system_*) and — when
+// includeDatabase is true — the Postgres metrics (ADR-0037, postgresql_*). Per-service
+// alerts are ServiceBuiltIns, in service.go.
+//
+// Thresholds are fixed; an env that needs different ones opts out (built_in_alerts: false)
+// and authors custom alerts. Every built-in routes through the env's default_profile
+// (Profile ""). includeDatabase gates the Postgres alerts so a DB-less env's "metrics
+// missing" alert can't fire forever.
 func BuiltIns(env string, includeDatabase bool) []Alert {
 	e := envMatcher(env)
 	fs := `type=~"ext4|xfs"`
-
-	// b compiles a built-in; built-in exprs are authored here so parseCondition
-	// never fails — a panic here would be a programming error, surfaced by tests.
-	b := func(name, expr, cond, forDur, severity, summary, noData string) Alert {
-		r, err := build(name, expr, cond, forDur, severity, summary, noData, nil)
-		if err != nil {
-			panic(fmt.Sprintf("grafanaalert: built-in %q: %v", name, err))
-		}
-		return Alert{Rule: r, Severity: severity}
-	}
 
 	alerts := []Alert{
 		b("Host CPU Saturated",

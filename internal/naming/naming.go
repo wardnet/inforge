@@ -211,3 +211,15 @@ func ZoneRelative(fqdn, baseDomain string) string {
 	}
 	return strings.TrimSuffix(fqdn, "."+baseDomain)
 }
+
+// TelemetryServiceName is the OTLP `service.name` a deployed service registers, which
+// Grafana Cloud promotes to the `service_name` series label — the label inforge's built-in
+// service alerts and the Service dashboard both group by.
+//
+// It is the usage prefix plus the manifest name (`ddns` -> `wardnet-ddns`), matching every
+// other name inforge derives. This is a CONTRACT with the deployed service: the process must
+// register exactly this as its `service.name`, or the alerts inforge generates for it will
+// match no series and silently never fire.
+func TelemetryServiceName(service string) string {
+	return usage + "-" + service
+}
