@@ -804,6 +804,15 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 				// mintScript embeds the monitor role's random password (secret, and unknown
 				// at preview); a raw secret in Triggers breaks preview with
 				// "malformed RPC secret" — safeTrigger hashes + unsecrets it.
+				//
+				// v6.1.1 migration note: v6.0.0 put the RAW mintScript here, so on a
+				// stack last applied with v6.0.0 this trigger diffs (raw → hash) even
+				// though the script bytes are pinned to v6.0.0's — this ONE command
+				// replaces on the first v6.1.1 deploy, replaying the old drop recorded
+				// in state. That replay is safe for the monitor role only because it
+				// owns nothing and its grants are cluster-level (a default-db DROP
+				// OWNED clears them); the same replay on a per-service mint is the
+				// v6.1.0 outage, which is why THOSE triggers must not diff at all.
 				Triggers: pulumi.Array{safeTrigger(mintScript)},
 				// The monitor role owns no objects, so DROP OWNED just revokes its
 				// pg_monitor membership + CONNECT grants; postgres.OSUser is the bootstrap
@@ -1345,6 +1354,14 @@ func blobFrom(names, fileKeys []string, args []any) (hostsecrets.Blob, error) {
 // safeTrigger turns a possibly-secret, possibly-unknown string output into a
 // change-detector safe to use as a remote.Command `Triggers` element: it
 // SHA-256-hashes the resolved value and strips the secret marker.
+//
+// DO NOT CHANGE THE ENCODING (hash scheme, prefixing, element shape) during the
+// v6.1.x line: the mint commands' recorded triggers are safeTrigger values, and a
+// changed encoding force-replaces every DeleteBeforeReplace mint even when the
+// script bytes pinned by TestMintScriptsByteIdenticalToV600 are unchanged —
+// replaying the broken delete recorded in pre-v6.1.1 state (the v6.1.0 outage).
+// The golden test pins the script layer; this comment is the pin for the
+// composition layer above it.
 //
 // A secret value must NEVER go directly into `Triggers`. During `preview` a
 // secret wrapping an UNKNOWN value (e.g. a hash derived from a grant's

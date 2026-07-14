@@ -296,7 +296,7 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 	// The mint script carries the password literal, so build it inside an apply over
 	// the secret; the whole command's Create is then encrypted in Pulumi state.
 	mintScript := pw.Result.ApplyT(func(password string) (string, error) {
-		return postgres.MintRoleScript(p.port, roleName, password, p.database, p.owner, permission)
+		return postgres.MintRoleScript(p.port, roleName, password, p.database, permission)
 	}).(pulumi.StringOutput)
 	// On teardown (grant/service removed) reassign the role's owned objects to the
 	// database owner and drop the role, so a retired service leaves no live login. The
