@@ -62,9 +62,12 @@ func TestObservabilityTriggersAreNotSecret(t *testing.T) {
 
 	mint := mocks.captured[monitorRoleName("prd", "use1", "pg")+"-mint"]
 	require.NotEmpty(t, mint.create, "the monitor-role mint must be registered")
-	require.Len(t, mint.triggers, 1)
-	assert.Equal(t, sha256Hex(mint.create), mint.triggers[0],
-		"the mint script embeds the monitor password — Triggers must carry its safeTrigger hash, not the script")
+	// ADR-0042: a delete-bearing command carries NO Triggers at all — a script
+	// change re-runs the idempotent mint in place via the create/update diff,
+	// never as a replace that would run the drop recorded in state. No triggers
+	// also trivially satisfies this test's original concern (no raw secret may
+	// enter Triggers).
+	require.Empty(t, mint.triggers, "the monitor-role mint must carry no Triggers (ADR-0042)")
 
 	cfg := mocks.captured[naming.Resource("prd", "use1", "otelcol", "edge-01")+"-config"]
 	require.NotEmpty(t, cfg.create, "the collector config command must be registered")

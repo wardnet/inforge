@@ -179,6 +179,19 @@ Key internal seams introduced in slice #110:
   `pki:` alone no longer forces anything to be delivered at deploy time: a plain mesh member's leaf
   is the mesh proxy's business, and an `mtls_files:` service's own leaf is `inforge pki renew`'s.
 
+## Host-command lifecycle (ADR-0042)
+
+A host-mutating `remote.Command` whose delete destroys state (role drop, unit removal,
+file delete) carries **no `Triggers:`** — its idempotent script change re-runs IN PLACE
+via the create/update diff, and the delete runs only on true manifest removal. Retiring a
+trigger always pairs with `IgnoreChanges(["triggers"])` (zero-diff migration). The one
+inversion is the `-secrets` command (nondeterministic age ciphertext): deterministic
+`Triggers` as sole detector + `IgnoreChanges(["create","update"])` + **delete-free** —
+service teardown (unit + descriptor + secrets.age) is consolidated in
+`serviceDeprovisionScript`, and `serviceProvisionScript` ends in `try-restart` so an
+agent/unit update moves the running process without a replace stop/start cycle. See rule
+`delete-bearing-commands-have-no-triggers` and `program/adr0042_test.go`.
+
 ## Service secrets (ADR-0017, ADR-0040)
 
 A service's `vault:<KEY>` sources resolve against the env's committed store,

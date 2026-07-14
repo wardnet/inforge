@@ -296,7 +296,7 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 	// The mint script carries the password literal, so build it inside an apply over
 	// the secret; the whole command's Create is then encrypted in Pulumi state.
 	mintScript := pw.Result.ApplyT(func(password string) (string, error) {
-		return postgres.MintRoleScript(p.port, roleName, password, p.database, permission)
+		return postgres.MintRoleScript(p.port, roleName, password, p.database, p.owner, permission)
 	}).(pulumi.StringOutput)
 	// On teardown (grant/service removed) reassign the role's owned objects to the
 	// database owner and drop the role, so a retired service leaves no live login. The
@@ -318,16 +318,22 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 		Create:     mintScript,
 		Update:     mintScript,
 		Delete:     pulumi.String(dropScript),
-		// mintScript embeds the role's random password (secret + unknown at preview);
-		// a raw secret in Triggers breaks preview with "malformed RPC secret".
-		// safeTrigger hashes + unsecrets it (see program.go).
-		Triggers: pulumi.Array{safeTrigger(mintScript)},
-		// DeleteBeforeReplace: the default create-before-delete order would
-		// mint the new role then immediately DROP it via the old resource's
-		// Delete (same roleName), silently leaving a service's granted DB
-		// credential missing after a "successful" apply — see program.go's
+		// NO Triggers — deliberately (see rule delete-bearing-commands-have-no-triggers
+		// and ADR-0042). The mint script is idempotent, so a script change must re-run
+		// it IN PLACE (pulumi-command updates on a create/update input diff on its
+		// own); a Triggers entry would turn that same change into a REPLACE, and
+		// DeleteBeforeReplace would then run the drop recorded in state — dropping a
+		// live credential (and, on a pre-#225 stack, aborting the whole deploy: the
+		// v6.1.0 outage). IgnoreChanges("triggers") below makes retiring the old
+		// recorded trigger a zero-diff migration (the stale value stays in state,
+		// inert) instead of itself forcing one last replace.
+		//
+		// DeleteBeforeReplace stays for the replaces that remain possible (e.g. a
+		// Connection change when the host is recreated): the default
+		// create-before-delete order would mint the new role then immediately DROP
+		// it via the old resource's Delete (same roleName) — see program.go's
 		// provisionService for the full incident writeup of this bug class.
-	}, pulumi.DependsOn(mintDeps), pulumi.DeleteBeforeReplace(true))
+	}, pulumi.DependsOn(mintDeps), pulumi.DeleteBeforeReplace(true), pulumi.IgnoreChanges([]string{"triggers"}))
 	if err != nil {
 		return types.DBRoleFields{}, fmt.Errorf("db role %q: mint role: %w", roleName, err)
 	}

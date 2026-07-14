@@ -628,7 +628,7 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		if err != nil {
 			return err
 		}
-		unit, err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug, inforgeVersion, gate)
+		unit, err := provisionService(ctx, svc, host, deployUser, deployPrivateKey, env, slug, inforgeVersion, gate, meshReloads)
 		if err != nil {
 			return err
 		}
@@ -639,13 +639,12 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 		// its leaf.age is delivered later by `inforge pki renew`, not here).
 		//
 		// Delivery is gated on the UNIT (not just the cloud-init gate): its script
-		// ends in reloadOrRestartScript, which must never run while the unit file is
-		// absent. Every inforge release changes the provision script (it pins the
-		// agent version), replacing that resource — and DeleteBeforeReplace runs its
-		// `disable --now` + `rm -f <unit>` FIRST. Without this dependency the restart
-		// could land inside that window, fail with "Unit not found", and (before the
-		// `|| true` was removed) be swallowed — leaving the service stopped under a
-		// green deploy. That is exactly how tenants went down on 5.5.1 → 5.5.2.
+		// ends in reloadOrRestartScript, which must never run while the unit file
+		// is absent. Since ADR-0042 a provision change is an in-place update (no
+		// more per-release replace window), but the first CREATE still writes the
+		// unit, and a restart racing ahead of it fails with "Unit not found" —
+		// which is exactly how tenants went down on 5.5.1 → 5.5.2, when that
+		// window was the per-release `disable --now` + `rm -f <unit>` replace.
 
 		// MESH ORDERING (#226). deliverServiceSecrets ends in reloadOrRestartScript — the
 		// restart that brings the service up on its new configuration — and that restart must
@@ -674,21 +673,29 @@ func provisionServices(ctx *pulumi.Context, res types.Resources, computeOut map[
 }
 
 // provisionService writes one service's unit + folder (+ no-login user) on its
-// host. The unit is enabled but never started here (see provisionServices).
-func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug, inforgeVersion string, gate pulumi.Resource) (*remote.Command, error) {
+// host and — on an UPDATE (agent version bump, unit change) — try-restarts the
+// service onto the new binary/unit. On first CREATE the try-restart is a no-op
+// (the unit is enabled but not yet active; the real first start comes from the
+// release path).
+func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.ComputeOutputs, deployUser, deployPrivateKey, env, slug, inforgeVersion string, gate pulumi.Resource, meshReloads []pulumi.Resource) (*remote.Command, error) {
 	conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
 	createScript := serviceProvisionScript(svc, inforgeVersion)
 	name := naming.Resource(env, slug, "svc", svc.Name)
 	cmd, err := remote.NewCommand(ctx, name+"-provision", &remote.CommandArgs{
 		Connection: conn,
 		Create:     pulumi.String(createScript),
-		// Update (not replace) when the script changes: the script is idempotent
-		// and re-runs in place. Without Update, a Triggers change replaces the
-		// resource, running Create AND Delete (disable --now) on the same unit —
-		// e.g. when a later slice changes the unit's ExecStart for every service.
-		Update:   pulumi.String(createScript),
-		Delete:   pulumi.String(serviceDeprovisionScript(svc)),
-		Triggers: pulumi.Array{pulumi.String(createScript)},
+		Update:     pulumi.String(createScript),
+		Delete:     pulumi.String(serviceDeprovisionScript(svc)),
+		// NO Triggers — deliberately (rule delete-bearing-commands-have-no-triggers,
+		// ADR-0042). The script is idempotent, so a change (agent version bump,
+		// unit edit) re-runs it IN PLACE via the create/update diff, and the
+		// script's own try-restart moves the running service onto the new
+		// binary/unit. Before ADR-0042 a Triggers entry turned every release into
+		// a REPLACE — a `disable --now` + `rm -f <unit>` window on every host on
+		// every release, for a change the script converges in place.
+		// IgnoreChanges("triggers") retires the previously recorded trigger as a
+		// zero-diff migration.
+		//
 		// DeleteBeforeReplace (resource option below): if a replace is ever
 		// forced anyway (e.g. Connection changes because the host was
 		// recreated), Pulumi's default create-before-delete order would run
@@ -696,10 +703,12 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 		// Create step just installed, since both old and new target the
 		// identical host/unit name. That silently leaves the unit permanently
 		// missing despite a "successful" apply (confirmed in production
-		// against wardnet-infrastructure's tenants service). Matches the
-		// DeleteBeforeReplace already used by deliverServiceSecrets/
-		// deliverServiceDescriptor's remote.Command calls for the same reason.
-	}, pulumi.DependsOn([]pulumi.Resource{gate}), pulumi.DeleteBeforeReplace(true))
+		// against wardnet-infrastructure's tenants service).
+		//
+		// MESH ORDERING: the update path ends in a try-restart, so like
+		// deliverServiceSecrets' restart it must land AFTER every mesh proxy has
+		// reloaded its allow-map (#226) — hence the meshReloads dependency.
+	}, pulumi.DependsOn(append([]pulumi.Resource{gate}, meshReloads...)), pulumi.DeleteBeforeReplace(true), pulumi.IgnoreChanges([]string{"triggers"}))
 	if err != nil {
 		return nil, fmt.Errorf("service %q: provision unit: %w", svc.Name, err)
 	}
@@ -801,19 +810,13 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 				Connection: conn,
 				Create:     mintScript,
 				Update:     mintScript,
-				// mintScript embeds the monitor role's random password (secret, and unknown
-				// at preview); a raw secret in Triggers breaks preview with
-				// "malformed RPC secret" — safeTrigger hashes + unsecrets it.
+				// NO Triggers — deliberately (rule delete-bearing-commands-have-no-triggers,
+				// ADR-0042): the mint is idempotent, so a script change re-runs it in
+				// place via the create/update diff; a Triggers entry would make the
+				// same change a REPLACE that runs the drop recorded in state.
+				// IgnoreChanges("triggers") retires the previously recorded trigger
+				// as a zero-diff migration.
 				//
-				// v6.1.1 migration note: v6.0.0 put the RAW mintScript here, so on a
-				// stack last applied with v6.0.0 this trigger diffs (raw → hash) even
-				// though the script bytes are pinned to v6.0.0's — this ONE command
-				// replaces on the first v6.1.1 deploy, replaying the old drop recorded
-				// in state. That replay is safe for the monitor role only because it
-				// owns nothing and its grants are cluster-level (a default-db DROP
-				// OWNED clears them); the same replay on a per-service mint is the
-				// v6.1.0 outage, which is why THOSE triggers must not diff at all.
-				Triggers: pulumi.Array{safeTrigger(mintScript)},
 				// The monitor role owns no objects, so DROP OWNED just revokes its
 				// pg_monitor membership + CONNECT grants; postgres.OSUser is the bootstrap
 				// superuser the REASSIGN targets (a no-op here). It still runs against every
@@ -826,7 +829,7 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 				// create-before-delete order would mint the role then
 				// immediately DROP it (same roleName, same host), silently
 				// leaving the monitor role missing after a "successful" apply.
-			}, pulumi.DependsOn(mintDeps), pulumi.DeleteBeforeReplace(true))
+			}, pulumi.DependsOn(mintDeps), pulumi.DeleteBeforeReplace(true), pulumi.IgnoreChanges([]string{"triggers"}))
 			if err != nil {
 				return fmt.Errorf("observability: host %q cluster %q: mint monitor role: %w", hostKey, cluster, err)
 			}
@@ -1285,31 +1288,41 @@ func deliverServiceSecrets(ctx *pulumi.Context, svc types.ServiceSpec, host type
 			reloadOrRestartScript(svc), nil
 	}).(pulumi.StringOutput)
 
-	deleteScript := iremote.DeleteFileScript(service.DescriptorPath(svc.Name)) + "\n" +
-		iremote.DeleteFileScript(service.SecretsPath(svc.Name))
-
 	if _, err := remote.NewCommand(ctx, name+"-secrets", &remote.CommandArgs{
 		Connection: conn,
 		Create:     writeScript,
 		Update:     writeScript,
-		Delete:     pulumi.String(deleteScript),
+		// NO Delete — deliberately (ADR-0042). This delete used to remove
+		// descriptor.yaml + secrets.age, and it ran not only on true service
+		// removal but on EVERY Triggers-driven replace, leaving every service one
+		// restart from death whenever a deploy aborted between the delete and the
+		// re-create (the v6.1.0 outage's blast radius). True-removal cleanup now
+		// lives in serviceDeprovisionScript (the unit's delete), so the agent
+		// inputs live exactly as long as the unit does.
+		//
 		// The static descriptor content triggers a rewrite on its own change (e.g.
 		// a host/mesh-port change with no secret change); hashOut is the
-		// ADR-0035 plaintext-hash trigger for a secret value change. Either
-		// changing re-runs Create/Update, which re-issues reloadOrRestartScript.
+		// ADR-0035 plaintext-hash trigger for a secret value change. Triggers is
+		// the SOLE change detector here — writeScript embeds a fresh age
+		// ciphertext every run (age encryption is nondeterministic), so without
+		// ignoring create/update below, every deploy diffed [~create,update],
+		// rewrote secrets.age, and reload-or-restarted EVERY secret-bearing
+		// service — the per-deploy restart storm behind the mesh 403 races
+		// (#226) and the useless "everything changed" previews. A Triggers
+		// change still REPLACES and runs the NEW writeScript (verified against
+		// pulumi-command v1.2.1), which is exactly the rewrite-and-restart we
+		// want on a real change.
 		Triggers: pulumi.Array{pulumi.String(descriptor), safeTrigger(hashOut)},
-		// A Triggers change replaces the resource; with the engine's default
-		// create-before-delete the OLD resource's Delete script (recorded in
-		// state) would run AFTER the new Create and remove the freshly written
-		// files — including across the secrets↔descriptor shape flip, which
-		// reuses this URN. Delete-before-replace makes the old files go first
-		// and the new write land last.
+		// Delete-before-replace: this URN is shared with the descriptor-only
+		// shape (writeHostFile), whose state MAY carry a delete script. On a
+		// shape flip the trigger diff replaces the resource; delete-before-
+		// replace makes any old recorded delete run FIRST so it can never remove
+		// the freshly written files after the new create.
 		// Depend on the unit EXPLICITLY, not just transitively through hostKey: this
-		// command's script ends in reloadOrRestartScript, and the ordering that keeps
-		// a restart from racing the `rm -f <unit>` of a provision replace is
-		// load-bearing enough to state outright rather than leave resting on
-		// hostKey's own dependency edge.
-	}, pulumi.DependsOn(append([]pulumi.Resource{hostKey, unit}, meshReloads...)), pulumi.DeleteBeforeReplace(true)); err != nil {
+		// command's script ends in reloadOrRestartScript, which must never run
+		// while the unit file is absent (first create) — and after every mesh
+		// proxy has reloaded its allow-map (#226), hence meshReloads.
+	}, pulumi.DependsOn(append([]pulumi.Resource{hostKey, unit}, meshReloads...)), pulumi.DeleteBeforeReplace(true), pulumi.IgnoreChanges([]string{"create", "update"})); err != nil {
 		return fmt.Errorf("service %q: write descriptor/secrets: %w", svc.Name, err)
 	}
 	return nil
@@ -1355,13 +1368,12 @@ func blobFrom(names, fileKeys []string, args []any) (hostsecrets.Blob, error) {
 // change-detector safe to use as a remote.Command `Triggers` element: it
 // SHA-256-hashes the resolved value and strips the secret marker.
 //
-// DO NOT CHANGE THE ENCODING (hash scheme, prefixing, element shape) during the
-// v6.1.x line: the mint commands' recorded triggers are safeTrigger values, and a
-// changed encoding force-replaces every DeleteBeforeReplace mint even when the
-// script bytes pinned by TestMintScriptsByteIdenticalToV600 are unchanged —
-// replaying the broken delete recorded in pre-v6.1.1 state (the v6.1.0 outage).
-// The golden test pins the script layer; this comment is the pin for the
-// composition layer above it.
+// Encoding changes (hash scheme, prefixing) are no longer dangerous — ADR-0042
+// retired Triggers from every delete-bearing command, so a changed trigger value
+// can no longer replay a recorded delete. Its one remaining consumer is the
+// -secrets command's plaintext-hash trigger, where an encoding change would
+// replace the resource: a one-time fleet-wide secrets rewrite + restart. Noisy,
+// not destructive — still, don't change it casually.
 //
 // A secret value must NEVER go directly into `Triggers`. During `preview` a
 // secret wrapping an UNKNOWN value (e.g. a hash derived from a grant's
@@ -1448,8 +1460,13 @@ func writeHostFile(ctx *pulumi.Context, name, nameSuffix string, conn remote.Con
 		Create:     pulumi.String(writeScript),
 		Update:     pulumi.String(writeScript),
 		Delete:     pulumi.String(deleteScript),
-		Triggers:   pulumi.Array{pulumi.String(writeScript)},
-	}, pulumi.DependsOn([]pulumi.Resource{gate}), pulumi.DeleteBeforeReplace(true))
+		// NO Triggers — deliberately (rule delete-bearing-commands-have-no-triggers,
+		// ADR-0042): the content is deterministic, so a change re-runs the write
+		// IN PLACE via the create/update diff; the delete (rm) runs only on true
+		// removal. IgnoreChanges("triggers") retires the previously recorded
+		// trigger as a zero-diff migration; DeleteBeforeReplace stays for the
+		// replaces that remain possible (e.g. a Connection change).
+	}, pulumi.DependsOn([]pulumi.Resource{gate}), pulumi.DeleteBeforeReplace(true), pulumi.IgnoreChanges([]string{"triggers"}))
 }
 
 // deliverServiceDescriptor writes a secret-less service's descriptor.yaml (0644)
@@ -1594,19 +1611,18 @@ func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string
 		fmt.Sprintf("sudo install -d -m 0755 %s", iremote.Quote(service.Folder(svc.Name))),
 		iremote.WriteFileScript(service.UnitPath(svc.Name), service.Unit(svc)),
 		"sudo systemctl daemon-reload",
-		// enable --now, not enable: this script is also the CREATE half of a
-		// REPLACE (the Triggers hash covers the agent version, so every inforge
-		// release replaces this resource), and the matching Delete half ran
-		// `disable --now` moments earlier. Enabling without starting would leave a
-		// previously-RUNNING service stopped, with the deploy still reporting
-		// success — which is exactly what happened in production when the agent
-		// version bumped from 5.5.1 to 5.5.2.
-		//
-		// It is safe on a first deploy, before any release has landed a binary: the
-		// unit carries ConditionPathExists=<exec>, so systemd skips the start and
-		// exits 0 rather than failing. The service's real first start still comes
-		// from `inforge releases deploy`, once the code is present.
+		// enable --now is safe on a first deploy, before any release has landed a
+		// binary: the unit carries ConditionPathExists=<exec>, so systemd skips the
+		// start and exits 0 rather than failing. The service's real first start
+		// still comes from `inforge releases deploy`, once the code is present.
 		fmt.Sprintf("sudo systemctl enable --now %s", iremote.Quote(service.UnitName(svc.Name))),
+		// try-restart: the same script is the resource's UPDATE (ADR-0042 — a
+		// provision change is an in-place converge, never a replace), and an
+		// update means the agent binary or the unit changed; only a restart makes
+		// the RUNNING process pick either up. try-restart restarts only an active
+		// unit, so a not-yet-released service stays down and the first CREATE is
+		// a no-op.
+		fmt.Sprintf("sudo systemctl try-restart %s", iremote.Quote(service.UnitName(svc.Name))),
 	)
 	// An mtls_files: service's leaf.age is delivered later by `inforge pki
 	// renew`'s SSH push, which also signals reload-or-restart directly — there
@@ -1653,6 +1669,14 @@ func serviceDeprovisionScript(svc types.ServiceSpec) string {
 	return strings.Join([]string{
 		fmt.Sprintf("sudo systemctl disable --now %s 2>/dev/null || true", iremote.Quote(service.UnitName(svc.Name))),
 		fmt.Sprintf("sudo rm -f %s", iremote.Quote(service.UnitPath(svc.Name))),
+		// The agent inputs are removed HERE, on true service removal, not by the
+		// -secrets command: its delete used to run on every Triggers-driven
+		// replace too, leaving the fleet one restart from death whenever a deploy
+		// aborted between the delete and the re-create (the v6.1.0 outage's blast
+		// radius). Consolidating teardown on the unit's delete means the files
+		// live exactly as long as the unit does (ADR-0042).
+		fmt.Sprintf("sudo rm -f %s", iremote.Quote(service.DescriptorPath(svc.Name))),
+		fmt.Sprintf("sudo rm -f %s", iremote.Quote(service.SecretsPath(svc.Name))),
 		"sudo systemctl daemon-reload",
 	}, "\n")
 }
