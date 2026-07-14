@@ -43,9 +43,7 @@ inforge ships **one** action — it installs the CLI. You own your workflow and 
 secrets as env vars:
 
 ```yaml
-- uses: wardnet/inforge@v1
-  with:
-    version: v1.6.0   # pin the CLI; default is the latest release
+- uses: wardnet/inforge@v6   # installs the latest inforge release
 - run: inforge deploy prd --yes
 ```
 
