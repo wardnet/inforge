@@ -22,6 +22,18 @@ import "testing"
 //
 // If this test fails, DO NOT update the goldens — you are about to re-arm the
 // landmine. Move your mint-script change to the post-Triggers-retirement release.
+//
+// Two caveats byte-identity cannot cover:
+//
+//   - The trigger is a hash over the WHOLE rendered script, role/database/port
+//     included. A manifest change that alters a mint's inputs (a grant permission
+//     flip, a database rename) in the SAME deploy that first applies v6.1.1 still
+//     forces a replace before the recorded delete was refreshed — replaying the
+//     broken drop. The first v6.1.1 deploy must carry no grant/database changes.
+//   - The monitor-role mint replaces ONCE regardless: v6.0.0 recorded its raw
+//     script as the trigger and #225 switched to safeTrigger's hash (see the
+//     migration note at its Triggers line in program/program.go). Safe only
+//     because the monitor role owns nothing.
 func TestMintScriptsByteIdenticalToV600(t *testing.T) {
 	t.Parallel()
 

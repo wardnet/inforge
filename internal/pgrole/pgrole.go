@@ -35,25 +35,18 @@ func QuoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// ReaderGroup and WriterGroup name the two NOLOGIN group roles that carry a database's
-// ro/rw privileges on objects created after a mint. They exist because ALTER DEFAULT
-// PRIVILEGES entries are keyed to BOTH the creating role (defaclrole) and the grantee:
-// the tables of a service are created by ITS rw login role (it runs the migrations and
-// must own them to keep DDL), while the grantees are other services' login roles that
-// may be minted before or after it. Naming each side of that pair after the database —
-// the one identity both mints share — makes the two mints order-independent: an rw mint
-// declares its defaults for the groups, an ro mint just joins the reader group.
+// ReaderGroup and WriterGroup name the two NOLOGIN group roles that will carry a
+// database's ro/rw privileges on objects created after a mint (the group-role
+// redesign — reverted from the mint for the v6.1.1 state migration, see MintRoleSQL;
+// only CheckGroupRoleNames consumes these names today, so validate pre-clears
+// manifests for the re-land). They exist because ALTER DEFAULT PRIVILEGES entries are
+// keyed to BOTH the creating role (defaclrole) and the grantee: the tables of a
+// service are created by ITS rw login role (it runs the migrations and must own them
+// to keep DDL), while the grantees are other services' login roles that may be minted
+// before or after it. Naming each side of that pair after the database — the one
+// identity both mints share — makes the two mints order-independent.
 func ReaderGroup(database string) string { return database + "_ro" }
 func WriterGroup(database string) string { return database + "_rw" }
-
-// EnsureGroupRolesSQL returns idempotent statements creating a database's reader and
-// writer group roles (NOLOGIN, own nothing, hold no password — pure privilege carriers).
-func EnsureGroupRolesSQL(database string) []string {
-	return []string{
-		EnsureRoleNoLoginSQL(ReaderGroup(database)),
-		EnsureRoleNoLoginSQL(WriterGroup(database)),
-	}
-}
 
 // EnsureRoleNoLoginSQL returns an idempotent statement that ensures a NOLOGIN role
 // exists — the shape shared by the database owner role and the two group roles: it
@@ -95,10 +88,12 @@ const MaxIdentifierLen = 63
 // not see these derived names. (The owner is checked too: it is a real CREATE ROLE
 // target, and a truncated owner is not the role `createdb -O` then names.)
 //
-// `inforge validate` reports all of this credential-free. Until the group-role
-// redesign re-lands (it was reverted for the v6.1.1 state migration — see MintRoleSQL),
-// validate is the only caller: the names are pre-validated so existing manifests are
-// already clean when the mint starts creating the group roles again.
+// `inforge validate` reports the database/owner rules credential-free. Until the
+// group-role redesign re-lands (it was reverted for the v6.1.1 state migration — see
+// MintRoleSQL), validate is the only caller — and it passes role="" (it has no
+// per-service login-role name at that layer), so the role-vs-group branch is
+// exercised by no caller until the mint calls this again. The re-land must restore
+// the mint-side call to regain the fail-closed enforcement #225 documented.
 func CheckGroupRoleNames(role, database, owner string) error {
 	if n := len(owner); n > MaxIdentifierLen {
 		return fmt.Errorf("pgrole: database %q: owner role %q is %d bytes; Postgres truncates identifiers at %d, so it would create a role of a different name than the deployment uses — shorten it by %d character(s)", database, owner, n, MaxIdentifierLen, n-MaxIdentifierLen)
@@ -118,10 +113,18 @@ func CheckGroupRoleNames(role, database, owner string) error {
 }
 
 // GrantSQL returns the ordered statements that grant role the ro/rw privileges on
-// schema public of database, run as the database owner (or a superuser). ALTER
-// DEFAULT PRIVILEGES covers tables/sequences the owner creates later. rw additionally
-// grants CREATE on the schema so the service can run its own migrations; ro is
-// read-only. An unknown permission is an error.
+// schema public of database. rw additionally grants CREATE on the schema so the
+// service can run its own migrations; ro is read-only. An unknown permission is an
+// error.
+//
+// KNOWN v6.0.0 DEFECT, deliberately restored for the v6.1.1 byte-identity migration
+// (see MintRoleSQL): the ALTER DEFAULT PRIVILEGES statements carry no FOR ROLE, so
+// they key to the connected superuser (`sudo -u postgres psql` → defaclrole =
+// postgres) — but tables are created by each service's rw LOGIN role, never by
+// postgres, so these entries match nothing. An ro role only sees tables created
+// after its mint once a later re-mint's `GRANT SELECT ON ALL TABLES` catches up.
+// #225's group-role redesign (defaults keyed FOR ROLE <rw role>) is the fix and
+// re-lands after the Triggers retirement.
 func GrantSQL(permission, role, database string) ([]string, error) {
 	r := QuoteIdent(role)
 	db := QuoteIdent(database)
@@ -192,15 +195,9 @@ func RevokeAllSQL(role, database string) []string {
 // than accumulating privileges across deploys. It is the unit the on-host psql script
 // executes for a grant (ADR-0036).
 //
-// DO NOT CHANGE THE RENDERED STATEMENTS in this release line (v6.1.x). The rendered
-// mint script is the `-mint` remote.Command's Triggers input, so any byte change
-// forces a Pulumi REPLACE — and DeleteBeforeReplace then runs the delete script
-// RECORDED IN STATE by the PREVIOUS deploy, which for every pre-v6.1.1 stack is the
-// broken pre-#225 drop (no per-database clears) that fails `DROP ROLE` and aborts the
-// deploy mid-flight (the v6.1.0 production outage). v6.1.1 exists to refresh that
-// recorded delete via a pure `[diff: ~delete]` UPDATE, which requires this script to
-// stay byte-identical to v6.0.0's — enforced by TestMintScriptsByteIdenticalToV600.
-// The group-role redesign (#225's mint side) re-lands only after Triggers are retired
+// DO NOT CHANGE THE RENDERED STATEMENTS in this release line (v6.1.x) — see
+// TestMintScriptsByteIdenticalToV600 (internal/postgres) for the full story. The
+// group-role redesign (#225's mint side) re-lands only after Triggers are retired
 // from the mint commands, when a script change is an in-place update.
 func MintRoleSQL(role, password, database, permission string) ([]string, error) {
 	grants, err := GrantSQL(permission, role, database)

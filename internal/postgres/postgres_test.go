@@ -366,3 +366,25 @@ func TestMintMonitorRoleScript(t *testing.T) {
 		}
 	}
 }
+
+// Every renderer that takes a ClusterConfig fails closed on an invalid one — the
+// scripts run as root over SSH, so a half-built config must never render.
+func TestRenderersRejectInvalidClusterConfig(t *testing.T) {
+	bad := map[string]ClusterConfig{
+		"empty cluster": {ListenIP: "10.0.0.5", Port: 5432, NetworkCIDR: "10.0.0.0/16"},
+		"empty listen":  {Cluster: "edge", Port: 5432, NetworkCIDR: "10.0.0.0/16"},
+		"zero port":     {Cluster: "edge", ListenIP: "10.0.0.5", NetworkCIDR: "10.0.0.0/16"},
+		"empty cidr":    {Cluster: "edge", ListenIP: "10.0.0.5", Port: 5432},
+	}
+	for name, cfg := range bad {
+		if _, err := RenderPostgresqlConf(cfg); err == nil {
+			t.Errorf("%s: RenderPostgresqlConf must error", name)
+		}
+		if _, err := RenderHBA(cfg); err == nil {
+			t.Errorf("%s: RenderHBA must error", name)
+		}
+		if _, err := ApplyScript(cfg); err == nil {
+			t.Errorf("%s: ApplyScript must error", name)
+		}
+	}
+}

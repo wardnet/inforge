@@ -153,10 +153,8 @@ func TestEnsureRoleNoLoginSQL(t *testing.T) {
 	}
 }
 
-// CheckGroupRoleNames is validate-only until the group-role redesign re-lands (its
-// mint side was reverted for the v6.1.1 state migration — see MintRoleSQL). The
-// checks stay live so existing manifests are already clean when the mint starts
-// creating the group roles again.
+// CheckGroupRoleNames is validate-only until the group-role redesign re-lands — see
+// the function doc for the enforcement caveats.
 func TestCheckGroupRoleNames(t *testing.T) {
 	// The database owner is operator-authored free text. If it collides with a derived
 	// group role, `GRANT <writer group> TO <service>` would make the service a member
