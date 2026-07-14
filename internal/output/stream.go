@@ -62,6 +62,11 @@ type Printer struct {
 	// just before it as a DiagnosticEvent — so we stash it here and attach it
 	// when the failure event lands.
 	errByURN map[string]string
+	// destructive collects, per delete/delete-replaced operation, what the
+	// delete destroys on a host (from the resource-name grammar). Finish prints
+	// them as their own section: a deploy must never destroy host state only a
+	// resource-name connoisseur can spot in the stream.
+	destructive []string
 }
 
 // NewPrinter returns a Printer that writes formatted output to w.
@@ -98,8 +103,14 @@ func (p *Printer) Handle(ev events.EngineEvent) {
 		if isSystemResource(m.Type) || m.Op == apitype.OpSame {
 			return
 		}
-		_, _ = fmt.Fprintf(p.w, "  %s %-36s  %s\n",
-			opSymbol(m.Op), shortType(m.Type), urnName(m.URN))
+		info := translate(m.Type, urnName(m.URN))
+		warn := ""
+		if (m.Op == apitype.OpDelete || m.Op == apitype.OpDeleteReplaced) && info.destroys != "" {
+			warn = "  ⚠"
+			p.destructive = append(p.destructive, fmt.Sprintf("%s: %s", info.display(), info.destroys))
+		}
+		_, _ = fmt.Fprintf(p.w, "  %-2s %-44s %s%s%s\n",
+			opSymbol(m.Op), info.display(), opVerb(m.Op), diffSuffix(m), warn)
 
 	case e.ResOutputsEvent != nil:
 		m := e.ResOutputsEvent.Metadata
@@ -204,6 +215,18 @@ func (p *Printer) Finish() {
 	preview := p.summary != nil && p.summary.IsPreview
 	changes := p.effectiveChanges()
 
+	if len(p.destructive) > 0 {
+		_, _ = fmt.Fprintln(p.w)
+		if preview {
+			_, _ = fmt.Fprintln(p.w, "⚠ Destructive operations in this plan:")
+		} else {
+			_, _ = fmt.Fprintln(p.w, "⚠ Destructive operations in this run:")
+		}
+		for _, d := range p.destructive {
+			_, _ = fmt.Fprintf(p.w, "  ⚠ %s\n", d)
+		}
+	}
+
 	_, _ = fmt.Fprintln(p.w)
 	_, _ = fmt.Fprintln(p.w, "Summary:")
 
@@ -266,6 +289,25 @@ func opSymbol(op apitype.OpType) string {
 		return "+-"
 	default:
 		return "?"
+	}
+}
+
+// opVerb is the tense-neutral verb for a resource's in-stream line ("what is
+// being done"), distinct from opLabel's summary tenses.
+func opVerb(op apitype.OpType) string {
+	switch op {
+	case apitype.OpCreate:
+		return "create"
+	case apitype.OpUpdate:
+		return "update"
+	case apitype.OpDelete:
+		return "delete"
+	case apitype.OpCreateReplacement:
+		return "replace"
+	case apitype.OpDeleteReplaced:
+		return "delete (for replace)"
+	default:
+		return string(op)
 	}
 }
 
