@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
+	"github.com/wardnet/inforge/internal/naming"
 )
 
 // opInfo is the human translation of one resource operation: what the resource
@@ -42,52 +43,18 @@ func (i opInfo) display() string {
 	return s
 }
 
-// namedTypes are the <type> tokens of the resource-name grammar
-// (`wardnet-<env>[-<slug>]-<type>-<rest>`). The token AFTER the env is a region
-// slug only when it is not one of these — naming.GlobalResource omits the slug.
-var namedTypes = map[string]bool{
-	"vm": true, "fw": true, "net": true, "subnet": true, "vol": true,
-	"db": true, "record": true, "ingress": true, "svc": true, "app": true,
-	"key": true, "dbrole": true, "dbbackup": true, "mesh": true, "otelcol": true,
-}
-
 // translate parses a Pulumi resource name (plus its type token) into the human
-// opInfo. Unrecognized names fall back to the short type + raw name, so the
-// output never hides a resource it cannot explain.
+// opInfo. The grammar decode lives beside the name builders
+// (naming.ParseResourceName), so the parser and the builders cannot drift;
+// this layer only maps the decoded parts onto human kinds and destroy
+// descriptions. Unrecognized names fall back to the short type + raw name, so
+// the output never hides a resource it cannot explain.
 func translate(typ, name string) opInfo {
-	info, ok := parseWardnetName(name)
+	grammarType, rest, slug, ok := naming.ParseResourceName(name)
 	if !ok {
 		return opInfo{kind: shortType(typ), subject: name}
 	}
-	return info
-}
-
-// parseWardnetName decodes `wardnet-<env>[-<slug>]-<type>-<rest>` and the
-// well-known command suffixes appended to those names.
-func parseWardnetName(name string) (opInfo, bool) {
-	parts := strings.Split(name, "-")
-	if len(parts) < 4 || parts[0] != "wardnet" {
-		return opInfo{}, false
-	}
-	// The env itself may contain hyphens (an ephemeral env is "eph-<rand>"), so
-	// the type token is FOUND, not assumed at a fixed index: the first token
-	// after the env prefix that is a known type. The token immediately before
-	// it (when not the env's own tail... i.e. when at least env+scope precede)
-	// is the region slug; an env-global name has the type right after the env.
-	// A region slug that collides with a type token would fool this scan — as
-	// would any positional scheme; slugs are short airport-style codes in
-	// practice, and the fallback is the raw name, never a wrong warning.
-	for i := 2; i < len(parts)-1; i++ {
-		if !namedTypes[parts[i]] {
-			continue
-		}
-		scope := ""
-		if i > 2 {
-			scope = parts[i-1]
-		}
-		return classify(parts[i], strings.Join(parts[i+1:], "-"), scope), true
-	}
-	return opInfo{}, false
+	return classify(grammarType, rest, slug)
 }
 
 // classify maps a (type token, remaining name) pair onto its human kind, its

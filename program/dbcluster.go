@@ -318,22 +318,13 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 		Create:     mintScript,
 		Update:     mintScript,
 		Delete:     pulumi.String(dropScript),
-		// NO Triggers — deliberately (see rule delete-bearing-commands-have-no-triggers
-		// and ADR-0042). The mint script is idempotent, so a script change must re-run
-		// it IN PLACE (pulumi-command updates on a create/update input diff on its
-		// own); a Triggers entry would turn that same change into a REPLACE, and
-		// DeleteBeforeReplace would then run the drop recorded in state — dropping a
-		// live credential (and, on a pre-#225 stack, aborting the whole deploy: the
-		// v6.1.0 outage). IgnoreChanges("triggers") below makes retiring the old
-		// recorded trigger a zero-diff migration (the stale value stays in state,
-		// inert) instead of itself forcing one last replace.
-		//
-		// DeleteBeforeReplace stays for the replaces that remain possible (e.g. a
-		// Connection change when the host is recreated): the default
-		// create-before-delete order would mint the new role then immediately DROP
-		// it via the old resource's Delete (same roleName) — see program.go's
-		// provisionService for the full incident writeup of this bug class.
-	}, pulumi.DependsOn(mintDeps), pulumi.DeleteBeforeReplace(true), pulumi.IgnoreChanges([]string{"triggers"}))
+		// NO Triggers — a mint-SQL change is an in-place idempotent re-mint, never
+		// a replace that runs the drop recorded in state (ADR-0042; see
+		// program/adr0042.go). DeleteBeforeReplace stays for the replaces that
+		// remain possible (e.g. a Connection change when the host is recreated):
+		// create-before-delete would mint the new role then immediately DROP it
+		// via the old resource's Delete (same roleName).
+	}, pulumi.DependsOn(mintDeps), pulumi.DeleteBeforeReplace(true), retiredTriggers())
 	if err != nil {
 		return types.DBRoleFields{}, fmt.Errorf("db role %q: mint role: %w", roleName, err)
 	}

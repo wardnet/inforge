@@ -283,73 +283,48 @@ func firstLine(s string) string {
 	return s
 }
 
+// opWords is the single op→wording table: the stream symbol, the tense-neutral
+// in-stream verb, and the summary's future/past labels. One table so a newly
+// supported op (an import, a refresh) cannot be added to one renderer and
+// missed in another.
+var opWords = map[apitype.OpType]struct {
+	symbol, verb, future, past string
+}{
+	apitype.OpCreate:            {"+", "create", "to create", "created"},
+	apitype.OpUpdate:            {"~", "update", "to update", "updated"},
+	apitype.OpDelete:            {"-", "delete", "to delete", "deleted"},
+	apitype.OpCreateReplacement: {"+-", "replace", "to replace", "replaced"},
+	apitype.OpDeleteReplaced:    {"+-", "delete (for replace)", "to delete (replaced)", "deleted (replaced)"},
+}
+
 func opSymbol(op apitype.OpType) string {
-	switch op {
-	case apitype.OpCreate:
-		return "+"
-	case apitype.OpUpdate:
-		return "~"
-	case apitype.OpDelete:
-		return "-"
-	case apitype.OpCreateReplacement, apitype.OpDeleteReplaced:
-		return "+-"
-	default:
-		return "?"
+	if w, ok := opWords[op]; ok {
+		return w.symbol
 	}
+	return "?"
 }
 
 // opVerb is the tense-neutral verb for a resource's in-stream line ("what is
 // being done"), distinct from opLabel's summary tenses.
 func opVerb(op apitype.OpType) string {
-	switch op {
-	case apitype.OpCreate:
-		return "create"
-	case apitype.OpUpdate:
-		return "update"
-	case apitype.OpDelete:
-		return "delete"
-	case apitype.OpCreateReplacement:
-		return "replace"
-	case apitype.OpDeleteReplaced:
-		return "delete (for replace)"
-	default:
-		return string(op)
+	if w, ok := opWords[op]; ok {
+		return w.verb
 	}
+	return string(op)
 }
 
 // opLabel renders an OpType for the summary. preview selects future tense
 // ("to create") for `inforge preview`; an applied update reads past tense
 // ("created").
 func opLabel(op apitype.OpType, preview bool) string {
-	switch op {
-	case apitype.OpCreate:
-		if preview {
-			return "to create"
-		}
-		return "created"
-	case apitype.OpUpdate:
-		if preview {
-			return "to update"
-		}
-		return "updated"
-	case apitype.OpDelete:
-		if preview {
-			return "to delete"
-		}
-		return "deleted"
-	case apitype.OpCreateReplacement:
-		if preview {
-			return "to replace"
-		}
-		return "replaced"
-	case apitype.OpDeleteReplaced:
-		if preview {
-			return "to delete (replaced)"
-		}
-		return "deleted (replaced)"
-	default:
+	w, ok := opWords[op]
+	if !ok {
 		return string(op)
 	}
+	if preview {
+		return w.future
+	}
+	return w.past
 }
 
 // isSystemResource returns true for Pulumi meta-resources (the stack itself

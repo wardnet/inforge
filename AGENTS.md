@@ -461,8 +461,8 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
   `NormalizeIngress` defaults `health_probes_port` to 81); loader reads `ingress/` and `app/`
   sub-folders in both scopes alongside the existing resource folders.
 - **`internal/validate`** — `checkIngress` enforces the same-scope `host:` FK (single-instance vm,
-  `global/` rejected), unique ingress names, **one ingress per host** (`ingressNamesByHost` — see rule
-  `.agents/rules/one-ingress-per-host.md`), and health-port collision checks (must not be 80, must not
+  `global/` rejected), unique ingress names, **one ingress per scope** (its DNS name is
+  scope-singular; this subsumes the former one-ingress-per-host rule), and health-port collision checks (must not be 80, must not
   equal a route listen port, must stay out of the loopback reserved range); `checkApp` enforces the
   same-scope `ingress:` FK (see rule `.agents/rules/app-ingress-fk-is-same-scope-only.md`) and unique
   app names/subdomains; `schemaSet` now includes `ingress` and `app`. **Forward exclusivity** is now

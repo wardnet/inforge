@@ -175,11 +175,9 @@ func provisionDatabaseBackups(ctx *pulumi.Context, res types.Resources, computeO
 				Create:     pulumi.String(applyScript),
 				Update:     pulumi.String(applyScript),
 				Delete:     pulumi.String(removeScript),
-				// NO Triggers — deliberately (rule delete-bearing-commands-have-no-
-				// triggers, ADR-0042): the apply is idempotent, so a change re-runs
-				// it IN PLACE via the create/update diff; RemoveScript runs only on
-				// true removal (the database opting out). IgnoreChanges("triggers")
-				// retires the previously recorded trigger as a zero-diff migration.
+				// NO Triggers — the idempotent apply re-runs IN PLACE; RemoveScript
+				// runs only on true removal (the database opting out) (ADR-0042;
+				// see program/adr0042.go).
 				//
 				// DeleteBeforeReplace: the default create-before-delete order
 				// would install the new timer then immediately tear it down
@@ -187,7 +185,7 @@ func provisionDatabaseBackups(ctx *pulumi.Context, res types.Resources, computeO
 				// identity), silently leaving backups untimered after a
 				// "successful" apply — see program.go's provisionService for
 				// the full incident writeup of this bug class.
-			}, pulumi.DependsOn([]pulumi.Resource{credCmd}), pulumi.DeleteBeforeReplace(true), pulumi.IgnoreChanges([]string{"triggers"})); err != nil {
+			}, pulumi.DependsOn([]pulumi.Resource{credCmd}), pulumi.DeleteBeforeReplace(true), retiredTriggers()); err != nil {
 				return fmt.Errorf("backups: database %q: install timer: %w", it.database, err)
 			}
 		}
