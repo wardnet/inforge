@@ -296,7 +296,7 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 	// The mint script carries the password literal, so build it inside an apply over
 	// the secret; the whole command's Create is then encrypted in Pulumi state.
 	mintScript := pw.Result.ApplyT(func(password string) (string, error) {
-		return postgres.MintRoleScript(p.port, roleName, password, p.database, permission)
+		return postgres.MintRoleScript(p.port, roleName, password, p.database, p.owner, permission)
 	}).(pulumi.StringOutput)
 	// On teardown (grant/service removed) reassign the role's owned objects to the
 	// database owner and drop the role, so a retired service leaves no live login. The
@@ -318,16 +318,13 @@ func (p *selfHostedRoleProvisioner) ProvisionRole(ctx *pulumi.Context, roleName,
 		Create:     mintScript,
 		Update:     mintScript,
 		Delete:     pulumi.String(dropScript),
-		// mintScript embeds the role's random password (secret + unknown at preview);
-		// a raw secret in Triggers breaks preview with "malformed RPC secret".
-		// safeTrigger hashes + unsecrets it (see program.go).
-		Triggers: pulumi.Array{safeTrigger(mintScript)},
-		// DeleteBeforeReplace: the default create-before-delete order would
-		// mint the new role then immediately DROP it via the old resource's
-		// Delete (same roleName), silently leaving a service's granted DB
-		// credential missing after a "successful" apply — see program.go's
-		// provisionService for the full incident writeup of this bug class.
-	}, pulumi.DependsOn(mintDeps), pulumi.DeleteBeforeReplace(true))
+		// NO Triggers — a mint-SQL change is an in-place idempotent re-mint, never
+		// a replace that runs the drop recorded in state (ADR-0042; see
+		// program/adr0042.go). DeleteBeforeReplace stays for the replaces that
+		// remain possible (e.g. a Connection change when the host is recreated):
+		// create-before-delete would mint the new role then immediately DROP it
+		// via the old resource's Delete (same roleName).
+	}, pulumi.DependsOn(mintDeps), pulumi.DeleteBeforeReplace(true), retiredTriggers())
 	if err != nil {
 		return types.DBRoleFields{}, fmt.Errorf("db role %q: mint role: %w", roleName, err)
 	}

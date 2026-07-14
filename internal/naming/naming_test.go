@@ -213,3 +213,29 @@ func TestInZone(t *testing.T) {
 		})
 	}
 }
+
+func TestParseResourceName(t *testing.T) {
+	cases := []struct {
+		name            string
+		typ, rest, slug string
+		ok              bool
+	}{
+		{"wardnet-prd-use1-svc-tenants-provision", "svc", "tenants-provision", "use1", true},
+		{"wardnet-prd-use1-vol-pg", "vol", "pg", "use1", true},
+		// env-global names carry no slug segment
+		{"wardnet-prd-key-user", "key", "user", "", true},
+		// an ephemeral env's slug is hyphenated ("eph-<rand>") — the type token
+		// is found by scan, not position
+		{"wardnet-eph-x1y2-use1-dbrole-tenants-tenants-mint", "dbrole", "tenants-tenants-mint", "use1", true},
+		// outside the grammar
+		{"tenants-pw", "", "", "", false},
+		{"wardnet-prd-nope", "", "", "", false},
+	}
+	for _, c := range cases {
+		typ, rest, slug, ok := ParseResourceName(c.name)
+		if typ != c.typ || rest != c.rest || slug != c.slug || ok != c.ok {
+			t.Errorf("ParseResourceName(%q) = (%q,%q,%q,%v), want (%q,%q,%q,%v)",
+				c.name, typ, rest, slug, ok, c.typ, c.rest, c.slug, c.ok)
+		}
+	}
+}

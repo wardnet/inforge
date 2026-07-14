@@ -12,22 +12,21 @@ list of provider secrets, so it stays decoupled from which clouds you use.
 ## The install action
 
 ```yaml
-- uses: wardnet/inforge@v1
+- uses: wardnet/inforge@v6
 ```
 
 Downloads the `inforge` binary and runs `inforge plugins install`. Pin the CLI version with the
 `version` input:
 
 ```yaml
-- uses: wardnet/inforge@v1
-  with:
-    version: v1.6.0   # default: latest release
+- uses: wardnet/inforge@v6   # installs the latest inforge release
 ```
 
-:::warning `@v1` pins the action, not the CLI
-`wardnet/inforge@v1` pins the *action* to the rolling `v1` tag; on its own it installs the **latest**
-`inforge` release, which can move under you. For reproducible runs, also pin the CLI with the
-`version:` input (e.g. `version: v1.6.0`). The two are independent: the action ref controls the
+:::warning `@v6` pins the action, not the CLI
+`wardnet/inforge@v6` pins the *action code* to the rolling `v6` tag; the CLI it installs comes from
+the release marked **Latest**. To pin the CLI instead, set the `version:` input to a **full release
+tag** (e.g. `version: v6.1.1`) — never a major alias like `v6`: the alias is a git tag with no
+release assets, and the action rejects it. The two refs are independent: the action ref controls the
 install glue, `version:` controls the binary it downloads.
 :::
 
@@ -77,9 +76,7 @@ jobs:
       CLOUDFLARE_ZONE_ID:       ${{ secrets.CLOUDFLARE_ZONE_ID }}
     steps:
       - uses: actions/checkout@v4
-      - uses: wardnet/inforge@v1
-        with:
-          version: v1.6.0          # pin the CLI for reproducible runs
+      - uses: wardnet/inforge@v6
       - run: inforge validate prd
       - run: inforge preview prd --report report.md
       - if: github.event_name == 'pull_request'
@@ -110,9 +107,7 @@ jobs:
       INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
-      - uses: wardnet/inforge@v1
-        with:
-          version: v1.6.0
+      - uses: wardnet/inforge@v6
       - run: inforge deploy prd --yes
 ```
 
@@ -144,9 +139,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: wardnet/inforge@v1
-        with:
-          version: v1.6.0
+      - uses: wardnet/inforge@v6
       - id: m
         run: echo "environments=$(inforge matrix --base main --head HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -165,9 +158,7 @@ jobs:
       INFORGE_DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
-      - uses: wardnet/inforge@v1
-        with:
-          version: v1.6.0
+      - uses: wardnet/inforge@v6
       - run: inforge deploy "${{ matrix.environment }}" --yes
 ```
 
@@ -198,9 +189,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # ...your build steps produce the artifact under ./deployments...
-      - uses: wardnet/inforge@v1
-        with:
-          version: v1.6.0
+      - uses: wardnet/inforge@v6
       - run: inforge releases push   prd --service api-server --sha "$GITHUB_SHA"
       - run: inforge releases deploy prd --service api-server --sha "$GITHUB_SHA"
 ```
@@ -229,7 +218,7 @@ fixed set of provider secrets. Three things change for consumers.
 
 **Reusable workflows → your own workflow + the action.** Replace every
 `uses: wardnet/inforge/.github/workflows/<name>.yml@v1` caller with a normal job that installs the CLI
-via `wardnet/inforge@v1` and runs `inforge <command>` directly. Start from the [starter
+via `wardnet/inforge@v6` and runs `inforge <command>` directly. Start from the [starter
 workflows](#starter-workflows) above — the `deploy`, `preview`, `reconcile`, and `service-release`
 reusable workflows all map onto one of them.
 

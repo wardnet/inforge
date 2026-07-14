@@ -3,18 +3,20 @@
 Any code path that can STOP a running service must also be the path that brings it back. Two rules
 follow, and both are load-bearing:
 
-1. **`serviceProvisionScript` uses `systemctl enable --now`, not `enable`.** That script is the CREATE
-   half of a REPLACE whose DELETE half (`serviceDeprovisionScript`) runs `disable --now` + `rm -f
-   <unit>`. The provision resource's `Triggers` cover the inforge-agent version, so **every inforge
-   release replaces it** — meaning every release tears a running service down. Enabling without
-   starting leaves it dead.
+1. **`serviceProvisionScript` uses `systemctl enable --now`, not `enable`, and ends in a
+   change-gated `try-restart`.** Since ADR-0042 the provision command carries no `Triggers` — a script
+   change (agent version bump, unit edit) is an in-place UPDATE, never a replace — so the script itself
+   must move the running service onto the new binary/unit: it try-restarts when (and only when) the
+   installed agent sha or the unit bytes actually changed. The `disable --now` + `rm -f <unit>` delete
+   half now runs ONLY on true manifest removal (and also removes descriptor.yaml + secrets.age — it is
+   the single owner of on-host service teardown).
 
-   It is safe: the unit is enabled and `WantedBy=multi-user.target`, so systemd already starts it
-   unprompted on every reboot, and `ConditionPathExists=<exec>` makes that a clean no-op (exit 0) before
-   any release has landed a binary. `enable --now` walks the same path.
+   `enable --now` is safe on first create: the unit is `WantedBy=multi-user.target` and
+   `ConditionPathExists=<exec>` makes the start a clean no-op (exit 0) before any release has landed a
+   binary; `try-restart` likewise ignores an inactive unit.
 
-   Do **not** rely on the delivery command's restart to rescue this: when only the agent version changes,
-   the descriptor is unchanged and Pulumi skips delivery entirely.
+   Do **not** rely on the delivery command's restart to rescue an agent-version bump: when only the
+   agent version changes, the descriptor is unchanged and the -secrets triggers don't fire.
 
 2. **`reloadOrRestartScript` must not swallow failures** (`2>/dev/null || true`). A failed restart is
    the difference between a dead service and a green deploy. The original justification — a first deploy

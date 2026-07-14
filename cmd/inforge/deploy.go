@@ -71,6 +71,14 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 		return err
 	}
 
+	// Fail FAST on a stale state lock: a cancelled/killed deploy leaves its lock
+	// object in the backend, and the engine then waits on it in a retry loop that
+	// emits no events — i.e. no output at all — indefinitely. Better one clear
+	// error naming the lock and the fix than a silent 30-minute hang in CI.
+	if err := failOnStackLock(ctx, projCfg, stackName); err != nil {
+		return err
+	}
+
 	s, pushState, err := upsertStack(ctx, stackName, projCfg)
 	if err != nil {
 		return fmt.Errorf("initialise stack: %w", err)
@@ -285,11 +293,23 @@ func writeTempKeyFile(material string) (string, error) {
 func streamEngineRun(w io.Writer, header string, run func(ch chan events.EngineEvent, progress, errProgress io.Writer) error) (*output.Printer, error) {
 	p := output.NewPrinter(w)
 	ch := output.NewEventChannel()
+
+	// PRE-PLAN VISIBILITY. Anything the engine says BEFORE its first event —
+	// plugin downloads, state-backend messages, and above all the DIY backend's
+	// "the stack is currently locked … retrying" loop — used to be discarded or
+	// buffered, so a deploy stuck waiting on a stale lock printed the header and
+	// then NOTHING for as long as the wait lasted (a 30-minute silent hang in
+	// CI). Both raw streams are relayed to w until the first engine event lands;
+	// from then on the Printer owns the output and the raw streams fall back to
+	// their old roles (progress discarded, errors buffered for the failure dump).
+	prelude := &preludeRelay{w: w}
+	progressBranch, errBranch := prelude.branch(), prelude.branch()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for ev := range ch {
+			prelude.mute()
 			p.Handle(ev)
 		}
 	}()
@@ -298,18 +318,58 @@ func streamEngineRun(w io.Writer, header string, run func(ch chan events.EngineE
 		_, _ = fmt.Fprint(w, header)
 	}
 	var errBuf bytes.Buffer
-	runErr := run(ch, io.Discard, &errBuf)
+	runErr := run(ch, progressBranch, io.MultiWriter(errBranch, &errBuf))
 	wg.Wait()
 	p.Finish()
 
 	// The raw engine error stream is the fallback when the Printer recorded no
-	// per-resource Failure (e.g. a config error before any op). Write it to w — the
-	// same stream the Printer summary it substitutes for uses — so a caller whose
-	// human output is stdout (ephemeral up/down) doesn't have this one line split
-	// off to stderr. In JSON-mode deploy w is already stderr, so behaviour there is
-	// unchanged.
-	if runErr != nil && len(p.Failures()) == 0 && errBuf.Len() > 0 {
-		_, _ = fmt.Fprint(w, errBuf.String())
+	// per-resource Failure (e.g. a config error before any op). The prelude may
+	// already have relayed a PREFIX of it live — dump only the remainder, so
+	// nothing prints twice and nothing is lost.
+	if runErr != nil && len(p.Failures()) == 0 {
+		if rest := errBuf.Bytes()[min(errBranch.relayed(), errBuf.Len()):]; len(rest) > 0 {
+			_, _ = w.Write(rest)
+		}
 	}
 	return p, runErr
+}
+
+// preludeRelay relays engine output to w until muted (the first engine event),
+// then swallows it. Each stream (progress, errors) gets its own branch so the
+// error branch can count exactly the bytes it relayed — the end-of-run failure
+// dump prints only the un-relayed remainder of the error buffer.
+type preludeRelay struct {
+	mu    sync.Mutex
+	w     io.Writer
+	muted bool
+}
+
+func (r *preludeRelay) mute() {
+	r.mu.Lock()
+	r.muted = true
+	r.mu.Unlock()
+}
+
+func (r *preludeRelay) branch() *preludeBranch { return &preludeBranch{r: r} }
+
+type preludeBranch struct {
+	r *preludeRelay
+	n int
+}
+
+func (b *preludeBranch) Write(p []byte) (int, error) {
+	b.r.mu.Lock()
+	defer b.r.mu.Unlock()
+	if b.r.muted {
+		return len(p), nil
+	}
+	n, err := b.r.w.Write(p)
+	b.n += n
+	return n, err
+}
+
+func (b *preludeBranch) relayed() int {
+	b.r.mu.Lock()
+	defer b.r.mu.Unlock()
+	return b.n
 }

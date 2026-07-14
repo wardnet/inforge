@@ -62,6 +62,11 @@ type Printer struct {
 	// just before it as a DiagnosticEvent — so we stash it here and attach it
 	// when the failure event lands.
 	errByURN map[string]string
+	// destructive collects, per delete/delete-replaced operation, what the
+	// delete destroys on a host (from the resource-name grammar). Finish prints
+	// them as their own section: a deploy must never destroy host state only a
+	// resource-name connoisseur can spot in the stream.
+	destructive []string
 }
 
 // NewPrinter returns a Printer that writes formatted output to w.
@@ -98,8 +103,15 @@ func (p *Printer) Handle(ev events.EngineEvent) {
 		if isSystemResource(m.Type) || m.Op == apitype.OpSame {
 			return
 		}
-		_, _ = fmt.Fprintf(p.w, "  %s %-36s  %s\n",
-			opSymbol(m.Op), shortType(m.Type), urnName(m.URN))
+		info := translate(m.Type, urnName(m.URN))
+		warn := ""
+		isDelete := m.Op == apitype.OpDelete || (m.Op == apitype.OpDeleteReplaced && !info.suppressOnReplace)
+		if isDelete && info.destroys != "" {
+			warn = "  ⚠"
+			p.destructive = append(p.destructive, fmt.Sprintf("%s: %s", info.display(), info.destroys))
+		}
+		_, _ = fmt.Fprintf(p.w, "  %-2s %-44s %s%s%s\n",
+			opSymbol(m.Op), info.display(), opVerb(m.Op), diffSuffix(m), warn)
 
 	case e.ResOutputsEvent != nil:
 		m := e.ResOutputsEvent.Metadata
@@ -189,6 +201,11 @@ func (p *Printer) Changes() map[string]int {
 // Failures returns the resources whose operation failed during the run.
 func (p *Printer) Failures() []Failure { return p.failures }
 
+// Destructive returns the destructive-operation descriptions collected during
+// the run — the same entries the terminal ⚠ section shows, exposed so the
+// markdown report (the artifact a PR reviewer actually reads) carries them too.
+func (p *Printer) Destructive() []string { return p.destructive }
+
 // abortBanner explains, after a failed run, that absence from the change counts
 // does not mean a resource is healthy — Pulumi stops a dependency chain at the
 // first error, so dependents of a failed resource are skipped, not applied.
@@ -203,6 +220,18 @@ const abortBanner = "Update did not complete: the resources above failed, and an
 func (p *Printer) Finish() {
 	preview := p.summary != nil && p.summary.IsPreview
 	changes := p.effectiveChanges()
+
+	if len(p.destructive) > 0 {
+		_, _ = fmt.Fprintln(p.w)
+		if preview {
+			_, _ = fmt.Fprintln(p.w, "⚠ Destructive operations in this plan:")
+		} else {
+			_, _ = fmt.Fprintln(p.w, "⚠ Destructive operations in this run:")
+		}
+		for _, d := range p.destructive {
+			_, _ = fmt.Fprintf(p.w, "  ⚠ %s\n", d)
+		}
+	}
 
 	_, _ = fmt.Fprintln(p.w)
 	_, _ = fmt.Fprintln(p.w, "Summary:")
@@ -254,54 +283,48 @@ func firstLine(s string) string {
 	return s
 }
 
+// opWords is the single op→wording table: the stream symbol, the tense-neutral
+// in-stream verb, and the summary's future/past labels. One table so a newly
+// supported op (an import, a refresh) cannot be added to one renderer and
+// missed in another.
+var opWords = map[apitype.OpType]struct {
+	symbol, verb, future, past string
+}{
+	apitype.OpCreate:            {"+", "create", "to create", "created"},
+	apitype.OpUpdate:            {"~", "update", "to update", "updated"},
+	apitype.OpDelete:            {"-", "delete", "to delete", "deleted"},
+	apitype.OpCreateReplacement: {"+-", "replace", "to replace", "replaced"},
+	apitype.OpDeleteReplaced:    {"+-", "delete (for replace)", "to delete (replaced)", "deleted (replaced)"},
+}
+
 func opSymbol(op apitype.OpType) string {
-	switch op {
-	case apitype.OpCreate:
-		return "+"
-	case apitype.OpUpdate:
-		return "~"
-	case apitype.OpDelete:
-		return "-"
-	case apitype.OpCreateReplacement, apitype.OpDeleteReplaced:
-		return "+-"
-	default:
-		return "?"
+	if w, ok := opWords[op]; ok {
+		return w.symbol
 	}
+	return "?"
+}
+
+// opVerb is the tense-neutral verb for a resource's in-stream line ("what is
+// being done"), distinct from opLabel's summary tenses.
+func opVerb(op apitype.OpType) string {
+	if w, ok := opWords[op]; ok {
+		return w.verb
+	}
+	return string(op)
 }
 
 // opLabel renders an OpType for the summary. preview selects future tense
 // ("to create") for `inforge preview`; an applied update reads past tense
 // ("created").
 func opLabel(op apitype.OpType, preview bool) string {
-	switch op {
-	case apitype.OpCreate:
-		if preview {
-			return "to create"
-		}
-		return "created"
-	case apitype.OpUpdate:
-		if preview {
-			return "to update"
-		}
-		return "updated"
-	case apitype.OpDelete:
-		if preview {
-			return "to delete"
-		}
-		return "deleted"
-	case apitype.OpCreateReplacement:
-		if preview {
-			return "to replace"
-		}
-		return "replaced"
-	case apitype.OpDeleteReplaced:
-		if preview {
-			return "to delete (replaced)"
-		}
-		return "deleted (replaced)"
-	default:
+	w, ok := opWords[op]
+	if !ok {
 		return string(op)
 	}
+	if preview {
+		return w.future
+	}
+	return w.past
 }
 
 // isSystemResource returns true for Pulumi meta-resources (the stack itself

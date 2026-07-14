@@ -19,6 +19,7 @@ Every record is an A-record pointing at a host's public IP, named with the resou
 | Host | `<compute>.vm.<env>.<slug>.<base>` | each [Compute](./compute) host (its SSH / cloud-init domain) | no |
 | Service | `<service>.svc.<env>.<slug>.<base>` | any [ingress](./service#ingress) entry | yes, on a `tls-termination` route |
 | Vanity | the expanded vanity value | a `tls-termination` entry's `vanity` list | yes |
+| Ingress | `ingress.<slug>.<base>` (regional) / `ingress.<base>` (global) | the scope's [ingress](./ingress) (points at its host; the name follows the ingress if it moves hosts) | no |
 
 A `forward` entry gets the `<svc>.svc` DNS record but no certificate (the backend owns TLS). The
 `<svc>.svc` name is derived once per service even if it carries several ingress entries.

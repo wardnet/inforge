@@ -55,16 +55,13 @@ func EnsureDatabaseScript(port int, database, owner string) string {
 // MintRoleScript renders shell that mints (create-or-update) a per-service LOGIN role
 // with password and applies its ro/rw GRANTs on database — the self-hosted analogue of
 // the Neon RoleProvisioner, run on the host over local peer auth. It runs connected to
-// database (psql -d), which the schema-public statements depend on. The password
-// appears in the rendered SQL (quoted), so the caller wraps the whole command as a
-// Pulumi secret. Returns an error for an unknown permission.
-//
-// The rendered script must stay byte-identical to v6.0.0's for the whole v6.1.x
-// line — it is the mint command's Pulumi Triggers input, and any byte change forces
-// a replace that replays the broken delete recorded in pre-v6.1.1 state. See
-// pgrole.MintRoleSQL and TestMintScriptsByteIdenticalToV600.
-func MintRoleScript(port int, role, password, database, permission string) (string, error) {
-	stmts, err := pgrole.MintRoleSQL(role, password, database, permission)
+// database (psql -d), which the per-database statements (REASSIGN OWNED, the
+// schema-public grants) depend on. owner is the database's NOLOGIN owner role, the
+// target of the downgrade reassign. The password appears in the rendered SQL (quoted),
+// so the caller wraps the whole command as a Pulumi secret. Returns an error for an
+// unknown permission.
+func MintRoleScript(port int, role, password, database, owner, permission string) (string, error) {
+	stmts, err := pgrole.MintRoleSQL(role, password, database, owner, permission)
 	if err != nil {
 		return "", err
 	}

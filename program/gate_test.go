@@ -36,6 +36,9 @@ type capturedCommand struct {
 	// itself (the mocked engine resolves a secret value, so secretness alone does not
 	// prove the hashing happened).
 	triggers []string
+	// deleteScript records the command's `delete` input (empty when the command
+	// carries none), so a test can assert a command is delete-free (ADR-0042).
+	deleteScript string
 }
 
 // commandMocks is a Pulumi mock monitor that records every command.remote keyed
@@ -77,6 +80,14 @@ func (m *commandMocks) NewResource(args pulumi.MockResourceArgs) (string, resour
 				if u, ok := v.ObjectValue()["user"]; ok && u.IsString() {
 					c.user = u.StringValue()
 				}
+			}
+		}
+		if v, ok := args.Inputs["delete"]; ok {
+			if v.IsSecret() {
+				v = v.SecretValue().Element
+			}
+			if v.IsString() {
+				c.deleteScript = v.StringValue()
 			}
 		}
 		if v, ok := args.Inputs["triggers"]; ok {

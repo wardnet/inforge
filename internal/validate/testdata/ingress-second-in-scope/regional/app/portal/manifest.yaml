@@ -1,0 +1,5 @@
+name: portal
+container: ingress
+ingress: web
+subdomain: portal
+spa: true

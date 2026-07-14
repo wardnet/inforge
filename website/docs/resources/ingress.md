@@ -37,7 +37,7 @@ health_probes_port: 81     # optional — public port for service health checks 
 |-------|------|----------|-------------|
 | `name` | string | Yes | Ingress name. Unique within the scope. |
 | `container` | string | Yes | Grouping label (tags, like other resources). |
-| `host` | string | Yes | **Name** of the Compute resource (same scope) this ingress runs on. Must be a single-instance `vm`. A `global/` prefix is rejected — a global ingress is declared in the global slice itself. **At most one ingress per host** — the derived nginx config and firewall are per-host. |
+| `host` | string | Yes | **Name** of the Compute resource (same scope) this ingress runs on. Must be a single-instance `vm`. A `global/` prefix is rejected — a global ingress is declared in the global slice itself. **At most one ingress per scope** — the ingress's DNS name (`ingress[.<slug>].<base>`, see below) is scope-singular, which also implies one per host. |
 | `health_probes_port` | int | No | Public port nginx exposes service [health checks](#health-probes) on. Defaults to `81`. Opened to the internet only when a referencing service declares its own `health_probes_port`. Must not be `80` or a route `listen` port on this host. |
 
 ## What it serves
@@ -55,6 +55,14 @@ private network; only the ingress host exposes the public `listen` ports.
 A `forward` route may **share a `listen` port** with `tls-termination` routes on the same ingress: nginx
 inspects the TLS SNI without terminating (`ssl_preread`) and routes each known SNI to its terminator and
 the single unknown SNI to the forward backend. See [Service → Types](./service#types).
+
+## The ingress DNS name
+
+The scope's ingress gets a stable A record pointing at its host — `ingress.<base_domain>` for the
+global scope, `ingress.<region-slug>.<base_domain>` per region — so consumers can address "the ingress
+of this scope" without knowing which machine it runs on: if the ingress moves to a different host, the
+name follows it on the next deploy. Because the name is scope-singular, **a scope hosts at most one
+ingress**, and the `ingress` subdomain is reserved (an app or gateway may not claim it).
 
 ## Health probes
 

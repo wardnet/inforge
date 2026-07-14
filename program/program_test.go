@@ -179,13 +179,15 @@ func TestDerivedRecordsBridge(t *testing.T) {
 	var flat []rn
 	for _, d := range got {
 		flat = append(flat, rn{d.rec.Name, d.rec.RecordName, d.hostKey})
-		assert.Equal(t, "bridge", d.rec.Container)
 	}
 	assert.Equal(t, []rn{
 		{"bridge-vm-prd-use1", "bridge.vm.prd.use1", "bridge-01"},
 		{"bridge-svc-prd-use1", "bridge.svc.prd.use1", "bridge-01"},
 		{"key-broker", "key-broker", "bridge-01"}, // key-broker.{BASE_DOMAIN} -> key-broker.wardnet.network
 		{"key-broker-inforge", "key-broker.inforge", "bridge-01"},
+		// The scope's ingress host record: `ingress.<slug>.<base>` for a region,
+		// pointing at the ingress's host.
+		{"ingress-use1", "ingress.use1", "bridge-01"},
 	}, flat)
 }
 

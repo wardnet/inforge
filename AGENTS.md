@@ -179,6 +179,19 @@ Key internal seams introduced in slice #110:
   `pki:` alone no longer forces anything to be delivered at deploy time: a plain mesh member's leaf
   is the mesh proxy's business, and an `mtls_files:` service's own leaf is `inforge pki renew`'s.
 
+## Host-command lifecycle (ADR-0042)
+
+A host-mutating `remote.Command` whose delete destroys state (role drop, unit removal,
+file delete) carries **no `Triggers:`** — its idempotent script change re-runs IN PLACE
+via the create/update diff, and the delete runs only on true manifest removal. Retiring a
+trigger always pairs with `IgnoreChanges(["triggers"])` (zero-diff migration). The one
+inversion is the `-secrets` command (nondeterministic age ciphertext): deterministic
+`Triggers` as sole detector + `IgnoreChanges(["create","update"])` + **delete-free** —
+service teardown (unit + descriptor + secrets.age) is consolidated in
+`serviceDeprovisionScript`, and `serviceProvisionScript` ends in `try-restart` so an
+agent/unit update moves the running process without a replace stop/start cycle. See rule
+`delete-bearing-commands-have-no-triggers` and `program/adr0042_test.go`.
+
 ## Service secrets (ADR-0017, ADR-0040)
 
 A service's `vault:<KEY>` sources resolve against the env's committed store,
@@ -440,12 +453,16 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
   when the host runs an ingress — the reserved loopback range); a udp exposed port lives in the new
   proto-aware `udpExposedUsersByHost` and collides only with another udp exposed port; a duplicate
   `(proto,port)` on one service is rejected.
+- **Ingress DNS name.** The scope's ingress gets a stable A record at its host —
+  `ingress.<base>` (global) / `ingress.<slug>.<base>` (regional), built by `naming.AppFQDN` over the
+  reserved `naming.IngressDNSLabel` in `derivedRecords`. Scope-singular: `checkIngress` rejects a
+  second ingress in a scope, and `checkApp`/`checkGateway` reject the reserved subdomain.
 - **`internal/loader`** — `NormalizeIngress` and `NormalizeApp` trim free-text fields (and
   `NormalizeIngress` defaults `health_probes_port` to 81); loader reads `ingress/` and `app/`
   sub-folders in both scopes alongside the existing resource folders.
 - **`internal/validate`** — `checkIngress` enforces the same-scope `host:` FK (single-instance vm,
-  `global/` rejected), unique ingress names, **one ingress per host** (`ingressNamesByHost` — see rule
-  `.agents/rules/one-ingress-per-host.md`), and health-port collision checks (must not be 80, must not
+  `global/` rejected), unique ingress names, **one ingress per scope** (its DNS name is
+  scope-singular; this subsumes the former one-ingress-per-host rule), and health-port collision checks (must not be 80, must not
   equal a route listen port, must stay out of the loopback reserved range); `checkApp` enforces the
   same-scope `ingress:` FK (see rule `.agents/rules/app-ingress-fk-is-same-scope-only.md`) and unique
   app names/subdomains; `schemaSet` now includes `ingress` and `app`. **Forward exclusivity** is now

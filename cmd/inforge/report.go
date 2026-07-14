@@ -18,7 +18,7 @@ import (
 // never calls the GitHub API. Posting a PR comment stays in the consumer's
 // workflow, so the binary carries no platform coupling.
 func writeReport(command, stackName string, p *output.Printer, reportPath string) {
-	md := output.Markdown(fmt.Sprintf("inforge %s — %s", command, stackName), p.Changes(), p.Failures())
+	md := output.Markdown(fmt.Sprintf("inforge %s — %s", command, stackName), p.Changes(), p.Failures(), p.Destructive())
 
 	if reportPath == "" {
 		reportPath = filepath.Join(os.TempDir(), fmt.Sprintf("inforge-%s-%s.md", command, stackName))

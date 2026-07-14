@@ -20,6 +20,17 @@ runs:
         # so the whole script is on disk before any of it runs — a response that
         # is truncated or altered mid-flight can't execute the prefix that did
         # arrive. Same shape as wardnet/bulwark's own installer step.
+        #
+        # version must name a RELEASE (vX.Y.Z, optionally with a pre-release
+        # suffix like v6.2.0-rc.1 — release.yml publishes assets for any
+        # v*.*.* tag) or "latest". Reject anything else up front: the floating
+        # major alias (`v6`) is a git tag with no release assets, so passing it
+        # here used to surface only as a bare `curl: 404` at the asset URL.
+        if [[ "${VERSION}" != "latest" && ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+          echo "::error::version '${VERSION}' is not a release — use a full release tag (e.g. v6.1.1) or 'latest'." \
+            "A major alias like 'v6' selects the ACTION code in \`uses:\`, but has no release assets to install."
+          exit 1
+        fi
         if [[ "${VERSION}" != "latest" ]]; then
           export INFORGE_VERSION="${VERSION}"
         fi

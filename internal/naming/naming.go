@@ -13,6 +13,48 @@ import (
 // usage is the fixed top-level namespace segment.
 const usage = "wardnet"
 
+// resourceTypes is the closed set of <type> tokens the resource-name grammar
+// (`wardnet-<env>[-<slug>]-<type>-<rest>`) uses — every Resource /
+// ResourceInstance / GlobalResource call site draws its type from this set.
+// ParseResourceName keys slug-vs-type detection on membership here, so ADDING A
+// NEW TYPE TOKEN MEANS ADDING IT HERE: a token missing from this set makes every
+// name of that type unparseable, and the deploy output's destructive-operation
+// warnings (internal/output) silently skip it.
+var resourceTypes = map[string]bool{
+	"vm": true, "fw": true, "net": true, "subnet": true, "vol": true,
+	"db": true, "record": true, "ingress": true, "svc": true, "app": true,
+	"key": true, "dbrole": true, "dbbackup": true, "mesh": true, "otelcol": true,
+}
+
+// ParseResourceName decodes a full resource name back into its grammar parts:
+// the type token, the remaining name (which may carry per-command suffixes the
+// caller interprets), and the region slug ("" for an env-global name). ok is
+// false for names outside the grammar.
+//
+// The env itself may contain hyphens (an ephemeral env is "eph-<rand>"), so the
+// type token is FOUND, not assumed at a fixed index: the first token after the
+// env prefix that is a known type; the token immediately before it (when at
+// least env+slug precede) is the region slug. A region slug that collides with
+// a type token would fool this scan — as would any positional scheme; slugs are
+// short airport-style codes in practice, and the caller's fallback is the raw
+// name, never a wrong answer presented confidently.
+func ParseResourceName(name string) (typ, rest, slug string, ok bool) {
+	parts := strings.Split(name, "-")
+	if len(parts) < 4 || parts[0] != usage {
+		return "", "", "", false
+	}
+	for i := 2; i < len(parts)-1; i++ {
+		if !resourceTypes[parts[i]] {
+			continue
+		}
+		if i > 2 {
+			slug = parts[i-1]
+		}
+		return parts[i], strings.Join(parts[i+1:], "-"), slug, true
+	}
+	return "", "", "", false
+}
+
 // CanonicalComputeKeys maps every accepted compute foreign-key form to its
 // canonical expanded specKey. Each instance i of a compute is keyed by its
 // SpecKey (e.g. "bridge-01" -> "bridge-01"); a single-instance compute is
@@ -160,6 +202,12 @@ func ServiceFQDN(env, regionSlug, service, baseDomain string) string {
 // "<subdomain>.<ephemeralSlug>.<slug>.<base>" regional). An ephemeral env clones
 // the source's base_domain, so without this segment its app hostname would
 // collide with the source's; the slug segment keeps the clone's app URLs distinct.
+// IngressDNSLabel is the reserved subdomain of the per-scope ingress host
+// record: `ingress.<base>` for the global scope, `ingress.<slug>.<base>` per
+// region (same shape as AppFQDN, which builds it). Apps and gateways may not
+// claim it as their subdomain.
+const IngressDNSLabel = "ingress"
+
 func AppFQDN(subdomain, regionSlug, baseDomain, ephemeralSlug string) string {
 	parts := make([]string, 0, 4)
 	parts = append(parts, subdomain)

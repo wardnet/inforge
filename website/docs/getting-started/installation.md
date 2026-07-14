@@ -50,7 +50,7 @@ inforge --version
 For CI use, add the install action to your workflow:
 
 ```yaml
-- uses: wardnet/inforge@v1
+- uses: wardnet/inforge@v6
 ```
 
 This downloads `inforge` and runs `inforge plugins install` automatically.

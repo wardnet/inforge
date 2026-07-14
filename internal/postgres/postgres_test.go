@@ -275,22 +275,38 @@ func TestEnsureDatabaseScript(t *testing.T) {
 }
 
 func TestMintRoleScript(t *testing.T) {
-	s, err := MintRoleScript(5433, "svc", "s3cr3t", "tunneller", "rw")
+	s, err := MintRoleScript(5433, "svc", "s3cr3t", "tunneller", "tunneller-owner", "rw")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
 		"psql -p 5433 -w -v ON_ERROR_STOP=1 -d 'tunneller'",
-		`CREATE ROLE "svc" LOGIN PASSWORD 's3cr3t'`,
+		`CREATE ROLE "svc" LOGIN INHERIT PASSWORD 's3cr3t'`,
 		`GRANT USAGE, CREATE ON SCHEMA public TO "svc"`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE "svc" IN SCHEMA public GRANT SELECT ON TABLES TO "tunneller_ro"`,
 		"<<'INFORGE_PGSQL'",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("MintRoleScript missing %q in:\n%s", want, s)
 		}
 	}
-	if _, err := MintRoleScript(5432, "svc", "pw", "db", "bogus"); err == nil {
+	if _, err := MintRoleScript(5432, "svc", "pw", "db", "db-owner", "bogus"); err == nil {
 		t.Error("unknown permission must error")
+	}
+}
+
+// REASSIGN OWNED is per-database: the downgrade must run connected to the granted
+// database, not the cluster default.
+func TestMintRoleScriptROReassignsInTargetDatabase(t *testing.T) {
+	s, err := MintRoleScript(5433, "svc", "s3cr3t", "tunneller", "tunneller-owner", "ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(s, "psql -p 5433 -w -v ON_ERROR_STOP=1 -d 'tunneller'") {
+		t.Errorf("ro mint must connect to the granted database:\n%s", s)
+	}
+	if !strings.Contains(s, `REASSIGN OWNED BY "svc" TO "tunneller-owner"`) {
+		t.Errorf("ro mint must reassign owned objects to the database owner:\n%s", s)
 	}
 }
 

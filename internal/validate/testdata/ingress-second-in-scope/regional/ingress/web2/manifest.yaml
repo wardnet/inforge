@@ -1,0 +1,3 @@
+name: web2
+container: ingress
+host: edge2

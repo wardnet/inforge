@@ -195,12 +195,14 @@ func TestDerivedRecordsGlobalService(t *testing.T) {
 	var flat []rn
 	for _, d := range got {
 		flat = append(flat, rn{d.rec.Name, d.rec.RecordName, d.hostKey})
-		assert.Equal(t, "tenants", d.rec.Container)
 	}
 	assert.Equal(t, []rn{
 		{"tenants-vm-prd", "tenants.vm.prd", "tenants-01"},
 		{"tenants-svc-prd", "tenants.svc.prd", "tenants-01"},
 		{"account", "account", "tenants-01"}, // account.{BASE_DOMAIN} -> account.wardnet.network
+		// The scope's ingress host record: region-less `ingress.<base>` for the
+		// global slice, pointing at the ingress's host.
+		{"ingress", "ingress", "tenants-01"},
 	}, flat, "global records carry no slug segment")
 }
 

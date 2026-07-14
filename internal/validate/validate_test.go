@@ -1564,11 +1564,17 @@ func TestCheckIngressHealthPort(t *testing.T) {
 	errs, _ = checkIngress(s, ctx)
 	assert.Contains(t, strings.Join(errs, "|"), "reserved internal range")
 
-	// Two ingresses sharing one compute host -> FAIL.
+	// Two ingresses in one scope -> FAIL (scope-singular DNS name; this subsumes
+	// the former one-ingress-per-host rule). Reported once, from the
+	// lexicographically-first ingress only.
 	s, ctx = base(81)
-	ctx.ingressNamesByHost = map[string][]string{"bridge-01": {"other-ingress", "edge"}}
+	ctx.ingressNames = map[string]bool{"edge": true, "other-ingress": true}
 	errs, _ = checkIngress(s, ctx)
 	assert.Contains(t, strings.Join(errs, "|"), "hosts at most one ingress")
+	s.Name = "other-ingress"
+	errs, _ = checkIngress(s, ctx)
+	assert.NotContains(t, strings.Join(errs, "|"), "hosts at most one ingress",
+		"the scope-singular error is reported once, from the first ingress")
 }
 
 // TestCheckServiceLoopbackRangeCrossHostIngress: the route-target reserved-loopback
@@ -1884,4 +1890,21 @@ func TestCheckDatabaseRejectsTruncatedIdentifiers(t *testing.T) {
 	if errs, _ := checkDatabase(fits, ctx); len(errs) != 0 {
 		t.Errorf("a database at the limit must validate, got %v", errs)
 	}
+}
+
+// TestValidateResourcesSecondIngressInScope: the scope's ingress DNS name
+// (`ingress[.<slug>].<base>`) is scope-singular, so a second ingress — even on
+// its own host — fails validation.
+func TestValidateResourcesSecondIngressInScope(t *testing.T) {
+	err := ValidateResources("ingress-second-in-scope", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "a second ingress in one scope should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
+// TestValidateResourcesAppReservedIngressSubdomain: an app may not claim the
+// reserved `ingress` subdomain — it is the scope's ingress host record.
+func TestValidateResourcesAppReservedIngressSubdomain(t *testing.T) {
+	err := ValidateResources("app-reserved-ingress-subdomain", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "an app claiming the reserved ingress subdomain should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
 }
