@@ -160,6 +160,12 @@ func ServiceFQDN(env, regionSlug, service, baseDomain string) string {
 // "<subdomain>.<ephemeralSlug>.<slug>.<base>" regional). An ephemeral env clones
 // the source's base_domain, so without this segment its app hostname would
 // collide with the source's; the slug segment keeps the clone's app URLs distinct.
+// IngressDNSLabel is the reserved subdomain of the per-scope ingress host
+// record: `ingress.<base>` for the global scope, `ingress.<slug>.<base>` per
+// region (same shape as AppFQDN, which builds it). Apps and gateways may not
+// claim it as their subdomain.
+const IngressDNSLabel = "ingress"
+
 func AppFQDN(subdomain, regionSlug, baseDomain, ephemeralSlug string) string {
 	parts := make([]string, 0, 4)
 	parts = append(parts, subdomain)

@@ -56,6 +56,14 @@ A `forward` route may **share a `listen` port** with `tls-termination` routes on
 inspects the TLS SNI without terminating (`ssl_preread`) and routes each known SNI to its terminator and
 the single unknown SNI to the forward backend. See [Service → Types](./service#types).
 
+## The ingress DNS name
+
+The scope's ingress gets a stable A record pointing at its host — `ingress.<base_domain>` for the
+global scope, `ingress.<region-slug>.<base_domain>` per region — so consumers can address "the ingress
+of this scope" without knowing which machine it runs on: if the ingress moves to a different host, the
+name follows it on the next deploy. Because the name is scope-singular, **a scope hosts at most one
+ingress**, and the `ingress` subdomain is reserved (an app or gateway may not claim it).
+
 ## Health probes
 
 When a [service](./service#health-probes) declares a `health_probes_port`, the ingress exposes a single

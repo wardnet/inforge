@@ -1885,3 +1885,20 @@ func TestCheckDatabaseRejectsTruncatedIdentifiers(t *testing.T) {
 		t.Errorf("a database at the limit must validate, got %v", errs)
 	}
 }
+
+// TestValidateResourcesSecondIngressInScope: the scope's ingress DNS name
+// (`ingress[.<slug>].<base>`) is scope-singular, so a second ingress — even on
+// its own host — fails validation.
+func TestValidateResourcesSecondIngressInScope(t *testing.T) {
+	err := ValidateResources("ingress-second-in-scope", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "a second ingress in one scope should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}
+
+// TestValidateResourcesAppReservedIngressSubdomain: an app may not claim the
+// reserved `ingress` subdomain — it is the scope's ingress host record.
+func TestValidateResourcesAppReservedIngressSubdomain(t *testing.T) {
+	err := ValidateResources("app-reserved-ingress-subdomain", testdataDir, types.ProviderDefaults{})
+	require.Error(t, err, "an app claiming the reserved ingress subdomain should fail validation")
+	assert.Contains(t, err.Error(), "validation failed")
+}

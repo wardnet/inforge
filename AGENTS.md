@@ -453,6 +453,10 @@ service migration; C = app static serving + DNS + descriptor; **D (live) = app r
   when the host runs an ingress — the reserved loopback range); a udp exposed port lives in the new
   proto-aware `udpExposedUsersByHost` and collides only with another udp exposed port; a duplicate
   `(proto,port)` on one service is rejected.
+- **Ingress DNS name.** The scope's ingress gets a stable A record at its host —
+  `ingress.<base>` (global) / `ingress.<slug>.<base>` (regional), built by `naming.AppFQDN` over the
+  reserved `naming.IngressDNSLabel` in `derivedRecords`. Scope-singular: `checkIngress` rejects a
+  second ingress in a scope, and `checkApp`/`checkGateway` reject the reserved subdomain.
 - **`internal/loader`** — `NormalizeIngress` and `NormalizeApp` trim free-text fields (and
   `NormalizeIngress` defaults `health_probes_port` to 81); loader reads `ingress/` and `app/`
   sub-folders in both scopes alongside the existing resource folders.

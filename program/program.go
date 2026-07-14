@@ -2640,6 +2640,18 @@ func derivedRecords(res types.Resources, env, slug, baseDomain, ephemeralSlug st
 	for _, rg := range resolveGateways(res, canonical, slug, baseDomain, ephemeralSlug) {
 		dedupAdd(rg.fqdn, rg.gw.Container, rg.host)
 	}
+	// The scope's ingress gets a stable DNS name — `ingress.<base>` (global) /
+	// `ingress.<slug>.<base>` (regional) — pointing at its host, so consumers can
+	// address "the ingress of this scope" without knowing which machine it runs
+	// on (the ingress can move hosts; the name follows it). The label is
+	// scope-singular by construction, so validate rejects a second ingress in a
+	// scope (checkIngress) and reserves the subdomain from apps/gateways; the
+	// duplicate-record check in createDNSRecords backstops both.
+	for _, ing := range res.Ingress {
+		if hk, ok := canonical[ing.Host]; ok {
+			dedupAdd(naming.AppFQDN(naming.IngressDNSLabel, slug, baseDomain, ephemeralSlug), ing.Container, hk)
+		}
+	}
 	return out
 }
 

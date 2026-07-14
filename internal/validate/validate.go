@@ -2344,6 +2344,22 @@ func checkIngress(s types.IngressSpec, ctx regionContext) (errs, warns []string)
 	hostKey, hostErrs := resolveComputeHost(s.Host, "an ingress", ctx)
 	errs = append(errs, hostErrs...)
 
+	// One ingress per SCOPE: the ingress's stable DNS name
+	// (`ingress.<base>` global / `ingress.<slug>.<base>` regional) is
+	// scope-singular — a second ingress would derive the same A record on a
+	// different host, which createDNSRecords rejects at deploy. Fail it here,
+	// at authoring time, with the reason.
+	if len(ctx.ingressNames) > 1 {
+		others := make([]string, 0, len(ctx.ingressNames)-1)
+		for n := range ctx.ingressNames {
+			if n != s.Name {
+				others = append(others, n)
+			}
+		}
+		sort.Strings(others)
+		errs = append(errs, fmt.Sprintf("a scope hosts at most one ingress (its DNS name %q is scope-singular); also declared: %s", naming.IngressDNSLabel, strings.Join(others, ", ")))
+	}
+
 	// One ingress per host: the nginx config, firewall, and health port are derived
 	// per host, so two ingresses sharing a host would silently merge or override each
 	// other (e.g. only one health port survives). Reject the collision.
@@ -2426,6 +2442,9 @@ func meshEgressRangeErr(label string, port int) string {
 func checkApp(s types.AppSpec, ctx regionContext) (errs, warns []string) {
 	if s.Subdomain != "" && ctx.appSubdomainCounts[s.Subdomain] > 1 {
 		errs = append(errs, fmt.Sprintf("subdomain: %q is used by more than one app in this scope; each app must map to a distinct public FQDN", s.Subdomain))
+	}
+	if s.Subdomain == naming.IngressDNSLabel {
+		errs = append(errs, fmt.Sprintf("subdomain: %q is reserved for the scope's ingress host record (ingress[.<slug>].<base>)", naming.IngressDNSLabel))
 	}
 	switch {
 	case strings.HasPrefix(s.Ingress, "global/"):
@@ -2583,6 +2602,9 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 	// collide on the DNS record and the ACME cert.
 	if s.Subdomain != "" && ctx.appSubdomainCounts[s.Subdomain] > 0 {
 		errs = append(errs, fmt.Sprintf("subdomain: %q is already used by an app in this scope; the gateway needs its own public FQDN", s.Subdomain))
+	}
+	if s.Subdomain == naming.IngressDNSLabel {
+		errs = append(errs, fmt.Sprintf("subdomain: %q is reserved for the scope's ingress host record (ingress[.<slug>].<base>)", naming.IngressDNSLabel))
 	}
 	return errs, warns
 }
