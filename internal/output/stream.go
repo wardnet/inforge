@@ -105,7 +105,8 @@ func (p *Printer) Handle(ev events.EngineEvent) {
 		}
 		info := translate(m.Type, urnName(m.URN))
 		warn := ""
-		if (m.Op == apitype.OpDelete || m.Op == apitype.OpDeleteReplaced) && info.destroys != "" {
+		isDelete := m.Op == apitype.OpDelete || (m.Op == apitype.OpDeleteReplaced && !info.suppressOnReplace)
+		if isDelete && info.destroys != "" {
 			warn = "  ⚠"
 			p.destructive = append(p.destructive, fmt.Sprintf("%s: %s", info.display(), info.destroys))
 		}
@@ -199,6 +200,11 @@ func (p *Printer) Changes() map[string]int {
 
 // Failures returns the resources whose operation failed during the run.
 func (p *Printer) Failures() []Failure { return p.failures }
+
+// Destructive returns the destructive-operation descriptions collected during
+// the run — the same entries the terminal ⚠ section shows, exposed so the
+// markdown report (the artifact a PR reviewer actually reads) carries them too.
+func (p *Printer) Destructive() []string { return p.destructive }
 
 // abortBanner explains, after a failed run, that absence from the change counts
 // does not mean a resource is healthy — Pulumi stops a dependency chain at the

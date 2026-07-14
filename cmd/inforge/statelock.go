@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"sort"
@@ -113,6 +114,12 @@ func failOnStackLock(ctx context.Context, projCfg projectConfig, stack string) e
 		fmt.Fprintf(os.Stderr, "warning: could not check for state locks (%v) — continuing\n", err)
 		return nil
 	}
+	return lockedStackError(locks, stack)
+}
+
+// lockedStackError renders the fail-fast error for a locked stack: each lock's
+// key + age, and the remedy. nil when there are no locks.
+func lockedStackError(locks []lockObject, stack string) error {
 	if len(locks) == 0 {
 		return nil
 	}
@@ -165,12 +172,19 @@ func runStackUnlock(ctx context.Context, projCfg projectConfig, stack string) er
 	if !ok {
 		return fmt.Errorf("stack unlock: backend type %q has no shared lock objects to clear", projCfg.Backend.Type)
 	}
+	return unlockStackLocks(ctx, client, bucket, stack, os.Stdout)
+}
+
+// unlockStackLocks deletes exactly the stack's lock objects, reporting each to
+// out. A lock-free stack is a no-op, not an error (the common "was it actually
+// locked?" probe).
+func unlockStackLocks(ctx context.Context, client stackLockChecker, bucket, stack string, out io.Writer) error {
 	locks, err := findStackLocks(ctx, client, bucket, stack)
 	if err != nil {
 		return err
 	}
 	if len(locks) == 0 {
-		fmt.Printf("stack %q holds no locks — nothing to do\n", stack)
+		_, _ = fmt.Fprintf(out, "stack %q holds no locks — nothing to do\n", stack)
 		return nil
 	}
 	for _, l := range locks {
@@ -180,8 +194,8 @@ func runStackUnlock(ctx context.Context, projCfg projectConfig, stack string) er
 		}); err != nil {
 			return fmt.Errorf("delete lock %q: %w", l.Key, err)
 		}
-		fmt.Printf("removed %s\n", l.Key)
+		_, _ = fmt.Fprintf(out, "removed %s\n", l.Key)
 	}
-	fmt.Printf("stack %q unlocked (%d lock(s) removed) — re-run the deploy\n", stack, len(locks))
+	_, _ = fmt.Fprintf(out, "stack %q unlocked (%d lock(s) removed) — re-run the deploy\n", stack, len(locks))
 	return nil
 }

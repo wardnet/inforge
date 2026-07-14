@@ -33,7 +33,7 @@ import (
 //
 // Keying off any single op spelling is what produced the original bug: a
 // replacement-only run rendered as all-zeroes.
-func Markdown(title string, changes map[string]int, failures []Failure) string {
+func Markdown(title string, changes map[string]int, failures []Failure, destructive []string) string {
 	created := changes[string(apitype.OpCreate)]
 	updated := changes[string(apitype.OpUpdate)]
 	deleted := changes[string(apitype.OpDelete)]
@@ -48,6 +48,17 @@ func Markdown(title string, changes map[string]int, failures []Failure) string {
 	fmt.Fprintln(&b, "|---|---|---|---|---|")
 	fmt.Fprintf(&b, "| %d | %d | %d | %d | %d |\n",
 		created, updated, deleted, replaced, len(failures))
+
+	// The destructive section is the report's whole reason to exist for a PR
+	// reviewer: counts alone once summarized a fleet-wide agent-input deletion
+	// as "deleted: 6" (the v6.1.0 outage). Nobody watches the CI stream — the
+	// report is where the warning must live.
+	if len(destructive) > 0 {
+		fmt.Fprint(&b, "\n### ⚠ Destructive operations\n\n")
+		for _, d := range destructive {
+			fmt.Fprintf(&b, "- ⚠ %s\n", d)
+		}
+	}
 
 	if len(failures) > 0 {
 		fmt.Fprint(&b, "\n### Failed\n\n")

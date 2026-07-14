@@ -40,11 +40,21 @@ Applied to: the per-service DB-role mint, the monitor-role mint, the service
 provision (`-provision`), the static host-file writes (`writeHostFile`: descriptor,
 mesh descriptor), and the backup timer.
 
-**Migration is zero-diff.** Removing the `Triggers` input alone diffs `-triggers`
-and forces one final replace — replaying the very deletes we are defusing. Every
-retired command therefore adds `pulumi.IgnoreChanges([]string{"triggers"})`: the
-diff is suppressed, the stale recorded trigger stays in state, inert. (Verified:
+**The trigger retirement is zero-diff; the migration deploy is not a no-op.**
+Removing the `Triggers` input alone diffs `-triggers` and forces one final
+replace — replaying the very deletes we are defusing. Every retired command
+therefore adds `pulumi.IgnoreChanges([]string{"triggers"})`: the diff is
+suppressed, the stale recorded trigger stays in state, inert. (Verified:
 unchanged / update-still-flows / replace-runs-new-create, all against v1.2.1.)
+
+The first post-upgrade deploy still performs in-place UPDATES — never replaces,
+never recorded deletes: the mint scripts changed (group-role re-land → one
+idempotent re-mint per role), the provision script changed (one converge per
+service; the change-gated try-restart keeps it restart-free when the binary and
+unit are unchanged), and the `-secrets` commands diff `[~delete]` (the removed
+delete input) — one rewrite + reload-or-restart per secret-bearing service,
+the LAST such storm. Deploys after that report `unchanged` when nothing
+changed, for the first time.
 
 ## The inversion: `-secrets`
 

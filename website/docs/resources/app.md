@@ -34,7 +34,7 @@ spa: true              # any non-file path serves index.html (deep-link fallback
 | `name` | string | Yes | App resource name (unique per scope). |
 | `container` | string | Yes | Logical container/grouping, like every resource. |
 | `ingress` | string | Yes | **Name** of the [ingress](./ingress) resource (same scope) that serves this app. The app inherits the ingress's provider (its compute host's) and declares none of its own. A `global/` reference is rejected — an app served from a global ingress is declared in the global slice itself. |
-| `subdomain` | string | Yes | Public subdomain the app is served on. The FQDN is the flat form `<subdomain>.<slug>.<base>` (regional) / `<subdomain>.<base>` (global); an ephemeral env inserts its slug. Must be unique among apps in the scope, and must not collide with a [gateway](./gateway) subdomain. |
+| `subdomain` | string | Yes | Public subdomain the app is served on. The FQDN is the flat form `<subdomain>.<slug>.<base>` (regional) / `<subdomain>.<base>` (global); an ephemeral env inserts its slug. Must be unique among apps in the scope, must not collide with a [gateway](./gateway) subdomain, and must not be the reserved `ingress` label (the scope's [ingress host record](./ingress#the-ingress-dns-name)). |
 | `spa` | bool | No | When `true`, any request path that does not map to a file serves `index.html` (single-page-app deep-link fallback via nginx `try_files`); when `false`, a missing path is `404`. |
 
 ## How an app is served and released

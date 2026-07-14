@@ -1370,10 +1370,12 @@ func blobFrom(names, fileKeys []string, args []any) (hostsecrets.Blob, error) {
 //
 // Encoding changes (hash scheme, prefixing) are no longer dangerous — ADR-0042
 // retired Triggers from every delete-bearing command, so a changed trigger value
-// can no longer replay a recorded delete. Its one remaining consumer is the
-// -secrets command's plaintext-hash trigger, where an encoding change would
-// replace the resource: a one-time fleet-wide secrets rewrite + restart. Noisy,
-// not destructive — still, don't change it casually.
+// can no longer replay a recorded delete. Its remaining consumers are all
+// delete-free: the -secrets command's plaintext-hash trigger (an encoding change
+// replaces it — a one-time fleet-wide secrets rewrite + restart), the dbbackup
+// credential write, and the otelcol config write (an encoding change re-runs
+// their idempotent scripts). Noisy, not destructive — still, don't change it
+// casually, and NEVER wire safeTrigger into a delete-bearing command's Triggers.
 //
 // A secret value must NEVER go directly into `Triggers`. During `preview` a
 // secret wrapping an UNKNOWN value (e.g. a hash derived from a grant's
@@ -1452,8 +1454,11 @@ func readHostPubKey(ctx *pulumi.Context, conn remote.ConnectionArgs, name string
 // new Create runs (the two logical steps of a "replace" would otherwise race
 // in the wrong order). nameSuffix distinguishes the resource name from
 // sibling commands against the same host (e.g. "-secrets", "-agent").
-func writeHostFile(ctx *pulumi.Context, name, nameSuffix string, conn remote.ConnectionArgs, path, content string, gate pulumi.Resource) (*remote.Command, error) {
-	writeScript := iremote.WriteFileScript(path, content)
+// extraWrite lines are appended to the write script (create/update only, never
+// the delete) — e.g. the descriptor-only service delivery removes a stale
+// secrets.age alongside its write.
+func writeHostFile(ctx *pulumi.Context, name, nameSuffix string, conn remote.ConnectionArgs, path, content string, gate pulumi.Resource, extraWrite ...string) (*remote.Command, error) {
+	writeScript := strings.Join(append([]string{iremote.WriteFileScript(path, content)}, extraWrite...), "\n")
 	deleteScript := iremote.DeleteFileScript(path)
 	return remote.NewCommand(ctx, name+nameSuffix, &remote.CommandArgs{
 		Connection: conn,
@@ -1486,7 +1491,13 @@ func deliverServiceDescriptor(ctx *pulumi.Context, svc types.ServiceSpec, host t
 	// replace keeps a shape flip or trigger change from letting the old
 	// Delete script remove the freshly written descriptor (see
 	// deliverServiceSecrets).
-	if _, err := writeHostFile(ctx, name, "-secrets", conn, service.DescriptorPath(svc.Name), descriptor, gate); err != nil {
+	// The write also removes a stale secrets.age: this URN is shared with the
+	// secrets shape, and a service dropping its last secret/grant flips to this
+	// shape as an in-place UPDATE (ADR-0042) — nothing else would ever clean up
+	// the retired secret material until full service removal. Idempotent: a
+	// descriptor-only service legitimately has no secrets.age.
+	if _, err := writeHostFile(ctx, name, "-secrets", conn, service.DescriptorPath(svc.Name), descriptor, gate,
+		iremote.DeleteFileScript(service.SecretsPath(svc.Name))); err != nil {
 		return fmt.Errorf("service %q: write descriptor: %w", svc.Name, err)
 	}
 	return nil
@@ -1590,39 +1601,62 @@ func renderDescriptor(svc types.ServiceSpec, host types.ComputeOutputs, secretNa
 	return string(b), nil
 }
 
-// serviceProvisionScript renders the host shell that downloads inforge-agent,
-// writes a service's unit + folder (+ no-login user), reloads systemd, and
-// ENABLES the unit. It must never emit a start/restart: the agent's target
-// binary (<folder>/run) does not exist until release delivers code, so a start
-// would fail the deploy. All caller-supplied values interpolated into the shell
-// are quoted.
+// serviceProvisionScript renders the host shell that CONVERGES a service's
+// provisioning — agent binary, unit, folder, no-login user — and restarts the
+// service only when something it runs on actually changed. It is both the
+// CREATE and the UPDATE of the -provision command (ADR-0042: provision changes
+// re-run in place, never replace), so every step is change-detected:
+//
+//   - the agent binary is downloaded only when the installed sha256 differs
+//     from the release checksum (k co-located services no longer re-download
+//     the same multi-MB asset k times, and a no-op update needs no GitHub);
+//   - the unit file is rewritten (+ daemon-reload) only when its bytes differ;
+//   - `systemctl try-restart` runs only when either changed — a cosmetic
+//     script edit must never restart the fleet, and a not-yet-released
+//     service stays down (try-restart ignores inactive units).
+//
+// All caller-supplied values interpolated into the shell are quoted.
 func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string {
 	steps := []string{
 		"set -euo pipefail",
+		"changed=\"\"",
 		agentDownloadStep(inforgeVersion),
 	}
 	if svc.User != "" {
 		steps = append(steps, fmt.Sprintf(
 			"sudo useradd --system --shell /usr/sbin/nologin %s 2>/dev/null || true", iremote.Quote(svc.User)))
 	}
+	unitPath := iremote.Quote(service.UnitPath(svc.Name))
 	steps = append(steps,
 		// Service folder: root-owned, world-readable. The svc user gets r-x (no
 		// write); release extracts the payload into it as root.
 		fmt.Sprintf("sudo install -d -m 0755 %s", iremote.Quote(service.Folder(svc.Name))),
-		iremote.WriteFileScript(service.UnitPath(svc.Name), service.Unit(svc)),
-		"sudo systemctl daemon-reload",
+		// Write the unit to a temp file and install it only when the bytes
+		// differ — the daemon-reload and the restart below key off this.
+		"unit_tmp=$(mktemp)",
+		// One combined trap: a second `trap ... EXIT` REPLACES the first, so
+		// re-arming with all three temps keeps the agent step's $tmp/$sums
+		// covered too.
+		"trap 'rm -f \"$tmp\" \"$sums\" \"$unit_tmp\"' EXIT",
+		// base64 is shell-alphabet-safe, so the unit content needs no quoting
+		// gymnastics (same scheme as iremote.WriteFileScript, but into OUR temp
+		// path variable, which that helper's quoted-literal path cannot target).
+		fmt.Sprintf("printf '%%s' %s | base64 -d > \"$unit_tmp\"", base64.StdEncoding.EncodeToString([]byte(service.Unit(svc)))),
+		fmt.Sprintf("if ! sudo cmp -s \"$unit_tmp\" %s; then", unitPath),
+		fmt.Sprintf("  sudo install -m 0644 \"$unit_tmp\" %s", unitPath),
+		"  sudo systemctl daemon-reload",
+		"  changed=1",
+		"fi",
 		// enable --now is safe on a first deploy, before any release has landed a
 		// binary: the unit carries ConditionPathExists=<exec>, so systemd skips the
 		// start and exits 0 rather than failing. The service's real first start
 		// still comes from `inforge releases deploy`, once the code is present.
 		fmt.Sprintf("sudo systemctl enable --now %s", iremote.Quote(service.UnitName(svc.Name))),
-		// try-restart: the same script is the resource's UPDATE (ADR-0042 — a
-		// provision change is an in-place converge, never a replace), and an
-		// update means the agent binary or the unit changed; only a restart makes
-		// the RUNNING process pick either up. try-restart restarts only an active
-		// unit, so a not-yet-released service stays down and the first CREATE is
-		// a no-op.
-		fmt.Sprintf("sudo systemctl try-restart %s", iremote.Quote(service.UnitName(svc.Name))),
+		// Restart ONLY when the binary or the unit changed above: only a restart
+		// makes the RUNNING process pick either up, and nothing else may restart
+		// it (a cosmetic script change re-runs this whole script — ADR-0042 — and
+		// must be a true no-op on the host). try-restart ignores inactive units.
+		fmt.Sprintf("[ -z \"$changed\" ] || sudo systemctl try-restart %s", iremote.Quote(service.UnitName(svc.Name))),
 	)
 	// An mtls_files: service's leaf.age is delivered later by `inforge pki
 	// renew`'s SSH push, which also signals reload-or-restart directly — there
@@ -1630,9 +1664,10 @@ func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string
 	return strings.Join(steps, "\n")
 }
 
-// agentDownloadStep renders the idempotent shell that downloads the
-// inforge-agent raw release binary onto the host, verifies its checksum, and
-// installs it at service.AgentBin. The host arch is detected on the host
+// agentDownloadStep renders the idempotent shell that ensures the pinned
+// inforge-agent release binary is installed at service.AgentBin, downloading
+// and checksum-verifying it only when the installed sha256 differs (it sets
+// the enclosing script's `changed` flag when it installs). The host arch is detected on the host
 // (uname -m → Go arch), the version is pinned to the deploying inforge build, and
 // the goreleaser raw-asset name scheme is mirrored (inforge-agent_<ver>_linux_<arch>,
 // under the v<ver> release tag). The binary's sha256 is verified against the
@@ -1642,6 +1677,7 @@ func serviceProvisionScript(svc types.ServiceSpec, inforgeVersion string) string
 // The version is single-quoted into a shell var so it is injection-safe while
 // still composing with the shell-side ${arch} expansion.
 func agentDownloadStep(inforgeVersion string) string {
+	agentBin := iremote.Quote(service.AgentBin)
 	return strings.Join([]string{
 		"ver=" + iremote.Quote(inforgeVersion),
 		hostpaths.ArchDetectShell,
@@ -1650,15 +1686,24 @@ func agentDownloadStep(inforgeVersion string) string {
 		"tmp=$(mktemp)",
 		"sums=$(mktemp)",
 		"trap 'rm -f \"$tmp\" \"$sums\"' EXIT",
-		"curl -fsSL \"${base}/${asset}\" -o \"$tmp\"",
+		// The tiny checksums file is fetched FIRST and compared against the
+		// installed binary: on a converge where the pinned version is already
+		// installed (the common case — k co-located services each run this
+		// script), the multi-MB binary download and the install are skipped
+		// entirely. `changed` feeds the caller's conditional try-restart.
 		"curl -fsSL \"${base}/checksums.txt\" -o \"$sums\"",
 		// Pull the expected sha256 for exactly this asset from the release
 		// checksums; an absent line (empty want) is a hard failure.
 		"want=$(awk -v f=\"$asset\" '$2==f {print $1}' \"$sums\")",
 		"[ -n \"$want\" ] || { echo \"no checksum for $asset in release\" >&2; exit 1; }",
-		"got=$(sha256sum \"$tmp\" | awk '{print $1}')",
-		"[ \"$want\" = \"$got\" ] || { echo \"checksum mismatch for $asset\" >&2; exit 1; }",
-		fmt.Sprintf("sudo install -m 0755 \"$tmp\" %s", iremote.Quote(service.AgentBin)),
+		fmt.Sprintf("have=$([ -f %s ] && sha256sum %s | awk '{print $1}' || true)", agentBin, agentBin),
+		"if [ \"$have\" != \"$want\" ]; then",
+		"  curl -fsSL \"${base}/${asset}\" -o \"$tmp\"",
+		"  got=$(sha256sum \"$tmp\" | awk '{print $1}')",
+		"  [ \"$want\" = \"$got\" ] || { echo \"checksum mismatch for $asset\" >&2; exit 1; }",
+		fmt.Sprintf("  sudo install -m 0755 \"$tmp\" %s", agentBin),
+		"  changed=1",
+		"fi",
 	}, "\n")
 }
 

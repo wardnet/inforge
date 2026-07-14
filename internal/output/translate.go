@@ -22,6 +22,12 @@ type opInfo struct {
 	// the destructive-operations section. Empty means the delete is not known
 	// to destroy host state (or the op is not a delete).
 	destroys string
+	// suppressOnReplace keeps the ⚠ off OpDeleteReplaced for kinds whose
+	// trigger-driven replace is the ROUTINE change path (the delete-free
+	// -secrets command post-ADR-0042): warning on every secret rotation would
+	// train operators to ignore the section. True removal (OpDelete) always
+	// warns.
+	suppressOnReplace bool
 }
 
 // display renders "kind subject (scope)" with the scope omitted when unknown.
@@ -40,10 +46,9 @@ func (i opInfo) display() string {
 // (`wardnet-<env>[-<slug>]-<type>-<rest>`). The token AFTER the env is a region
 // slug only when it is not one of these — naming.GlobalResource omits the slug.
 var namedTypes = map[string]bool{
-	"vm": true, "fw": true, "net": true, "subnet": true, "db": true,
-	"project": true, "secrets": true, "workspace": true, "record": true,
-	"ingress": true, "svc": true, "identity": true, "app": true, "key": true,
-	"dbrole": true, "dbbackup": true, "mesh": true, "otelcol": true,
+	"vm": true, "fw": true, "net": true, "subnet": true, "vol": true,
+	"db": true, "record": true, "ingress": true, "svc": true, "app": true,
+	"key": true, "dbrole": true, "dbbackup": true, "mesh": true, "otelcol": true,
 }
 
 // translate parses a Pulumi resource name (plus its type token) into the human
@@ -64,17 +69,25 @@ func parseWardnetName(name string) (opInfo, bool) {
 	if len(parts) < 4 || parts[0] != "wardnet" {
 		return opInfo{}, false
 	}
-	// parts[1] is the env. parts[2] is either the region slug or (for an
-	// env-global name) already the type token.
-	scope, rest := "", parts[2:]
-	if !namedTypes[rest[0]] {
-		scope, rest = rest[0], rest[1:]
-		if len(rest) < 2 || !namedTypes[rest[0]] {
-			return opInfo{}, false
+	// The env itself may contain hyphens (an ephemeral env is "eph-<rand>"), so
+	// the type token is FOUND, not assumed at a fixed index: the first token
+	// after the env prefix that is a known type. The token immediately before
+	// it (when not the env's own tail... i.e. when at least env+scope precede)
+	// is the region slug; an env-global name has the type right after the env.
+	// A region slug that collides with a type token would fool this scan — as
+	// would any positional scheme; slugs are short airport-style codes in
+	// practice, and the fallback is the raw name, never a wrong warning.
+	for i := 2; i < len(parts)-1; i++ {
+		if !namedTypes[parts[i]] {
+			continue
 		}
+		scope := ""
+		if i > 2 {
+			scope = parts[i-1]
+		}
+		return classify(parts[i], strings.Join(parts[i+1:], "-"), scope), true
 	}
-	typ, tail := rest[0], strings.Join(rest[1:], "-")
-	return classify(typ, tail, scope), true
+	return opInfo{}, false
 }
 
 // classify maps a (type token, remaining name) pair onto its human kind, its
@@ -90,7 +103,12 @@ func classify(typ, tail, scope string) opInfo {
 		}
 		if s, ok := cut("-secrets"); ok {
 			return opInfo{kind: "service config+secrets", subject: s, scope: scope,
-				destroys: fmt.Sprintf("removes service %q's descriptor.yaml + secrets.age — the service dies on its next restart (pre-ADR-0042 recorded delete)", s)}
+				// destroys describes the worst case: a delete script recorded by a
+				// pre-ADR-0042 deploy. Post-migration the command is delete-free and
+				// its routine trigger-driven replaces destroy nothing — hence
+				// suppressOnReplace: the ⚠ fires only on true removal.
+				suppressOnReplace: true,
+				destroys:          fmt.Sprintf("removes service %q's descriptor.yaml + secrets.age — the service dies on its next restart (pre-ADR-0042 recorded delete)", s)}
 		}
 		i.kind = "service"
 	case "dbrole":
@@ -100,8 +118,17 @@ func classify(typ, tail, scope string) opInfo {
 		}
 		i.kind = "db role"
 	case "db":
-		// The cluster command chain: <cluster>-install|-mount|-init|-apply and the
-		// per-database <cluster>-db-<database> ensure.
+		// The per-database <cluster>-db-<database> ensure is matched FIRST: a
+		// database legitimately named "install"/"apply"/... would otherwise be
+		// eaten by the cluster step-suffix cuts below.
+		if cluster, database, ok := strings.Cut(tail, "-db-"); ok {
+			return opInfo{kind: "database", subject: database + " @ " + cluster, scope: scope,
+				// The -db- command has NO delete script: a delete op here is Pulumi
+				// forgetting the resource. Say so — silence is how data-bearing
+				// state gets orphaned invisibly.
+				destroys: fmt.Sprintf("forgets database %q from state ONLY — the on-host database and its data are NOT deleted; drop it manually if intended", database)}
+		}
+		// The cluster command chain: <cluster>-install|-mount|-init|-apply.
 		for _, step := range []struct{ suffix, kind string }{
 			{"-install", "postgres install"}, {"-mount", "postgres volume"},
 			{"-init", "postgres initdb"}, {"-apply", "postgres config"},
@@ -109,13 +136,6 @@ func classify(typ, tail, scope string) opInfo {
 			if s, ok := cut(step.suffix); ok {
 				return opInfo{kind: step.kind, subject: s, scope: scope}
 			}
-		}
-		if cluster, database, ok := strings.Cut(tail, "-db-"); ok {
-			return opInfo{kind: "database", subject: database + " @ " + cluster, scope: scope,
-				// The -db- command has NO delete script: a delete op here is Pulumi
-				// forgetting the resource. Say so — silence is how data-bearing
-				// state gets orphaned invisibly.
-				destroys: fmt.Sprintf("forgets database %q from state ONLY — the on-host database and its data are NOT deleted; drop it manually if intended", database)}
 		}
 		i.kind = "db cluster"
 	case "dbbackup":
@@ -140,6 +160,8 @@ func classify(typ, tail, scope string) opInfo {
 		i.kind = "mesh proxy"
 	case "vm":
 		i.kind, i.destroys = "server", fmt.Sprintf("DESTROYS server %q and its disk", tail)
+	case "vol":
+		i.kind, i.destroys = "data volume", fmt.Sprintf("DESTROYS data volume %q and everything stored on it (a Postgres cluster's PGDATA lives here)", tail)
 	case "fw":
 		i.kind, i.destroys = "firewall", "deletes the cloud firewall"
 	case "net":

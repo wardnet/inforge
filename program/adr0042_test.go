@@ -107,4 +107,11 @@ func TestServiceProvisionScriptTryRestartsAfterEnable(t *testing.T) {
 	require.Greater(t, enable, -1, "provision must enable the unit")
 	require.Greater(t, restart, -1, "provision must try-restart so an update moves the running service onto the new binary/unit")
 	assert.Greater(t, restart, enable, "try-restart must come after enable --now")
+	// The restart is gated on real change (binary sha or unit bytes): a cosmetic
+	// provision-script edit re-runs this script on every host (ADR-0042 update-
+	// in-place) and must NOT restart the fleet.
+	assert.Contains(t, got, `[ -z "$changed" ] || sudo systemctl try-restart`,
+		"the try-restart must be conditional on the changed flag")
+	assert.Contains(t, got, `if [ "$have" != "$want" ]`,
+		"the agent download must be skipped when the installed sha matches the release checksum")
 }
