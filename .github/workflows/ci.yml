@@ -98,7 +98,7 @@ jobs:
       # it would trade that for nothing — the supply-chain risk the rule guards against
       # is the same risk we'd be taking on our own repo either way.
       # nosemgrep: yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
-      - uses: wardnet/bulwark@v1
+      - uses: wardnet/bulwark@v1.3.0
         with:
           tests-mode: skip
           go-report: coverage.out
