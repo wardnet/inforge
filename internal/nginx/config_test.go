@@ -76,6 +76,68 @@ stream {
 	assert.Equal(t, want, got)
 }
 
+// TestRenderRateLimit checks the ADR-0043 IP rate-limit rendering: one uniform limit
+// stamped on a tls-termination route (http limit_req + limit_conn) and a forward route
+// (stream limit_conn), with each shared-memory zone declared exactly once per context
+// and throttled requests answered 429 rather than nginx's default 503.
+func TestRenderRateLimit(t *testing.T) {
+	rl := &types.RateLimitProfile{Name: "edge", RPS: 20, Burst: 40, MaxConn: 40}
+	routes := []types.IngressRoute{
+		{Service: "dns", Type: types.IngressTypeForward, Listen: 853, Target: 5353, Backend: "127.0.0.1", RateLimit: rl},
+		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Backend: "127.0.0.1",
+			FQDNs: []string{"api.svc.prd.use1.wardnet.network"}, RateLimit: rl},
+	}
+	got, err := Render(routes, nil, nil, 0, nil)
+	require.NoError(t, err)
+
+	// http{} zones, declared once, with the 429 status overrides.
+	assert.Contains(t, got, "limit_req_zone $binary_remote_addr zone=rl_edge:10m rate=20r/s;")
+	assert.Contains(t, got, "limit_conn_zone $binary_remote_addr zone=rlc_edge:10m;")
+	assert.Contains(t, got, "limit_req_status 429;")
+	assert.Contains(t, got, "limit_conn_status 429;")
+	assert.Equal(t, 1, strings.Count(got, "limit_req_zone $binary_remote_addr zone=rl_edge"), "req zone declared once")
+
+	// per-location http limits on the tls-termination server.
+	assert.Contains(t, got, "limit_req zone=rl_edge burst=40 nodelay;")
+	assert.Contains(t, got, "limit_conn rlc_edge 40;")
+
+	// stream (forward) connection limit — its own zone namespace.
+	assert.Contains(t, got, "limit_conn_zone $binary_remote_addr zone=rls_edge:10m;")
+	assert.Contains(t, got, "limit_conn rls_edge 40;")
+}
+
+// TestRenderRateLimitExemptsHealthAndACME confirms the limit lands only on the
+// service-facing locations: the public health servers and the :80 ACME/redirect server
+// are never rate-limited (they are rendered by separate functions that carry no profile).
+func TestRenderRateLimitExemptsHealthAndACME(t *testing.T) {
+	rl := &types.RateLimitProfile{Name: "edge", RPS: 20, Burst: 40, MaxConn: 40}
+	routes := []types.IngressRoute{
+		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Backend: "127.0.0.1",
+			FQDNs: []string{"api.svc.prd.use1.wardnet.network"}, RateLimit: rl},
+	}
+	health := []types.IngressHealth{
+		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 9000, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
+	}
+	got, err := Render(routes, nil, health, 81, nil)
+	require.NoError(t, err)
+	// Exactly one limited location — the tls-termination route. Health + ACME are exempt.
+	assert.Equal(t, 1, strings.Count(got, "limit_req zone=rl_edge"))
+	assert.Contains(t, got, "listen 81;") // the health server exists...
+}
+
+// TestRenderNoRateLimit guards the golden's premise: a nil profile emits no limit
+// directives at all, so an env without rate limiting renders byte-identically to before.
+func TestRenderNoRateLimit(t *testing.T) {
+	routes := []types.IngressRoute{
+		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Backend: "127.0.0.1",
+			FQDNs: []string{"api.svc.prd.use1.wardnet.network"}},
+	}
+	got, err := Render(routes, nil, nil, 0, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, got, "limit_req")
+	assert.NotContains(t, got, "limit_conn")
+}
+
 // TestRenderMixedPreread pins the mixed-port shape: two tls-termination services
 // and one forward (passthrough) sharing listen 443. The public :443 moves into a
 // stream{} ssl_preread server that maps known SNIs to an internal loopback

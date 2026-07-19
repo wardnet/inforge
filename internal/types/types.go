@@ -359,6 +359,24 @@ type PKIResourceSpec struct {
 	Validity  string `yaml:"validity,omitempty"` // optional CA validity (e.g. "10y")
 }
 
+// RateLimitProfile is the resolved IP-based rate limit applied to an edge's public
+// servers (ADR-0043). Rate limiting is a blanket ingress SECURITY measure, not per-route
+// tuning: one limit is derived at deploy from the env's security.rate_limit block and
+// stamped UNIFORMLY on every server of an edge (per-route / per-identity limits are a
+// gateway-module concern — ADR-0044 — not this layer). It rides on the ingress-derived
+// server structs (IngressRoute/IngressApp/IngressGateway) so the nginx renderer emits the
+// shared-memory zone and the per-server limit directives without a wider signature; a nil
+// pointer means the edge has no rate limiting (disabled, or opted out via `security:
+// false`). Name is the nginx zone stem (a fixed constant, since the limit is uniform).
+// Keying is always the client IP (ADR-0043); RPS/Burst drive limit_req (http only —
+// ignored for an L4 forward), MaxConn drives limit_conn (http and stream).
+type RateLimitProfile struct {
+	Name    string // nginx zone stem (a fixed constant — the limit is edge-uniform)
+	RPS     int    // requests/second (limit_req rate); 0 disables request-rate limiting
+	Burst   int    // queued excess before a 429 (limit_req burst)
+	MaxConn int    // max concurrent connections per client IP (limit_conn); 0 disables
+}
+
 // IngressRoute is one typed inbound routing entry the ingress proxy (nginx)
 // realizes, derived from one route of one service that references the ingress.
 // The ingress is the sole public entry point: nginx fronts the service on the
@@ -385,6 +403,10 @@ type IngressRoute struct {
 	Listen  int      // public port the ingress accepts traffic on
 	Target  int      // backend port the service listens on
 	Backend string   // backend address nginx proxies to ("127.0.0.1" co-located; private IP cross-host)
+	// RateLimit is the resolved rate-limit profile for this route (nil = none). A
+	// tls-termination route uses RPS/Burst (limit_req) and MaxConn (limit_conn); a
+	// forward route uses only MaxConn (stream limit_conn — L4 has no request rate).
+	RateLimit *RateLimitProfile
 }
 
 // IngressApp is one static front-end (SPA) the ingress proxy (nginx) serves from
@@ -401,6 +423,8 @@ type IngressApp struct {
 	FQDN string // fully-qualified app domain (single SNI / ACME cert)
 	Root string // on-host document root nginx serves (the `current` symlink)
 	Spa  bool   // true -> try_files fallback to /index.html (SPA deep links)
+	// RateLimit is the resolved rate-limit profile for this app's server (nil = none).
+	RateLimit *RateLimitProfile
 }
 
 // IngressHealth is one service health endpoint the ingress proxy (nginx) surfaces,
@@ -435,6 +459,9 @@ type IngressGateway struct {
 	FQDN             string // fully-qualified gateway domain (single SNI / ACME cert)
 	Routes           []IngressGatewayRoute
 	HealthProbePaths []string // exact paths on the 443 server nginx answers 200 "ok" directly (edge liveness)
+	// RateLimit is the resolved rate-limit profile applied to this gateway's mesh-route
+	// locations (nil = none). The edge health-probe locations are never limited.
+	RateLimit *RateLimitProfile
 }
 
 // IngressGatewayRoute is one derived path route on the gateway server: daemon

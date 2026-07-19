@@ -298,6 +298,19 @@ func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health [
 			dir("real_ip_header", "proxy_protocol"),
 		)
 	}
+	// Rate-limit zones for every profile an http server on this host references,
+	// declared once in http{} before the servers that consume them (ADR-0043).
+	var httpProfiles []*types.RateLimitProfile
+	for _, r := range terminate {
+		httpProfiles = append(httpProfiles, r.RateLimit)
+	}
+	for _, a := range apps {
+		httpProfiles = append(httpProfiles, a.RateLimit)
+	}
+	for _, g := range gateways {
+		httpProfiles = append(httpProfiles, g.RateLimit)
+	}
+	children = append(children, httpRateLimitZones(httpProfiles)...)
 	for _, r := range terminate {
 		children = append(children, terminateServer(r, listenDir(r.Listen)))
 	}
@@ -333,6 +346,12 @@ func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health [
 // accepting the PROXY protocol). Render has already verified r.Backend is non-empty.
 func terminateServer(r types.IngressRoute, listen *crossplane.Directive) *crossplane.Directive {
 	serverName := append([]string{}, r.FQDNs...)
+	loc := append(rlHTTPLimitDirs(r.RateLimit),
+		dir("proxy_pass", fmt.Sprintf("http://%s:%d", r.Backend, r.Target)),
+		dir("proxy_set_header", "Host", "$host"),
+		dir("proxy_set_header", "X-Forwarded-For", "$proxy_add_x_forwarded_for"),
+		dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
+	)
 	return block("server", nil,
 		listen,
 		dir("server_name", serverName...),
@@ -340,12 +359,7 @@ func terminateServer(r types.IngressRoute, listen *crossplane.Directive) *crossp
 		dir("ssl_certificate", "$acme_certificate"),
 		dir("ssl_certificate_key", "$acme_certificate_key"),
 		dir("ssl_certificate_cache", "max=2"),
-		block("location", []string{"/"},
-			dir("proxy_pass", fmt.Sprintf("http://%s:%d", r.Backend, r.Target)),
-			dir("proxy_set_header", "Host", "$host"),
-			dir("proxy_set_header", "X-Forwarded-For", "$proxy_add_x_forwarded_for"),
-			dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
-		),
+		block("location", []string{"/"}, loc...),
 	)
 }
 
@@ -359,6 +373,7 @@ func appServer(a types.IngressApp, listen *crossplane.Directive) *crossplane.Dir
 	if a.Spa {
 		fallback = []string{"$uri", "$uri/", "/index.html"}
 	}
+	loc := append(rlHTTPLimitDirs(a.RateLimit), dir("try_files", fallback...))
 	return block("server", nil,
 		listen,
 		dir("server_name", a.FQDN),
@@ -368,9 +383,7 @@ func appServer(a types.IngressApp, listen *crossplane.Directive) *crossplane.Dir
 		dir("ssl_certificate_cache", "max=2"),
 		dir("root", a.Root),
 		dir("index", "index.html"),
-		block("location", []string{"/"},
-			dir("try_files", fallback...),
-		),
+		block("location", []string{"/"}, loc...),
 	)
 }
 
@@ -423,23 +436,22 @@ func gatewayServer(g types.IngressGateway, listen *crossplane.Directive, regexOf
 		))
 	}
 	for _, rt := range routes {
-		children = append(children,
-			block("location", []string{"~", regexOf[rt.Pattern]},
-				dir("proxy_http_version", "1.1"),
-				dir("proxy_set_header", "Upgrade", "$http_upgrade"),
-				dir("proxy_set_header", "Connection", "$connection_upgrade"),
-				dir("proxy_set_header", "Host", "$host"),
-				// SET, never append: this is the internet-facing first hop, so a
-				// daemon-supplied X-Forwarded-For is untrusted input — appending
-				// ($proxy_add_x_forwarded_for) would forward a forged first entry
-				// through the mesh and defeat per-IP audit/rate-limit logic.
-				dir("proxy_set_header", "X-Forwarded-For", "$remote_addr"),
-				dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
-				dir("proxy_set_header", "X-Mesh-Target", rt.Service),
-				dir("proxy_read_timeout", "3600s"),
-				dir("proxy_pass", fmt.Sprintf("http://127.0.0.1:%d", meshpaths.GatewayEgressPort)),
-			),
+		loc := append(rlHTTPLimitDirs(g.RateLimit),
+			dir("proxy_http_version", "1.1"),
+			dir("proxy_set_header", "Upgrade", "$http_upgrade"),
+			dir("proxy_set_header", "Connection", "$connection_upgrade"),
+			dir("proxy_set_header", "Host", "$host"),
+			// SET, never append: this is the internet-facing first hop, so a
+			// daemon-supplied X-Forwarded-For is untrusted input — appending
+			// ($proxy_add_x_forwarded_for) would forward a forged first entry
+			// through the mesh and defeat per-IP audit/rate-limit logic.
+			dir("proxy_set_header", "X-Forwarded-For", "$remote_addr"),
+			dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
+			dir("proxy_set_header", "X-Mesh-Target", rt.Service),
+			dir("proxy_read_timeout", "3600s"),
+			dir("proxy_pass", fmt.Sprintf("http://127.0.0.1:%d", meshpaths.GatewayEgressPort)),
 		)
+		children = append(children, block("location", []string{"~", regexOf[rt.Pattern]}, loc...))
 	}
 	children = append(children, jsonNotFoundLocation())
 	return block("server", nil, children...)
@@ -505,6 +517,20 @@ func healthServer(h types.IngressHealth, healthPort int) *crossplane.Directive {
 // ports keep the plain raw-L4 server.
 func streamBlock(forwardOnly []types.IngressRoute, mixed []mixedPort) *crossplane.Directive {
 	var children crossplane.Directives
+	// Stream limit_conn zones for the forward servers carrying a rate-limit profile,
+	// declared once at stream{} scope before the servers use them (ADR-0043). Only
+	// connection limiting applies at L4 — there is no request rate to shape. A forward
+	// sharing a mixed port is fronted by the ssl_preread server and is not limited here
+	// (its socket also carries the terminators' traffic); only forward-only ports are.
+	var streamProfiles []*types.RateLimitProfile
+	for _, r := range forwardOnly {
+		streamProfiles = append(streamProfiles, r.RateLimit)
+	}
+	for _, p := range dedupeProfiles(streamProfiles) {
+		if p.MaxConn > 0 {
+			children = append(children, dir("limit_conn_zone", "$binary_remote_addr", "zone="+rlStreamConnZone(p.Name)+":"+rlZoneSize))
+		}
+	}
 	for _, mp := range mixed {
 		entries := make(crossplane.Directives, 0, len(mp.fqdns)+1)
 		for _, fqdn := range mp.fqdns {
@@ -525,13 +551,101 @@ func streamBlock(forwardOnly []types.IngressRoute, mixed []mixedPort) *crossplan
 		))
 	}
 	for _, r := range forwardOnly {
-		children = append(children, block("server", nil,
-			dir("listen", strconv.Itoa(r.Listen)),
+		srv := crossplane.Directives{dir("listen", strconv.Itoa(r.Listen))}
+		srv = append(srv, rlStreamLimitDirs(r.RateLimit)...)
+		srv = append(srv,
 			dir("proxy_pass", fmt.Sprintf("%s:%d", r.Backend, r.Target)),
 			dir("proxy_protocol", "on"),
-		))
+		)
+		children = append(children, block("server", nil, srv...))
 	}
 	return block("stream", nil, children...)
+}
+
+// Rate limiting (ADR-0043). Each referenced profile becomes one shared-memory zone in
+// http{} (and/or stream{}); every server carrying the profile emits the matching
+// limit_req/limit_conn directives inside its location. Keying is always the client IP
+// ($binary_remote_addr) — accurate here because set_real_ip recovers the true address on
+// ssl_preread'd mixed ports in POST_READ, before the preaccess phase where limit_req runs.
+const rlZoneSize = "10m"
+
+// rlReqZone/rlConnZone/rlStreamConnZone name the shared-memory zones for a profile.
+// The prefixes keep them clear of other nginx names and keep the http and stream
+// limit_conn zones distinct (separate nginx contexts, rendered independently).
+func rlReqZone(name string) string        { return "rl_" + name }
+func rlConnZone(name string) string       { return "rlc_" + name }
+func rlStreamConnZone(name string) string { return "rls_" + name }
+
+// rlHTTPLimitDirs are the per-location limit directives for an http server carrying
+// profile p (nil -> none). limit_req is emitted only when the profile sets a rate,
+// limit_conn only when it caps connections — so a profile may do either or both.
+func rlHTTPLimitDirs(p *types.RateLimitProfile) []*crossplane.Directive {
+	if p == nil {
+		return nil
+	}
+	var d []*crossplane.Directive
+	if p.RPS > 0 {
+		d = append(d, dir("limit_req", "zone="+rlReqZone(p.Name), fmt.Sprintf("burst=%d", p.Burst), "nodelay"))
+	}
+	if p.MaxConn > 0 {
+		d = append(d, dir("limit_conn", rlConnZone(p.Name), strconv.Itoa(p.MaxConn)))
+	}
+	return d
+}
+
+// rlStreamLimitDirs are the per-server limit directives for a stream (forward) server:
+// only connection limiting applies at L4 (there is no request rate to shape).
+func rlStreamLimitDirs(p *types.RateLimitProfile) []*crossplane.Directive {
+	if p == nil || p.MaxConn <= 0 {
+		return nil
+	}
+	return []*crossplane.Directive{dir("limit_conn", rlStreamConnZone(p.Name), strconv.Itoa(p.MaxConn))}
+}
+
+// dedupeProfiles returns the distinct profiles among the pointers, sorted by name, so
+// zone emission is deterministic and each zone is declared exactly once per context.
+func dedupeProfiles(ps []*types.RateLimitProfile) []*types.RateLimitProfile {
+	seen := map[string]*types.RateLimitProfile{}
+	for _, p := range ps {
+		if p != nil {
+			seen[p.Name] = p
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]*types.RateLimitProfile, 0, len(names))
+	for _, n := range names {
+		out = append(out, seen[n])
+	}
+	return out
+}
+
+// httpRateLimitZones renders the http{} shared-memory zones plus the status overrides
+// for every profile an http server references. limit_req_status/limit_conn_status make a
+// throttled request answer 429 (CrowdSec-parseable) rather than nginx's default 503.
+func httpRateLimitZones(profiles []*types.RateLimitProfile) []*crossplane.Directive {
+	var out []*crossplane.Directive
+	anyReq, anyConn := false, false
+	for _, p := range dedupeProfiles(profiles) {
+		if p.RPS > 0 {
+			out = append(out, dir("limit_req_zone", "$binary_remote_addr", "zone="+rlReqZone(p.Name)+":"+rlZoneSize, fmt.Sprintf("rate=%dr/s", p.RPS)))
+			anyReq = true
+		}
+		if p.MaxConn > 0 {
+			out = append(out, dir("limit_conn_zone", "$binary_remote_addr", "zone="+rlConnZone(p.Name)+":"+rlZoneSize))
+			anyConn = true
+		}
+	}
+	if anyReq {
+		out = append(out, dir("limit_req_status", "429"))
+	}
+	if anyConn {
+		out = append(out, dir("limit_conn_status", "429"))
+	}
+	return out
 }
 
 // sortedIntKeys returns the keys of an int set as an ascending slice.

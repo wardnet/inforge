@@ -35,6 +35,23 @@ mesh (mTLS-proven `X-Service-Identity=gateway`), never from an arbitrary caller.
 
 ## Decisions
 
+- **This tier owns per-route and per-identity limits; the ingress security floor
+  (ADR-0043) does not.** ADR-0043 is a blanket IP rate limit applied uniformly to every
+  edge server as a security measure. Finer limits — per route, per API key, per verified
+  client — are application logic keyed on a *verified* identity, which only exists once
+  authentication is at the gateway. They are therefore defined and enforced here, on top of
+  the IP floor below.
+
+- **The enforcement mechanism for auth (and identity-keyed limits) is an open choice
+  between two shapes, both compatible with the stock-nginx render.** (a) `auth_request` →
+  a co-located auth service (below), or (b) a **custom nginx dynamic module** (compiled,
+  e.g. via `ngx-rust`) that validates the token and enforces per-route/identity limits
+  inline — no per-request subrequest, richest control, but it owns a module built against
+  each nginx version (the version-coupling cost that ruled out ModSecurity in ADR-0043).
+  The `auth_request` shape is the lower-risk default and the one the rest of this ADR
+  details; the dynamic module is the higher-ceiling alternative if the subrequest hop or
+  the split enforcement point ever bites. This choice is deliberately left open here.
+
 - **nginx stays the router; authentication is added via the built-in `auth_request`
   directive — no lua/njs JWT logic in nginx.** nginx is an excellent TLS-terminating,
   path-routing edge and is already rendered deterministically (`internal/nginx`,

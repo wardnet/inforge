@@ -52,45 +52,19 @@ security:
     # version: "1.6.4"         # optional pin; else inforge's DefaultVersion
     # console: true            # optional dashboard enrollment (needs reserved secret)
   rate_limit:
-    default_profile: standard  # applied to EVERY public server unless overridden
-    profiles:
-      standard:
-        requests_per_second: 20
-        burst: 40              # queued excess before a 429
-        max_connections: 40    # concurrent conns per client IP
-      strict:
-        requests_per_second: 5
-        burst: 10
-        max_connections: 10
-      api:
-        requests_per_second: 100
-        burst: 200
-        max_connections: 200
+    enabled: true              # one blanket IP-based limit on EVERY public edge server
+    requests_per_second: 20
+    burst: 40                  # queued excess before a 429
+    max_connections: 40        # concurrent conns per client IP
 ```
 
-**Profiles, not per-route detail** (mirrors the observability notification-profile
-idiom — `Profiles map[string]Profile` + a `default_profile`, referenced by name). Limits
-are named once; a route selects one with a single token. `default_profile` applies to
-every public server automatically, so "all routes at 20 rps" needs zero per-route
-authoring.
-
-**Per-resource override** references a profile by name (never re-specifies limits):
-
-```yaml
-# service route (resources/<env>/regional/service/<svc>/manifest.yaml)
-routes:
-  - type: tls-termination
-    listen: 443
-    target: 8080
-    rate_limit_profile: strict     # overrides the default for this route
-
-# app (app/<name>/manifest.yaml) and gateway (gateway/<name>/manifest.yaml)
-rate_limit_profile: api            # one profile per app / per gateway
-```
-
-`rate_limit_profile: none` is the reserved sentinel meaning **no limiting** on that
-resource (parallels a `muted` route in notifications). `none` cannot be defined as a
-real profile.
+**One uniform limit, no per-route knobs.** IP rate limiting is a blanket *security*
+measure — a floor applied identically to every public server on an edge, exactly like
+CrowdSec. There is deliberately no per-route/per-app profile: a single
+`requests_per_second`/`burst`/`max_connections` covers the whole edge. Per-route and
+per-identity limits are a *different* concern (application logic, not a security floor)
+and belong to the gateway module once authentication is at the edge — see ADR-0044; they
+are enforced there (the auth service or a custom nginx dynamic module), never here.
 
 **Per-edge opt-out** — an ingress/gateway leaves the whole security tier:
 
@@ -112,28 +86,27 @@ needs no secret.
   is stock-nginx.org (no lua/OpenResty), flows through the existing `internal/nginx`
   crossplane render, and preserves the deterministic-bytes property. `limit_req` is the
   leaky-bucket request-rate limiter; `limit_conn` caps concurrent connections per IP.
-- **Named profiles + a default profile**, keyed by client IP (`$binary_remote_addr`).
-  Modeled directly on `types.NotificationsSpec` profiles: define once, reference by
-  name, one env-level default. Each *referenced* profile renders one
-  `limit_req_zone`/`limit_conn_zone` in `http{}` (deduped by profile name); every server
-  using it emits `limit_req zone=<p> burst=<b> nodelay;` + `limit_conn <p>_conn <n>;`.
-  `limit_req_status 429;` / `limit_conn_status 429;` so rejects are `429` (CrowdSec-
-  parseable), not the nginx default `503`.
-- **v1 keys on client IP only (`$binary_remote_addr`).** Accurate here — grey-cloud records
-  and the ssl_preread `set_real_ip_from`/`proxy_protocol` recovery both yield the true
-  client IP. Identity-based keying (per API key or per verified client) is **deferred**,
-  and deferred for a *reason that resolves itself*: the gateway does not validate the JWT
-  today (ADR-0032 — the service does), so any identity claim at the edge is unverified and
-  spoofable for quota evasion. The moment authentication moves into the gateway (see
-  "Future" below), the claim becomes *verified at the edge* and per-client-identity keying
-  becomes safe to add on the same `limit_req_zone` mechanism — at which point a profile
-  gains an optional `key:` field. Until then, IP is the only trustworthy edge key.
-- **Applies to the http edge servers** (tls-termination routes, apps, gateway). **Health
-  and ACME servers are exempt** — liveness probes and cert issuance must never be
-  throttled. **Forward (L4) routes** get only the profile's `max_connections` via a
-  `stream{}` `limit_conn` (a stream-context zone); `requests_per_second`/`burst` do not
-  apply at L4 and are ignored for a forward route (validation notes this rather than
-  erroring, so a profile can serve both).
+- **One uniform limit per edge, keyed by client IP (`$binary_remote_addr`) — no per-route
+  profiles.** Rate limiting is a security floor, so the same `requests_per_second`/`burst`/
+  `max_connections` is stamped on every public server of an edge, not tuned per route. The
+  renderer resolves that single limit onto each `IngressRoute`/`IngressApp`/`IngressGateway`
+  and emits one `limit_req_zone`/`limit_conn_zone` in `http{}` (deduped — one zone, fixed
+  stem), with `limit_req zone=<z> burst=<b> nodelay;` + `limit_conn <z> <n>;` in each
+  service-facing location. `limit_req_status 429;` / `limit_conn_status 429;` make a
+  throttled request answer `429` (CrowdSec-parseable), not the nginx default `503`.
+- **Client IP is the only key.** Accurate here — grey-cloud records and the ssl_preread
+  `set_real_ip_from`/`proxy_protocol` recovery both yield the true client IP. Per-identity
+  keying is out of scope for this layer entirely: it is application logic, it requires a
+  *verified* identity (which the edge does not have until gateway auth lands — ADR-0032),
+  and it belongs to the gateway module (ADR-0044), not the ingress security floor.
+- **Applies to the service-facing http locations** (tls-termination routes, apps, gateway
+  mesh routes). **Health and ACME servers are exempt** — liveness probes and cert issuance
+  must never be throttled; they are rendered by separate functions that carry no limit, and
+  the gateway's own edge health-probe locations are left unlimited too. **Forward (L4)
+  routes** get only `max_connections` via a `stream{}` `limit_conn` (its own zone
+  namespace); `requests_per_second`/`burst` do not apply at L4. A forward sharing a mixed
+  ssl_preread port is not connection-limited (its socket also carries the terminators'
+  traffic) — a documented v1 limitation.
 - **The private mesh nginx (`internal/meshnginx`) is untouched.** Rate limiting is an
   internet-edge concern; east-west peer traffic is already allowlist-gated.
 
@@ -189,27 +162,28 @@ Grounded in the existing otelcol path (`program.provisionObservability`,
   `ConfigPath`, `BouncerConfigPath`, `AcquisPath`, `DefaultVersion`, reserved-secret
   namespace/key) + `install.go` (`InstallScript`, `AcquisScript`, `BouncerScript`,
   `EnrollScript`, `WriteFileScript`). Pure, Pulumi-free.
-- **`types`** — new `SecurityConfig` (with `Crowdsec` + `RateLimit` sub-blocks and
-  profiles) on `EnvironmentVariables`; a `Security *bool` opt-out on `IngressSpec` and
-  `GatewaySpec`; a `RateLimitProfile string` on `RouteSpec`, `AppSpec`, `GatewaySpec`.
-  Accessors defaulting like `DashboardsEnabled()`.
-- **`schemas`** — extend `environment.json` (the `security` block + profiles),
-  `ingress.json`/`gateway.json` (`security`, `rate_limit_profile`), `service.json` (route
-  `rate_limit_profile`), `app.json` (`rate_limit_profile`).
-- **`loader`** — normalize/trim; default `rate_limit.default_profile`; carry profiles.
-- **`validate`** — new `checkSecurity`: `default_profile` and every `rate_limit_profile`
-  reference resolve to a defined profile (or `none`); profile bounds
-  (`requests_per_second > 0`, `burst >= 0`, `max_connections >= 0`); reserved name `none`
-  not defined; `crowdsec.enabled` with no edge host in the env is an error; console
-  enrollment configured ⇒ reserved secret present.
-- **`internal/nginx/config.go`** — thread the resolved rate-limit plan into `Render(...)`
-  and `IngressProvider.Realize(...)`; emit the zones + per-server directives. The
-  `Realize` signature change ripples to the Hetzner provider and the `types` interface
-  (a mechanical, compile-checked change).
-- **`program.go`** — new `provisionCrowdsec(...)` copied from `provisionObservability` but
-  iterating the ingress∪gateway host set (respecting per-edge opt-out), sharing the
-  memoized `gates` cloud-init map, called in the scope loop beside the observability pass.
-  Rate-limit config is resolved per host and passed into `realizeIngress`.
+- **`types`** — new `SecurityConfig` (with `Crowdsec` + a flat `RateLimit`
+  `{enabled, requests_per_second, burst, max_connections}`) on `EnvironmentVariables`; a
+  `Security *bool` opt-out on `IngressSpec` and `GatewaySpec`. The resolved
+  `RateLimitProfile` (a fixed-stem struct) already rides on the ingress-derived server
+  structs — **no per-route spec fields, and the `IngressProvider.Realize` signature is
+  unchanged.** Accessors defaulting like `DashboardsEnabled()`.
+- **`schemas`** — extend `ingress.json`/`gateway.json` with the boolean `security` opt-out.
+  The `security` block lives in `variables.yaml`, which is struct-decoded (like
+  `observability:`), so no JSON schema changes for the block itself. No per-route schema
+  changes.
+- **`loader`** — normalize/trim; default the rate-limit fields.
+- **`validate`** — new `checkSecurity`: rate-limit bounds (`requests_per_second > 0`,
+  `burst >= 0`, `max_connections >= 0`) when enabled; `crowdsec.enabled` with no edge host
+  in the env is an error; console enrollment configured ⇒ reserved secret present.
+- **`internal/nginx/config.go`** — DONE (commit 1): emits the zones + per-location
+  directives from the `RateLimit` field on the server structs; render is fully unit-tested,
+  and a nil profile renders byte-identically to before.
+- **`program.go`** — resolve the single per-edge `RateLimitProfile` from the env
+  `SecurityConfig` (unless the edge opted out) and stamp it on every server the ingress
+  derivations build for that host; then the new `provisionCrowdsec(...)` (copied from
+  `provisionObservability`) iterating the ingress∪gateway host set, sharing the memoized
+  `gates` cloud-init map, called in the scope loop beside the observability pass.
 - **Docs** — public docs updated per rule `update-public-docs-with-resource-changes`;
   AGENTS.md gains a "Security (edge)" section.
 
@@ -222,20 +196,19 @@ Grounded in the existing otelcol path (`program.provisionObservability`,
   that has never fetched them; a hub outage fails the CrowdSec pass on a fresh edge (an
   already-provisioned host re-runs as a no-op).
 - The edge nginx.conf grows `limit_req_zone`/`limit_conn_zone` blocks; render stays
-  deterministic (zones deduped and sorted by profile name).
+  deterministic (one deduped zone per context, fixed stem).
 - CrowdSec keeps local state (SQLite decisions) on the edge host — surviving reloads,
   rebuilt on host replacement (bans re-learned; the community blocklist re-pulls).
 - New third-party apt source on edge hosts (CrowdSec), same trade-off class as ADR-0031.
 
 ## Future direction
 
-- **Gateway authentication.** Today the gateway routes and forwards the JWT for the
-  service to validate (ADR-0032). Moving *authentication* (token validation → a verified
-  identity header) into the gateway while keeping *authorization* at the service is a
-  natural next step; it also unlocks identity-based rate-limit keying here (the `key:`
-  field noted above). The mechanism that fits this ADR's stock-nginx constraint is nginx's
-  built-in `auth_request` delegating to a dedicated auth service — no lua/njs JWT logic in
-  the router. That belongs in its own ADR; this one only notes the coupling.
+- **Per-route / per-identity limits are a gateway concern, not this layer's.** This ADR is
+  a blanket IP security floor. Finer limits (per route, per API key, per verified client)
+  are application logic that requires a *verified* identity, and are enforced at the gateway
+  module once authentication is at the edge — see ADR-0044 (gateway authentication tier),
+  which owns both the `auth_request`/dynamic-module mechanism and any identity-keyed
+  limiting. This ADR only notes the coupling; it intentionally ships no per-route surface.
 
 ## Considered and rejected
 
