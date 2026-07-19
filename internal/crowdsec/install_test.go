@@ -24,6 +24,14 @@ func TestInstallScriptPinsAgentVersionOnly(t *testing.T) {
 	assert.NotContains(t, s, BouncerPackage+"=")
 }
 
+func TestInstallScriptGivesUnitsARestartPolicy(t *testing.T) {
+	s := InstallScript("")
+	// A crashed security daemon must self-heal, not silently stop enforcing.
+	assert.Contains(t, s, "Restart=always")
+	assert.Contains(t, s, "10-restart.conf")
+	assert.Contains(t, s, "systemctl daemon-reload")
+}
+
 func TestConfigScriptInstallsCollectionsAndRegistersCAPI(t *testing.T) {
 	s := ConfigScript()
 	assert.Contains(t, s, "cscli collections install crowdsecurity/nginx crowdsecurity/base-http-scenarios crowdsecurity/http-cve")
@@ -33,6 +41,26 @@ func TestConfigScriptInstallsCollectionsAndRegistersCAPI(t *testing.T) {
 	// paths appear in the mv target).
 	assert.Contains(t, s, AcquisPath)
 	assert.Contains(t, s, AgentConfigLocal)
+	// The hub index is refreshed BEFORE collections install, or a fresh host can't find them.
+	assert.Contains(t, s, "cscli hub update")
+	assert.Less(t, strings.Index(s, "cscli hub update"), strings.Index(s, "cscli collections install"),
+		"hub update must precede collections install")
+}
+
+func TestAssertScriptRetriesLAPIStatus(t *testing.T) {
+	s := AssertScript()
+	// Poll before the final unsuppressed check, so a just-restarted LAPI does not race.
+	assert.Contains(t, s, "for i in 1 2 3 4 5")
+	assert.Contains(t, s, "cscli lapi status")
+	assert.Contains(t, s, "cscli bouncers list -o json | grep -q 'inforge-fw'")
+}
+
+func TestEnrollScriptSurfacesFailure(t *testing.T) {
+	s := EnrollScript("tok")
+	assert.Contains(t, s, "cscli console enroll 'tok'")
+	// Failure is logged, not silently swallowed by `|| true`.
+	assert.NotContains(t, s, "|| true")
+	assert.Contains(t, s, ">&2")
 }
 
 func TestBouncerScriptIsIdempotentAndRestarts(t *testing.T) {

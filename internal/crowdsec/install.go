@@ -43,6 +43,22 @@ echo "deb [signed-by=%[2]s] https://packagecloud.io/crowdsec/crowdsec/${ID}/ ${V
 %[1]s
 sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y %[5]s %[6]s
 
+# A dead security daemon silently stops enforcing (a crashed bouncer = no bans applied).
+# The packaged units may carry no restart policy, so guarantee one via a drop-in — the same
+# policy inforge writes for every unit it owns (.agents/rules/daemon-units-restart-on-any-exit.md).
+for unit in %[7]s %[8]s; do
+  sudo install -d -m 0755 "/etc/systemd/system/${unit}.service.d"
+  sudo tee "/etc/systemd/system/${unit}.service.d/10-restart.conf" >/dev/null <<'UNIT'
+# Managed by inforge — a daemon has no correct exit.
+[Unit]
+StartLimitIntervalSec=0
+
+[Service]
+Restart=always
+RestartSec=5
+UNIT
+done
+sudo systemctl daemon-reload
 sudo systemctl enable %[7]s %[8]s
 `, aptlock.UpdateCmd(), KeyringPath, RepoKeyURL, RepoListPath, agentPkg, BouncerPackage, AgentService, BouncerService)
 }
@@ -58,6 +74,9 @@ func ConfigScript() string {
 		"set -e",
 		writeFileScript(AgentConfigLocal, agentPrometheusLocal(), "0644", "root:root"),
 		writeFileScript(AcquisPath, nginxAcquis(), "0644", "root:root"),
+		// Refresh the hub index first — a fresh host has none, and `collections install`
+		// fails ("can't find collection") without it, failing the deploy under set -e.
+		"sudo cscli hub update",
 		fmt.Sprintf("sudo cscli collections install %s", strings.Join(Collections, " ")),
 		// Register to the Central API (the community blocklist) unless already registered.
 		"sudo cscli capi status >/dev/null 2>&1 || sudo cscli capi register",
@@ -86,12 +105,14 @@ func BouncerScript(apiKey string) string {
 }
 
 // EnrollScript enrolls the agent to the CrowdSec console with the given token and
-// restarts the agent. It is optional (gated on the reserved crowdsec_enroll secret). The
-// enroll is a no-op-safe best effort: an already-enrolled instance is left as-is.
+// restarts the agent. It is optional (gated on the reserved crowdsec_enroll secret).
+// Console enrollment is non-fatal (an already-enrolled host re-enrolls with an error we
+// tolerate), but a failure is SURFACED to the deploy log rather than silently swallowed —
+// so a bad or expired token is visible instead of a green deploy that never enrolled.
 func EnrollScript(token string) string {
 	return strings.Join([]string{
 		"set -e",
-		fmt.Sprintf("sudo cscli console enroll %s || true", shQuote(token)),
+		fmt.Sprintf(`sudo cscli console enroll %s || echo "inforge: cscli console enroll failed (already enrolled, or a bad/expired token) — verify with 'cscli console status'" >&2`, shQuote(token)),
 		fmt.Sprintf("sudo systemctl restart %s", AgentService),
 	}, "\n")
 }
@@ -102,7 +123,10 @@ func EnrollScript(token string) string {
 func AssertScript() string {
 	return strings.Join([]string{
 		"set -e",
-		"sudo cscli lapi status",
+		// The local API needs a moment to rebind :8080 after the restart above, so poll it
+		// briefly before asserting — otherwise a healthy CrowdSec fails the deploy on a race.
+		"for i in 1 2 3 4 5; do sudo cscli lapi status >/dev/null 2>&1 && break; sleep 2; done",
+		"sudo cscli lapi status", // final, unsuppressed — fails the deploy if still down
 		fmt.Sprintf("sudo cscli bouncers list -o json | grep -q %s", shQuote(BouncerName)),
 	}, "\n")
 }
