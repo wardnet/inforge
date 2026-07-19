@@ -55,14 +55,17 @@ security:
     default_profile: standard  # applied to EVERY public server unless overridden
     profiles:
       standard:
+        key: ip                # rate-limit key: client IP (default)
         requests_per_second: 20
         burst: 40              # queued excess before a 429
         max_connections: 40    # concurrent conns per client IP
       strict:
+        key: ip
         requests_per_second: 5
         burst: 10
         max_connections: 10
       api:
+        key: { header: X-Api-Key }  # key on the API-key header, fall back to IP when absent
         requests_per_second: 100
         burst: 200
         max_connections: 200
@@ -119,6 +122,19 @@ needs no secret.
   using it emits `limit_req zone=<p> burst=<b> nodelay;` + `limit_conn <p>_conn <n>;`.
   `limit_req_status 429;` / `limit_conn_status 429;` so rejects are `429` (CrowdSec-
   parseable), not the nginx default `503`.
+- **Keying is per-profile: `ip` (default) or a custom header, never a JWT claim at the
+  edge.** `key: ip` uses `$binary_remote_addr` (accurate here — grey-cloud records and the
+  ssl_preread `set_real_ip_from`/`proxy_protocol` recovery both yield the true client IP).
+  `key: { header: X-Api-Key }` keys `limit_req` on `$http_x_api_key`, but nginx **skips a
+  limit whose key is empty** (a bypass for header-less requests), so header keying always
+  renders through a `map` that falls back to `$binary_remote_addr` when the header is
+  absent. `limit_conn` stays IP-keyed regardless (connections are not per-request-header).
+  **JWT-claim keying is deliberately excluded**: stock nginx cannot parse a JWT (Plus/njs
+  only), and — the load-bearing reason — the gateway does not validate the JWT (ADR-0032:
+  the service does), so a claim key at the edge is *unverified* and spoofable for quota
+  evasion (set `sub=<victim>` to burn their budget, or rotate `sub` for fresh unlimited
+  buckets). Per-verified-client quotas belong at the service, which holds the validated
+  identity; the edge offers IP and header keying only.
 - **Applies to the http edge servers** (tls-termination routes, apps, gateway). **Health
   and ACME servers are exempt** — liveness probes and cert issuance must never be
   throttled. **Forward (L4) routes** get only the profile's `max_connections` via a
