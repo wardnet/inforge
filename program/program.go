@@ -441,7 +441,7 @@ func Run(ctx *pulumi.Context) error {
 		if err := provisionServices(ctx, sc.res, computeOutputs[sc.key], serviceSecrets, gates, vars.SSH.DeployPrivateKey, env, sc.key, sc.slug, vars.BaseDomain, inforgeVersion, meshReloads); err != nil {
 			return err
 		}
-		if err := provisionObservability(ctx, sc.res, computeOutputs[sc.key], databaseOutputs[sc.key], gates, dbHostTails, vars.Observability, obsAuthB64, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
+		if err := provisionObservability(ctx, sc.res, computeOutputs[sc.key], databaseOutputs[sc.key], gates, dbHostTails, vars.Observability, vars.Security, obsAuthB64, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
 			return err
 		}
 		// The edge security tier (ADR-0043): install CrowdSec + the nftables firewall
@@ -746,11 +746,18 @@ func provisionService(ctx *pulumi.Context, svc types.ServiceSpec, host types.Com
 // authB64 is the base64 OTLP Basic-auth value, already marked secret by the caller;
 // the credential write is built inside an ApplyT over it so the secret is encrypted
 // in Pulumi state (never written as plaintext), mirroring deliverServiceSecrets.
-func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, dbOut map[string]types.DatabaseOutputs, gates map[string]pulumi.Resource, dbHostTails map[string]pulumi.Resource, obs types.ObservabilityConfig, authB64 pulumi.StringOutput, deployPrivateKey, env, slug string) error {
+func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, dbOut map[string]types.DatabaseOutputs, gates map[string]pulumi.Resource, dbHostTails map[string]pulumi.Resource, obs types.ObservabilityConfig, sec types.SecurityConfig, authB64 pulumi.StringOutput, deployPrivateKey, env, slug string) error {
 	if obs.OTLPEndpoint == "" {
 		return nil
 	}
 	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
+	// CrowdSec edge hosts (ADR-0043): on these the collector also scrapes CrowdSec's
+	// loopback Prometheus endpoints. Empty when CrowdSec is off, so a non-edge host (or a
+	// CrowdSec-disabled env) renders a host-metrics-only collector, byte-identical.
+	csEdge := map[string]bool{}
+	if sec.Crowdsec.Enabled {
+		csEdge = crowdsecEdgeHosts(res, naming.CanonicalComputeKeys(res.Compute))
+	}
 	// Postgres cluster ports per host, single-sourced with the realization + firewall
 	// (ADR-0037); used to add a postgresql receiver per co-located cluster.
 	ports := clusterPortsByHost(res, naming.CanonicalComputeKeys(res.Compute))
@@ -860,6 +867,13 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 			pgPasswords = append(pgPasswords, pw.Result)
 		}
 
+		var csScrape []string
+		if csEdge[hostKey] {
+			csScrape = []string{
+				fmt.Sprintf("%s:%d", crowdsec.AgentMetricsAddr, crowdsec.AgentMetricsPort),
+				fmt.Sprintf("%s:%d", crowdsec.BouncerMetricsAddr, crowdsec.BouncerMetricsPort),
+			}
+		}
 		config, err := otelcol.Render(obs.OTLPEndpoint, otelcol.Attributes{
 			HostID:           naming.Resource(env, slug, "vm", hostKey),
 			CloudProvider:    host.CloudProvider,
@@ -868,7 +882,7 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 			MachineType:      host.MachineType,
 			Environment:      env,
 			RegionSlug:       slug,
-		}, pgTargets)
+		}, pgTargets, csScrape...)
 		if err != nil {
 			return fmt.Errorf("observability: host %q: render config: %w", hostKey, err)
 		}

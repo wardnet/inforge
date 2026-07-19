@@ -251,3 +251,25 @@ func TestRenderNoPostgresIsHostOnly(t *testing.T) {
 	assert.NotContains(t, a, "transform/db-labels")
 	assert.NotContains(t, a, "postgresql")
 }
+
+func TestRenderCrowdsecReceiver(t *testing.T) {
+	out, err := Render("https://otlp.example/v1", fullAttrs(), nil, "127.0.0.1:6060", "127.0.0.1:60601")
+	require.NoError(t, err)
+	// A dedicated prometheus receiver + job scraping both loopback endpoints, its own
+	// pipeline, and the CrowdSec job name overwriting the scrape-derived one.
+	assert.Contains(t, out, "prometheus/crowdsec")
+	assert.Contains(t, out, "job_name: crowdsec")
+	assert.Contains(t, out, "127.0.0.1:6060")
+	assert.Contains(t, out, "127.0.0.1:60601")
+	assert.Contains(t, out, "metrics/crowdsec")
+	assert.Contains(t, out, CrowdsecServiceName)
+	// The rendered config must still be valid YAML.
+	var parsed map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(out), &parsed))
+}
+
+func TestRenderNoCrowdsecByDefault(t *testing.T) {
+	out, err := Render("https://otlp.example/v1", fullAttrs(), nil)
+	require.NoError(t, err)
+	assert.NotContains(t, out, "crowdsec")
+}

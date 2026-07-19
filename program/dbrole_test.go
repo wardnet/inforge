@@ -56,7 +56,7 @@ func TestObservabilityTriggersAreNotSecret(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		authB64 := pulumi.ToSecret(pulumi.String("dXNlcjpwdw==")).(pulumi.StringOutput)
 		obs := types.ObservabilityConfig{OTLPEndpoint: "https://otlp.example.com/v1/metrics"}
-		return provisionObservability(ctx, res, computeOut, nil, map[string]pulumi.Resource{}, nil, obs, authB64, "priv", "prd", "use1")
+		return provisionObservability(ctx, res, computeOut, nil, map[string]pulumi.Resource{}, nil, obs, types.SecurityConfig{}, authB64, "priv", "prd", "use1")
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 
@@ -109,7 +109,7 @@ func TestMonitorMintWaitsOnServiceRoleMints(t *testing.T) {
 		dbOut := map[string]types.DatabaseOutputs{"app": {RoleProvisioner: p}}
 		authB64 := pulumi.ToSecret(pulumi.String("dXNlcjpwdw==")).(pulumi.StringOutput)
 		obs := types.ObservabilityConfig{OTLPEndpoint: "https://otlp.example.com/v1/metrics"}
-		return provisionObservability(ctx, res, computeOut, dbOut, map[string]pulumi.Resource{}, nil, obs, authB64, "priv", "prd", "use1")
+		return provisionObservability(ctx, res, computeOut, dbOut, map[string]pulumi.Resource{}, nil, obs, types.SecurityConfig{}, authB64, "priv", "prd", "use1")
 	}, pulumi.WithMocks("project", "stack", mocks))
 	require.NoError(t, err)
 
