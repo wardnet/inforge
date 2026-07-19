@@ -117,12 +117,16 @@ needs no secret.
   nftables from log analysis and touches no nginx config. inforge manages **no host packet
   filter today** (the firewall is the Hetzner *cloud* firewall via the provider), so the
   bouncer owns its own nft table with zero conflict — confirmed against the codebase.
-- **Off-the-shelf `.deb`, checksum-verified download — mirrors ADR-0031 (otelcol).** New
-  pure package `internal/crowdsec` (stdlib-only, Pulumi-free, like `internal/otelcol` and
-  `internal/nginx`) renders the idempotent install shell (download the version-pinned
-  `crowdsec` + `crowdsec-firewall-bouncer-nftables` `.deb`s, verify sha256, `apt-get
-  install` the local files) and the on-host config. A `DefaultVersion` is pinned and
-  bumped deliberately.
+- **Signed apt repo (packagecloud) — mirrors the nginx.org repo pattern, not the otelcol
+  `.deb` download.** CrowdSec ships `crowdsec` + `crowdsec-firewall-bouncer-nftables`
+  (with dependencies) through the `packagecloud.io/crowdsec/crowdsec` apt repository, not
+  as standalone checksummed `.deb`s, so the robust install adds that repo with a pinned
+  `signed-by` keyring exactly as `internal/nginx/install.go` adds the nginx.org repo, then
+  `apt-get install`s both packages. New pure package `internal/crowdsec` (stdlib-only,
+  Pulumi-free, like `internal/otelcol`/`internal/nginx`) renders that idempotent install
+  shell and the on-host config. Version pinning is optional and applies to the agent only —
+  the bouncer carries its own independent version scheme (0.0.x vs the agent's 1.x), so a
+  single pin cannot cover both; unpinned installs the repo's current compatible pair.
 - **Community blocklist on by default; console optional.** `cscli capi register` (no
   secret) enrolls the machine to the Central API and pulls the crowd-sourced blocklist —
   the pre-emptive known-bad-IP protection that is CrowdSec's edge over fail2ban. Console
