@@ -22,6 +22,8 @@ observability:               # optional — Grafana Cloud integration
   grafana_url: https://myorg.grafana.net                     # dashboards + alerts target
 
 security:                    # optional — edge security tier (public ingress + gateway hosts)
+  crowdsec:
+    enabled: true            # IP banning (nftables) + free community blocklist on edges
   rate_limit:
     enabled: true            # one blanket IP-based limit on every public edge server
     requests_per_second: 20
@@ -91,6 +93,24 @@ opts the whole tier out with `security: false` on its own spec.
 
   Health-check and ACME (certificate) endpoints are never rate-limited.
 
+- `crowdsec` — installs the [CrowdSec](https://www.crowdsec.net) agent + nftables firewall
+  bouncer on every edge host. It parses the ingress nginx logs, bans abusive and
+  known-bad IPs at the kernel (nftables), and pulls the free crowd-sourced community
+  blocklist for pre-emptive protection. Fields:
+  - `enabled` — turn CrowdSec on (default off).
+  - `version` — optional pin for the `crowdsec` agent package. The firewall bouncer
+    versions independently, so it is never pinned; omit to install the repo's current pair.
+  - `console` — enroll the host in the CrowdSec console dashboard. Requires the reserved
+    secret `security/crowdsec_enroll`
+    (`inforge secret set <env> security crowdsec_enroll --reserved`). The community
+    blocklist itself needs no secret.
+
+  When `observability.otlp_endpoint` is set, CrowdSec's own metrics (log-acquisition rate,
+  active decisions, bouncer pulls) are scraped by the host collector and shipped to Grafana
+  Cloud alongside host and database metrics — so you can see it working, and catch its
+  silent-failure mode (unreadable logs ⇒ nothing parsed). A deploy fails if CrowdSec does
+  not come up on an edge host.
+
 ## Example
 
 ```yaml title="resources/prd/variables.yaml"
@@ -105,6 +125,9 @@ observability:
   # built_in_dashboards: false   # opt out of the generated dashboards
   # built_in_alerts: false       # opt out of the generated alert rules
 security:
+  crowdsec:
+    enabled: true
+    # console: true                # dashboard enrollment (needs security/crowdsec_enroll)
   rate_limit:
     enabled: true
     requests_per_second: 20
