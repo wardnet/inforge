@@ -387,7 +387,7 @@ func Run(ctx *pulumi.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := realizeIngress(ctx, sc.reg, sc.res, computeOutputs[sc.key], gates, appSeeds, vars.SSH.DeployPrivateKey, env, sc.slug, vars.BaseDomain, ephemeralSlug, providerDefaults); err != nil {
+		if err := realizeIngress(ctx, sc.reg, sc.res, computeOutputs[sc.key], gates, appSeeds, vars.SSH.DeployPrivateKey, env, sc.slug, vars.BaseDomain, ephemeralSlug, vars.Security, providerDefaults); err != nil {
 			return err
 		}
 		// The east-west mesh proxy (ADR-0032) materializes on every host running a
@@ -1714,7 +1714,7 @@ func serviceDeprovisionScript(svc types.ServiceSpec) string {
 // (cross-host, using the backend's PrivateIP). FQDNs are env-scoped here so the
 // provider stays a pure installer. Hosts are realized in sorted order so the
 // resource graph is stable across runs.
-func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, appSeeds map[string][]pulumi.Resource, deployPrivateKey, env, slug, baseDomain, ephemeralSlug string, defaults types.ProviderDefaults) error {
+func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, appSeeds map[string][]pulumi.Resource, deployPrivateKey, env, slug, baseDomain, ephemeralSlug string, sec types.SecurityConfig, defaults types.ProviderDefaults) error {
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	routesByHostKey, _, err := ingressRoutesByHost(res, canonical, env, slug, baseDomain)
 	if err != nil {
@@ -1722,6 +1722,10 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 	}
 	appsByHostKey := ingressAppsByHost(res, canonical, slug, baseDomain, ephemeralSlug)
 	gatewaysByHostKey := gatewaysByHost(res, canonical, slug, baseDomain, ephemeralSlug)
+	// Stamp the env-uniform IP rate limit (ADR-0043) onto every edge server whose edge
+	// has not opted out (`security: false`). Rate limiting is a blanket security floor,
+	// so the same profile lands on every route/app/gateway — there is no per-route knob.
+	stampRateLimit(sec, res, routesByHostKey, appsByHostKey, gatewaysByHostKey)
 	// Resolve the ingress-tier services once and feed both derivations below — the
 	// health entries and the cross-host backend set — so the service list is walked a
 	// single time per host realization.
@@ -1817,6 +1821,66 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		}
 	}
 	return nil
+}
+
+// stampRateLimit resolves the env's single blanket IP rate limit (ADR-0043) and stamps
+// it onto every derived edge server whose owning edge has not opted out via
+// `security: false`. It is a no-op when rate limiting is disabled. A route's edge is the
+// ingress its service references; an app's edge is the ingress it targets; a gateway is
+// its own edge. Rate limiting is a uniform security floor, so a stamped server always
+// gets the same profile — there is deliberately no per-route variation.
+func stampRateLimit(sec types.SecurityConfig, res types.Resources, routes map[string][]types.IngressRoute, apps map[string][]types.IngressApp, gateways map[string][]types.IngressGateway) {
+	rl := sec.ResolvedRateLimit()
+	if rl == nil {
+		return
+	}
+	svcIngress := fkByName(res.Service, func(s types.ServiceSpec) (string, string) { return s.Name, s.Ingress })
+	appIngress := fkByName(res.App, func(a types.AppSpec) (string, string) { return a.Name, a.Ingress })
+	ingOptOut := securityOptOut(res.Ingress, func(i types.IngressSpec) (string, *bool) { return i.Name, i.Security })
+	gwOptOut := securityOptOut(res.Gateway, func(g types.GatewaySpec) (string, *bool) { return g.Name, g.Security })
+	for hk := range routes {
+		for i := range routes[hk] {
+			if !ingOptOut[svcIngress[routes[hk][i].Service]] {
+				routes[hk][i].RateLimit = rl
+			}
+		}
+	}
+	for hk := range apps {
+		for i := range apps[hk] {
+			if !ingOptOut[appIngress[apps[hk][i].Name]] {
+				apps[hk][i].RateLimit = rl
+			}
+		}
+	}
+	for hk := range gateways {
+		for i := range gateways[hk] {
+			if !gwOptOut[gateways[hk][i].Name] {
+				gateways[hk][i].RateLimit = rl
+			}
+		}
+	}
+}
+
+// fkByName builds a name -> foreign-key map from a spec slice, given a projector that
+// returns each spec's (name, fk). Used to resolve a derived server back to its edge.
+func fkByName[T any](specs []T, project func(T) (string, string)) map[string]string {
+	m := make(map[string]string, len(specs))
+	for _, s := range specs {
+		name, fk := project(s)
+		m[name] = fk
+	}
+	return m
+}
+
+// securityOptOut builds a name -> opted-out map from a spec slice: a resource is opted
+// out only when its `security:` flag is explicitly false (nil/absent = env policy applies).
+func securityOptOut[T any](specs []T, project func(T) (string, *bool)) map[string]bool {
+	m := make(map[string]bool, len(specs))
+	for _, s := range specs {
+		name, flag := project(s)
+		m[name] = flag != nil && !*flag
+	}
+	return m
 }
 
 // ingressHostsByName maps each ingress resource name to the canonical specKey of

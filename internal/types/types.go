@@ -45,6 +45,10 @@ type IngressSpec struct {
 	Container        string `yaml:"container"`
 	Host             string `yaml:"host"`                         // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
 	HealthProbesPort int    `yaml:"health_probes_port,omitempty"` // public port nginx exposes service health checks on (defaults to 81 when omitted); opened only when a referencing service declares its own health_probes_port
+	// Security opts this edge out of the env-level security tier (ADR-0043) when set to
+	// false: no rate limiting (and, slice 2, no CrowdSec). Nil/absent = the env policy
+	// applies. A *bool distinguishes "unset" from an explicit opt-out.
+	Security *bool `yaml:"security,omitempty"`
 }
 
 // AppSpec is one front-end (static SPA) resource — a bundle served from an
@@ -84,6 +88,10 @@ type GatewaySpec struct {
 	Services         []string `yaml:"services"`                     // FKs -> services (same scope) exposed at the edge; the routing table is derived from their mesh.public_paths
 	HealthProbesPort int      `yaml:"health_probes_port,omitempty"` // public port the gateway host exposes its listed services' health checks on (plain HTTP, Host-demuxed by service FQDN; defaults to 81)
 	HealthProbePaths []string `yaml:"health_probe_paths,omitempty"` // exact paths on the gateway's own 443 server that nginx answers 200 "ok" directly (edge liveness over the real TLS path); optional
+	// Security opts this gateway edge out of the env-level security tier (ADR-0043) when
+	// set to false: no rate limiting on its mesh routes (and, slice 2, no CrowdSec on its
+	// host). Nil/absent = the env policy applies.
+	Security *bool `yaml:"security,omitempty"`
 }
 
 // EffectiveHealthProbesPort is the gateway twin of the ingress method: the
@@ -821,6 +829,57 @@ type EnvironmentVariables struct {
 	BaseDomain    string              `yaml:"base_domain"`
 	SSH           SSHConfig           `yaml:"ssh"`
 	Observability ObservabilityConfig `yaml:"observability"`
+	Security      SecurityConfig      `yaml:"security"`
+}
+
+// SecurityConfig is the optional env-level edge security tier (ADR-0043): a blanket IP
+// rate limit and (slice 2) the CrowdSec agent, applied to every public edge (ingress +
+// gateway) host. Both are off unless enabled. Like ObservabilityConfig it lives in
+// variables.yaml and is struct-decoded — there is no JSON schema for the block. An edge
+// opts the whole tier out with `security: false` on its ingress/gateway spec.
+type SecurityConfig struct {
+	Crowdsec  CrowdsecConfig  `yaml:"crowdsec"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
+}
+
+// CrowdsecConfig toggles the per-edge-host CrowdSec agent + firewall bouncer (slice 2).
+// Version pins the installed release (else the package DefaultVersion); Console opts in
+// to dashboard enrollment (gated on a reserved secret). The fields are carried now so
+// the authoring surface is stable; the realization lands in the CrowdSec slice.
+type CrowdsecConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Version string `yaml:"version,omitempty"`
+	Console bool   `yaml:"console,omitempty"`
+}
+
+// RateLimitConfig is the blanket IP rate limit (ADR-0043): one uniform limit applied to
+// every public server on an edge — a security floor, not per-route tuning (per-route /
+// per-identity limits are a gateway concern, ADR-0044). Keying is always the client IP.
+type RateLimitConfig struct {
+	Enabled           bool `yaml:"enabled"`
+	RequestsPerSecond int  `yaml:"requests_per_second"`
+	Burst             int  `yaml:"burst"`
+	MaxConnections    int  `yaml:"max_connections"`
+}
+
+// RateLimitZoneStem is the fixed nginx zone stem for the edge-uniform limit. It is a
+// constant (not per-route) because one limit covers the whole edge (ADR-0043).
+const RateLimitZoneStem = "edge"
+
+// ResolvedRateLimit returns the profile to stamp on an edge's public servers, or nil
+// when rate limiting is disabled or has nothing to enforce (both limits zero). The
+// program applies it uniformly to every server of every edge that has not opted out.
+func (s SecurityConfig) ResolvedRateLimit() *RateLimitProfile {
+	rl := s.RateLimit
+	if !rl.Enabled || (rl.RequestsPerSecond <= 0 && rl.MaxConnections <= 0) {
+		return nil
+	}
+	return &RateLimitProfile{
+		Name:    RateLimitZoneStem,
+		RPS:     rl.RequestsPerSecond,
+		Burst:   rl.Burst,
+		MaxConn: rl.MaxConnections,
+	}
 }
 
 // ObservabilityConfig is the optional env-level observability block (ADR-0031,

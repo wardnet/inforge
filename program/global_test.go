@@ -238,7 +238,7 @@ func TestGlobalServiceRealizesRegionLess(t *testing.T) {
 		}
 		gates := map[string]pulumi.Resource{}
 		// Empty slug throughout — exactly how the scopes loop drives the global slice.
-		if err := realizeIngress(ctx, reg, res, computeOut, gates, nil, "priv", "prd", "", "wardnet.network", "", types.ProviderDefaults{}); err != nil {
+		if err := realizeIngress(ctx, reg, res, computeOut, gates, nil, "priv", "prd", "", "wardnet.network", "", types.SecurityConfig{}, types.ProviderDefaults{}); err != nil {
 			return err
 		}
 		return provisionServices(ctx, res, computeOut, map[string]serviceMaterial{}, gates, "priv", "prd", globalScope, "", "wardnet.network", "1.2.3", nil)

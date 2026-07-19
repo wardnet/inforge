@@ -31,6 +31,7 @@ name: edge                 # required — ingress name (unique within the scope)
 container: bridge          # required — grouping label
 host: bridge               # required — FK -> compute name (same scope); the vm nginx runs on
 health_probes_port: 81     # optional — public port for service health checks (default 81)
+# security: false          # optional — opt this edge out of the env security tier (rate limiting)
 ```
 
 | Field | Type | Required | Description |
@@ -39,6 +40,7 @@ health_probes_port: 81     # optional — public port for service health checks 
 | `container` | string | Yes | Grouping label (tags, like other resources). |
 | `host` | string | Yes | **Name** of the Compute resource (same scope) this ingress runs on. Must be a single-instance `vm`. A `global/` prefix is rejected — a global ingress is declared in the global slice itself. **At most one ingress per scope** — the ingress's DNS name (`ingress[.<slug>].<base>`, see below) is scope-singular, which also implies one per host. |
 | `health_probes_port` | int | No | Public port nginx exposes service [health checks](#health-probes) on. Defaults to `81`. Opened to the internet only when a referencing service declares its own `health_probes_port`. Must not be `80` or a route `listen` port on this host. |
+| `security` | bool | No | Set `false` to opt this ingress out of the env-level [security tier](/configuration/variables-yaml#security) — its servers get no rate limiting. Absent/`true` = the env policy applies. |
 
 ## What it serves
 

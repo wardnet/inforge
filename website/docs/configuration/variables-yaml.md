@@ -20,6 +20,13 @@ ssh:                         # required when using compute
 observability:               # optional — Grafana Cloud integration
   otlp_endpoint: https://otlp-gateway-....grafana.net/otlp   # host/DB metrics collector
   grafana_url: https://myorg.grafana.net                     # dashboards + alerts target
+
+security:                    # optional — edge security tier (public ingress + gateway hosts)
+  rate_limit:
+    enabled: true            # one blanket IP-based limit on every public edge server
+    requests_per_second: 20
+    burst: 40
+    max_connections: 40
 ```
 
 ## Fields
@@ -67,6 +74,23 @@ are [reserved secrets](/cli/secret) in `secrets.enc.yaml`, never committed here.
   (from `observability/notifications.yaml`) that built-in alerts and any alert omitting
   `profile:` route through. Required once alerts are managed.
 
+### `security`
+
+Optional edge security tier applied to the public [ingress](/resources/ingress) and
+[gateway](/resources/gateway) hosts. Off unless enabled. An individual ingress or gateway
+opts the whole tier out with `security: false` on its own spec.
+
+- `rate_limit` — a single **blanket, IP-based** rate limit applied uniformly to every
+  public server on every edge. It is a security floor, not per-route tuning: the same
+  limit covers all routes, apps, and gateway paths (per-route / per-identity limits are a
+  future gateway concern). Requests over the limit are answered `429`. Fields:
+  - `enabled` — turn rate limiting on (default off).
+  - `requests_per_second` — sustained per-client-IP request rate (`limit_req`).
+  - `burst` — how many excess requests may queue before a `429` is returned.
+  - `max_connections` — concurrent connections allowed per client IP (`limit_conn`).
+
+  Health-check and ACME (certificate) endpoints are never rate-limited.
+
 ## Example
 
 ```yaml title="resources/prd/variables.yaml"
@@ -80,4 +104,10 @@ observability:
   default_profile: prod          # notification profile for built-in + un-profiled alerts
   # built_in_dashboards: false   # opt out of the generated dashboards
   # built_in_alerts: false       # opt out of the generated alert rules
+security:
+  rate_limit:
+    enabled: true
+    requests_per_second: 20
+    burst: 40
+    max_connections: 40
 ```
