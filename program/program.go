@@ -329,7 +329,10 @@ func Run(ctx *pulumi.Context) error {
 	// built-in dashboards are pushed via the pulumiverse/grafana provider. Org-global, so
 	// realized ONCE here (not per scope) and env-prefixed. A no-op when grafana_url is empty.
 	hasDatabase := len(res.DatabaseCluster) > 0 || len(globalRes.DatabaseCluster) > 0
-	if err := realizeGrafana(ctx, dir, srcEnv, env, vars.Observability, hasDatabase, ctx.DryRun(), serviceScopes(regionTable, res, globalRes)); err != nil {
+	// CrowdSec dashboard/alerts are gated on it being enabled for this env (ADR-0043),
+	// mirroring how the Postgres built-ins are gated on a cluster existing.
+	hasCrowdsec := vars.Security.Crowdsec.Enabled
+	if err := realizeGrafana(ctx, dir, srcEnv, env, vars.Observability, hasDatabase, hasCrowdsec, ctx.DryRun(), serviceScopes(regionTable, res, globalRes)); err != nil {
 		return err
 	}
 
