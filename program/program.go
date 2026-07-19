@@ -20,6 +20,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 	"github.com/wardnet/inforge/internal/agent"
 	"github.com/wardnet/inforge/internal/app"
+	"github.com/wardnet/inforge/internal/crowdsec"
 	"github.com/wardnet/inforge/internal/dbbackup"
 	"github.com/wardnet/inforge/internal/grant"
 	"github.com/wardnet/inforge/internal/hostpaths"
@@ -308,6 +309,22 @@ func Run(ctx *pulumi.Context) error {
 		obsAuthB64 = pulumi.ToSecret(pulumi.String(base64.StdEncoding.EncodeToString([]byte(authRaw)))).(pulumi.StringOutput)
 	}
 
+	// Optional CrowdSec console enrollment token (ADR-0043): decrypted once per deploy
+	// only when console enrollment is requested, and marked secret so it is encrypted in
+	// Pulumi state. Enabled with no token is a hard misconfiguration (fail at up, skipped
+	// in preview). The community blocklist needs no secret, so this is console-only.
+	var csEnrollToken pulumi.StringOutput
+	if vars.Security.Crowdsec.Enabled && vars.Security.Crowdsec.Console {
+		tokRaw, err := decryptReservedSecret(dir, srcEnv, crowdsec.ReservedNamespace, crowdsec.EnrollSecretKey, ctx.DryRun())
+		if err != nil {
+			return err
+		}
+		if tokRaw == "" && !ctx.DryRun() {
+			return fmt.Errorf("crowdsec: console enrollment is enabled but secrets.enc.yaml is missing or has no %s/%s token — run `inforge secret set %s %s %s --reserved` and commit the store", crowdsec.ReservedNamespace, crowdsec.EnrollSecretKey, srcEnv, crowdsec.ReservedNamespace, crowdsec.EnrollSecretKey)
+		}
+		csEnrollToken = pulumi.ToSecret(pulumi.String(tokRaw)).(pulumi.StringOutput)
+	}
+
 	// Env-level Grafana dashboards (ADR-0038): when grafana_url is configured, this env's
 	// built-in dashboards are pushed via the pulumiverse/grafana provider. Org-global, so
 	// realized ONCE here (not per scope) and env-prefixed. A no-op when grafana_url is empty.
@@ -425,6 +442,13 @@ func Run(ctx *pulumi.Context) error {
 			return err
 		}
 		if err := provisionObservability(ctx, sc.res, computeOutputs[sc.key], databaseOutputs[sc.key], gates, dbHostTails, vars.Observability, obsAuthB64, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
+			return err
+		}
+		// The edge security tier (ADR-0043): install CrowdSec + the nftables firewall
+		// bouncer on every public-edge (ingress/gateway) host, gated on
+		// security.crowdsec.enabled and the per-edge opt-out. Runs after observability so
+		// the collector (which will scrape CrowdSec's metrics) is already installed.
+		if err := provisionCrowdsec(ctx, sc.res, computeOutputs[sc.key], gates, vars.Security, csEnrollToken, vars.SSH.DeployPrivateKey, env, sc.slug); err != nil {
 			return err
 		}
 	}
@@ -875,6 +899,148 @@ func provisionObservability(ctx *pulumi.Context, res types.Resources, computeOut
 		}
 	}
 	return nil
+}
+
+// provisionCrowdsec installs the CrowdSec agent + nftables firewall bouncer on every
+// public-edge host in this scope (ADR-0043), gated on security.crowdsec.enabled: it is a
+// no-op when disabled or when no non-opted-out edge exists. Unlike the observability
+// collector (every VM), CrowdSec lands only on ingress/gateway hosts — where public HTTP
+// traffic terminates. Each host runs install -> agent config -> bouncer -> (optional
+// console enroll) -> liveness assertion, chained by DependsOn and gated on the host's
+// cloud-init readiness (shared gates map). The bouncer API key is minted per host
+// (random, alphanumeric so it is YAML-safe) and woven through ApplyT so it is encrypted
+// in state and never lands in the unencrypted Triggers array — the deliverServiceSecrets
+// / monitor-role invariant. enrollToken is used only when console enrollment is on.
+func provisionCrowdsec(ctx *pulumi.Context, res types.Resources, computeOut map[string]types.ComputeOutputs, gates map[string]pulumi.Resource, sec types.SecurityConfig, enrollToken pulumi.StringOutput, deployPrivateKey, env, slug string) error {
+	if !sec.Crowdsec.Enabled {
+		return nil
+	}
+	edge := crowdsecEdgeHosts(res, naming.CanonicalComputeKeys(res.Compute))
+	if len(edge) == 0 {
+		return nil
+	}
+	deployUserByCompute := naming.DeployUsersByHost(res.Compute)
+	for _, hostKey := range sortedKeys(computeOut) {
+		if !edge[hostKey] {
+			continue
+		}
+		host := computeOut[hostKey]
+		deployUser := deployUserByCompute[hostKey]
+		if !ctx.DryRun() {
+			if deployUser == "" {
+				return fmt.Errorf("crowdsec: host %q has no deploy_user; inforge needs one to SSH and install CrowdSec", hostKey)
+			}
+			if deployPrivateKey == "" {
+				return fmt.Errorf("crowdsec: no deploy private key configured (set the deploy_private_key stack config or INFORGE_DEPLOY_PRIVATE_KEY)")
+			}
+		}
+		gate, err := cloudInitGate(ctx, gates, hostKey, host, deployPrivateKey, env, slug)
+		if err != nil {
+			return err
+		}
+		conn := iremote.Connection(host.PublicIP, deployUser, deployPrivateKey)
+		name := naming.Resource(env, slug, "crowdsec", hostKey)
+
+		// 1. Install the agent + bouncer from the packagecloud repo. First per-host command,
+		//    so it carries the cloud-init gate; later steps chain off it.
+		install := crowdsec.InstallScript(sec.Crowdsec.Version)
+		installCmd, err := remote.NewCommand(ctx, name+"-install", &remote.CommandArgs{
+			Connection: conn,
+			Create:     pulumi.String(install),
+			Update:     pulumi.String(install),
+			Triggers:   pulumi.Array{pulumi.String(install)},
+		}, pulumi.DependsOn([]pulumi.Resource{gate}))
+		if err != nil {
+			return fmt.Errorf("crowdsec: host %q: install: %w", hostKey, err)
+		}
+
+		// 2. Agent config: nginx acquisition + prometheus overlays, hub collections, CAPI
+		//    (community blocklist) registration, reload.
+		cfg := crowdsec.ConfigScript()
+		cfgCmd, err := remote.NewCommand(ctx, name+"-config", &remote.CommandArgs{
+			Connection: conn,
+			Create:     pulumi.String(cfg),
+			Update:     pulumi.String(cfg),
+			Triggers:   pulumi.Array{pulumi.String(cfg)},
+		}, pulumi.DependsOn([]pulumi.Resource{installCmd}))
+		if err != nil {
+			return fmt.Errorf("crowdsec: host %q: configure agent: %w", hostKey, err)
+		}
+
+		// 3. Bouncer: mint an inforge-owned API key (alphanumeric, YAML-safe), register it,
+		//    write the overlay, restart. The key is secret, so the whole script is built
+		//    inside an ApplyT and its Triggers use safeTrigger (never the raw key).
+		key, err := random.NewRandomPassword(ctx, name+"-bouncer-key", &random.RandomPasswordArgs{
+			Length:  pulumi.Int(48),
+			Special: pulumi.Bool(false),
+		})
+		if err != nil {
+			return fmt.Errorf("crowdsec: host %q: bouncer key: %w", hostKey, err)
+		}
+		bouncerScript := key.Result.ApplyT(func(k string) string { return crowdsec.BouncerScript(k) }).(pulumi.StringOutput)
+		bouncerCmd, err := remote.NewCommand(ctx, name+"-bouncer", &remote.CommandArgs{
+			Connection: conn,
+			Create:     bouncerScript,
+			Update:     bouncerScript,
+			Triggers:   pulumi.Array{safeTrigger(bouncerScript)},
+		}, pulumi.DependsOn([]pulumi.Resource{cfgCmd}))
+		if err != nil {
+			return fmt.Errorf("crowdsec: host %q: configure bouncer: %w", hostKey, err)
+		}
+		lastDep := pulumi.Resource(bouncerCmd)
+
+		// 4. Optional console enrollment (gated on the reserved crowdsec_enroll secret).
+		if sec.Crowdsec.Console {
+			enrollScript := enrollToken.ApplyT(func(tok string) string { return crowdsec.EnrollScript(tok) }).(pulumi.StringOutput)
+			enrollCmd, err := remote.NewCommand(ctx, name+"-enroll", &remote.CommandArgs{
+				Connection: conn,
+				Create:     enrollScript,
+				Update:     enrollScript,
+				Triggers:   pulumi.Array{safeTrigger(enrollScript)},
+			}, pulumi.DependsOn([]pulumi.Resource{bouncerCmd}))
+			if err != nil {
+				return fmt.Errorf("crowdsec: host %q: console enroll: %w", hostKey, err)
+			}
+			lastDep = enrollCmd
+		}
+
+		// 5. Deploy-time liveness gate: fail the deploy if the agent's local API is not up
+		//    or the bouncer did not register (CrowdSec otherwise fails silently — ADR-0043).
+		assert := crowdsec.AssertScript()
+		if _, err := remote.NewCommand(ctx, name+"-assert", &remote.CommandArgs{
+			Connection: conn,
+			Create:     pulumi.String(assert),
+			Update:     pulumi.String(assert),
+			Triggers:   pulumi.Array{safeTrigger(bouncerScript)},
+		}, pulumi.DependsOn([]pulumi.Resource{lastDep})); err != nil {
+			return fmt.Errorf("crowdsec: host %q: liveness assertion: %w", hostKey, err)
+		}
+	}
+	return nil
+}
+
+// crowdsecEdgeHosts returns the set of canonical host keys that run a public edge (an
+// ingress or a gateway) and have not opted out of the security tier via `security: false`
+// (ADR-0043). A host is included if at least one non-opted-out edge resource lands on it.
+func crowdsecEdgeHosts(res types.Resources, canonical map[string]string) map[string]bool {
+	edge := map[string]bool{}
+	for _, ing := range res.Ingress {
+		if ing.Security != nil && !*ing.Security {
+			continue
+		}
+		if hk, ok := canonical[ing.Host]; ok {
+			edge[hk] = true
+		}
+	}
+	for _, gw := range res.Gateway {
+		if gw.Security != nil && !*gw.Security {
+			continue
+		}
+		if hk, ok := canonical[gw.Host]; ok {
+			edge[hk] = true
+		}
+	}
+	return edge
 }
 
 // pgMaxIdentifierLen is Postgres's NAMEDATALEN-1: the longest identifier the server
