@@ -152,6 +152,21 @@ needs no secret.
   VM" expansion (sshd brute-force coverage) is a config flip, not a rewrite.
 - **No new open ports.** The local API is loopback (`127.0.0.1:8080`); the community
   blocklist pull is outbound. `types.FirewallPorts` is unchanged.
+- **Observable through the existing otelcol pipeline — CrowdSec's silent failure mode
+  demands it.** CrowdSec fails quietly: if it cannot read the nginx logs (rotation, path,
+  permissions) it parses nothing and bans nothing while every `cscli` command still looks
+  healthy. So slice 2 wires its telemetry into the pipeline inforge already runs (ADR-0031/
+  0037): enable the agent's Prometheus endpoint (`127.0.0.1:6060`) and the firewall
+  bouncer's loopback metrics endpoint, and add a `prometheus` receiver to the edge host's
+  otelcol collector — gated on the same `observability.otlp_endpoint`, exported through the
+  same `otlphttp` → Grafana Cloud, tagged with the ADR-0030 resource attributes, exactly as
+  the `postgresql` receiver is added on a cluster host (ADR-0037). The load-bearing signal
+  is **acquisition health** (`cs_reader_hits` / parse rate > 0 = CrowdSec is actually seeing
+  traffic); the bouncer's last-pull timestamp catches enforcement drift. The deploy also
+  asserts liveness at apply time — `cscli lapi status` and the bouncer appearing in `cscli
+  bouncers list` — so a CrowdSec that did not come up fails the deploy rather than sitting
+  dead. Dashboards and the two built-in alerts ("acquisition stalled", "bouncer not
+  pulling") are a thin slice 2b once metrics flow.
 
 ## Wiring (implementation shape)
 
