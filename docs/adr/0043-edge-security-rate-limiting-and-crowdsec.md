@@ -165,8 +165,9 @@ needs no secret.
   otelcol collector — gated on the same `observability.otlp_endpoint`, exported through the
   same `otlphttp` → Grafana Cloud, tagged with the ADR-0030 resource attributes, exactly as
   the `postgresql` receiver is added on a cluster host (ADR-0037). The load-bearing signal
-  is **acquisition health** (`cs_reader_hits` / parse rate > 0 = CrowdSec is actually seeing
-  traffic); the bouncer's last-pull timestamp catches enforcement drift. The deploy also
+  is **acquisition health** (`cs_filesource_hits_total` / `cs_parser_hits_total` rate > 0 =
+  CrowdSec is actually seeing traffic); the bouncer's LAPI request rate catches enforcement
+  drift. The deploy also
   asserts liveness at apply time — `cscli lapi status` and the bouncer appearing in `cscli
   bouncers list` — so a CrowdSec that did not come up fails the deploy rather than sitting
   dead. Dashboards and the two built-in alerts ("acquisition stalled", "bouncer not
@@ -246,3 +247,48 @@ Grounded in the existing otelcol path (`program.provisionObservability`,
   edge host, so a separate placement FK invites a meaningless "WAF on a host with no
   ingress" case. The env-block + per-edge opt-out gives the same control with far less
   surface.
+
+## Host verification (2026-07-20)
+
+The install shell and the metric names in slice 2b were originally authored from docs. They
+have since been run end-to-end on a throwaway Hetzner VM (Ubuntu 24.04 `noble`, amd64,
+`crowdsec` 1.7.8 + `crowdsec-firewall-bouncer-nftables` 0.0.34), rendering the exact scripts
+`internal/crowdsec` produces. Confirmed as designed:
+
+- **packagecloud repo** — the armored `.asc` works directly via `signed-by` with no
+  `gpg --dearmor`, and `.../crowdsec/crowdsec/ubuntu/ noble main` resolves; both packages install.
+- **`acquis.d` drop-in** — `/etc/crowdsec/acquis.d/nginx.yaml` is read (`acquisition_dir` is a
+  package default) and `crowdsecurity/nginx-logs` parses the access log. Note CrowdSec tails
+  from end-of-file, so a source only appears in `cscli metrics` once new lines arrive.
+- **`.local` overlays** — both merge; the bouncer logs `with additional values from
+  '…/crowdsec-firewall-bouncer.yaml.local'`.
+- **cscli syntax** — `hub update`, `collections install`, `capi status`/`register`,
+  `bouncers add --key`/`delete`, `lapi status`, `bouncers list -o json`, and the positional
+  `console enroll <key>` all match. (The Debian package auto-registers CAPI, so the
+  `capi status || capi register` guard correctly no-ops.)
+- **nftables enforcement** — `table ip crowdsec` / `table ip6 crowdsec6` with real `drop`
+  rules; a `cscli decisions add` lands in a `crowdsec-blacklists-cscli` set within seconds.
+- **systemd `Restart=always`** — the drop-in applies to both units; `kill -9` respawns.
+- **Metrics ports** — agent `127.0.0.1:6060` and bouncer `127.0.0.1:60601` are both correct.
+
+**Metric names were substantially wrong** and are corrected in `internal/grafanadash` and
+`internal/grafanaalert`. The bouncer does **not** use the `cs_` prefix:
+
+| Assumed | Actual |
+|---|---|
+| `cs_reader_hits_total` | `cs_filesource_hits_total` |
+| `cs_scenario_hits_total` | `cs_bucket_poured_total` |
+| `cs_lapi_decisions_total` | *(no such counter — decisions are the `cs_active_decisions` gauge only)* |
+| `cs_bouncer_dropped_packets_total` | `fw_bouncer_dropped_packets` |
+| `cs_bouncer_dropped_bytes_total` | `fw_bouncer_dropped_bytes` |
+| `cs_bouncer_last_pull` | *(does not exist — use the bouncer's `lapi_requests_total` rate)* |
+
+`cs_parser_hits_total` and `cs_active_decisions` were correct as written. Because there is no
+decisions-added counter, no panel uses `increase()` over decisions; the "bans added" stat now
+reports `fw_bouncer_banned_ips` (what the firewall actually holds). `fw_bouncer_dropped_*` are
+declared `gauge` despite being cumulative — `rate()` remains correct over them.
+
+**Still unverified:** how the OTLP hop renames these series. The collector's `prometheus`
+receiver → `otlphttp` → Grafana Cloud path may add or strip a `_total` suffix on counters; that
+needs one live scrape against the real endpoint to pin down, and the queries above assume the
+names pass through unchanged.

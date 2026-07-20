@@ -24,7 +24,7 @@ per-node / per-cluster / per-database / per-service drill-down.
 | **Infrastructure** | host metrics (ADR-0031, `system_*`) | fleet CPU / memory / disk / network, per-node uptime and restarts |
 | **Database** | Postgres receiver metrics (ADR-0037, `postgresql_*`) | connections, transaction rate, DB size, checkpoints — fleet, per cluster, and per database |
 | **Service** | wardnet-cloud RED + domain metrics | request rate, 5xx error rate, and latency percentiles per service and route, plus the domain counters (DDNS networks provisioned, active tunnels, tenant tombstone sweeps) |
-| **CrowdSec** | CrowdSec agent + firewall-bouncer metrics (ADR-0043, `cs_*`) | log-acquisition rate (the "is it working" signal), active ban decisions, decisions by reason, scenario hits, and the firewall bouncer's dropped packets/bytes + last-pull freshness. Present only when [`security.crowdsec.enabled`](/configuration/variables-yaml#security). |
+| **CrowdSec** | CrowdSec agent (`cs_*`) + firewall-bouncer (`fw_bouncer_*`) metrics (ADR-0043) | log-acquisition rate (the "is it working" signal), active ban decisions by reason, scenario hits, IPs banned at the firewall, and the bouncer's dropped packets/bytes + LAPI pull rate. Present only when [`security.crowdsec.enabled`](/configuration/variables-yaml#security). |
 
 The **Service** dashboard reads the RED histogram `http_server_request_duration_seconds_*` that every
 wardnet-cloud service emits, grouped by the `service_name` label Grafana Cloud promotes from the OTLP
@@ -88,7 +88,7 @@ Thresholds are fixed — to tune, opt out and re-author as custom alerts.
 | Postgres High Rollback Ratio | rollbacks > 25% of transactions per cluster | 15m | warning |
 | Postgres Metrics Missing | no cluster reporting (NoData → alerting) | 5m | critical |
 | CrowdSec Acquisition Stalled | parse rate ≈ 0 per edge (CrowdSec is blind) | 15m | warning |
-| CrowdSec Bouncer Not Pulling | firewall bouncer last-pull > 10m stale per edge | 10m | warning |
+| CrowdSec Bouncer Not Pulling | firewall bouncer's LAPI request rate ≈ 0 per edge | 10m | warning |
 
 The CrowdSec alerts use `NoData → OK` (not `alerting`): they fire only on a present-but-bad signal,
 so a metric-name mismatch or a not-yet-scraped agent never false-fires. Confirm CrowdSec is exporting
