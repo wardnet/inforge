@@ -140,7 +140,7 @@ func (p *Printer) Handle(ev events.EngineEvent) {
 		switch d.Severity {
 		case "error", "warning", "info#err":
 			msg := strings.TrimSpace(d.Message)
-			if msg == "" {
+			if msg == "" || isKnownNoise(msg) {
 				return
 			}
 			if d.Severity == "error" && d.URN != "" {
@@ -274,6 +274,19 @@ func (p *Printer) Finish() {
 	}
 	_, _ = fmt.Fprintln(p.w)
 	_, _ = fmt.Fprintln(p.w, abortBanner)
+}
+
+// isKnownNoise drops diagnostics that carry no operator-actionable signal and
+// repeat on EVERY remote command of EVERY deploy. Currently exactly one: the
+// pulumi-command remote provider tries to pass PULUMI_COMMAND_STDOUT/STDERR as
+// SSH env vars, OpenSSH's default AcceptEnv rejects them, and the provider
+// warns — harmless (the vars only control the provider's own log forwarding;
+// command stdout/stderr capture is unaffected) and unfixable from here short
+// of loosening every host's sshd AcceptEnv for a cosmetic win. Keep this list
+// SHORT and exact-prefix-matched: a suppression that grows becomes a place
+// real warnings go to die.
+func isKnownNoise(msg string) bool {
+	return strings.HasPrefix(msg, "Unable to set 'PULUMI_COMMAND_")
 }
 
 func firstLine(s string) string {

@@ -148,3 +148,27 @@ func TestPrinterDestructiveAccessor(t *testing.T) {
 		t.Errorf("entry = %q", p.Destructive()[0])
 	}
 }
+
+// The pulumi-command remote provider warns about PULUMI_COMMAND_* SSH env vars
+// on EVERY command of EVERY deploy — non-actionable noise that buried the real
+// lines. It is suppressed; a real warning still prints.
+func TestKnownNoiseWarningsAreSuppressed(t *testing.T) {
+	var buf bytes.Buffer
+	p := NewPrinter(&buf)
+	diag := func(sev, msg string) events.EngineEvent {
+		return events.EngineEvent{EngineEvent: apitype.EngineEvent{
+			DiagnosticEvent: &apitype.DiagnosticEvent{Severity: sev, Message: msg},
+		}}
+	}
+	p.Handle(diag("warning", "Unable to set 'PULUMI_COMMAND_STDERR'. This only works if your SSH server is configured to accept these variables via AcceptEnv."))
+	p.Handle(diag("warning", "Unable to set 'PULUMI_COMMAND_STDOUT'. This only works if your SSH server is configured to accept these variables via AcceptEnv."))
+	p.Handle(diag("warning", "a REAL warning about something else"))
+	p.Finish()
+	out := buf.String()
+	if strings.Contains(out, "PULUMI_COMMAND_") {
+		t.Errorf("the AcceptEnv provider noise must be suppressed:\n%s", out)
+	}
+	if !strings.Contains(out, "a REAL warning about something else") {
+		t.Errorf("real warnings must still print:\n%s", out)
+	}
+}
