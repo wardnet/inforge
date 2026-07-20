@@ -6,7 +6,7 @@ require (
 	filippo.io/age v1.3.1
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.27
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.104.2
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.105.0
 	github.com/aws/smithy-go v1.27.3
 	github.com/nginxinc/nginx-go-crossplane v0.4.89
 	github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.17.0
