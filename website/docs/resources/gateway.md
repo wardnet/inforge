@@ -27,6 +27,7 @@ services:                 # the services exposed at the edge — routing is DERI
   - tunneller
 health_probe_paths:       # optional — edge liveness: nginx answers 200 "ok" on the 443 server
   - /livez
+# security: false         # optional — opt this edge out of the env security tier (rate limiting)
 ```
 
 ## Fields
@@ -41,6 +42,7 @@ health_probe_paths:       # optional — edge liveness: nginx answers 200 "ok" o
 | `services` | array | Yes (min 1) | The services (same scope) exposed at the internet edge. The routing table is **derived**: one nginx regex location per (listed service, [`mesh.public_paths`](./service#path-level-exposure) glob), target named in `X-Mesh-Target`. A request matching no public glob is answered at the edge with an `application/json` `404` body `{"error":"not_found"}` — it never traverses to any service. |
 | `health_probes_port` | int | No | Public **plain-HTTP** port the gateway host exposes its listed services' health checks on (default `81`), demuxed by request `Host` (the service's FQDN) — the gateway twin of the ingress [health port](./ingress#health-probes). Opened to the internet only when a listed service declares its own [`health_probes_port`](./service#health-probes). Must not be `80` or `443`, and must **match** a co-hosted ingress's health port (one public health port per host). |
 | `health_probe_paths` | array | No | Exact paths on the gateway's **own `443` server** that nginx answers `200 "ok"` directly — edge liveness proving the real daemon path (DNS + cert + TLS) without touching any backend. `inforge validate` rejects a path that any listed service's public glob claims. |
+| `security` | bool | No | Set `false` to opt this gateway out of the env-level [security tier](/configuration/variables-yaml#security) — its mesh-route locations get no rate limiting. Absent/`true` = the env policy applies. Health-probe locations are never rate-limited regardless. |
 
 **A gateway is a scope singleton** — at most one per scope: it is the scope's one public daemon
 edge. It may only list services in the **same scope**.

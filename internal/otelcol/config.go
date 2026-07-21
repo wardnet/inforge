@@ -23,6 +23,13 @@ const ServiceName = "wardnet-host-metrics"
 // last of which becomes meaningful once a cluster spans multiple hosts.
 const DBServiceName = "wardnet-db-metrics"
 
+// CrowdsecServiceName is the OTel service.name (Prometheus job) stamped on CrowdSec
+// metrics scraped on edge hosts (ADR-0043) — a distinct job from host and DB metrics so
+// CrowdSec dashboards/alerts scope cleanly, still correlating with them on host.id. The
+// load-bearing signal is acquisition health (parse rate > 0 = CrowdSec is actually seeing
+// nginx traffic), which catches its silent-failure mode.
+const CrowdsecServiceName = "wardnet-crowdsec-metrics"
+
 // CollectionInterval is how often the hostmetrics receiver scrapes.
 const CollectionInterval = "60s"
 
@@ -104,7 +111,11 @@ func identityAttrs(attrs Attributes) []map[string]any {
 // to a host-metrics-only collector. Each pg target gets its own receiver + metrics
 // pipeline whose resource processor stamps service.name=DBServiceName,
 // service.instance.id=HostID, db.cluster.name=<cluster>, plus the shared identity.
-func Render(endpoint string, attrs Attributes, pg []PostgresTarget) (string, error) {
+// crowdsecScrape, when non-empty, adds a prometheus receiver scraping those loopback
+// "host:port" endpoints (the CrowdSec agent + firewall bouncer, ADR-0043) on their own
+// job/pipeline; empty leaves the config byte-identical. It is variadic so the many
+// host-metrics-only callers stay unchanged.
+func Render(endpoint string, attrs Attributes, pg []PostgresTarget, crowdsecScrape ...string) (string, error) {
 	if endpoint == "" {
 		return "", fmt.Errorf("otelcol: empty OTLP endpoint")
 	}
@@ -208,6 +219,33 @@ func Render(endpoint string, attrs Attributes, pg []PostgresTarget) (string, err
 		pipelines[pipeName] = map[string]any{
 			"receivers":  []string{recName},
 			"processors": []string{procName, "transform/db-labels", "batch"},
+			"exporters":  []string{"otlphttp"},
+		}
+	}
+
+	// CrowdSec metrics (ADR-0043): one prometheus receiver scraping the agent + firewall
+	// bouncer loopback endpoints on an edge host, on its own job + pipeline. The resource
+	// processor overwrites the scrape-derived job/instance with a fixed CrowdSec job name
+	// and the per-node HostID (like the pg targets) plus the shared identity, so CrowdSec
+	// health correlates with host + app telemetry on host.id. Empty targets = no receiver.
+	if len(crowdsecScrape) > 0 {
+		receivers["prometheus/crowdsec"] = map[string]any{
+			"config": map[string]any{
+				"scrape_configs": []map[string]any{{
+					"job_name":        "crowdsec",
+					"scrape_interval": CollectionInterval,
+					"static_configs":  []map[string]any{{"targets": crowdsecScrape}},
+				}},
+			},
+		}
+		csResourceAttrs := append([]map[string]any{
+			upsert("service.name", CrowdsecServiceName),
+			upsert("service.instance.id", attrs.HostID),
+		}, identityAttrs(attrs)...)
+		processors["resource/crowdsec"] = map[string]any{"attributes": csResourceAttrs}
+		pipelines["metrics/crowdsec"] = map[string]any{
+			"receivers":  []string{"prometheus/crowdsec"},
+			"processors": []string{"resource/crowdsec", "batch"},
 			"exporters":  []string{"otlphttp"},
 		}
 	}

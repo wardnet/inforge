@@ -30,7 +30,7 @@ import (
 // inforge envs share one Grafana org cleanly. Built-in dashboards and built-in alerts
 // are each opt-out per env (obs.DashboardsEnabled / obs.AlertsEnabled); routing uses
 // per-rule notification settings, so no org-singleton notification policy is touched.
-func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.ObservabilityConfig, hasDatabase, dryRun bool, services []grafanaalert.ServiceScope) error {
+func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.ObservabilityConfig, hasDatabase, hasCrowdsec, dryRun bool, services []grafanaalert.ServiceScope) error {
 	if obs.GrafanaURL == "" {
 		return nil
 	}
@@ -89,6 +89,17 @@ func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.Obse
 				return err
 			}
 		}
+		// The CrowdSec dashboard exists only when CrowdSec is enabled (ADR-0043), the same
+		// resource-gating the Postgres dashboard/alerts use — a non-CrowdSec env gets none.
+		if hasCrowdsec {
+			body, err := grafanadash.Crowdsec(env, grafana.DashboardUID(env, "crowdsec"))
+			if err != nil {
+				return err
+			}
+			if err := newDashboard("crowdsec", body); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Custom dashboards: Grafana-exported files committed under this env's
@@ -109,7 +120,7 @@ func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.Obse
 	}
 
 	// Alert rules + contact points (opt-out per env for the built-ins).
-	if err := realizeGrafanaAlerts(ctx, prov, folder, dir, srcEnv, env, obs, hasDatabase, dryRun, services); err != nil {
+	if err := realizeGrafanaAlerts(ctx, prov, folder, dir, srcEnv, env, obs, hasDatabase, hasCrowdsec, dryRun, services); err != nil {
 		return err
 	}
 	return nil
@@ -122,7 +133,7 @@ func realizeGrafana(ctx *pulumi.Context, dir, srcEnv, env string, obs types.Obse
 // custom alerts. Each rule routes via its own NotificationSettings.ContactPoint —
 // resolved from the alert's profile + severity — so the org notification policy is
 // never touched. A route marked `muted: true` drops the rule.
-func realizeGrafanaAlerts(ctx *pulumi.Context, prov *grafanasdk.Provider, folder *oss.Folder, dir, srcEnv, env string, obs types.ObservabilityConfig, hasDatabase, dryRun bool, services []grafanaalert.ServiceScope) error {
+func realizeGrafanaAlerts(ctx *pulumi.Context, prov *grafanasdk.Provider, folder *oss.Folder, dir, srcEnv, env string, obs types.ObservabilityConfig, hasDatabase, hasCrowdsec, dryRun bool, services []grafanaalert.ServiceScope) error {
 	notif, err := loader.LoadNotifications(srcEnv, dir)
 	if err != nil {
 		return err
@@ -163,6 +174,11 @@ func realizeGrafanaAlerts(ctx *pulumi.Context, prov *grafanasdk.Provider, folder
 	if obs.AlertsEnabled() {
 		alerts = append(alerts, grafanaalert.BuiltIns(env, hasDatabase)...)
 		alerts = append(alerts, grafanaalert.ServiceBuiltIns(env, services)...)
+		// CrowdSec alerts only when CrowdSec is enabled (ADR-0043) — otherwise the
+		// acquisition/bouncer rules would evaluate against series that never exist.
+		if hasCrowdsec {
+			alerts = append(alerts, grafanaalert.CrowdsecBuiltIns(env)...)
+		}
 	}
 	customAlerts, err := grafanaalert.Custom(alertsSpec.Alerts)
 	if err != nil {

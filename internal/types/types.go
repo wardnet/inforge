@@ -45,6 +45,10 @@ type IngressSpec struct {
 	Container        string `yaml:"container"`
 	Host             string `yaml:"host"`                         // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
 	HealthProbesPort int    `yaml:"health_probes_port,omitempty"` // public port nginx exposes service health checks on (defaults to 81 when omitted); opened only when a referencing service declares its own health_probes_port
+	// Security opts this edge out of the env-level security tier (ADR-0043) when set to
+	// false: no rate limiting (and, slice 2, no CrowdSec). Nil/absent = the env policy
+	// applies. A *bool distinguishes "unset" from an explicit opt-out.
+	Security *bool `yaml:"security,omitempty"`
 }
 
 // AppSpec is one front-end (static SPA) resource — a bundle served from an
@@ -84,6 +88,10 @@ type GatewaySpec struct {
 	Services         []string `yaml:"services"`                     // FKs -> services (same scope) exposed at the edge; the routing table is derived from their mesh.public_paths
 	HealthProbesPort int      `yaml:"health_probes_port,omitempty"` // public port the gateway host exposes its listed services' health checks on (plain HTTP, Host-demuxed by service FQDN; defaults to 81)
 	HealthProbePaths []string `yaml:"health_probe_paths,omitempty"` // exact paths on the gateway's own 443 server that nginx answers 200 "ok" directly (edge liveness over the real TLS path); optional
+	// Security opts this gateway edge out of the env-level security tier (ADR-0043) when
+	// set to false: no rate limiting on its mesh routes (and, slice 2, no CrowdSec on its
+	// host). Nil/absent = the env policy applies.
+	Security *bool `yaml:"security,omitempty"`
 }
 
 // EffectiveHealthProbesPort is the gateway twin of the ingress method: the
@@ -359,6 +367,24 @@ type PKIResourceSpec struct {
 	Validity  string `yaml:"validity,omitempty"` // optional CA validity (e.g. "10y")
 }
 
+// RateLimitProfile is the resolved IP-based rate limit applied to an edge's public
+// servers (ADR-0043). Rate limiting is a blanket ingress SECURITY measure, not per-route
+// tuning: one limit is derived at deploy from the env's security.rate_limit block and
+// stamped UNIFORMLY on every server of an edge (per-route / per-identity limits are a
+// gateway-module concern — ADR-0044 — not this layer). It rides on the ingress-derived
+// server structs (IngressRoute/IngressApp/IngressGateway) so the nginx renderer emits the
+// shared-memory zone and the per-server limit directives without a wider signature; a nil
+// pointer means the edge has no rate limiting (disabled, or opted out via `security:
+// false`). Name is the nginx zone stem (a fixed constant, since the limit is uniform).
+// Keying is always the client IP (ADR-0043); RPS/Burst drive limit_req (http only —
+// ignored for an L4 forward), MaxConn drives limit_conn (http and stream).
+type RateLimitProfile struct {
+	Name    string // nginx zone stem (a fixed constant — the limit is edge-uniform)
+	RPS     int    // requests/second (limit_req rate); 0 disables request-rate limiting
+	Burst   int    // queued excess before a 429 (limit_req burst)
+	MaxConn int    // max concurrent connections per client IP (limit_conn); 0 disables
+}
+
 // IngressRoute is one typed inbound routing entry the ingress proxy (nginx)
 // realizes, derived from one route of one service that references the ingress.
 // The ingress is the sole public entry point: nginx fronts the service on the
@@ -385,6 +411,10 @@ type IngressRoute struct {
 	Listen  int      // public port the ingress accepts traffic on
 	Target  int      // backend port the service listens on
 	Backend string   // backend address nginx proxies to ("127.0.0.1" co-located; private IP cross-host)
+	// RateLimit is the resolved rate-limit profile for this route (nil = none). A
+	// tls-termination route uses RPS/Burst (limit_req) and MaxConn (limit_conn); a
+	// forward route uses only MaxConn (stream limit_conn — L4 has no request rate).
+	RateLimit *RateLimitProfile
 }
 
 // IngressApp is one static front-end (SPA) the ingress proxy (nginx) serves from
@@ -401,6 +431,8 @@ type IngressApp struct {
 	FQDN string // fully-qualified app domain (single SNI / ACME cert)
 	Root string // on-host document root nginx serves (the `current` symlink)
 	Spa  bool   // true -> try_files fallback to /index.html (SPA deep links)
+	// RateLimit is the resolved rate-limit profile for this app's server (nil = none).
+	RateLimit *RateLimitProfile
 }
 
 // IngressHealth is one service health endpoint the ingress proxy (nginx) surfaces,
@@ -435,6 +467,9 @@ type IngressGateway struct {
 	FQDN             string // fully-qualified gateway domain (single SNI / ACME cert)
 	Routes           []IngressGatewayRoute
 	HealthProbePaths []string // exact paths on the 443 server nginx answers 200 "ok" directly (edge liveness)
+	// RateLimit is the resolved rate-limit profile applied to this gateway's mesh-route
+	// locations (nil = none). The edge health-probe locations are never limited.
+	RateLimit *RateLimitProfile
 }
 
 // IngressGatewayRoute is one derived path route on the gateway server: daemon
@@ -794,6 +829,57 @@ type EnvironmentVariables struct {
 	BaseDomain    string              `yaml:"base_domain"`
 	SSH           SSHConfig           `yaml:"ssh"`
 	Observability ObservabilityConfig `yaml:"observability"`
+	Security      SecurityConfig      `yaml:"security"`
+}
+
+// SecurityConfig is the optional env-level edge security tier (ADR-0043): a blanket IP
+// rate limit and (slice 2) the CrowdSec agent, applied to every public edge (ingress +
+// gateway) host. Both are off unless enabled. Like ObservabilityConfig it lives in
+// variables.yaml and is struct-decoded — there is no JSON schema for the block. An edge
+// opts the whole tier out with `security: false` on its ingress/gateway spec.
+type SecurityConfig struct {
+	Crowdsec  CrowdsecConfig  `yaml:"crowdsec"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
+}
+
+// CrowdsecConfig toggles the per-edge-host CrowdSec agent + firewall bouncer (slice 2).
+// Version pins the installed release (else the package DefaultVersion); Console opts in
+// to dashboard enrollment (gated on a reserved secret). The fields are carried now so
+// the authoring surface is stable; the realization lands in the CrowdSec slice.
+type CrowdsecConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Version string `yaml:"version,omitempty"`
+	Console bool   `yaml:"console,omitempty"`
+}
+
+// RateLimitConfig is the blanket IP rate limit (ADR-0043): one uniform limit applied to
+// every public server on an edge — a security floor, not per-route tuning (per-route /
+// per-identity limits are a gateway concern, ADR-0044). Keying is always the client IP.
+type RateLimitConfig struct {
+	Enabled           bool `yaml:"enabled"`
+	RequestsPerSecond int  `yaml:"requests_per_second"`
+	Burst             int  `yaml:"burst"`
+	MaxConnections    int  `yaml:"max_connections"`
+}
+
+// RateLimitZoneStem is the fixed nginx zone stem for the edge-uniform limit. It is a
+// constant (not per-route) because one limit covers the whole edge (ADR-0043).
+const RateLimitZoneStem = "edge"
+
+// ResolvedRateLimit returns the profile to stamp on an edge's public servers, or nil
+// when rate limiting is disabled or has nothing to enforce (both limits zero). The
+// program applies it uniformly to every server of every edge that has not opted out.
+func (s SecurityConfig) ResolvedRateLimit() *RateLimitProfile {
+	rl := s.RateLimit
+	if !rl.Enabled || (rl.RequestsPerSecond <= 0 && rl.MaxConnections <= 0) {
+		return nil
+	}
+	return &RateLimitProfile{
+		Name:    RateLimitZoneStem,
+		RPS:     rl.RequestsPerSecond,
+		Burst:   rl.Burst,
+		MaxConn: rl.MaxConnections,
+	}
 }
 
 // ObservabilityConfig is the optional env-level observability block (ADR-0031,
