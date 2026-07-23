@@ -52,7 +52,12 @@ type mixedPort struct {
 // strictly by server_name (the service FQDN) and reverse-proxied to the backend
 // health port. http{} is emitted when the host terminates TLS for any route, serves
 // any app, or has any health endpoint; stream{} when it has any forward route.
-func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway) (string, error) {
+// gateways are the gateway TERMINATION servers this host fronts as an ingress
+// (TLS + security → reverse-proxy to the private gateway, ADR-0045); gatewayRoutes
+// are the gateway ROUTING servers this host runs as a gateway host (plain-HTTP,
+// real_ip recovery → mesh egress). When a gateway is co-located with its ingress,
+// the same host receives both for the same gateway.
+func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway, gatewayRoutes []types.IngressGateway) (string, error) {
 	var terminate, forward []types.IngressRoute
 	for _, r := range routes {
 		// Backend is the resolved upstream address the caller must fill — "127.0.0.1"
@@ -114,16 +119,30 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 	}
 	sort.Slice(sortedHealth, func(i, j int) bool { return sortedHealth[i].FQDN < sortedHealth[j].FQDN })
 
-	// Gateways render in a stable order. Each must carry its resolved FQDN — the
-	// server_name and ACME cert SNI; empty means the program wiring failed. Every
-	// route pattern is compiled up front (validation guarantees parseability; a
-	// bad glob reaching this far fails the render loud rather than emitting a
-	// broken location).
+	// Gateway TERMINATION servers (on the ingress host) render in a stable order.
+	// Each must carry its resolved FQDN (server_name + ACME SNI) and the resolved
+	// backend the ingress reverse-proxies to (the private gateway's HTTP listener) —
+	// empty means the program wiring failed; fail loud rather than proxy to nowhere.
 	sortedGateways := append([]types.IngressGateway(nil), gateways...)
-	gatewayRegexOf := map[string]string{}
 	for _, g := range sortedGateways {
 		if g.FQDN == "" {
 			return "", fmt.Errorf("nginx: gateway %q has no FQDN", g.Name)
+		}
+		if g.Backend == "" || g.HTTPPort <= 0 {
+			return "", fmt.Errorf("nginx: gateway %q termination has no resolved backend (unresolved private gateway address)", g.Name)
+		}
+	}
+	sort.Slice(sortedGateways, func(i, j int) bool { return sortedGateways[i].FQDN < sortedGateways[j].FQDN })
+
+	// Gateway ROUTING servers (on the gateway host) render in a stable order. Each
+	// must carry its bind address, HTTP port, and the ingress source it trusts for
+	// real-IP recovery. Every route pattern is compiled up front (validation
+	// guarantees parseability; a bad glob reaching this far fails the render loud).
+	sortedGatewayRoutes := append([]types.IngressGateway(nil), gatewayRoutes...)
+	gatewayRegexOf := map[string]string{}
+	for _, g := range sortedGatewayRoutes {
+		if g.ListenAddr == "" || g.HTTPPort <= 0 || g.RealIPFrom == "" {
+			return "", fmt.Errorf("nginx: gateway %q routing server has unresolved wiring (listen/port/real_ip)", g.Name)
 		}
 		for _, rt := range g.Routes {
 			p, err := pathglob.Parse(rt.Pattern)
@@ -133,7 +152,7 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 			gatewayRegexOf[rt.Pattern] = p.Regex()
 		}
 	}
-	sort.Slice(sortedGateways, func(i, j int) bool { return sortedGateways[i].FQDN < sortedGateways[j].FQDN })
+	sort.Slice(sortedGatewayRoutes, func(i, j int) bool { return sortedGatewayRoutes[i].FQDN < sortedGatewayRoutes[j].FQDN })
 
 	// Classify ports: a forward whose listen also carries a tls-termination route
 	// or (on 443) an app is "mixed" and needs ssl_preread; the rest are forward-only.
@@ -232,8 +251,8 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 		block("events", nil, dir("worker_connections", "1024")),
 	)
 
-	if len(terminate) > 0 || len(sortedApps) > 0 || len(sortedHealth) > 0 || len(sortedGateways) > 0 {
-		top = append(top, httpBlock(terminate, sortedApps, sortedHealth, healthPort, sortedGateways, gatewayRegexOf, listenDir, len(mixedPorts) > 0))
+	if len(terminate) > 0 || len(sortedApps) > 0 || len(sortedHealth) > 0 || len(sortedGateways) > 0 || len(sortedGatewayRoutes) > 0 {
+		top = append(top, httpBlock(terminate, sortedApps, sortedHealth, healthPort, sortedGateways, sortedGatewayRoutes, gatewayRegexOf, listenDir, len(mixedPorts) > 0))
 	}
 	if len(forwardOnly) > 0 || len(mixedPorts) > 0 {
 		top = append(top, streamBlock(forwardOnly, mixedPorts))
@@ -256,7 +275,7 @@ func Render(routes []types.IngressRoute, apps []types.IngressApp, health []types
 // ACME-challenge/redirect server (only when something terminates TLS).
 // listenDir places a terminating server on its public port or, when that port is
 // mixed, on its internal loopback port.
-func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway, gatewayRegexOf map[string]string, listenDir func(int) *crossplane.Directive, anyMixed bool) *crossplane.Directive {
+func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway, gatewayRoutes []types.IngressGateway, gatewayRegexOf map[string]string, listenDir func(int) *crossplane.Directive, anyMixed bool) *crossplane.Directive {
 	terminatesTLS := len(terminate) > 0 || len(apps) > 0 || len(gateways) > 0
 
 	// Content-Type for everything served off disk. Unconditional: nginx's built-in
@@ -268,10 +287,10 @@ func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health [
 		dir("include", mimeTypesPath),
 		dir("default_type", "application/octet-stream"),
 	}
-	if len(gateways) > 0 {
-		// WebSocket upgrade support for the gateway's mesh-bound locations: a daemon
-		// WS handshake crosses gateway → gateway-mesh → callee-mesh, and every hop
-		// must pass Upgrade through (ADR-0032 realization invariant).
+	if len(gateways) > 0 || len(gatewayRoutes) > 0 {
+		// WebSocket upgrade support for the gateway path: a daemon WS handshake crosses
+		// ingress-termination → gateway-routing → gateway-mesh → callee-mesh, and every
+		// hop must pass Upgrade through (ADR-0032/0045 realization invariant).
 		children = append(children,
 			block("map", []string{"$http_upgrade", "$connection_upgrade"},
 				dir("default", "upgrade"),
@@ -318,7 +337,10 @@ func httpBlock(terminate []types.IngressRoute, apps []types.IngressApp, health [
 		children = append(children, appServer(a, listenDir(443)))
 	}
 	for _, g := range gateways {
-		children = append(children, gatewayServer(g, listenDir(443), gatewayRegexOf))
+		children = append(children, gatewayTerminationServer(g, listenDir(443)))
+	}
+	for _, g := range gatewayRoutes {
+		children = append(children, gatewayRoutingServer(g, gatewayRegexOf))
 	}
 	if len(health) > 0 {
 		children = append(children, healthCatchAllServer(healthPort))
@@ -387,30 +409,64 @@ func appServer(a types.IngressApp, listen *crossplane.Directive) *crossplane.Dir
 	)
 }
 
-// gatewayServer renders the north-south daemon gateway server (ADR-0032/0034):
-// ACME-managed TLS on the gateway's single FQDN, with one regex location per
-// derived route (a listed service's public path glob, compiled by pathglob)
-// handing the request to the LOCAL mesh proxy's gateway egress listener.
-// The location proxies plain HTTP to loopback; the mesh does the mTLS hop
-// presenting the gateway's <scope>/gateway leaf, and the callee's mesh stamps
-// X-Service-Identity from that cert. Invariants realized here:
+// gatewayTerminationServer renders the ingress-side half of a private gateway
+// (ADR-0045): ACME-managed TLS on the gateway's FQDN on the FRONTING INGRESS host,
+// enforcing the edge security tier (rate limit) and reverse-proxying the whole FQDN
+// to the private gateway's plain-HTTP routing server (g.Backend:g.HTTPPort). The
+// routing table stays gateway business — this server never inspects paths or
+// touches X-Mesh-Target; it blind-proxies. XFF is APPENDED here (the ingress is the
+// trusted internet-facing hop): $proxy_add_x_forwarded_for stamps the real client
+// ($remote_addr — recovered from proxy_protocol on a mixed port) as the rightmost
+// entry, which the routing server then recovers via set_real_ip_from this ingress.
+// listen is the pre-computed listen directive (public ssl, or a mixed-port loopback
+// ssl listen accepting the PROXY protocol). WebSocket-capable (a daemon WS crosses
+// four proxy hops); the daemon Authorization header is forwarded untouched.
+func gatewayTerminationServer(g types.IngressGateway, listen *crossplane.Directive) *crossplane.Directive {
+	loc := append(rlHTTPLimitDirs(g.RateLimit),
+		dir("proxy_http_version", "1.1"),
+		dir("proxy_set_header", "Upgrade", "$http_upgrade"),
+		dir("proxy_set_header", "Connection", "$connection_upgrade"),
+		dir("proxy_set_header", "Host", "$host"),
+		dir("proxy_set_header", "X-Forwarded-For", "$proxy_add_x_forwarded_for"),
+		dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
+		dir("proxy_read_timeout", "3600s"),
+		dir("proxy_pass", fmt.Sprintf("http://%s:%d", g.Backend, g.HTTPPort)),
+	)
+	return block("server", nil,
+		listen,
+		dir("server_name", g.FQDN),
+		dir("acme_certificate", acmeIssuer),
+		dir("ssl_certificate", "$acme_certificate"),
+		dir("ssl_certificate_key", "$acme_certificate_key"),
+		dir("ssl_certificate_cache", "max=2"),
+		block("location", []string{"/"}, loc...),
+	)
+}
+
+// gatewayRoutingServer renders the gateway-side half of a private gateway
+// (ADR-0032/0034/0045): a plain-HTTP server on the gateway host (never public — it
+// listens on g.ListenAddr:g.HTTPPort, reached only through the fronting ingress),
+// with one regex location per derived route handing the request to the LOCAL mesh
+// proxy's gateway egress listener. The mesh does the mTLS hop presenting the
+// gateway's <scope>/gateway leaf. Invariants realized here:
+//   - the client IP is recovered from the ingress-stamped X-Forwarded-For, trusting
+//     ONLY the fronting ingress (set_real_ip_from g.RealIPFrom, real_ip_recursive) —
+//     so $remote_addr is the real daemon and a client-forged XFF entry is stripped;
 //   - the target is named out-of-band in X-Mesh-Target, so the PATH IS PRESERVED
 //     byte-for-byte — a daemon's PoP-signed path reaches the service verbatim;
 //   - the daemon's Authorization header is forwarded untouched (the service
 //     validates the JWT, never the gateway);
-//   - every location is WebSocket-capable ($connection_upgrade map, 1h read
-//     timeout) — a daemon WS crosses three proxy hops;
-//   - the real daemon IP is stamped into X-Forwarded-For at this, the TLS edge;
-//   - the gateway's own health probe paths are answered 200 "ok" by nginx
-//     itself, over the same TLS path daemons use (edge liveness);
-//   - a path matching no route is a JSON 404 at the edge, never proxied.
+//   - X-Forwarded-For toward the mesh is SET to $remote_addr (the recovered client),
+//     so the callee reads the real client as the leftmost XFF entry;
+//   - every location is WebSocket-capable; the health probe paths are answered 200
+//     "ok" directly (edge liveness, reached over the real public path through the
+//     ingress); a path matching no route is a JSON 404, never proxied.
 //
-// Regex locations are evaluated in emitted order for every request on this
-// server, but validation guarantees the patterns are pairwise non-overlapping
-// across the gateway's services (pathglob.Overlaps), so order cannot change
-// which route wins. regexOf maps each route's raw pattern to its compiled,
-// Render-verified regex.
-func gatewayServer(g types.IngressGateway, listen *crossplane.Directive, regexOf map[string]string) *crossplane.Directive {
+// Regex locations are evaluated in emitted order, but validation guarantees the
+// patterns are pairwise non-overlapping across the gateway's services, so order
+// cannot change which route wins. regexOf maps each route's raw pattern to its
+// compiled, Render-verified regex.
+func gatewayRoutingServer(g types.IngressGateway, regexOf map[string]string) *crossplane.Directive {
 	routes := append([]types.IngressGatewayRoute(nil), g.Routes...)
 	sort.Slice(routes, func(i, j int) bool {
 		if routes[i].Pattern != routes[j].Pattern {
@@ -420,12 +476,15 @@ func gatewayServer(g types.IngressGateway, listen *crossplane.Directive, regexOf
 	})
 
 	children := crossplane.Directives{
-		listen,
+		dir("listen", fmt.Sprintf("%s:%d", g.ListenAddr, g.HTTPPort)),
 		dir("server_name", g.FQDN),
-		dir("acme_certificate", acmeIssuer),
-		dir("ssl_certificate", "$acme_certificate"),
-		dir("ssl_certificate_key", "$acme_certificate_key"),
-		dir("ssl_certificate_cache", "max=2"),
+		// The fronting ingress is the sole trusted source of the client IP: recover the
+		// real daemon address from its X-Forwarded-For. Only this ingress is trusted, so
+		// real_ip_recursive stops at the rightmost non-trusted entry — the real client
+		// the ingress appended — and a client-forged left entry is discarded (anti-spoof).
+		dir("set_real_ip_from", g.RealIPFrom),
+		dir("real_ip_header", "X-Forwarded-For"),
+		dir("real_ip_recursive", "on"),
 	}
 	probes := append([]string(nil), g.HealthProbePaths...)
 	sort.Strings(probes)
@@ -436,22 +495,20 @@ func gatewayServer(g types.IngressGateway, listen *crossplane.Directive, regexOf
 		))
 	}
 	for _, rt := range routes {
-		loc := append(rlHTTPLimitDirs(g.RateLimit),
+		children = append(children, block("location", []string{"~", regexOf[rt.Pattern]},
 			dir("proxy_http_version", "1.1"),
 			dir("proxy_set_header", "Upgrade", "$http_upgrade"),
 			dir("proxy_set_header", "Connection", "$connection_upgrade"),
 			dir("proxy_set_header", "Host", "$host"),
-			// SET, never append: this is the internet-facing first hop, so a
-			// daemon-supplied X-Forwarded-For is untrusted input — appending
-			// ($proxy_add_x_forwarded_for) would forward a forged first entry
-			// through the mesh and defeat per-IP audit/rate-limit logic.
+			// SET, never append: $remote_addr is the real client (recovered above from
+			// the trusted ingress), so this stamps it as the sole XFF entry the mesh
+			// forwards — the callee reads it as the leftmost value.
 			dir("proxy_set_header", "X-Forwarded-For", "$remote_addr"),
-			dir("proxy_set_header", "X-Forwarded-Proto", "$scheme"),
+			dir("proxy_set_header", "X-Forwarded-Proto", "$http_x_forwarded_proto"),
 			dir("proxy_set_header", "X-Mesh-Target", rt.Service),
 			dir("proxy_read_timeout", "3600s"),
 			dir("proxy_pass", fmt.Sprintf("http://127.0.0.1:%d", meshpaths.GatewayEgressPort)),
-		)
-		children = append(children, block("location", []string{"~", regexOf[rt.Pattern]}, loc...))
+		))
 	}
 	children = append(children, jsonNotFoundLocation())
 	return block("server", nil, children...)

@@ -449,6 +449,7 @@ func NormalizeGateway(g *types.GatewaySpec) {
 	g.Name = strings.TrimSpace(g.Name)
 	g.Container = strings.TrimSpace(g.Container)
 	g.Host = strings.TrimSpace(g.Host)
+	g.Ingress = strings.TrimSpace(g.Ingress)
 	g.Pki = strings.TrimSpace(g.Pki)
 	g.Subdomain = strings.TrimSpace(g.Subdomain)
 	trimAll(g.Services)

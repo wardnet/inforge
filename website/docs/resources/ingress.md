@@ -11,9 +11,10 @@ like `service.host`) and reuses that host's provisioning, firewall, cloud-init, 
 **no provider** of its own — it inherits its host's.
 
 The ingress is one of two **north-south** (external-facing) tiers. Its sibling is the
-[Gateway](./gateway) — the public edge external **daemons** HTTPS into, which routes each path to a
-service through the east-west mesh. Both are public nginx server blocks and can share one host (they
-merge into a single nginx there); the ingress fronts apps/web, the gateway fronts the daemon API.
+[Gateway](./gateway) — the daemon API front door, which routes each path to a service through the
+east-west mesh. A gateway is **private, fronted by an ingress** (ADR-0045): this ingress terminates
+its TLS and the security tier and reverse-proxies to it. The ingress fronts apps/web (and any
+gateway); the gateway holds the daemon routing table.
 
 An ingress lives in a folder under `regional/ingress/<name>/` (or `global/ingress/<name>/`):
 

@@ -5,14 +5,15 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wardnet/inforge/internal/nginx"
 	"github.com/wardnet/inforge/internal/types"
 )
 
-// gatewayPathsRes is the shared fixture for the ADR-0034 derivations: a gateway
-// on its own host (edge) listing two services — tenants (co-located with the
-// gateway? no: on back, cross-host, with health) and billing (on edge,
-// co-located, no health) — plus an ingress-fronted service that must stay out of
-// the gateway health tier (D12).
+// gatewayPathsRes is the shared fixture for the ADR-0034/0045 derivations: a
+// gateway on host `edge`, fronted by the scope ingress `web` on host `back` (a
+// SPLIT gateway — the gateway and its ingress are on different hosts), listing two
+// services — tenants (on back, with health) and billing (on edge, no health) —
+// plus an ingress-fronted service that must stay out of the gateway health tier (D12).
 func gatewayPathsRes() types.Resources {
 	return types.Resources{
 		Compute: []types.ComputeSpec{
@@ -21,7 +22,7 @@ func gatewayPathsRes() types.Resources {
 		},
 		Ingress: []types.IngressSpec{{Name: "web", Host: "back"}},
 		Gateway: []types.GatewaySpec{{
-			Name: "api", Container: "edge", Host: "edge", Pki: "mesh", Subdomain: "api",
+			Name: "api", Container: "edge", Host: "edge", Ingress: "web", Pki: "mesh", Subdomain: "api",
 			Services:         []string{"tenants", "billing"},
 			HealthProbePaths: []string{"/healthz"},
 		}},
@@ -54,21 +55,49 @@ func TestToGatewayNginxRoutes(t *testing.T) {
 	}, routes)
 }
 
-// TestGatewaysByHostThreadsRoutesAndHealth: the derived IngressGateway carries
-// the derived routes and the gateway's own health probe paths.
-func TestGatewaysByHostThreadsRoutesAndHealth(t *testing.T) {
+// TestGatewayEdgeByHostSplitsTerminationAndRouting: a private gateway (ADR-0045)
+// derives a TERMINATION server on its fronting ingress host (back-01) and a ROUTING
+// server on its own host (edge-01), carrying the derived routes + health paths. Being
+// split, each half records the peer host whose private IP the provider resolves.
+func TestGatewayEdgeByHostSplitsTerminationAndRouting(t *testing.T) {
 	res := gatewayPathsRes()
 	canonical := map[string]string{"edge": "edge-01", "back": "back-01"}
-	byHost := gatewaysByHost(res, canonical, "use1", "wardnet.network", "")
-	require.Len(t, byHost["edge-01"], 1)
-	g := byHost["edge-01"][0]
-	assert.Equal(t, []string{"/healthz"}, g.HealthProbePaths)
-	assert.Len(t, g.Routes, 3)
+	terms, routings, peers := gatewayEdgeByHost(res, canonical, "use1", "wardnet.network", "")
+	// Termination on the ingress host; routing on the gateway host.
+	require.Len(t, terms["back-01"], 1)
+	require.Len(t, routings["edge-01"], 1)
+	assert.Empty(t, terms["edge-01"])
+	assert.Empty(t, routings["back-01"])
+	route := routings["edge-01"][0]
+	assert.Equal(t, []string{"/healthz"}, route.HealthProbePaths)
+	assert.Len(t, route.Routes, 3)
+	assert.Empty(t, route.ListenAddr, "split routing server binds the gateway host's own private IP, filled by the provider")
+	assert.Empty(t, route.RealIPFrom, "split routing real_ip source resolves from the ingress host's private IP")
+	assert.Empty(t, terms["back-01"][0].Backend, "split termination backend resolves from the gateway host's private IP")
+	// Peer-IP needs: the termination (on back-01) needs the gateway host (edge-01);
+	// the routing (on edge-01) needs the ingress host (back-01).
+	assert.Equal(t, "edge-01", peers["back-01"]["api"])
+	assert.Equal(t, "back-01", peers["edge-01"]["api"])
+}
+
+// TestGatewayEdgeByHostCoLocated: when the gateway shares its ingress's host, both
+// halves render on one host with loopback addresses and no peer-IP resolution.
+func TestGatewayEdgeByHostCoLocated(t *testing.T) {
+	res := gatewayPathsRes()
+	res.Ingress = []types.IngressSpec{{Name: "web", Host: "edge"}} // move the ingress onto the gateway host
+	canonical := map[string]string{"edge": "edge-01", "back": "back-01"}
+	terms, routings, peers := gatewayEdgeByHost(res, canonical, "use1", "wardnet.network", "")
+	require.Len(t, terms["edge-01"], 1)
+	require.Len(t, routings["edge-01"], 1)
+	assert.Equal(t, "127.0.0.1", terms["edge-01"][0].Backend)
+	assert.Equal(t, "127.0.0.1", routings["edge-01"][0].ListenAddr)
+	assert.Equal(t, "127.0.0.1", routings["edge-01"][0].RealIPFrom)
+	assert.Empty(t, peers, "co-located gateways need no cross-host IP resolution")
 }
 
 // TestResolveGatewayHealthServices: only gateway-listed, health-declaring,
-// ingress-less services join the gateway health tier (D12), with co-location
-// resolved against the gateway host.
+// ingress-less services join the gateway health tier (D12). The listener renders on
+// the gateway's FRONTING INGRESS host (ADR-0045), and co-location is relative to it.
 func TestResolveGatewayHealthServices(t *testing.T) {
 	res := gatewayPathsRes()
 	canonical := map[string]string{"edge": "edge-01", "back": "back-01"}
@@ -76,41 +105,45 @@ func TestResolveGatewayHealthServices(t *testing.T) {
 	require.Len(t, gsvcs, 1, "billing has no health port; webapp has an ingress (D12)")
 	gs := gsvcs[0]
 	assert.Equal(t, "tenants", gs.svc.Name)
-	assert.Equal(t, "edge-01", gs.gwHost)
+	assert.Equal(t, "back-01", gs.gwHost, "health renders on the fronting ingress host, not the gateway host")
 	assert.Equal(t, "back-01", gs.svcHost)
-	assert.False(t, gs.coLocated)
+	assert.True(t, gs.coLocated, "tenants shares the ingress host (back), so its health backend is loopback")
 }
 
-// TestGatewayHealthByHost: the health entries render on the gateway's host with
-// the declared probe paths; a cross-host backend is left empty for the provider
-// to substitute the private IP.
+// TestGatewayHealthByHost: the health entries render on the gateway's FRONTING
+// INGRESS host (ADR-0045) with the declared probe paths. tenants shares that host
+// (back), so its backend is loopback.
 func TestGatewayHealthByHost(t *testing.T) {
 	res := gatewayPathsRes()
 	canonical := map[string]string{"edge": "edge-01", "back": "back-01"}
 	byHost := gatewayHealthByHost(resolveGatewayHealthServices(res, canonical), "prd", "use1", "wardnet.network")
-	require.Len(t, byHost["edge-01"], 1)
-	h := byHost["edge-01"][0]
+	require.Len(t, byHost["back-01"], 1)
+	h := byHost["back-01"][0]
 	assert.Equal(t, "tenants.svc.prd.use1.wardnet.network", h.FQDN)
 	assert.Equal(t, 8081, h.Target)
 	assert.Equal(t, []string{"/livez", "/readyz"}, h.Paths)
-	assert.Empty(t, h.Backend, "cross-host backend is the provider's to fill")
+	assert.Equal(t, "127.0.0.1", h.Backend, "tenants is co-located with the ingress host, so its health backend is loopback")
 }
 
-// TestFirewallPlanByHostGatewayHealth: the gateway host opens its public health
-// port (default 81) alongside 443/80; the cross-host backend opens its health
-// port privately to the network CIDR.
+// TestFirewallPlanByHostGatewayHealth: a private gateway (ADR-0045) opens its public
+// pair (443/80) and its health port on the FRONTING INGRESS host (back-01), never on
+// the gateway host; the split gateway host (edge-01) opens only its private routing
+// port (GatewayHTTPPort) to the network CIDR.
 func TestFirewallPlanByHostGatewayHealth(t *testing.T) {
 	res := gatewayPathsRes()
 	got := firewallPlanByHost(res, false)
-	assert.Contains(t, got["edge-01"].Public, 81, "gateway health listener is public on the gateway host")
-	assert.Contains(t, got["edge-01"].Public, 443)
-	assert.Contains(t, got["edge-01"].Public, 80)
-	assert.Contains(t, got["back-01"].Private, 8081, "cross-host backend health port opens privately")
+	assert.Contains(t, got["back-01"].Public, 443, "gateway TLS termination is public on the ingress host")
+	assert.Contains(t, got["back-01"].Public, 80, "gateway ACME is public on the ingress host")
+	assert.Contains(t, got["back-01"].Public, 81, "gateway health listener is public on the ingress host")
+	assert.NotContains(t, got["edge-01"].Public, 443, "the gateway host is never public")
+	assert.NotContains(t, got["edge-01"].Public, 80)
+	assert.Contains(t, got["edge-01"].Private, nginx.GatewayHTTPPort, "the split gateway host opens its routing port privately")
 }
 
-// TestDerivedRecordsGatewayHealth: a gateway-routed service's ServiceFQDN A
-// record points at the GATEWAY host; an ingress-fronted health service's record
-// points at the ingress host (D12 keeps the two exclusive).
+// TestDerivedRecordsGatewayHealth: a gateway-routed service's ServiceFQDN A record
+// points at the gateway's FRONTING INGRESS host (ADR-0045: health follows the gateway
+// behind the ingress); an ingress-fronted health service's record points at its own
+// ingress host (D12 keeps the two exclusive). Here both resolve to back-01.
 func TestDerivedRecordsGatewayHealth(t *testing.T) {
 	res := gatewayPathsRes()
 	got := derivedRecords(res, "prd", "use1", "wardnet.network", "")
@@ -118,7 +151,7 @@ func TestDerivedRecordsGatewayHealth(t *testing.T) {
 	for _, d := range got {
 		byRecord[d.rec.RecordName] = d.hostKey
 	}
-	assert.Equal(t, "edge-01", byRecord["tenants.svc.prd.use1"], "gateway-routed health record points at the gateway host")
+	assert.Equal(t, "back-01", byRecord["tenants.svc.prd.use1"], "gateway-routed health record points at the fronting ingress host")
 	assert.Equal(t, "back-01", byRecord["webapp.svc.prd.use1"], "ingress-fronted health-only service gets its record at the ingress host")
 	_, hasBilling := byRecord["billing.svc.prd.use1"]
 	assert.False(t, hasBilling, "no health port -> no service record")

@@ -71,7 +71,7 @@ stream {
     }
 }
 `
-	got, err := Render(routes, nil, nil, 0, nil)
+	got, err := Render(routes, nil, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 }
@@ -87,7 +87,7 @@ func TestRenderRateLimit(t *testing.T) {
 		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Backend: "127.0.0.1",
 			FQDNs: []string{"api.svc.prd.use1.wardnet.network"}, RateLimit: rl},
 	}
-	got, err := Render(routes, nil, nil, 0, nil)
+	got, err := Render(routes, nil, nil, 0, nil, nil)
 	require.NoError(t, err)
 
 	// http{} zones, declared once, with the 429 status overrides.
@@ -118,7 +118,7 @@ func TestRenderRateLimitExemptsHealthAndACME(t *testing.T) {
 	health := []types.IngressHealth{
 		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 9000, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
 	}
-	got, err := Render(routes, nil, health, 81, nil)
+	got, err := Render(routes, nil, health, 81, nil, nil)
 	require.NoError(t, err)
 	// Exactly one limited location — the tls-termination route. Health + ACME are exempt.
 	assert.Equal(t, 1, strings.Count(got, "limit_req zone=rl_edge"))
@@ -132,7 +132,7 @@ func TestRenderNoRateLimit(t *testing.T) {
 		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Backend: "127.0.0.1",
 			FQDNs: []string{"api.svc.prd.use1.wardnet.network"}},
 	}
-	got, err := Render(routes, nil, nil, 0, nil)
+	got, err := Render(routes, nil, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.NotContains(t, got, "limit_req")
 	assert.NotContains(t, got, "limit_conn")
@@ -222,7 +222,7 @@ stream {
     }
 }
 `
-	got, err := Render(routes, nil, nil, 0, nil)
+	got, err := Render(routes, nil, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 }
@@ -237,7 +237,7 @@ func TestRenderMixedWithApp(t *testing.T) {
 	apps := []types.IngressApp{
 		{Name: "dashboard", FQDN: "my.use1.wardnet.network", Root: "/srv/wardnet/app/dashboard/current", Spa: true},
 	}
-	got, err := Render(routes, apps, nil, 0, nil)
+	got, err := Render(routes, apps, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "listen 127.0.0.1:11443 ssl proxy_protocol;", "app server moves to the loopback terminator")
 	assert.Contains(t, got, "my.use1.wardnet.network 127.0.0.1:11443;", "app FQDN joins the preread map")
@@ -326,7 +326,7 @@ http {
     }
 }
 `
-	got, err := Render(routes, apps, nil, 0, nil)
+	got, err := Render(routes, apps, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 }
@@ -337,7 +337,7 @@ http {
 func TestRenderAppOnly(t *testing.T) {
 	got, err := Render(nil, []types.IngressApp{
 		{Name: "my", FQDN: "my.wardnet.network", Root: "/srv/wardnet/app/my/current", Spa: true},
-	}, nil, 0, nil)
+	}, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "http {")
 	assert.Contains(t, got, "acme_certificate letsencrypt;")
@@ -358,7 +358,7 @@ func TestRenderAppOnly(t *testing.T) {
 func TestRenderIncludesMimeTypes(t *testing.T) {
 	got, err := Render(nil, []types.IngressApp{
 		{Name: "my", FQDN: "my.wardnet.network", Root: "/srv/wardnet/app/my/current", Spa: true},
-	}, nil, 0, nil)
+	}, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "include "+mimeTypesPath+";")
 	// The fallback for an unmapped extension must be a byte stream, not text —
@@ -369,7 +369,7 @@ func TestRenderIncludesMimeTypes(t *testing.T) {
 // TestRenderAppEmptyRootErrors: an app with no resolved document root fails loud
 // rather than letting nginx serve the whole filesystem.
 func TestRenderAppEmptyRootErrors(t *testing.T) {
-	_, err := Render(nil, []types.IngressApp{{Name: "my", FQDN: "my.wardnet.network", Spa: true}}, nil, 0, nil)
+	_, err := Render(nil, []types.IngressApp{{Name: "my", FQDN: "my.wardnet.network", Spa: true}}, nil, 0, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no document root")
 }
@@ -388,7 +388,7 @@ func TestRenderHealthGolden(t *testing.T) {
 		{Service: "web", FQDN: "web.svc.prd.use1.wardnet.network", Target: 3001, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
 		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
 	}
-	got, err := Render(routes, nil, health, 81, nil)
+	got, err := Render(routes, nil, health, 81, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "    server {\n        listen 81;\n        server_name api.svc.prd.use1.wardnet.network;\n        location = /healthz {\n            proxy_pass http://127.0.0.1:8081;\n            proxy_set_header Host $host;\n        }\n        location / {\n            return 404;\n        }\n    }")
 	assert.Contains(t, got, "    server {\n        listen 81;\n        server_name web.svc.prd.use1.wardnet.network;\n        location = /healthz {\n            proxy_pass http://127.0.0.1:3001;\n            proxy_set_header Host $host;\n        }\n        location / {\n            return 404;\n        }\n    }")
@@ -404,7 +404,7 @@ func TestRenderHealthCatchAll(t *testing.T) {
 	got, err := Render(nil, nil, []types.IngressHealth{
 		{Service: "web", FQDN: "web.svc.prd.use1.wardnet.network", Target: 3001, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
 		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
-	}, 81, nil)
+	}, 81, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "    server {\n        listen 81 default_server;\n        server_name _;\n        return 404;\n    }")
 	// The catch-all precedes every named health server, so no service's server can
@@ -419,7 +419,7 @@ func TestRenderHealthCatchAll(t *testing.T) {
 func TestRenderNoHealthNoCatchAll(t *testing.T) {
 	got, err := Render([]types.IngressRoute{
 		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Backend: "127.0.0.1", FQDNs: []string{"api.example.com"}},
-	}, nil, nil, 81, nil)
+	}, nil, nil, 81, nil, nil)
 	require.NoError(t, err)
 	assert.NotContains(t, got, "default_server")
 }
@@ -435,21 +435,21 @@ func TestRenderForwardOn80TerminatingHostRejected(t *testing.T) {
 		{Service: "relay", Type: types.IngressTypeForward, Listen: 80, Target: 8080, Backend: "127.0.0.1"},
 	}
 	// Terminating because of an app.
-	_, err := Render(fwd80, []types.IngressApp{{Name: "dash", FQDN: "my.example.com", Root: "/srv/dash", Spa: true}}, nil, 81, nil)
+	_, err := Render(fwd80, []types.IngressApp{{Name: "dash", FQDN: "my.example.com", Root: "/srv/dash", Spa: true}}, nil, 81, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ACME HTTP-01")
-	// Terminating because of a gateway.
-	_, err = Render(fwd80, nil, nil, 81, []types.IngressGateway{{Name: "api", FQDN: "api.example.com"}})
+	// Terminating because of a gateway termination server.
+	_, err = Render(fwd80, nil, nil, 81, []types.IngressGateway{{Name: "api", FQDN: "api.example.com", Backend: "127.0.0.1", HTTPPort: GatewayHTTPPort}}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ACME HTTP-01")
 	// Terminating because of a tls-termination route.
 	_, err = Render(append(append([]types.IngressRoute(nil), fwd80...),
 		types.IngressRoute{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, Backend: "127.0.0.1", FQDNs: []string{"api.example.com"}},
-	), nil, nil, 81, nil)
+	), nil, nil, 81, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ACME HTTP-01")
 	// Nothing terminates TLS: no :80 http server, so the forward owns the port.
-	got, err := Render(fwd80, nil, nil, 81, nil)
+	got, err := Render(fwd80, nil, nil, 81, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "listen 80;")
 }
@@ -461,7 +461,7 @@ func TestRenderForwardOnHealthPortRejected(t *testing.T) {
 		{Service: "relay", Type: types.IngressTypeForward, Listen: 81, Target: 8080, Backend: "127.0.0.1"},
 	}, nil, []types.IngressHealth{
 		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
-	}, 81, nil)
+	}, 81, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "public health port")
 }
@@ -471,7 +471,7 @@ func TestRenderForwardOnHealthPortRejected(t *testing.T) {
 func TestRenderHealthOnly(t *testing.T) {
 	got, err := Render(nil, nil, []types.IngressHealth{
 		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}},
-	}, 81, nil)
+	}, 81, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "http {")
 	assert.Contains(t, got, "listen 81;")
@@ -488,7 +488,7 @@ func TestRenderHealthPaths(t *testing.T) {
 	got, err := Render(nil, nil, []types.IngressHealth{
 		{Service: "api", FQDN: "api.svc.prd.use1.wardnet.network", Target: 8081, Backend: "127.0.0.1",
 			Paths: []string{"/readyz", "/healthz"}},
-	}, 81, nil)
+	}, 81, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "        location = /healthz {\n            proxy_pass http://127.0.0.1:8081;\n            proxy_set_header Host $host;\n        }")
 	assert.Contains(t, got, "        location = /readyz {\n            proxy_pass http://127.0.0.1:8081;\n            proxy_set_header Host $host;\n        }")
@@ -504,7 +504,7 @@ func TestRenderHealthPaths(t *testing.T) {
 func TestRenderHealthNoPathsErrors(t *testing.T) {
 	_, err := Render(nil, nil, []types.IngressHealth{
 		{Service: "api", FQDN: "api.svc", Target: 8081, Backend: "127.0.0.1"},
-	}, 81, nil)
+	}, 81, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allowlist-only")
 }
@@ -512,7 +512,7 @@ func TestRenderHealthNoPathsErrors(t *testing.T) {
 // TestRenderHealthNoBackendErrors: a health entry with no resolved backend fails
 // loud, like a route.
 func TestRenderHealthNoBackendErrors(t *testing.T) {
-	_, err := Render(nil, nil, []types.IngressHealth{{Service: "api", FQDN: "api.svc", Target: 8081}}, 81, nil)
+	_, err := Render(nil, nil, []types.IngressHealth{{Service: "api", FQDN: "api.svc", Target: 8081}}, 81, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no backend address")
 }
@@ -520,7 +520,7 @@ func TestRenderHealthNoBackendErrors(t *testing.T) {
 // TestRenderHealthNoPortErrors: health entries with no public health port fail loud
 // (the program must resolve the ingress's health port, default 81).
 func TestRenderHealthNoPortErrors(t *testing.T) {
-	_, err := Render(nil, nil, []types.IngressHealth{{Service: "api", FQDN: "api.svc", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}}}, 0, nil)
+	_, err := Render(nil, nil, []types.IngressHealth{{Service: "api", FQDN: "api.svc", Target: 8081, Backend: "127.0.0.1", Paths: []string{"/healthz"}}}, 0, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no public health port")
 }
@@ -534,9 +534,9 @@ func TestRenderDeterministic(t *testing.T) {
 		{Service: "c", Type: types.IngressTypeForward, Listen: 853, Target: 3000, Backend: "127.0.0.1"},
 	}
 	b := []types.IngressRoute{a[2], a[1], a[0]}
-	ra, err := Render(a, nil, nil, 0, nil)
+	ra, err := Render(a, nil, nil, 0, nil, nil)
 	require.NoError(t, err)
-	rb, err := Render(b, nil, nil, 0, nil)
+	rb, err := Render(b, nil, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, ra, rb)
 }
@@ -546,7 +546,7 @@ func TestRenderDeterministic(t *testing.T) {
 func TestRenderForwardOnly(t *testing.T) {
 	got, err := Render([]types.IngressRoute{
 		{Service: "bridge", Type: types.IngressTypeForward, Listen: 443, Target: 8080, Backend: "127.0.0.1"},
-	}, nil, nil, 0, nil)
+	}, nil, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "stream {")
 	assert.Contains(t, got, "proxy_protocol on;")
@@ -561,7 +561,7 @@ func TestRenderForwardOnly(t *testing.T) {
 func TestRenderTerminateOnly(t *testing.T) {
 	got, err := Render([]types.IngressRoute{
 		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, FQDNs: []string{"api.svc"}, Backend: "127.0.0.1"},
-	}, nil, nil, 0, nil)
+	}, nil, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "http {")
 	assert.Contains(t, got, "acme_certificate letsencrypt;")
@@ -579,7 +579,7 @@ func TestRenderCrossHostBackend(t *testing.T) {
 	got, err := Render([]types.IngressRoute{
 		{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, FQDNs: []string{"api.svc"}, Backend: "10.0.1.5"},
 		{Service: "dns", Type: types.IngressTypeForward, Listen: 853, Target: 5353, Backend: "10.0.1.6"},
-	}, nil, nil, 0, nil)
+	}, nil, nil, 0, nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, got, "proxy_pass http://10.0.1.5:8080;", "cross-host tls-termination proxies to the backend private IP")
 	assert.Contains(t, got, "proxy_pass 10.0.1.6:5353;", "cross-host forward proxies to the backend private IP")
@@ -588,7 +588,7 @@ func TestRenderCrossHostBackend(t *testing.T) {
 
 // TestRenderUnknownTypeErrors guards the renderer against an unexpected route type.
 func TestRenderUnknownTypeErrors(t *testing.T) {
-	_, err := Render([]types.IngressRoute{{Service: "x", Type: "passthrough", Listen: 443, Backend: "127.0.0.1"}}, nil, nil, 0, nil)
+	_, err := Render([]types.IngressRoute{{Service: "x", Type: "passthrough", Listen: 443, Backend: "127.0.0.1"}}, nil, nil, 0, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown type")
 }
@@ -597,31 +597,51 @@ func TestRenderUnknownTypeErrors(t *testing.T) {
 // than silently proxying the service to localhost (the program/provider must fill
 // Backend — "127.0.0.1" co-located, the private IP cross-host).
 func TestRenderEmptyBackendErrors(t *testing.T) {
-	_, err := Render([]types.IngressRoute{{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, FQDNs: []string{"api.svc"}}}, nil, nil, 0, nil)
+	_, err := Render([]types.IngressRoute{{Service: "api", Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8080, FQDNs: []string{"api.svc"}}}, nil, nil, 0, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no backend address")
 }
 
-// TestRenderGateway: the north-south gateway server block — ACME on its single
-// FQDN, one regex location per derived route (a listed service's public path
-// glob) handing the request to the LOCAL mesh egress at the fixed gateway port
-// (target named out-of-band in X-Mesh-Target so the path is preserved
-// byte-for-byte), WebSocket-capable, XFF stamped at the edge, and a JSON 404
-// default for undeclared paths (ADR-0034).
+// coLocatedGateway builds the termination + routing halves of a co-located
+// private gateway (ADR-0045) for the render tests: the ingress-side TLS termination
+// (proxy to the gateway's loopback HTTP port) and the gateway-side plain-HTTP routing
+// server (real_ip recovery → mesh egress).
+func coLocatedGateway(name, fqdn string, routes []types.IngressGatewayRoute, healthPaths []string) (term, route types.IngressGateway) {
+	term = types.IngressGateway{Name: name, FQDN: fqdn, Backend: "127.0.0.1", HTTPPort: GatewayHTTPPort}
+	route = types.IngressGateway{
+		Name: name, FQDN: fqdn, Routes: routes, HealthProbePaths: healthPaths,
+		HTTPPort: GatewayHTTPPort, ListenAddr: "127.0.0.1", RealIPFrom: "127.0.0.1",
+	}
+	return term, route
+}
+
+// TestRenderGateway: a private gateway (ADR-0045) renders two servers. The ingress
+// TERMINATION server holds ACME on the FQDN and reverse-proxies the whole host to the
+// gateway's plain-HTTP port, appending the real client to XFF. The gateway ROUTING
+// server recovers the client IP from that XFF (trusting only the ingress), then hands
+// each derived route to the LOCAL mesh egress (target out-of-band in X-Mesh-Target so
+// the path is preserved), WebSocket-capable, with a JSON 404 default (ADR-0034).
 func TestRenderGateway(t *testing.T) {
-	got, err := Render(nil, nil, nil, 0, []types.IngressGateway{{
-		Name: "api",
-		FQDN: "api.use1.wardnet.network",
-		Routes: []types.IngressGatewayRoute{
-			{Pattern: "/tunnel/**", Service: "tunneller"},
-			{Pattern: "/v*/dns/**", Service: "ddns"},
-			{Pattern: "/dns-status", Service: "ddns"},
-		},
-	}})
+	term, route := coLocatedGateway("api", "api.use1.wardnet.network", []types.IngressGatewayRoute{
+		{Pattern: "/tunnel/**", Service: "tunneller"},
+		{Pattern: "/v*/dns/**", Service: "ddns"},
+		{Pattern: "/dns-status", Service: "ddns"},
+	}, nil)
+	got, err := Render(nil, nil, nil, 0, []types.IngressGateway{term}, []types.IngressGateway{route})
 	require.NoError(t, err)
+	// Termination server: ACME on the FQDN, blind-proxy to the gateway HTTP port,
+	// APPEND the real client to XFF (the trusted internet edge).
 	assert.Contains(t, got, "server_name api.use1.wardnet.network;")
 	assert.Contains(t, got, "acme_certificate letsencrypt;")
 	assert.Contains(t, got, "listen 80;", "gateway alone still needs the ACME :80 server")
+	assert.Contains(t, got, fmt.Sprintf("proxy_pass http://127.0.0.1:%d;", GatewayHTTPPort), "termination blind-proxies to the gateway HTTP port")
+	assert.Contains(t, got, "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;", "the ingress edge appends the real client")
+	// Routing server: recover the client IP from the ingress XFF (trust only it),
+	// then hand each route to the mesh egress with X-Mesh-Target.
+	assert.Contains(t, got, fmt.Sprintf("listen 127.0.0.1:%d;", GatewayHTTPPort), "routing server listens plain HTTP on loopback")
+	assert.Contains(t, got, "set_real_ip_from 127.0.0.1;")
+	assert.Contains(t, got, "real_ip_header X-Forwarded-For;")
+	assert.Contains(t, got, "real_ip_recursive on;")
 	assert.Contains(t, got, "map $http_upgrade $connection_upgrade", "WS upgrade map present")
 	assert.Contains(t, got, `location ~ "^/v[^/]+/dns(/.*)?$" {`, "glob compiled to an anchored regex location")
 	assert.Contains(t, got, `location ~ "^/dns-status$" {`, "exact glob compiled to an anchored regex location")
@@ -629,12 +649,11 @@ func TestRenderGateway(t *testing.T) {
 	assert.Contains(t, got, "proxy_set_header X-Mesh-Target ddns;")
 	assert.Contains(t, got, "proxy_set_header X-Mesh-Target tunneller;")
 	assert.Contains(t, got, fmt.Sprintf("proxy_pass http://127.0.0.1:%d;", meshpaths.GatewayEgressPort))
-	// XFF is SET to the real client at the internet edge, not appended — a
-	// daemon-supplied X-Forwarded-For must not survive into the mesh.
+	// Toward the mesh, XFF is SET to the recovered client ($remote_addr) — the callee
+	// reads it as the leftmost entry.
 	assert.Contains(t, got, "proxy_set_header X-Forwarded-For $remote_addr;")
-	assert.NotContains(t, got, "$proxy_add_x_forwarded_for", "the edge must not append a client-supplied XFF")
 	assert.Contains(t, got, "proxy_set_header Upgrade $http_upgrade;")
-	// Undeclared paths are answered with a JSON 404 at the edge, never proxied.
+	// Undeclared paths are answered with a JSON 404, never proxied.
 	assert.Contains(t, got, "default_type application/json;")
 	assert.Contains(t, got, `return 404 '{"error":"not_found"}';`)
 	// Routes render in sorted-pattern order (/dns-status before /tunnel/** before /v*/dns/**).
@@ -644,15 +663,12 @@ func TestRenderGateway(t *testing.T) {
 }
 
 // TestRenderGatewaySelfHealth: the gateway's declared health probe paths are
-// answered 200 "ok" by nginx itself on the 443 server — edge liveness over the
-// real daemon TLS path — and render before the route locations.
+// answered 200 "ok" by nginx itself on the ROUTING server (reached through the
+// ingress over the real public path) and render before the route locations.
 func TestRenderGatewaySelfHealth(t *testing.T) {
-	got, err := Render(nil, nil, nil, 0, []types.IngressGateway{{
-		Name:             "api",
-		FQDN:             "api.use1.wardnet.network",
-		Routes:           []types.IngressGatewayRoute{{Pattern: "/tenants/**", Service: "tenants"}},
-		HealthProbePaths: []string{"/healthz"},
-	}})
+	term, route := coLocatedGateway("api", "api.use1.wardnet.network",
+		[]types.IngressGatewayRoute{{Pattern: "/tenants/**", Service: "tenants"}}, []string{"/healthz"})
+	got, err := Render(nil, nil, nil, 0, []types.IngressGateway{term}, []types.IngressGateway{route})
 	require.NoError(t, err)
 	assert.Contains(t, got, "location = /healthz {")
 	assert.Contains(t, got, "default_type text/plain;")
@@ -664,33 +680,40 @@ func TestRenderGatewaySelfHealth(t *testing.T) {
 // fails the render loud (validation guarantees it never happens; the renderer
 // must not emit a broken location if it does).
 func TestRenderGatewayBadGlobErrors(t *testing.T) {
-	_, err := Render(nil, nil, nil, 0, []types.IngressGateway{{
-		Name: "api", FQDN: "api.use1.wardnet.network",
-		Routes: []types.IngressGatewayRoute{{Pattern: "/a/**/b", Service: "tenants"}},
-	}})
+	_, route := coLocatedGateway("api", "api.use1.wardnet.network",
+		[]types.IngressGatewayRoute{{Pattern: "/a/**/b", Service: "tenants"}}, nil)
+	_, err := Render(nil, nil, nil, 0, nil, []types.IngressGateway{route})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid path glob")
 }
 
-// TestRenderGatewayMixedPort: a forward on :443 coexists with the gateway via
-// ssl_preread — the gateway server moves to a loopback terminator and its FQDN
-// joins the SNI map, exactly like an app.
+// TestRenderGatewayMixedPort: a forward on :443 coexists with the gateway
+// TERMINATION server via ssl_preread — the termination moves to a loopback
+// terminator and its FQDN joins the SNI map, exactly like an app. The routing
+// server (plain HTTP on its own port) is unaffected.
 func TestRenderGatewayMixedPort(t *testing.T) {
+	term, route := coLocatedGateway("api", "api.use1.wardnet.network",
+		[]types.IngressGatewayRoute{{Pattern: "/ddns/**", Service: "ddns"}}, nil)
 	got, err := Render([]types.IngressRoute{
 		{Service: "tunneller", Type: types.IngressTypeForward, Listen: 443, Target: 9443, Backend: "127.0.0.1"},
-	}, nil, nil, 0, []types.IngressGateway{{
-		Name: "api", FQDN: "api.use1.wardnet.network",
-		Routes: []types.IngressGatewayRoute{{Pattern: "/ddns/**", Service: "ddns"}},
-	}})
+	}, nil, nil, 0, []types.IngressGateway{term}, []types.IngressGateway{route})
 	require.NoError(t, err)
 	assert.Contains(t, got, "ssl_preread on;")
 	assert.Contains(t, got, "api.use1.wardnet.network 127.0.0.1:11443;", "gateway FQDN routes to the loopback terminator")
-	assert.Contains(t, got, "listen 127.0.0.1:11443 ssl proxy_protocol;", "gateway server moved to the loopback terminator")
+	assert.Contains(t, got, "listen 127.0.0.1:11443 ssl proxy_protocol;", "gateway termination moved to the loopback terminator")
 }
 
-// TestRenderGatewayNoFQDNErrors: a gateway without a resolved FQDN fails loud.
+// TestRenderGatewayNoFQDNErrors: a gateway termination without a resolved FQDN fails loud.
 func TestRenderGatewayNoFQDNErrors(t *testing.T) {
-	_, err := Render(nil, nil, nil, 0, []types.IngressGateway{{Name: "api"}})
+	_, err := Render(nil, nil, nil, 0, []types.IngressGateway{{Name: "api", Backend: "127.0.0.1", HTTPPort: GatewayHTTPPort}}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no FQDN")
+}
+
+// TestRenderGatewayUnresolvedBackendErrors: a termination missing its resolved
+// backend (the private gateway address) fails loud rather than proxying to nowhere.
+func TestRenderGatewayUnresolvedBackendErrors(t *testing.T) {
+	_, err := Render(nil, nil, nil, 0, []types.IngressGateway{{Name: "api", FQDN: "api.svc"}}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unresolved private gateway address")
 }
