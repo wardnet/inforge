@@ -11,7 +11,7 @@ require (
 	github.com/nginxinc/nginx-go-crossplane v0.4.89
 	github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.17.0
 	github.com/pulumi/pulumi-command/sdk v1.2.1
-	github.com/pulumi/pulumi-hcloud/sdk v1.39.0
+	github.com/pulumi/pulumi-hcloud/sdk v1.39.1
 	github.com/pulumi/pulumi-random/sdk/v4 v4.21.0
 	github.com/pulumi/pulumi/sdk/v3 v3.251.0
 	github.com/pulumiverse/pulumi-grafana/sdk v1.0.0
