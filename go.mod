@@ -9,7 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.105.0
 	github.com/aws/smithy-go v1.27.3
 	github.com/nginxinc/nginx-go-crossplane v0.4.89
-	github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.17.0
+	github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.18.0
 	github.com/pulumi/pulumi-command/sdk v1.2.1
 	github.com/pulumi/pulumi-hcloud/sdk v1.39.0
 	github.com/pulumi/pulumi-random/sdk/v4 v4.21.0

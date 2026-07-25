@@ -234,8 +234,8 @@ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRI
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/pulumi/appdash v0.0.0-20231130102222-75f619a67231 h1:vkHw5I/plNdTr435cARxCW6q9gc0S/Yxz7Mkd38pOb0=
 github.com/pulumi/appdash v0.0.0-20231130102222-75f619a67231/go.mod h1:murToZ2N9hNJzewjHBgfFdXhZKjY3z5cYC1VXk+lbFE=
-github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.17.0 h1:EAgb6T2aQ6GHMTyq2zAU1P7ysBgAS+sF3jW8TYy20QU=
-github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.17.0/go.mod h1:xj1wh7fz3MnClHlaE1LZuJ70QktVCqechvH6n6WGI8Q=
+github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.18.0 h1:cWcLhL9mRWj38lJ1Hzld/5EwpIqnRo5JzT7wW7WigoI=
+github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.18.0/go.mod h1:6v+y2y+ET4plu7qGNHQnTQHf+PhAZpTGVzPniy5JuCE=
 github.com/pulumi/pulumi-command/sdk v1.2.1 h1:mAziZ91a/9U+5IjZH5Skcar80OSmpBSYljeQNRblTWQ=
 github.com/pulumi/pulumi-command/sdk v1.2.1/go.mod h1:hQxv9DXg6bFjcd9BEiNdMImQ/V1rnC9D115q5VXYNps=
 github.com/pulumi/pulumi-hcloud/sdk v1.39.0 h1:Rm2Xh/EnPs53v1CEWxJzAasxTT8Exycz+biKDTe+y5w=
