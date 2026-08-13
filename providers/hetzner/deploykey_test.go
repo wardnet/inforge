@@ -26,7 +26,7 @@ func TestRealizeRequiresDeployKey(t *testing.T) {
 			err := h.Realize(ctx, "edge-01", host, "deploy",
 				[]types.IngressRoute{{Service: "api", Type: types.IngressTypeTLSTermination,
 					Listen: 443, Target: 8080, Backend: "127.0.0.1", FQDNs: []string{"api.wardnet.network"}}},
-				nil, nil, 0, nil, nil, "prd", nil)
+				nil, nil, 0, nil, nil, nil, nil, "prd", nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "no deploy private key configured")
 			return nil

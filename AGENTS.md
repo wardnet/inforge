@@ -634,9 +634,29 @@ feed the gateway's derived routing table (rule `gateway-routes-are-derived-from-
 
 ## North-south gateway realization (ADR-0032 daemon edge, ADR-0034 derived routes)
 
-The `gateway` resource (authored: `host` + **`pki`** + `subdomain` + **`services:[names]`** +
-optional `health_probes_port`/`health_probe_paths`; scope singleton; validated in `checkGateway`
-incl. listed-service `allowed_services` + **same-`pki:`** match) is realized in two halves:
+The `gateway` resource (authored: `host` + **`ingress`** + **`pki`** + `subdomain` +
+**`services:[names]`** + optional `health_probes_port`/`health_probe_paths`; scope singleton;
+validated in `checkGateway` incl. listed-service `allowed_services` + **same-`pki:`** match) is
+realized in two halves:
+
+- **A gateway is PRIVATE, fronted by an ingress (ADR-0045).** The `ingress:` FK is **required**
+  (same-scope singleton ingress; gateway host and ingress host must share a network). A gateway is
+  **never a public edge** — it opens no public port and holds no ACME cert. Its FQDN renders as TWO
+  servers: a **termination server** on the fronting ingress host (ACME TLS + rate limit →
+  reverse-proxy the whole FQDN to the gateway, appending the real client to XFF) and a **routing
+  server** on the gateway host (plain HTTP on `nginx.GatewayHTTPPort`, `set_real_ip_from <ingress>` +
+  `real_ip_header X-Forwarded-For` to recover the client, then the derived route locations → mesh
+  egress). `program.gatewayEdgeByHost` derives both halves (terminations by ingress host, routings by
+  gateway host) + the cross-host peer-IP map; co-located = loopback, split = private IPs resolved in
+  the provider apply. **Consequences:** `crowdsecEdgeHosts` derives from **ingress hosts only** (a
+  gateway is never an edge); the gateway FQDN A record and firewall `443`/`80` live on the **ingress
+  host**; the split gateway host opens only `GatewayHTTPPort` privately; listed-service health
+  relocates to the ingress host. **No wardnet-cloud change** — the routing server's `real_ip`
+  recovery preserves the leftmost-XFF contract `client_ip()` expects. The `nginx.Render` signature
+  gained a `gatewayRoutes` slice; `IngressProvider.Realize` gained `gatewayRoutes` + `gatewayIPs`.
+  The bullets below describe the derived routing table and mesh-client half, which are unchanged;
+  where they say the gateway "terminates" or "opens public 443", read that as the **termination
+  server on the ingress host** per ADR-0045.
 
 - **Edge half (north-south nginx).** The routing table is **derived, never authored** (ADR-0034):
   `toGatewayNginxRoutes` emits one `IngressGatewayRoute{Pattern, Service}` per (listed service,

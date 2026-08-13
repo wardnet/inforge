@@ -31,6 +31,7 @@ import (
 	"github.com/wardnet/inforge/internal/meshpaths"
 	"github.com/wardnet/inforge/internal/meshplan"
 	"github.com/wardnet/inforge/internal/naming"
+	"github.com/wardnet/inforge/internal/nginx"
 	"github.com/wardnet/inforge/internal/otelcol"
 	"github.com/wardnet/inforge/internal/pgrole"
 	"github.com/wardnet/inforge/internal/postgres"
@@ -1036,9 +1037,12 @@ func provisionCrowdsec(ctx *pulumi.Context, res types.Resources, computeOut map[
 	return nil
 }
 
-// crowdsecEdgeHosts returns the set of canonical host keys that run a public edge (an
-// ingress or a gateway) and have not opted out of the security tier via `security: false`
-// (ADR-0043). A host is included if at least one non-opted-out edge resource lands on it.
+// crowdsecEdgeHosts returns the set of public-edge hosts CrowdSec installs on
+// (ADR-0043). The public edge is the INGRESS tier only: a gateway is never a
+// public edge (ADR-0045 — it is fronted by an ingress and holds no public port),
+// so its host contributes nothing here. When a gateway is co-located with its
+// ingress, the host is already covered via the ingress. The `security: false`
+// opt-out is honored per ingress.
 func crowdsecEdgeHosts(res types.Resources, canonical map[string]string) map[string]bool {
 	edge := map[string]bool{}
 	for _, ing := range res.Ingress {
@@ -1046,14 +1050,6 @@ func crowdsecEdgeHosts(res types.Resources, canonical map[string]string) map[str
 			continue
 		}
 		if hk, ok := canonical[ing.Host]; ok {
-			edge[hk] = true
-		}
-	}
-	for _, gw := range res.Gateway {
-		if gw.Security != nil && !*gw.Security {
-			continue
-		}
-		if hk, ok := canonical[gw.Host]; ok {
 			edge[hk] = true
 		}
 	}
@@ -1904,11 +1900,16 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		return fmt.Errorf("ingress: %w", err)
 	}
 	appsByHostKey := ingressAppsByHost(res, canonical, slug, baseDomain, ephemeralSlug)
-	gatewaysByHostKey := gatewaysByHost(res, canonical, slug, baseDomain, ephemeralSlug)
+	// A private gateway (ADR-0045) renders as two halves: a TERMINATION server on the
+	// fronting ingress host and a ROUTING server on the gateway's own host. Co-located
+	// gateways carry loopback addresses; a split gateway's cross-host IP is resolved
+	// per host from gatewayPeerByHost below.
+	gatewayTermByHost, gatewayRoutingByHost, gatewayPeerByHost := gatewayEdgeByHost(res, canonical, slug, baseDomain, ephemeralSlug)
 	// Stamp the env-uniform IP rate limit (ADR-0043) onto every edge server whose edge
 	// has not opted out (`security: false`). Rate limiting is a blanket security floor,
-	// so the same profile lands on every route/app/gateway — there is no per-route knob.
-	stampRateLimit(sec, res, routesByHostKey, appsByHostKey, gatewaysByHostKey)
+	// so the same profile lands on every route/app and — for a gateway — its termination
+	// server on the ingress (ADR-0045), there is no per-route knob.
+	stampRateLimit(sec, res, routesByHostKey, appsByHostKey, gatewayTermByHost)
 	// Resolve the ingress-tier services once and feed both derivations below — the
 	// health entries and the cross-host backend set — so the service list is walked a
 	// single time per host realization.
@@ -1952,13 +1953,14 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 	// orders for the hostname. The route-vs-route half of this rule lives in
 	// ingressRoutesByHost; this closes the app-vs-route/app-vs-app half so the
 	// guarantee holds even when `up` runs without a prior `validate`.
-	if err := checkAppSNICollisions(routesByHostKey, appsByHostKey, gatewaysByHostKey); err != nil {
+	if err := checkAppSNICollisions(routesByHostKey, appsByHostKey, gatewayTermByHost); err != nil {
 		return fmt.Errorf("ingress: %w", err)
 	}
-	// nginx is installed on an ingress host iff at least one route, app, health
-	// endpoint, OR gateway targets it; an app-only, health-only, or gateway-only
-	// host still realizes — its server blocks and ACME certs provision alone.
-	hostKeys := ingressHostUnion(routesByHostKey, appsByHostKey, healthByHostKey, gatewaysByHostKey)
+	// nginx is installed on a host iff at least one route, app, health endpoint,
+	// gateway TERMINATION (ingress host), or gateway ROUTING server (gateway host)
+	// targets it; a gateway-only host (split, ADR-0045) still realizes its plain-HTTP
+	// routing server alone.
+	hostKeys := ingressHostUnion(routesByHostKey, appsByHostKey, healthByHostKey, gatewayTermByHost, gatewayRoutingByHost)
 	if len(hostKeys) == 0 {
 		return nil
 	}
@@ -1985,6 +1987,18 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 			}
 			backendIPs[svcName] = backend.PrivateIP
 		}
+		// A split gateway (ADR-0045) needs its peer host's private IP: the gateway
+		// host's IP for a termination server on this ingress host, or the ingress
+		// host's IP for a routing server on this gateway host. Co-located gateways
+		// record no peer, so gatewayIPs stays empty and the config renders synchronously.
+		gatewayIPs := map[string]pulumi.StringOutput{}
+		for gwName, peerHostKey := range gatewayPeerByHost[hostKey] {
+			peer, ok := computeOut[peerHostKey]
+			if !ok {
+				return fmt.Errorf("ingress: host %q: gateway %q peer host %q has no compute output (available: %v)", hostKey, gwName, peerHostKey, sortedKeys(computeOut))
+			}
+			gatewayIPs[gwName] = peer.PrivateIP
+		}
 		// The realization SSHes the ingress host, so it waits on that host's
 		// cloud-init gate (shared with service provisioning when co-located).
 		gate, err := cloudInitGate(ctx, gates, hostKey, host, deployPrivateKey, env, slug)
@@ -1999,7 +2013,7 @@ func realizeIngress(ctx *pulumi.Context, reg registry.ProviderRegistry, res type
 		if healthPort == 0 {
 			healthPort = types.DefaultHealthProbesPort
 		}
-		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], appsByHostKey[hostKey], healthByHostKey[hostKey], healthPort, gatewaysByHostKey[hostKey], backendIPs, env, deps); err != nil {
+		if err := ip.Realize(ctx, hostKey, host, deployUserByCompute[hostKey], routesByHostKey[hostKey], appsByHostKey[hostKey], healthByHostKey[hostKey], healthPort, gatewayTermByHost[hostKey], gatewayRoutingByHost[hostKey], backendIPs, gatewayIPs, env, deps); err != nil {
 			return err
 		}
 	}
@@ -2206,15 +2220,17 @@ func ingressAppsByHost(res types.Resources, canonical map[string]string, slug, b
 // consume so the three can never drift (the gateway analogue of resolveIngressApps;
 // rule mesh-host-grouping-is-single-sourced names gateway realization a consumer).
 type resolvedGateway struct {
-	gw   types.GatewaySpec
-	host string // canonical compute specKey
-	fqdn string // naming.AppFQDN(subdomain, …) — server_name, ACME cert, and DNS record
+	gw      types.GatewaySpec
+	host    string // canonical compute specKey — the gateway's own host (runs the plain-HTTP routing server + mesh egress)
+	ingHost string // canonical specKey of the fronting ingress's host (ADR-0045): terminates TLS + security, and where the FQDN/cert/DNS live
+	fqdn    string // naming.AppFQDN(subdomain, …) — server_name, ACME cert (on the ingress), and DNS record (→ ingress host)
 }
 
 // resolveGateways resolves each authored gateway to its canonical host and public
 // FQDN once. An unresolved host FK is skipped (validation rejects it long before
 // this), so every consumer sees the same host/FQDN pair.
 func resolveGateways(res types.Resources, canonical map[string]string, slug, baseDomain, ephemeralSlug string) []resolvedGateway {
+	ingHosts := ingressHostsByName(res, canonical)
 	out := make([]resolvedGateway, 0, len(res.Gateway))
 	for _, gw := range res.Gateway {
 		host, ok := canonical[gw.Host]
@@ -2222,31 +2238,79 @@ func resolveGateways(res types.Resources, canonical map[string]string, slug, bas
 			continue
 		}
 		out = append(out, resolvedGateway{
-			gw:   gw,
-			host: host,
-			fqdn: naming.AppFQDN(gw.Subdomain, slug, baseDomain, ephemeralSlug),
+			gw:      gw,
+			host:    host,
+			ingHost: ingHosts[gw.Ingress], // "" if the ingress FK is unresolved (validation rejects that)
+			fqdn:    naming.AppFQDN(gw.Subdomain, slug, baseDomain, ephemeralSlug),
 		})
 	}
 	return out
 }
 
-// gatewaysByHost groups the scope's north-south gateway (a scope singleton) under
-// its canonical host as the derived types.IngressGateway the public nginx renders
-// (ADR-0032/0034), via the shared resolveGateways derivation. The routing table
-// is DERIVED, not authored: one route per (listed service, public path glob),
-// carrying the raw pattern and the owning service name (the X-Mesh-Target
-// value); the mesh resolves the target's location, so no backend is resolved here.
-func gatewaysByHost(res types.Resources, canonical map[string]string, slug, baseDomain, ephemeralSlug string) map[string][]types.IngressGateway {
-	byHost := map[string][]types.IngressGateway{}
+// gatewayEdgeByHost derives the two halves of every private gateway (ADR-0045),
+// via the shared resolveGateways derivation. A gateway is fronted by an ingress:
+//   - the TERMINATION server (grouped by the fronting INGRESS host) terminates the
+//     gateway FQDN's TLS, enforces the security tier, and reverse-proxies to the
+//     gateway's routing server;
+//   - the ROUTING server (grouped by the gateway's OWN host) is plain HTTP, recovers
+//     the client IP from the ingress-stamped XFF, and hands each derived route to the
+//     local mesh egress. The routing table is DERIVED, not authored: one route per
+//     (listed service, public path glob).
+//
+// Co-located gateways carry loopback addresses ("127.0.0.1") and need no IP
+// resolution. A split gateway leaves the cross-host field empty and records the peer
+// host whose private IP fills it: gatewayPeerByHost[hostKey][gatewayName] is the peer
+// host — the gateway host's IP for a termination's Backend, the ingress host's IP for
+// a routing server's RealIPFrom. realizeIngress resolves those to compute private IPs.
+func gatewayEdgeByHost(res types.Resources, canonical map[string]string, slug, baseDomain, ephemeralSlug string) (terminations, routings map[string][]types.IngressGateway, gatewayPeerByHost map[string]map[string]string) {
+	terminations = map[string][]types.IngressGateway{}
+	routings = map[string][]types.IngressGateway{}
+	gatewayPeerByHost = map[string]map[string]string{}
+	addPeer := func(host, gwName, peer string) {
+		if gatewayPeerByHost[host] == nil {
+			gatewayPeerByHost[host] = map[string]string{}
+		}
+		gatewayPeerByHost[host][gwName] = peer
+	}
 	for _, rg := range resolveGateways(res, canonical, slug, baseDomain, ephemeralSlug) {
-		byHost[rg.host] = append(byHost[rg.host], types.IngressGateway{
+		if rg.ingHost == "" {
+			continue // unresolved ingress FK — validation rejects it; skip defensively
+		}
+		coLocated := rg.host == rg.ingHost
+		term := types.IngressGateway{Name: rg.gw.Name, FQDN: rg.fqdn, HTTPPort: nginx.GatewayHTTPPort}
+		if coLocated {
+			term.Backend = "127.0.0.1"
+		} else {
+			addPeer(rg.ingHost, rg.gw.Name, rg.host) // termination needs the gateway host's private IP
+		}
+		terminations[rg.ingHost] = append(terminations[rg.ingHost], term)
+
+		route := types.IngressGateway{
 			Name:             rg.gw.Name,
 			FQDN:             rg.fqdn,
 			Routes:           toGatewayNginxRoutes(rg.gw.Services, res.Service),
 			HealthProbePaths: append([]string(nil), rg.gw.HealthProbePaths...),
-		})
+			HTTPPort:         nginx.GatewayHTTPPort,
+		}
+		if coLocated {
+			route.ListenAddr = "127.0.0.1"
+			route.RealIPFrom = "127.0.0.1"
+		} else {
+			// Split: the routing server binds the gateway host's OWN private IP (the
+			// provider fills the empty ListenAddr from the host being realized) — never
+			// 0.0.0.0, so the port is not exposed on the public interface even if the
+			// firewall CIDR rule is ever wrong. RealIPFrom trusts the ingress host's IP.
+			addPeer(rg.host, rg.gw.Name, rg.ingHost) // routing needs the ingress host's private IP
+		}
+		routings[rg.host] = append(routings[rg.host], route)
 	}
-	return byHost
+	for _, gs := range terminations {
+		sort.Slice(gs, func(i, j int) bool { return gs[i].FQDN < gs[j].FQDN })
+	}
+	for _, gs := range routings {
+		sort.Slice(gs, func(i, j int) bool { return gs[i].FQDN < gs[j].FQDN })
+	}
+	return terminations, routings, gatewayPeerByHost
 }
 
 // toGatewayNginxRoutes derives the gateway's provider-facing nginx routes from
@@ -2296,7 +2360,7 @@ func ingressHealthByHost(svcs []ingressService, env, slug, baseDomain string) ma
 // address per service, or the ServiceFQDN A record would derive at two hosts).
 type gatewayHealthService struct {
 	svc          types.ServiceSpec
-	gwHost       string // canonical specKey of the gateway's host (where the health server renders)
+	gwHost       string // canonical specKey of the FRONTING INGRESS host (where the health server renders, ADR-0045)
 	svcHost      string // canonical specKey of the service's own host
 	coLocated    bool
 	gwHealthPort int // the gateway's effective public health port — carried here so nginx, firewall, and DNS read ONE derivation
@@ -2313,6 +2377,9 @@ func resolveGatewayHealthServices(res types.Resources, canonical map[string]stri
 	seen := map[string]bool{}
 	var out []gatewayHealthService
 	for _, rg := range resolveGateways(res, canonical, "", "", "") {
+		if rg.ingHost == "" {
+			continue // unresolved ingress FK — validation rejects it
+		}
 		for _, name := range rg.gw.Services {
 			svc, ok := svcByName[name]
 			if !ok || svc.HealthProbesPort == 0 || svc.Ingress != "" || seen[name] {
@@ -2323,11 +2390,14 @@ func resolveGatewayHealthServices(res types.Resources, canonical map[string]stri
 				continue
 			}
 			seen[name] = true
+			// A private gateway's listed-service health follows it behind the ingress
+			// (ADR-0045): the public health listener renders on the FRONTING INGRESS
+			// host, not the gateway host. coLocated is relative to that ingress host.
 			out = append(out, gatewayHealthService{
 				svc:          svc,
-				gwHost:       rg.host,
+				gwHost:       rg.ingHost,
 				svcHost:      svcHost,
-				coLocated:    svcHost == rg.host,
+				coLocated:    svcHost == rg.ingHost,
 				gwHealthPort: rg.gw.EffectiveHealthProbesPort(),
 			})
 		}
@@ -2422,10 +2492,11 @@ func ingressCrossHostBackends(svcs []ingressService) map[string]map[string]strin
 	return out
 }
 
-// ingressHostUnion returns the sorted union of the three ingress-host maps' keys —
-// the hosts that have routes, apps, and/or health endpoints — so realization visits
-// each host exactly once in a stable order.
-func ingressHostUnion(routes map[string][]types.IngressRoute, apps map[string][]types.IngressApp, health map[string][]types.IngressHealth, gateways map[string][]types.IngressGateway) []string {
+// ingressHostUnion returns the sorted union of the five host maps' keys — the hosts
+// that have routes, apps, health endpoints, gateway termination servers, and/or
+// gateway routing servers (ADR-0045) — so realization visits each host exactly once
+// in a stable order.
+func ingressHostUnion(routes map[string][]types.IngressRoute, apps map[string][]types.IngressApp, health map[string][]types.IngressHealth, gatewayTerms, gatewayRoutes map[string][]types.IngressGateway) []string {
 	set := map[string]bool{}
 	for k := range routes {
 		set[k] = true
@@ -2436,7 +2507,10 @@ func ingressHostUnion(routes map[string][]types.IngressRoute, apps map[string][]
 	for k := range health {
 		set[k] = true
 	}
-	for k := range gateways {
+	for k := range gatewayTerms {
+		set[k] = true
+	}
+	for k := range gatewayRoutes {
 		set[k] = true
 	}
 	out := make([]string, 0, len(set))
@@ -2560,15 +2634,24 @@ func firewallPlanByHost(res types.Resources, meshPublic bool) map[string]types.F
 		addPublic(ia.ingHost, 443)
 		addPublic(ia.ingHost, 80)
 	}
-	// The north-south gateway host opens the same public pair: daemons HTTPS in
-	// on 443, and :80 serves ACME HTTP-01 for the gateway cert. The gateway's
-	// backends are reached THROUGH the mesh (its own loopback egress → the
-	// callee's MTLSPort, already covered by the mesh rules) — no private rule.
-	// Slug/baseDomain don't affect the host resolution the firewall needs, so the
-	// empty-args resolveGateways call shares the FK resolution with nginx + DNS.
+	// A private gateway (ADR-0045) is fronted by an ingress: the daemon-facing public
+	// pair (443 for TLS, 80 for ACME HTTP-01 of the gateway cert) opens on the FRONTING
+	// INGRESS host, not the gateway host. When the gateway is split onto its own host,
+	// that host opens the gateway's plain-HTTP routing port (nginx.GatewayHTTPPort) to
+	// the network CIDR only (the ingress reaches it privately); co-located needs no rule
+	// (loopback). The gateway's own mesh backends are reached THROUGH the mesh (already
+	// covered by the mesh MTLSPort rules) — no other rule. Slug/baseDomain don't affect
+	// host resolution, so the empty-args resolveGateways call shares FK resolution with
+	// nginx + DNS.
 	for _, rg := range resolveGateways(res, canonical, "", "", "") {
-		addPublic(rg.host, 443)
-		addPublic(rg.host, 80)
+		if rg.ingHost == "" {
+			continue
+		}
+		addPublic(rg.ingHost, 443)
+		addPublic(rg.ingHost, 80)
+		if rg.host != rg.ingHost {
+			addPrivate(rg.host, nginx.GatewayHTTPPort)
+		}
 	}
 	// The gateway health tier (ADR-0034): the gateway host opens its public health
 	// port when >=1 listed (ingress-less) service declares a backend health port,
@@ -2904,11 +2987,16 @@ func derivedRecords(res types.Resources, env, slug, baseDomain, ephemeralSlug st
 		fqdn := naming.AppFQDN(ia.app.Subdomain, slug, baseDomain, ephemeralSlug)
 		dedupAdd(fqdn, ia.app.Container, ia.ingHost)
 	}
-	// The gateway's FQDN is a grey-cloud A record at its own host (where its nginx
-	// terminates daemon TLS) — the SAME resolveGateways derivation gatewaysByHost
-	// feeds the server_name/ACME cert from, so record and cert can never drift.
+	// The gateway's FQDN is a grey-cloud A record at its FRONTING INGRESS host
+	// (ADR-0045): the ingress terminates the gateway's daemon TLS and holds its ACME
+	// cert, so the record points there — the SAME resolveGateways derivation
+	// gatewayEdgeByHost feeds the termination server_name/ACME from, so record and
+	// cert can never drift.
 	for _, rg := range resolveGateways(res, canonical, slug, baseDomain, ephemeralSlug) {
-		dedupAdd(rg.fqdn, rg.gw.Container, rg.host)
+		if rg.ingHost == "" {
+			continue
+		}
+		dedupAdd(rg.fqdn, rg.gw.Container, rg.ingHost)
 	}
 	// The scope's ingress gets a stable DNS name — `ingress.<base>` (global) /
 	// `ingress.<slug>.<base>` (regional) — pointing at its host, so consumers can

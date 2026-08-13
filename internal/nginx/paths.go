@@ -67,4 +67,16 @@ const (
 	// MaxMixedPorts bounds the reserved loopback range (far above any real ingress,
 	// which has a handful of listen ports at most).
 	MaxMixedPorts = 64
+
+	// GatewayHTTPPort is the plain-HTTP port a PRIVATE gateway's routing server
+	// listens on (ADR-0045). A gateway is never publicly exposed: its fronting
+	// ingress terminates TLS and reverse-proxies the gateway FQDN to this port over
+	// loopback (co-located) or the private network (split; the firewall opens it to
+	// the network CIDR only). The routing server recovers the real client IP from
+	// the ingress-stamped X-Forwarded-For (set_real_ip_from the ingress), then hands
+	// the request to the local mesh egress. It sits outside every other reserved
+	// range: meshpaths MTLSPort (8443) / egress [9500,9756], and the ssl_preread
+	// loopback range [LoopbackBase, LoopbackBase+MaxMixedPorts). A co-located
+	// backend target must avoid it, same as the loopback range.
+	GatewayHTTPPort = 8442
 )

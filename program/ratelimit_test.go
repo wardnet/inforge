@@ -55,7 +55,7 @@ func TestStampRateLimitIngressOptOut(t *testing.T) {
 	stampRateLimit(enabledSec(), res, routes, apps, gws)
 	assert.Nil(t, routes["h"][0].RateLimit, "route on an opted-out ingress is not limited")
 	assert.Nil(t, apps["h"][0].RateLimit, "app on an opted-out ingress is not limited")
-	assert.NotNil(t, gws["h"][0].RateLimit, "the gateway is a separate edge and stays limited")
+	assert.NotNil(t, gws["h"][0].RateLimit, "the gateway's own edge (its ingress) did not opt out, so its termination stays limited")
 }
 
 func TestStampRateLimitGatewayOptOut(t *testing.T) {

@@ -17,33 +17,39 @@ func edgeFixture() types.Resources {
 			{Name: "worker", Kind: "vm", InstanceCount: 1},
 		},
 		Ingress: []types.IngressSpec{{Name: "main", Host: "edge"}},
-		Gateway: []types.GatewaySpec{{Name: "gw", Host: "gwhost"}},
+		// The gateway is fronted by the ingress (ADR-0045). Its own host (gwhost) is
+		// PRIVATE and is never a CrowdSec edge.
+		Gateway: []types.GatewaySpec{{Name: "gw", Host: "gwhost", Ingress: "main"}},
 	}
 }
 
-func TestCrowdsecEdgeHostsIncludesIngressAndGatewayOnly(t *testing.T) {
+// The public edge is the INGRESS tier only (ADR-0045): a gateway is never a public
+// edge, so its host contributes no CrowdSec host.
+func TestCrowdsecEdgeHostsIsIngressOnly(t *testing.T) {
 	res := edgeFixture()
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	edge := crowdsecEdgeHosts(res, canonical)
 	assert.True(t, edge[canonical["edge"]], "ingress host is an edge")
-	assert.True(t, edge[canonical["gwhost"]], "gateway host is an edge")
+	assert.False(t, edge[canonical["gwhost"]], "the gateway host is private, never a CrowdSec edge")
 	assert.False(t, edge[canonical["worker"]], "a plain worker gets no CrowdSec")
-	assert.Len(t, edge, 2)
+	assert.Len(t, edge, 1)
 }
 
-func TestCrowdsecEdgeHostsHonorsOptOut(t *testing.T) {
+func TestCrowdsecEdgeHostsHonorsIngressOptOut(t *testing.T) {
 	res := edgeFixture()
 	res.Ingress[0].Security = ptrBool(false) // this ingress opts out
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	edge := crowdsecEdgeHosts(res, canonical)
 	assert.False(t, edge[canonical["edge"]], "opted-out ingress host is excluded")
-	assert.True(t, edge[canonical["gwhost"]], "the gateway host is a separate edge and stays in")
+	assert.Empty(t, edge, "no other public edge remains — the gateway host is never one")
 }
 
-func TestCrowdsecEdgeHostsExplicitTrueStillIncluded(t *testing.T) {
+// The gateway's `security:` field no longer affects CrowdSec host selection: a gateway
+// is never a public edge, whatever the flag says.
+func TestCrowdsecEdgeHostsIgnoresGatewaySecurityFlag(t *testing.T) {
 	res := edgeFixture()
-	res.Gateway[0].Security = ptrBool(true) // explicit opt-in == absent
+	res.Gateway[0].Security = ptrBool(true)
 	canonical := naming.CanonicalComputeKeys(res.Compute)
 	edge := crowdsecEdgeHosts(res, canonical)
-	assert.True(t, edge[canonical["gwhost"]])
+	assert.False(t, edge[canonical["gwhost"]], "the gateway host stays out regardless of its security flag")
 }

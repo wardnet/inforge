@@ -374,9 +374,12 @@ type regionContext struct {
 	gatewayServiceTargets map[string]bool
 	// gatewayHostKey/gatewayHealthPort are the scope singleton gateway's canonical
 	// host and effective public health port ("" / 0 when the scope has no gateway),
-	// for the gateway-tier co-location checks in checkService.
-	gatewayHostKey    string
-	gatewayHealthPort int
+	// for the gateway-tier co-location checks in checkService. gatewayIngressHostKey is
+	// the canonical host of the gateway's fronting ingress (ADR-0045), where its TLS
+	// termination binds :443/:80 (the gateway's own host binds only GatewayHTTPPort).
+	gatewayHostKey        string
+	gatewayIngressHostKey string
+	gatewayHealthPort     int
 	// servicePkiByName maps each service name in this scope to its pki: mesh membership.
 	// checkGateway requires every route target to join the SAME mesh as the gateway —
 	// a callee's trust bundle only admits callers chaining to its own mesh's
@@ -993,6 +996,7 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			ctx.gatewayServiceTargets[name] = true
 		}
 		ctx.gatewayHostKey = canonicalHost(f.spec.Host, ctx)
+		ctx.gatewayIngressHostKey = ctx.ingressHost[f.spec.Ingress] // ingress pass ran earlier
 		ctx.gatewayHealthPort = f.spec.EffectiveHealthProbesPort()
 	}
 	// Service name sets (this scope): every service name, and the mesh-member subset,
@@ -1144,10 +1148,17 @@ func validateResourceSet(r *reporter, schemaSet map[string]*jsonschema.Schema, b
 			addNginxBind(host, 443, "app TLS listener")
 		}
 	}
-	// The gateway host binds :443 (daemon edge) and terminates TLS there (-> :80).
+	// A private gateway (ADR-0045) is fronted by an ingress: its TLS termination binds
+	// :443 (-> :80 ACME) on the FRONTING INGRESS host, while its plain-HTTP routing
+	// server binds GatewayHTTPPort on the gateway's OWN host. A co-located backend must
+	// avoid the routing port (EADDRINUSE with the routing nginx), the same way it must
+	// avoid an app/route :443 or the loopback range.
 	if ctx.gatewayHostKey != "" {
-		ctx.tlsTermIngressByHost[ctx.gatewayHostKey] = true
-		addNginxBind(ctx.gatewayHostKey, 443, "gateway TLS listener")
+		if ih := ctx.gatewayIngressHostKey; ih != "" {
+			ctx.tlsTermIngressByHost[ih] = true
+			addNginxBind(ih, 443, "gateway TLS termination")
+		}
+		addNginxBind(ctx.gatewayHostKey, nginx.GatewayHTTPPort, "gateway routing listener")
 	}
 	// Anything terminating TLS on a host provisions an ACME cert, so nginx binds :80
 	// (HTTP-01 challenge + redirect) there. Its :443 listen is a route listen (already
@@ -2483,6 +2494,28 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 	if ctx.gatewayScopeCount > 1 {
 		errs = append(errs, "a scope may declare at most one gateway (it is a scope singleton — one public daemon edge per scope)")
 	}
+	// The gateway is PRIVATE behind an ingress (ADR-0045): the ingress terminates
+	// TLS + the edge security tier and reverse-proxies the gateway FQDN to it over
+	// the private network. The FK is required and resolves to the scope's (singleton)
+	// ingress, exactly like app.ingress. Because the reverse-proxy hop is private,
+	// the gateway host and the ingress host must share a network (co-located is the
+	// trivial case: gwHost == ingHost).
+	var ingHost string
+	switch {
+	case s.Ingress == "":
+		errs = append(errs, "ingress: is required — a gateway is never publicly exposed; name the ingress (same scope) that fronts it")
+	case strings.HasPrefix(s.Ingress, "global/"):
+		errs = append(errs, fmt.Sprintf("ingress: %q references a global ingress; a gateway fronted by a global ingress is declared in the global slice itself, not referenced from a region", s.Ingress))
+	case !ctx.ingressNames[s.Ingress]:
+		errs = append(errs, fmt.Sprintf("ingress: %q does not resolve to an ingress resource in this scope", s.Ingress))
+	default:
+		ingHost = ctx.ingressHost[s.Ingress]
+		if gwHost != "" && ingHost != "" && gwHost != ingHost {
+			if gn, in := ctx.computeNetwork[gwHost], ctx.computeNetwork[ingHost]; gn != in {
+				errs = append(errs, fmt.Sprintf("ingress: %q is on network %q, but the gateway host is on network %q — the ingress reverse-proxies to the gateway over the private network, so the two hosts must share a network", s.Ingress, in, gn))
+			}
+		}
+	}
 	// Listed services (ADR-0034): the gateway's routing table is DERIVED from each
 	// listed service's mesh.public_paths, so each name must resolve to a service in
 	// this scope that permits the gateway (mesh.allowed_services contains
@@ -2551,9 +2584,10 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 		}
 	}
 	// The gateway's own health probe paths render as exact 200-"ok" locations on
-	// the 443 server (edge liveness, ADR-0034). Exact paths only, unique, and none
-	// may be claimed by a listed service's public glob — the exact-match location
-	// would silently shadow the service's endpoint.
+	// the gateway's (now plain-HTTP, ingress-fronted) server (edge liveness,
+	// ADR-0034/0045; reached through the ingress over the real public path). Exact
+	// paths only, unique, and none may be claimed by a listed service's public glob
+	// — the exact-match location would silently shadow the service's endpoint.
 	errs = append(errs, checkExactPaths("health_probe_paths", s.HealthProbePaths)...)
 	for _, hp := range s.HealthProbePaths {
 		for _, pp := range patterns {
@@ -2562,15 +2596,22 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 			}
 		}
 	}
-	// The public health port the gateway host exposes its listed services' health
-	// on (plain HTTP, Host-demuxed) — same rules as the ingress twin, plus 443
-	// (the gateway terminates daemon TLS there).
+	// The public health port the FRONTING INGRESS host exposes the gateway's listed
+	// services' health on (plain HTTP, Host-demuxed) — the gateway is private, so its
+	// listed-service health follows it behind the ingress (ADR-0045), rendered on the
+	// ingress host exactly like a service-with-an-ingress. Same rules as the ingress
+	// twin, plus 443 (the ingress terminates TLS there). Checks target the ingress
+	// host (== the gateway host when co-located).
+	healthHost := ingHost
+	if healthHost == "" {
+		healthHost = gwHost
+	}
 	healthPort := s.EffectiveHealthProbesPort()
 	if healthPort == 80 {
-		errs = append(errs, "health_probes_port: must not be 80 (ACME HTTP-01 owns :80 on the gateway host)")
+		errs = append(errs, "health_probes_port: must not be 80 (ACME HTTP-01 owns :80 on the fronting ingress host)")
 	}
 	if healthPort == 443 {
-		errs = append(errs, "health_probes_port: must not be 443 (the gateway terminates daemon TLS there)")
+		errs = append(errs, "health_probes_port: must not be 443 (the fronting ingress terminates TLS there)")
 	}
 	if inReservedLoopbackRange(healthPort) {
 		errs = append(errs, fmt.Sprintf("health_probes_port: %d falls in the reserved internal range [%d,%d) nginx uses for ssl_preread TLS terminators; pick a health port outside it", healthPort, nginx.LoopbackBase, nginx.LoopbackBase+nginx.MaxMixedPorts))
@@ -2581,15 +2622,15 @@ func checkGateway(s types.GatewaySpec, ctx regionContext) (errs, warns []string)
 	if msg := meshEgressRangeErr("health_probes_port", healthPort); msg != "" {
 		errs = append(errs, msg)
 	}
-	if gwHost != "" {
-		if users := ctx.portUsersByHost[gwHost][healthPort]; len(users) > 0 {
-			errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with a route listen port on the gateway host (used by service(s) %s); pick a distinct health port", healthPort, strings.Join(users, ", ")))
+	if healthHost != "" {
+		if users := ctx.portUsersByHost[healthHost][healthPort]; len(users) > 0 {
+			errs = append(errs, fmt.Sprintf("health_probes_port: %d collides with a route listen port on the ingress host (used by service(s) %s); pick a distinct health port", healthPort, strings.Join(users, ", ")))
 		}
 		// One host renders ONE health listener (Render takes a single healthPort per
-		// host), so a gateway sharing its host with an ingress must agree on the port.
-		for _, ingName := range ctx.ingressNamesByHost[gwHost] {
+		// host), so the gateway's health port must match the fronting ingress's own.
+		for _, ingName := range ctx.ingressNamesByHost[healthHost] {
 			if ip := ctx.ingressHealthPort[ingName]; ip != 0 && ip != healthPort {
-				errs = append(errs, fmt.Sprintf("health_probes_port: %d differs from ingress %q's public health port %d on the shared host %q; one host renders one health listener, so the two must match", healthPort, ingName, ip, s.Host))
+				errs = append(errs, fmt.Sprintf("health_probes_port: %d differs from ingress %q's public health port %d on host %q; one host renders one health listener, so the two must match", healthPort, ingName, ip, healthHost))
 			}
 		}
 	}

@@ -57,7 +57,9 @@ func (h *HetznerTLS) Realize(
 	health []types.IngressHealth,
 	healthPort int,
 	gateways []types.IngressGateway,
+	gatewayRoutes []types.IngressGateway,
 	backendIPs map[string]pulumi.StringOutput,
+	gatewayIPs map[string]pulumi.StringOutput,
 	env string,
 	dependsOn []pulumi.Resource,
 ) error {
@@ -74,7 +76,7 @@ func (h *HetznerTLS) Realize(
 		return fmt.Errorf("ingress %q: host has no deploy_user; inforge needs one to SSH and realize the ingress proxy", hostKey)
 	}
 
-	writeScript, err := h.renderWriteScript(hostKey, routes, apps, health, healthPort, gateways, backendIPs)
+	writeScript, err := h.renderWriteScript(hostKey, routes, apps, health, healthPort, gateways, gatewayRoutes, backendIPs, gatewayIPs, host.PrivateIP)
 	if err != nil {
 		return fmt.Errorf("ingress %q: %w", hostKey, err)
 	}
@@ -130,29 +132,51 @@ func (h *HetznerTLS) Realize(
 // Backend with the resolved IP before Render — so the upstream addresses are the
 // real private IPs, resolved at deploy time. In preview a cross-host backend IP is
 // unknown, so the apply (and the command that consumes it) is skipped entirely.
-func (h *HetznerTLS) renderWriteScript(hostKey string, routes []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway, backendIPs map[string]pulumi.StringOutput) (pulumi.StringInput, error) {
-	if len(backendIPs) == 0 {
-		cfg, err := nginx.Render(routes, apps, health, healthPort, gateways)
+func (h *HetznerTLS) renderWriteScript(hostKey string, routes []types.IngressRoute, apps []types.IngressApp, health []types.IngressHealth, healthPort int, gateways []types.IngressGateway, gatewayRoutes []types.IngressGateway, backendIPs map[string]pulumi.StringOutput, gatewayIPs map[string]pulumi.StringOutput, hostPrivateIP pulumi.StringOutput) (pulumi.StringInput, error) {
+	// Fast path: everything is co-located (routes carry "127.0.0.1", gateway
+	// termination/routing fields are pre-filled), so the whole config renders
+	// synchronously with no apply over unknown private IPs.
+	if len(backendIPs) == 0 && len(gatewayIPs) == 0 {
+		cfg, err := nginx.Render(routes, apps, health, healthPort, gateways, gatewayRoutes)
 		if err != nil {
 			return nil, err
 		}
 		return pulumi.String(iremote.WriteFileScript(nginx.ConfigPath, cfg)), nil
 	}
 
+	// A split gateway (or cross-host route/health) needs its peer host's private IP
+	// resolved at deploy time. Await backend IPs (keyed by service) and gateway IPs
+	// (keyed by gateway name) together, then substitute the empty fields before Render.
 	svcNames := make([]string, 0, len(backendIPs))
 	for n := range backendIPs {
 		svcNames = append(svcNames, n)
 	}
 	sort.Strings(svcNames)
-	outs := make([]any, len(svcNames))
-	for i, n := range svcNames {
-		outs[i] = backendIPs[n]
+	gwNames := make([]string, 0, len(gatewayIPs))
+	for n := range gatewayIPs {
+		gwNames = append(gwNames, n)
 	}
+	sort.Strings(gwNames)
+	outs := make([]any, 0, len(svcNames)+len(gwNames)+1)
+	for _, n := range svcNames {
+		outs = append(outs, backendIPs[n])
+	}
+	for _, n := range gwNames {
+		outs = append(outs, gatewayIPs[n])
+	}
+	// The gateway routing server (on THIS host, when it is a split gateway host) binds
+	// this host's own private IP, resolved last.
+	outs = append(outs, hostPrivateIP)
 	return pulumi.All(outs...).ApplyT(func(args []any) (string, error) {
 		resolved := make(map[string]string, len(svcNames))
 		for i, n := range svcNames {
 			resolved[n], _ = args[i].(string)
 		}
+		gwResolved := make(map[string]string, len(gwNames))
+		for i, n := range gwNames {
+			gwResolved[n], _ = args[len(svcNames)+i].(string)
+		}
+		hostIP, _ := args[len(svcNames)+len(gwNames)].(string)
 		rendered := make([]types.IngressRoute, len(routes))
 		for i, r := range routes {
 			if r.Backend == "" {
@@ -175,7 +199,40 @@ func (h *HetznerTLS) renderWriteScript(hostKey string, routes []types.IngressRou
 			}
 			renderedHealth[i] = hh
 		}
-		cfg, err := nginx.Render(rendered, apps, renderedHealth, healthPort, gateways)
+		// A split gateway's TERMINATION server (on this ingress host) proxies to the
+		// gateway host's private IP; fill any empty Backend.
+		renderedGw := make([]types.IngressGateway, len(gateways))
+		for i, g := range gateways {
+			if g.Backend == "" {
+				ip := gwResolved[g.Name]
+				if ip == "" {
+					return "", fmt.Errorf("ingress %q: split gateway %q has no resolved gateway-host private IP", hostKey, g.Name)
+				}
+				g.Backend = ip
+			}
+			renderedGw[i] = g
+		}
+		// A split gateway's ROUTING server (on this gateway host) binds this host's own
+		// private IP and trusts the ingress host's private IP for real-IP recovery; fill
+		// any empty ListenAddr / RealIPFrom.
+		renderedGwRoutes := make([]types.IngressGateway, len(gatewayRoutes))
+		for i, g := range gatewayRoutes {
+			if g.ListenAddr == "" {
+				if hostIP == "" {
+					return "", fmt.Errorf("ingress %q: split gateway %q has no resolved gateway-host private IP for its listen address", hostKey, g.Name)
+				}
+				g.ListenAddr = hostIP
+			}
+			if g.RealIPFrom == "" {
+				ip := gwResolved[g.Name]
+				if ip == "" {
+					return "", fmt.Errorf("ingress %q: split gateway %q has no resolved ingress-host private IP", hostKey, g.Name)
+				}
+				g.RealIPFrom = ip
+			}
+			renderedGwRoutes[i] = g
+		}
+		cfg, err := nginx.Render(rendered, apps, renderedHealth, healthPort, renderedGw, renderedGwRoutes)
 		if err != nil {
 			return "", err
 		}

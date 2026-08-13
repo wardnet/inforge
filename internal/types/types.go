@@ -65,32 +65,38 @@ type AppSpec struct {
 	Spa       bool   `yaml:"spa"`       // when true, any non-file path serves index.html (SPA deep-link fallback)
 }
 
-// GatewaySpec is the north-south daemon API gateway (ADR-0032): the public host
-// external daemons HTTPS into. It is NOT the east-west router (service↔service
-// runs through the derived mesh, not here). Like IngressSpec it is a sibling of
-// the workloads that references a compute Host by name in the SAME scope (an FK
-// exactly like ingress.host, resolved via resolveComputeHost) and carries no
-// provider of its own (it inherits the host's). It is a mesh client with identity
-// <scope>/gateway: a daemon request is TLS-terminated here, matched against the
-// public path globs of the listed Services (the routing table is DERIVED from
-// their mesh.public_paths — ADR-0034: the gateway names WHICH services are
-// public, the service names WHAT endpoints exist), and handed to the owning
-// service THROUGH the mesh (so the gateway is location-transparent and needs no
-// service locations). A path matching no public glob is answered 404 (JSON) at
-// the edge and never traverses. It does NOT validate the daemon JWT — it
-// forwards it for the service to validate.
+// GatewaySpec is the north-south daemon API gateway (ADR-0032, ADR-0045): a
+// PRIVATE router fronted by an ingress. It is NOT the east-west router
+// (service↔service runs through the derived mesh, not here). External daemons
+// HTTPS into the referenced Ingress (its public FQDN resolves to the ingress
+// host); the ingress terminates TLS, enforces the edge security tier
+// (CrowdSec/rate-limit, ADR-0043), and reverse-proxies the gateway FQDN over the
+// private network to this gateway, preserving the client IP. A gateway is
+// therefore NEVER a public edge — it opens no public port and holds no ACME cert
+// of its own. Like IngressSpec it references a compute Host by name in the SAME
+// scope (an FK resolved via resolveComputeHost) and carries no provider of its
+// own (it inherits the host's). It is a mesh client with identity <scope>/gateway:
+// a forwarded daemon request is matched against the public path globs of the
+// listed Services (the routing table is DERIVED from their mesh.public_paths —
+// ADR-0034: the gateway names WHICH services are public, the service names WHAT
+// endpoints exist), and handed to the owning service THROUGH the mesh (so the
+// gateway is location-transparent and needs no service locations). A path
+// matching no public glob is answered 404 (JSON) and never traverses. It does NOT
+// validate the daemon JWT — it forwards it for the service to validate.
 type GatewaySpec struct {
 	Name             string   `yaml:"name"`
 	Container        string   `yaml:"container"`
 	Host             string   `yaml:"host"`                         // FK -> compute resource name (same scope); reuses the host's provisioning/firewall/SSH
+	Ingress          string   `yaml:"ingress"`                      // FK -> ingress resource (same scope) that fronts this gateway (ADR-0045). REQUIRED: a gateway is never public; the ingress terminates TLS + security and reverse-proxies to it, preserving the client IP. host and ingress.host must share a network.
 	Pki              string   `yaml:"pki"`                          // FK -> two-tier (mesh) PKI in pki.enc.yaml the gateway's client leaf (<scope>/gateway) mints from (required); every listed service must join the same mesh
-	Subdomain        string   `yaml:"subdomain"`                    // public subdomain; the FQDN is composed at realization from scope + base domain
+	Subdomain        string   `yaml:"subdomain"`                    // public subdomain; the FQDN is composed at realization from scope + base domain and resolves to the ingress host
 	Services         []string `yaml:"services"`                     // FKs -> services (same scope) exposed at the edge; the routing table is derived from their mesh.public_paths
-	HealthProbesPort int      `yaml:"health_probes_port,omitempty"` // public port the gateway host exposes its listed services' health checks on (plain HTTP, Host-demuxed by service FQDN; defaults to 81)
-	HealthProbePaths []string `yaml:"health_probe_paths,omitempty"` // exact paths on the gateway's own 443 server that nginx answers 200 "ok" directly (edge liveness over the real TLS path); optional
-	// Security opts this gateway edge out of the env-level security tier (ADR-0043) when
-	// set to false: no rate limiting on its mesh routes (and, slice 2, no CrowdSec on its
-	// host). Nil/absent = the env policy applies.
+	HealthProbesPort int      `yaml:"health_probes_port,omitempty"` // public port the FRONTING INGRESS host exposes the listed services' health checks on (plain HTTP, Host-demuxed by service FQDN; defaults to 81)
+	HealthProbePaths []string `yaml:"health_probe_paths,omitempty"` // exact paths nginx answers 200 "ok" directly for edge liveness (served by the gateway, reached through the ingress over the real public path); optional
+	// Security opts this gateway's forwarded traffic out of the env-level rate limit
+	// (ADR-0043/0045) at the fronting ingress when set to false. A gateway is never a
+	// public edge, so this no longer affects CrowdSec host selection. Nil/absent = the
+	// env policy applies.
 	Security *bool `yaml:"security,omitempty"`
 }
 
@@ -464,12 +470,29 @@ type IngressHealth struct {
 // location is the mesh's business.
 type IngressGateway struct {
 	Name             string // gateway resource name (used to name Pulumi command resources)
-	FQDN             string // fully-qualified gateway domain (single SNI / ACME cert)
+	FQDN             string // fully-qualified gateway domain (single SNI / ACME cert on the fronting ingress)
 	Routes           []IngressGatewayRoute
-	HealthProbePaths []string // exact paths on the 443 server nginx answers 200 "ok" directly (edge liveness)
-	// RateLimit is the resolved rate-limit profile applied to this gateway's mesh-route
-	// locations (nil = none). The edge health-probe locations are never limited.
+	HealthProbePaths []string // exact paths the gateway's routing server answers 200 "ok" directly (edge liveness, reached through the ingress)
+	// RateLimit is the resolved rate-limit profile applied to this gateway's termination
+	// server on the ingress (nil = none). The edge health-probe locations are never limited.
 	RateLimit *RateLimitProfile
+	// Model-A private-gateway wiring (ADR-0045). A gateway is fronted by an ingress:
+	// the ingress renders a TERMINATION server (TLS + security → proxy to the gateway),
+	// and the gateway host renders a plain-HTTP ROUTING server (real_ip recovery →
+	// mesh egress). These fields carry the resolved addresses that connect the two.
+	//
+	// Backend is the address the ingress termination server proxies to — "127.0.0.1"
+	// when the gateway is co-located with its ingress, else the gateway host's private
+	// IP. HTTPPort is the routing server's plain-HTTP port (nginx.GatewayHTTPPort).
+	// RealIPFrom is the source the routing server trusts for X-Forwarded-For —
+	// "127.0.0.1" co-located, else the ingress host's private IP. ListenAddr is the
+	// routing server's bind address — "127.0.0.1" co-located (only the local ingress
+	// reaches it), else the gateway host's OWN private IP (never the public interface;
+	// left empty for the provider to fill from the host being realized).
+	Backend    string
+	HTTPPort   int
+	RealIPFrom string
+	ListenAddr string
 }
 
 // IngressGatewayRoute is one derived path route on the gateway server: daemon
@@ -748,8 +771,15 @@ type DnsProvider interface {
 // host's cloud-init readiness gate (and any other prerequisites): the provider must
 // make its first per-host SSH command depend on it so realization never races
 // deploy_user creation.
+// gateways are the gateway TERMINATION servers this host fronts as an ingress
+// (ADR-0045); gatewayRoutes are the gateway ROUTING servers this host runs as a
+// gateway host. When split (gateway and ingress on different hosts) a cross-host
+// private IP is substituted from gatewayIPs, keyed by gateway name — the gateway
+// host's IP for a termination's Backend, the ingress host's IP for a routing
+// server's real-IP source. Co-located gateways carry "127.0.0.1" already and need
+// no entry.
 type IngressProvider interface {
-	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, apps []IngressApp, health []IngressHealth, healthPort int, gateways []IngressGateway, backendIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
+	Realize(ctx *pulumi.Context, hostKey string, host ComputeOutputs, deployUser string, routes []IngressRoute, apps []IngressApp, health []IngressHealth, healthPort int, gateways []IngressGateway, gatewayRoutes []IngressGateway, backendIPs map[string]pulumi.StringOutput, gatewayIPs map[string]pulumi.StringOutput, env string, dependsOn []pulumi.Resource) error
 }
 
 // MeshProvider realizes a host's east-west mesh proxy — the SECOND nginx, private

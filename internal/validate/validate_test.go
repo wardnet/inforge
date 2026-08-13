@@ -823,6 +823,10 @@ func meshCtx() regionContext {
 	c.servicePublicPathsByName = map[string][]string{"ddns": {"/dns/**"}, "tunneller": {"/tunnel/**"}}
 	c.targetUsersByHost = map[string]map[int][]string{}
 	c.portUsersByHost = map[string]map[int][]string{}
+	// The gateway is fronted by an ingress (ADR-0045); "front" is co-located on the
+	// gateway's host (bridge), so the same-network check is trivially satisfied.
+	c.ingressNames = map[string]bool{"front": true}
+	c.ingressHost = map[string]string{"front": "bridge-01"}
 	return c
 }
 
@@ -836,14 +840,45 @@ func meshSvc(m *types.MeshSpec) types.ServiceSpec {
 }
 
 func gw(services ...string) types.GatewaySpec {
-	return types.GatewaySpec{Name: "api", Host: "bridge", Pki: "mesh", Subdomain: "api", Services: services}
+	return types.GatewaySpec{Name: "api", Host: "bridge", Ingress: "front", Pki: "mesh", Subdomain: "api", Services: services}
 }
 
-// TestCheckGatewayValid: a gateway on a same-scope vm, sole in scope, listing a
-// service that permits the gateway and publishes public paths, passes.
+// TestCheckGatewayValid: a gateway on a same-scope vm, sole in scope, fronted by an
+// ingress, listing a service that permits the gateway and publishes public paths, passes.
 func TestCheckGatewayValid(t *testing.T) {
 	errs, _ := checkGateway(gw("ddns"), meshCtx())
 	assert.Empty(t, errs)
+}
+
+// TestCheckGatewayRequiresIngress: the ingress FK is mandatory (ADR-0045) — a gateway
+// is never a standalone public edge.
+func TestCheckGatewayRequiresIngress(t *testing.T) {
+	g := gw("ddns")
+	g.Ingress = ""
+	errs, _ := checkGateway(g, meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "ingress: is required")
+}
+
+// TestCheckGatewayUnknownIngressRejected: the ingress FK must resolve in scope.
+func TestCheckGatewayUnknownIngressRejected(t *testing.T) {
+	g := gw("ddns")
+	g.Ingress = "ghost"
+	errs, _ := checkGateway(g, meshCtx())
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "does not resolve to an ingress")
+}
+
+// TestCheckGatewayCrossNetworkIngressRejected: the gateway host and its fronting
+// ingress host must share a network (the ingress reverse-proxies over the private net).
+func TestCheckGatewayCrossNetworkIngressRejected(t *testing.T) {
+	c := twoNetworkMeshCtx()
+	c.ingressHost = map[string]string{"front": "bridge-01"} // ingress on net-a, gateway on edge/net-b
+	g := types.GatewaySpec{Name: "api", Host: "edge", Ingress: "front", Pki: "mesh", Subdomain: "api",
+		Services: []string{"ddns"}}
+	errs, _ := checkGateway(g, c)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "\n"), "reverse-proxies to the gateway")
 }
 
 // TestCheckGatewayGlobalHostRejected: a gateway referencing a global compute is
@@ -858,7 +893,7 @@ func TestCheckGatewayGlobalHostRejected(t *testing.T) {
 // TestCheckGatewayUnknownHostRejected: a gateway whose host: does not resolve fails.
 func TestCheckGatewayUnknownHostRejected(t *testing.T) {
 	c := meshCtx()
-	errs, _ := checkGateway(types.GatewaySpec{Name: "api", Host: "ghost", Subdomain: "api"}, c)
+	errs, _ := checkGateway(types.GatewaySpec{Name: "api", Host: "ghost", Ingress: "front", Subdomain: "api"}, c)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "does not resolve to a compute")
 }
@@ -1011,6 +1046,9 @@ func twoNetworkMeshCtx() regionContext {
 		"edge-01": "net-b", "edge": "net-b",
 	}
 	c.serviceHostByName = map[string]string{"ddns": "bridge", "tunneller": "bridge"}
+	// The gateway sits on "edge" here, so co-locate its fronting ingress there (the
+	// gateway↔ingress same-network check is separate from the target check under test).
+	c.ingressHost = map[string]string{"front": "edge-01"}
 	return c
 }
 
@@ -1019,7 +1057,7 @@ func twoNetworkMeshCtx() regionContext {
 // private IP, unroutable across networks.
 func TestCheckGatewayCrossNetworkTargetRejected(t *testing.T) {
 	c := twoNetworkMeshCtx()
-	g := types.GatewaySpec{Name: "api", Host: "edge", Pki: "mesh", Subdomain: "api",
+	g := types.GatewaySpec{Name: "api", Host: "edge", Ingress: "front", Pki: "mesh", Subdomain: "api",
 		Services: []string{"ddns"}}
 	errs, _ := checkGateway(g, c)
 	require.NotEmpty(t, errs)
@@ -1031,7 +1069,7 @@ func TestCheckGatewaySameNetworkTargetOK(t *testing.T) {
 	c := twoNetworkMeshCtx()
 	c.computeNetwork["edge-01"] = "net-a"
 	c.computeNetwork["edge"] = "net-a"
-	g := types.GatewaySpec{Name: "api", Host: "edge", Pki: "mesh", Subdomain: "api",
+	g := types.GatewaySpec{Name: "api", Host: "edge", Ingress: "front", Pki: "mesh", Subdomain: "api",
 		Services: []string{"ddns"}}
 	errs, _ := checkGateway(g, c)
 	assert.Empty(t, errs)
@@ -1630,6 +1668,16 @@ func TestCheckServiceNginxImplicitBinds(t *testing.T) {
 		Routes: []types.RouteSpec{{Type: types.IngressTypeTLSTermination, Listen: 443, Target: 8081}}}
 	errs, _ = checkService(rs, rc)
 	assert.Contains(t, strings.Join(errs, "|"), "held by the edge nginx")
+
+	// exposed_ports hitting the gateway routing server's port on the gateway host
+	// (ADR-0045): a co-located backend must avoid GatewayHTTPPort.
+	gc := baseCtx()
+	gc.nginxBindsByHost = map[string]map[int]string{"bridge-01": {nginx.GatewayHTTPPort: "gateway routing listener"}}
+	gs := types.ServiceSpec{Name: "svc", Host: "bridge", Type: "raw", User: "svc",
+		ExposedPorts: []types.ExposedPort{{Proto: "tcp", Port: nginx.GatewayHTTPPort}}}
+	errs, _ = checkService(gs, gc)
+	require.NotEmpty(t, errs)
+	assert.Contains(t, strings.Join(errs, "|"), "gateway routing listener")
 }
 
 // TestCheckMeshEgressRangeOnPublicBinds: a PUBLIC bind (route listen or the

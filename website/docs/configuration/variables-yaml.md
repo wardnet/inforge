@@ -21,9 +21,10 @@ observability:               # optional — Grafana Cloud integration
   otlp_endpoint: https://otlp-gateway-....grafana.net/otlp   # host/DB metrics collector
   grafana_url: https://myorg.grafana.net                     # dashboards + alerts target
 
-security:                    # optional — edge security tier (public ingress + gateway hosts)
+security:                    # optional — edge security tier (public ingress hosts; a gateway is
+                             #   fronted by an ingress and enforced there, ADR-0045)
   crowdsec:
-    enabled: true            # IP banning (nftables) + free community blocklist on edges
+    enabled: true            # IP banning (nftables) + free community blocklist on ingress edges
   rate_limit:
     enabled: true            # one blanket IP-based limit on every public edge server
     requests_per_second: 20
