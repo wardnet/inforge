@@ -12,9 +12,12 @@ description: |
 
 Releases are **tag-driven**: pushing an annotated `vX.Y.Z` tag to a commit
 on `main` triggers `.github/workflows/release.yml` (build & test →
-goreleaser), which publishes the GitHub release with the four
-statically-linked binaries, the two `pulumi-resource-*` plugins,
-`checksums.txt`, and `install.sh`.
+goreleaser), which publishes the GitHub release with the two
+statically-linked binaries (`inforge`, `inforge-agent`), `checksums.txt`,
+and `install.sh`. There are **no** `pulumi-resource-*` plugin assets —
+ADR-0036 and ADR-0035 retired the bundled Neon and Infisical plugins, and
+`inforge plugins install` pulls the standard published plugins from their
+own upstream releases.
 
 Two tags move per release and **both are mandatory**:
 
@@ -103,9 +106,23 @@ git ls-remote origin "refs/tags/$MAJOR"   # must equal $SHA
 Confirm: workflow **success**; the release is **not draft / not prerelease**
 and shows as **Latest** in `gh release list` (goreleaser sets no
 `prerelease`/`make_latest: false`, so the highest semver is auto-Latest);
-assets include all four binaries × `linux_{amd64,arm64}` + `darwin_arm64`,
-both `pulumi-resource-*` plugins, `checksums.txt`, and `install.sh`; and the
-`$MAJOR` remote tag now points at `$SHA`.
+the `$MAJOR` remote tag now points at `$SHA`; and the asset list is exactly
+these **10** (per `.goreleaser.yml` — the `inforge` archive, the `raw`
+binary archive, checksums, and the `install.sh` extra_file):
+
+```
+checksums.txt
+install.sh
+inforge_<v>_{linux_amd64,linux_arm64,darwin_arm64}          # raw binaries
+inforge_<v>_{linux_amd64,linux_arm64,darwin_arm64}.tar.gz   # CLI archives
+inforge-agent_<v>_{linux_amd64,linux_arm64}                 # raw binaries
+```
+
+Two asymmetries are **correct, not missing assets**: `inforge-agent` has no
+`darwin_*` build (it is the on-host Linux runtime agent, and `.goreleaser.yml`
+gives it `goos: [linux]` only), and it ships raw-only — the `.tar.gz` archive
+covers the CLI alone, since `inforge deploy` pulls the agent from the raw
+archive. `inforge` also has no `darwin_amd64` (explicitly `ignore`d).
 
 ## How consumers pick it up
 
