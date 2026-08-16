@@ -115,3 +115,63 @@ func TestBouncerKeyNotPlaintextInConfigWrite(t *testing.T) {
 	// script: the `cscli bouncers add --key` argv (a documented accepted exposure).
 	assert.Equal(t, 1, strings.Count(s, "SUPERSECRETKEY"))
 }
+
+// The regression that broke every prd deploy: the sources file interpolated the host's
+// own ${VERSION_CODENAME}, and packagecloud publishes no suite for Ubuntu 26.04
+// (`resolute`). The suite must be resolved by probing, and it must be a variable the
+// probe set — never the raw codename.
+func TestInstallScriptResolvesSuiteByProbingNotByCodename(t *testing.T) {
+	s := InstallScript("")
+
+	// The deb line names the probed suite, not the host's codename.
+	assert.Contains(t, s, `/${ID}/ ${suite} main`)
+	assert.NotContains(t, s, `/${ID}/ ${VERSION_CODENAME} main`)
+
+	// The probe hits the suite's Release object and tries the host codename first.
+	assert.Contains(t, s, RepoBaseURL+`/${ID}/dists/${candidate}/Release`)
+	assert.Contains(t, s, `for candidate in "${VERSION_CODENAME}" "$fallback"`)
+
+	// An unresolvable suite is a hard failure, not a silently-written broken source.
+	assert.Contains(t, s, `if [ -z "$suite" ]; then`)
+	assert.Contains(t, s, "exit 1")
+}
+
+// The probe is worthless if the sources file is written first: apt-get update fails hard
+// on an unreachable source, so a broken entry breaks every LATER apt-using step on the
+// host (nginx, otelcol, postgres), not just CrowdSec's own.
+func TestInstallScriptProbesBeforeWritingTheSourcesFile(t *testing.T) {
+	s := InstallScript("")
+	probe := strings.Index(s, "dists/${candidate}/Release")
+	write := strings.Index(s, "sudo tee "+RepoListPath)
+	assert.Positive(t, probe, "probe must be present")
+	assert.Positive(t, write, "sources write must be present")
+	assert.Less(t, probe, write, "the suite must be probed BEFORE the sources file is written")
+}
+
+// A host poisoned by an earlier run must self-heal: the stale sources file has to go
+// before the first apt call, or that call fails and the script can never repair it.
+func TestInstallScriptClearsAStaleSourcesFileBeforeTheFirstAptCall(t *testing.T) {
+	s := InstallScript("")
+	rm := strings.Index(s, "sudo rm -f "+RepoListPath)
+	// The real invocation, not the word in a comment.
+	apt := strings.Index(s, "apt-get -o DPkg::Lock::Timeout")
+	assert.Positive(t, rm, "the stale sources file must be removed")
+	assert.Positive(t, apt, "an apt invocation must be present")
+	assert.Less(t, rm, apt, "removal must precede the first apt call")
+}
+
+// The script is a Pulumi trigger: unstable rendering would replace the resource (and
+// reinstall CrowdSec) on every deploy for no reason.
+func TestInstallScriptRendersDeterministically(t *testing.T) {
+	assert.Equal(t, InstallScript("1.7.8"), InstallScript("1.7.8"))
+	s := InstallScript("")
+	// Fallbacks render in sorted order regardless of map iteration order.
+	assert.Less(t, strings.Index(s, "debian) fallback="), strings.Index(s, "ubuntu) fallback="))
+}
+
+// The fallbacks must name suites packagecloud actually publishes — the whole point of
+// the table. Kept as a documented expectation; bump when packagecloud catches up.
+func TestFallbackSuitesCoverOurDeployTargets(t *testing.T) {
+	assert.Equal(t, "noble", FallbackSuites["ubuntu"], "Ubuntu deploy targets (26.04 resolute) fall back to noble")
+	assert.Equal(t, "bookworm", FallbackSuites["debian"])
+}

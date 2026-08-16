@@ -16,6 +16,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/spf13/cobra"
 	"github.com/wardnet/inforge/internal/output"
+	"github.com/wardnet/inforge/internal/validate"
 	"golang.org/x/term"
 )
 
@@ -70,6 +71,30 @@ func runDeploy(ctx context.Context, stackName, stackConfigPath, configPath, dir,
 	stackCfg, err := resolveStackConfig(stackConfigPath, stackName)
 	if err != nil {
 		return err
+	}
+
+	// Validate the resource tree BEFORE touching state. `deploy` used to skip this
+	// entirely, on the assumption that CI ran `inforge validate` on the PR first —
+	// which makes the whole validator advisory: nothing enforced that the tree a
+	// deploy applies is the tree that passed. It cost a production outage. When
+	// ADR-0045 made `gateway.ingress` required, the deployed manifests stopped
+	// validating, PR checks went red and were merged past, and the next deploy
+	// applied a tree the validator would have rejected — silently dropping the
+	// gateway and reloading nginx without any north-south edge at all.
+	//
+	// A deploy is the last place the tree can still be rejected cheaply, so it
+	// rejects it here. This is a pure static pass (no provider credentials, no
+	// network), so it costs a deploy nothing but the read.
+	//
+	// An ephemeral stack deploys its SOURCE env's tree under its own identity, so
+	// validate what will actually be READ (rule ephemeral-identity-vs-config-source).
+	validateEnv := stackName
+	if v := stackCfgValue(stackCfg, projCfg.Name, cfgKeySourceEnvironment); v != "" {
+		validateEnv = v
+	}
+	if err := validate.ValidateResources(validateEnv, dir, projCfg.Providers,
+		validate.WithBackupsBucket(projCfg.Backups.configured())); err != nil {
+		return fmt.Errorf("refusing to deploy an invalid resource tree: %w", err)
 	}
 
 	// Fail FAST on a stale state lock: a cancelled/killed deploy leaves its lock

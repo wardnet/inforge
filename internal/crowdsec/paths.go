@@ -36,7 +36,8 @@ const (
 
 	// packagecloud apt repo, added with a pinned signed-by keyring exactly as
 	// internal/nginx adds the nginx.org repo (an armored .asc used directly, no dearmor).
-	RepoKeyURL   = "https://packagecloud.io/crowdsec/crowdsec/gpgkey"
+	RepoBaseURL  = "https://packagecloud.io/crowdsec/crowdsec"
+	RepoKeyURL   = RepoBaseURL + "/gpgkey"
 	KeyringPath  = "/usr/share/keyrings/crowdsec_crowdsec-archive-keyring.asc"
 	RepoListPath = "/etc/apt/sources.list.d/crowdsec.list"
 
@@ -46,6 +47,30 @@ const (
 	ReservedNamespace = "security"
 	EnrollSecretKey   = "crowdsec_enroll" // #nosec G101 -- a lookup key name, not a credential
 )
+
+// FallbackSuites maps a distro ID (/etc/os-release ID) to the newest packagecloud
+// suite CrowdSec is known to publish for it. The install probes the host's OWN
+// ${VERSION_CODENAME} first and only falls back to this when packagecloud serves no
+// suite under that name.
+//
+// This exists because packagecloud lags new distro releases by months, and CrowdSec
+// packages are suite-generic — the noble build runs fine on a later Ubuntu. Deploy
+// targets moved to Ubuntu 26.04 (`resolute`) and every edge install broke: the script
+// wrote a sources file for a suite that 404s, and since `apt-get update` fails hard on
+// an unreachable source, it took every LATER apt-using provisioning step on that host
+// (nginx, otelcol, postgres) down with it — long after CrowdSec itself was disabled.
+//
+// Verified against packagecloud (Release object reachable):
+//
+//	ubuntu: noble 302, jammy 302, questing 404, resolute 404
+//	debian: bookworm 302, bullseye 302, trixie 404
+//
+// Bump an entry when packagecloud starts publishing a newer suite. An ID absent here
+// gets no fallback: the install fails loudly rather than guessing a suite name.
+var FallbackSuites = map[string]string{
+	"ubuntu": "noble",
+	"debian": "bookworm",
+}
 
 // Collections are the CrowdSec hub items installed on an nginx edge: nginx access/error
 // log parsing + scenarios, the generic HTTP attack scenarios, and known-CVE probing.

@@ -272,6 +272,17 @@ func selectStack(ctx context.Context, stackName string, projCfg projectConfig) (
 	return s, nil
 }
 
+// stackCfgValue reads a config key from the FILE-backed stack config
+// (inforge.<env>.yaml) — the pre-stack counterpart of stackConfigValue, for callers
+// that need a value BEFORE the stack is created. It tolerates the same
+// project-namespace prefix and returns "" when the key is absent.
+func stackCfgValue(cfg stackConfig, projName, key string) string {
+	if v, ok := cfg.Config[key]; ok {
+		return v
+	}
+	return cfg.Config[projName+":"+key]
+}
+
 // stackConfigValue reads a plain config key from a stack's config map, tolerating
 // the project-namespace prefix the backend stores keys under (e.g. "ephemeral" is
 // persisted as "<project>:ephemeral"). It returns "" when the key is absent.

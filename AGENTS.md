@@ -657,6 +657,16 @@ realized in two halves:
   The bullets below describe the derived routing table and mesh-client half, which are unchanged;
   where they say the gateway "terminates" or "opens public 443", read that as the **termination
   server on the ingress host** per ADR-0045.
+  **The required `ingress:` FK is enforced at DEPLOY, not just at validate.** Every gateway
+  derivation reaches the gateway through `resolveGateways`, which *skips* an unresolved FK — and
+  four consumers share that skip (`firewallPlanByHost`, `gatewayEdgeByHost`,
+  `resolveGatewayHealthServices`, `derivedRecords`), so an unresolvable gateway does not degrade,
+  it disappears: nginx renders with no gateway server and the deploy reports success. That is
+  exactly how prd lost its entire north-south edge when ADR-0045 landed against manifests with no
+  `ingress:`. `program.checkGatewayFKs` now runs at the top of `createInfra` and hard-fails, and
+  **`inforge deploy` runs `validate.ValidateResources` before touching state** (it previously ran
+  no validation at all — the validator was advisory, enforced only by a PR check that could be,
+  and was, merged past). See the rule `deploy-validates-and-never-skips-an-unresolved-gateway`.
 
 - **Edge half (north-south nginx).** The routing table is **derived, never authored** (ADR-0034):
   `toGatewayNginxRoutes` emits one `IngressGatewayRoute{Pattern, Service}` per (listed service,
@@ -704,6 +714,17 @@ realized in two halves:
   with no diff in inforge itself. When bumping, bump it deliberately and verify a real deploy against
   the R2 backend; a newer CLI may additionally need
   `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` for S3-compatible stores.
+- **A third-party apt repo must be PROBED before its sources file is written.** `apt-get update`
+  fails hard on an unreachable source and our installers wrap it in retry-then-exit-1, so a
+  sources file naming a suite the vendor does not publish breaks **every later apt-using step on
+  that host** (nginx, otelcol, postgres) — not just its own package. Never interpolate the host's
+  `${VERSION_CODENAME}` and hope: vendors lag a distro release by months and their packages are
+  usually suite-generic. `internal/crowdsec` is the reference shape — clear any stale sources file
+  *before* the first apt call (so a poisoned host self-heals), probe the suite's `Release` object,
+  fall back to `crowdsec.FallbackSuites[ID]`, and fail with the file absent if none resolves.
+  CrowdSec publishes nothing for Ubuntu 26.04 (`resolute` 404s; newest is `noble`), which is how
+  both prd edge hosts ended up unable to run apt at all. See the rule
+  `probe-third-party-apt-suites-before-writing-a-source`.
 - **Provider binary names are load-bearing.** Pulumi locates plugins by the exact filename
   `pulumi-resource-<name>`. Never rename these binaries or their `cmd/` directories.
 - **Binaries must stay fully self-contained.** All goreleaser builds set `CGO_ENABLED=0` so the output
