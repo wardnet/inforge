@@ -14,6 +14,14 @@ on:
       - "v*.*.*"
   workflow_dispatch:
 
+# Grouped by ref, so independently-versioned components still release in
+# parallel — wardnet-cloud ships several. Never cancelled: killing a
+# half-finished publish leaves a partial release behind, which is worse than
+# letting a superseded run finish.
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
