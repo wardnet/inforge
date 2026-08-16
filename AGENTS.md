@@ -692,6 +692,18 @@ realized in two halves:
 
 ## Conventions
 
+- **inforge depends on the Pulumi CLI, not just the Go SDK.** `cmd/inforge/stack.go` builds stacks
+  with `auto.NewLocalWorkspace` / `auto.*StackInlineSource` — the **Automation API**, which is a Go
+  SDK that *drives a `pulumi` binary*: it shells out to whatever `pulumi` is first on `PATH`. There
+  is no in-process engine. Treat the CLI as a real dependency with a pinned version:
+  `action.yml` installs it (`pulumi-version` input, currently **3.253.0**) so every consumer gets the
+  engine we validated rather than whatever its runner image ships, and
+  `.github/workflows/{ci,release}.yml` pin their own via `pulumi/actions`.
+  Leaving it unpinned is not a theoretical risk — a GitHub runner-image roll moved the preinstalled
+  CLI 3.253.0 → 3.256.0 and broke every prd deploy with `InvalidDigest` on the R2 checkpoint write,
+  with no diff in inforge itself. When bumping, bump it deliberately and verify a real deploy against
+  the R2 backend; a newer CLI may additionally need
+  `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` for S3-compatible stores.
 - **Provider binary names are load-bearing.** Pulumi locates plugins by the exact filename
   `pulumi-resource-<name>`. Never rename these binaries or their `cmd/` directories.
 - **Binaries must stay fully self-contained.** All goreleaser builds set `CGO_ENABLED=0` so the output

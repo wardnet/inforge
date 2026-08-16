@@ -242,3 +242,64 @@ func mustErr(t *testing.T, fn func() error) error {
 	}
 	return err
 }
+
+// TestBackendURLSetsChecksumCompat locks in the fix for the prd outage of
+// 2026-08-14: Pulumi CLI 3.256.0 began sending CRC32 request checksums that
+// Cloudflare R2 rejects (`InvalidDigest`, 400), so no checkpoint could be
+// written. We assert AWS_REQUEST_CHECKSUM_CALCULATION ourselves rather than
+// relying on the CLI's own custom-endpoint detection, which did not cover us.
+func TestBackendURLSetsChecksumCompat(t *testing.T) {
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "0123456789abcdef0123456789abcdef")
+
+	tests := []struct {
+		name    string
+		backend backendConfig
+		want    string
+	}{
+		{
+			name:    "r2 opts out",
+			backend: backendConfig{Type: "r2", URL: "r2://state"},
+			want:    "when_required",
+		},
+		{
+			name:    "s3 with custom endpoint opts out",
+			backend: backendConfig{Type: "s3", URL: "s3://state?endpoint=https://minio:9000"},
+			want:    "when_required",
+		},
+		{
+			name:    "plain aws s3 is left alone",
+			backend: backendConfig{Type: "s3", URL: "s3://state?region=us-east-1"},
+			want:    "",
+		},
+		{
+			name:    "file backend is left alone",
+			backend: backendConfig{Type: "file", URL: "file:///tmp/state"},
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(awsRequestChecksumEnv, "")
+			if _, err := (projectConfig{Backend: tt.backend}).backendURL(); err != nil {
+				t.Fatalf("backendURL: %v", err)
+			}
+			if got := os.Getenv(awsRequestChecksumEnv); got != tt.want {
+				t.Errorf("%s = %q, want %q", awsRequestChecksumEnv, got, tt.want)
+			}
+		})
+	}
+}
+
+// An operator who sets the variable deliberately must win — we only fill a blank.
+func TestBackendURLKeepsExplicitChecksumSetting(t *testing.T) {
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "0123456789abcdef0123456789abcdef")
+	t.Setenv(awsRequestChecksumEnv, "when_supported")
+
+	if _, err := (projectConfig{Backend: backendConfig{Type: "r2", URL: "r2://state"}}).backendURL(); err != nil {
+		t.Fatalf("backendURL: %v", err)
+	}
+	if got := os.Getenv(awsRequestChecksumEnv); got != "when_supported" {
+		t.Errorf("overrode an explicit setting: got %q, want %q", got, "when_supported")
+	}
+}

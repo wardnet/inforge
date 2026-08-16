@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/events"
@@ -290,6 +291,14 @@ func writeTempKeyFile(material string) (string, error) {
 // and returns its error. On failure with no per-resource Failure recorded (e.g. a
 // config error before any op), the buffered engine error stream is dumped to
 // stderr. It returns the Printer (for report/summary access) and run's error.
+// drainGrace is how long streamEngineRun waits for the engine's event channel to
+// close after the run returns, before winding the drain goroutine up itself. It
+// only ever elapses on the abnormal path (the engine returned without closing the
+// channel); the normal path closes it immediately. Generous enough that a slow
+// final flush is never truncated, short enough that a failed deploy still exits
+// promptly instead of holding a CI job open.
+const drainGrace = 5 * time.Second
+
 func streamEngineRun(w io.Writer, header string, run func(ch chan events.EngineEvent, progress, errProgress io.Writer) error) (*output.Printer, error) {
 	p := output.NewPrinter(w)
 	ch := output.NewEventChannel()
@@ -304,13 +313,26 @@ func streamEngineRun(w io.Writer, header string, run func(ch chan events.EngineE
 	// their old roles (progress discarded, errors buffered for the failure dump).
 	prelude := &preludeRelay{w: w}
 	progressBranch, errBranch := prelude.branch(), prelude.branch()
-	var wg sync.WaitGroup
-	wg.Add(1)
+
+	// The drain goroutine selects on `stop` as well as the event channel, rather
+	// than ranging over the channel alone, so it can be wound up even if the
+	// channel is never closed. See the drain-grace comment below for why that
+	// case is real.
+	stop := make(chan struct{})
+	drained := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		for ev := range ch {
-			prelude.mute()
-			p.Handle(ev)
+		defer close(drained)
+		for {
+			select {
+			case ev, ok := <-ch:
+				if !ok {
+					return
+				}
+				prelude.mute()
+				p.Handle(ev)
+			case <-stop:
+				return
+			}
 		}
 	}()
 
@@ -319,7 +341,31 @@ func streamEngineRun(w io.Writer, header string, run func(ch chan events.EngineE
 	}
 	var errBuf bytes.Buffer
 	runErr := run(ch, progressBranch, io.MultiWriter(errBranch, &errBuf))
-	wg.Wait()
+
+	// DRAIN GRACE. The Automation API closes the event channel when the ENGINE
+	// completes — but a run that dies before the engine's event stream starts
+	// returns its error with the channel still open. Waiting unconditionally for
+	// the channel to close therefore hangs forever on exactly the failures that
+	// happen earliest, and the process has to be killed.
+	//
+	// That is the prd outage of 2026-08-14: Pulumi rejected the very first R2
+	// state write (`InvalidDigest`), the error was relayed live by preludeRelay,
+	// and then `inforge deploy` sat here for the full 6h CI timeout every night.
+	// A one-second failure presenting as a multi-hour hang is worse than the
+	// failure itself — it hid the real error and pointed the investigation at an
+	// unrelated release.
+	//
+	// So: give the goroutine a short grace to drain events already in flight
+	// (the normal path closes the channel immediately and this returns at once),
+	// then wind it up. Stopping the drain before p.Finish() — rather than
+	// abandoning the goroutine — keeps the Printer single-threaded, so the
+	// give-up path cannot race Handle against Finish.
+	select {
+	case <-drained:
+	case <-time.After(drainGrace):
+		close(stop)
+		<-drained
+	}
 	p.Finish()
 
 	// The raw engine error stream is the fallback when the Printer recorded no

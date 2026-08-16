@@ -105,3 +105,39 @@ func TestStreamEngineRunDumpsOnlyUnrelayedErrors(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(got, "RELAYED-PREFIX"), "the live-relayed prefix must not print twice")
 	assert.Contains(t, got, "BUFFERED-REMAINDER", "the un-relayed remainder is the failure diagnostic")
 }
+
+// A run that dies BEFORE the engine's event stream starts returns its error
+// WITHOUT closing the event channel — the Automation API only closes it once the
+// engine has completed. streamEngineRun must still return.
+//
+// This is the prd outage of 2026-08-14: the R2 state write was rejected ~1s in,
+// the error was relayed live by preludeRelay, and then the drain goroutine sat on
+// `range ch` forever while wg.Wait() blocked. `inforge deploy` never exited and
+// burned the full 6h CI timeout every night, which disguised a one-second failure
+// as a hang and sent the diagnosis after the wrong cause entirely.
+func TestStreamEngineRunReturnsWhenEngineNeverClosesChannel(t *testing.T) {
+	type result struct {
+		err error
+		out string
+	}
+	done := make(chan result, 1)
+
+	go func() {
+		var out bytes.Buffer
+		_, err := streamEngineRun(&out, "Deploying (prd):\n", func(ch chan events.EngineEvent, progress, errProgress io.Writer) error {
+			// The backend rejects the very first write; no engine event is ever
+			// emitted and — the point of this test — ch is never closed.
+			_, _ = errProgress.Write([]byte("error: operation error S3: PutObject, api error InvalidDigest\n"))
+			return errors.New("operation error S3: PutObject: InvalidDigest")
+		})
+		done <- result{err: err, out: out.String()}
+	}()
+
+	select {
+	case got := <-done:
+		require.Error(t, got.err, "the run's error must be returned, not swallowed")
+		assert.Contains(t, got.out, "InvalidDigest", "the engine's diagnostic must still reach the operator")
+	case <-time.After(30 * time.Second):
+		t.Fatal("streamEngineRun did not return when the engine left the event channel open — `inforge deploy` would hang until the CI timeout")
+	}
+}

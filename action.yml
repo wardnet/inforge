@@ -1,14 +1,38 @@
 name: Install inforge
-description: Download and install the inforge binary and Pulumi provider plugins
+description: Download and install the inforge binary, the Pulumi CLI, and Pulumi provider plugins
 
 inputs:
   version:
     description: inforge version to install (omit or set to "latest" for the latest release)
     default: latest
+  pulumi-version:
+    description: >-
+      Pulumi CLI version to install. inforge drives the CLI through the Automation
+      API, so this pins the engine that writes stack state. Override only to test a
+      new CLI — the default is the version inforge is validated against.
+    default: "3.253.0"
 
 runs:
   using: composite
   steps:
+    # inforge is NOT a pure-Go-SDK consumer of Pulumi: `auto.NewLocalWorkspace`
+    # (cmd/inforge/stack.go) is the Automation API, which SHELLS OUT to a `pulumi`
+    # binary on PATH. That dependency was previously implicit — nothing here
+    # installed a CLI, so every consumer silently ran on whatever version its
+    # runner image happened to ship, and a GitHub runner-image roll could change
+    # the deploy engine underneath a pinned inforge release with no diff anywhere.
+    #
+    # That is exactly how prd broke: image ubuntu24/20260810.271 moved the
+    # preinstalled CLI 3.253.0 -> 3.256.0, and 3.256.0 fails to write the R2
+    # checkpoint with `InvalidDigest: The checksum or Content-MD5 you specified is
+    # not valid` (S3 PutObject 400). The same inforge v6.1.3 binary succeeded on
+    # the older image the day before. Pinning here makes the CLI a version we
+    # control and bump deliberately, like any other dependency.
+    - name: Install Pulumi CLI
+      uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7.0.0
+      with:
+        pulumi-version: ${{ inputs.pulumi-version }}
+
     - name: Install inforge
       shell: bash
       env:
