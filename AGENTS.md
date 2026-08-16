@@ -712,8 +712,19 @@ realized in two halves:
   Leaving it unpinned is not a theoretical risk — a GitHub runner-image roll moved the preinstalled
   CLI 3.253.0 → 3.256.0 and broke every prd deploy with `InvalidDigest` on the R2 checkpoint write,
   with no diff in inforge itself. When bumping, bump it deliberately and verify a real deploy against
-  the R2 backend; a newer CLI may additionally need
-  `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` for S3-compatible stores.
+  the R2 backend.
+- **The Pulumi SDK and the Pulumi CLI must be bumped TOGETHER.** `go.mod`'s
+  `github.com/pulumi/pulumi/sdk/v3` and `action.yml`'s `pulumi-version` are the same product on two
+  sides of a process boundary, and both are currently **3.253.0**. Nothing in the toolchain links
+  them: Dependabot bumps the SDK and cannot see the CLI pin, so accepting an SDK PR on its own
+  silently reopens the skew. Move both in one PR, or neither.
+- **Third-party binaries install from `wardnet/toolchain-mirror`, verified.** The Pulumi CLI
+  (`action.yml`) and every provider plugin (`cmd/inforge/plugins.go`) are downloaded from our mirror
+  and checked against the `SHA256SUMS` it publishes. **Mirror a version before pinning it here** — an
+  unmirrored version fails the install with a message naming the mirror. Fetching from a mirror
+  without verifying the digest would only relocate the trust, so the check is not optional: the plugin
+  path previously ran unverified bytes as part of a production deploy. The mirror's SHA-256 is
+  stronger than upstream's own guarantee for plugins — the provider repos publish only **SHA-1**.
 - **A third-party apt repo must be PROBED before its sources file is written.** `apt-get update`
   fails hard on an unreachable source and our installers wrap it in retry-then-exit-1, so a
   sources file naming a suite the vendor does not publish breaks **every later apt-using step on
