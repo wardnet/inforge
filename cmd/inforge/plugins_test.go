@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -215,5 +216,91 @@ func TestMirrorPluginBaseMatchesTheMirrorTagScheme(t *testing.T) {
 	want := "https://github.com/wardnet/toolchain-mirror/releases/download/plugin-grafana-v1.0.0"
 	if got := mirrorPluginBase("grafana", "1.0.0"); got != want {
 		t.Errorf("mirrorPluginBase = %q, want %q", got, want)
+	}
+}
+
+// The full install path against a local stand-in for the mirror: fetch the
+// digest, verify the archive, extract into the Pulumi plugin directory. This is
+// the shape of what runs before every deploy, so it is worth exercising as one
+// piece rather than only as its parts.
+func TestInstallPulumiPluginVerifiesAndInstalls(t *testing.T) {
+	const (
+		name = "hcloud"
+		ver  = "1.38.0"
+	)
+	binary := "pulumi-resource-" + name
+	want := []byte("#!/bin/sh\necho hcloud\n")
+	archive := tarGzWith(t, binary, want)
+	sum := sha256.Sum256(archive)
+	archiveName := pluginArchiveName(name, ver, runtime.GOOS, runtime.GOARCH)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS"):
+			// Cover every platform, as a real mirror release does, so the test also
+			// proves the right line is selected rather than the first one.
+			for _, p := range []string{"linux-amd64", "linux-arm64", "darwin-arm64"} {
+				digest := "0000000000000000000000000000000000000000000000000000000000000000"
+				file := pluginArchiveName(name, ver, strings.Split(p, "-")[0], strings.Split(p, "-")[1])
+				if file == archiveName {
+					digest = hex.EncodeToString(sum[:])
+				}
+				_, _ = w.Write([]byte(digest + "  " + file + "\n"))
+			}
+		case strings.HasSuffix(r.URL.Path, archiveName):
+			_, _ = w.Write(archive)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// pulumiPluginDir resolves under the user's home; point it at a temp dir so the
+	// test never touches the real ~/.pulumi.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if err := installPulumiPlugin(context.Background(), name, ver, srv.URL); err != nil {
+		t.Fatalf("installPulumiPlugin: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(home, ".pulumi", "plugins", "resource-"+name+"-v"+ver, binary))
+	if err != nil {
+		t.Fatalf("plugin binary not installed where Pulumi looks for it: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("installed content = %q, want %q", got, want)
+	}
+}
+
+// A tampered archive must not reach the plugin directory at all — verification
+// happens before extraction precisely so nothing executable is written first.
+func TestInstallPulumiPluginLeavesNothingBehindOnMismatch(t *testing.T) {
+	const (
+		name = "hcloud"
+		ver  = "1.38.0"
+	)
+	archiveName := pluginArchiveName(name, ver, runtime.GOOS, runtime.GOARCH)
+	tampered := tarGzWith(t, "pulumi-resource-"+name, []byte("malicious"))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/SHA256SUMS") {
+			// A digest that does NOT match the bytes served below.
+			_, _ = w.Write([]byte(strings.Repeat("a", 64) + "  " + archiveName + "\n"))
+			return
+		}
+		_, _ = w.Write(tampered)
+	}))
+	defer srv.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if err := installPulumiPlugin(context.Background(), name, ver, srv.URL); err == nil {
+		t.Fatal("expected a checksum mismatch, got nil")
+	}
+
+	if _, err := os.Stat(filepath.Join(home, ".pulumi", "plugins", "resource-"+name+"-v"+ver, "pulumi-resource-"+name)); !os.IsNotExist(err) {
+		t.Error("a binary was written despite the checksum mismatch — verification must precede extraction")
 	}
 }

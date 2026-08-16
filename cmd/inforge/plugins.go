@@ -50,7 +50,7 @@ func newPluginsCmd() *cobra.Command {
 				{"grafana", "1.0.0"},
 			} {
 				fmt.Printf("installing pulumi-resource-%s v%s...\n", p.name, p.version)
-				if err := installPulumiPlugin(ctx, p.name, p.version); err != nil {
+				if err := installPulumiPlugin(ctx, p.name, p.version, mirrorPluginBase(p.name, p.version)); err != nil {
 					return fmt.Errorf("install %s: %w", p.name, err)
 				}
 				fmt.Printf("  installed pulumi-resource-%s\n", p.name)
@@ -90,10 +90,13 @@ const mirrorRepo = "wardnet/toolchain-mirror"
 // Note the digest is SHA-256 even though the upstream provider repos publish only
 // SHA-1: the mirror computes its own over the bytes it stored, so what we verify
 // here is stronger than anything upstream offers for these artifacts.
-func installPulumiPlugin(ctx context.Context, name, ver string) error {
+// base is the release URL to fetch from — supplied by the caller rather than
+// derived here so the whole install path (fetch digest → verify → extract) is
+// exercisable against a local server in tests. Production callers pass
+// mirrorPluginBase; nothing else is a supported source.
+func installPulumiPlugin(ctx context.Context, name, ver, base string) error {
 	binary := "pulumi-resource-" + name
 	archive := pluginArchiveName(name, ver, runtime.GOOS, runtime.GOARCH)
-	base := mirrorPluginBase(name, ver)
 
 	want, err := mirrorDigest(ctx, base+"/SHA256SUMS", archive)
 	if err != nil {
