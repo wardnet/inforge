@@ -706,18 +706,29 @@ realized in two halves:
   with `auto.NewLocalWorkspace` / `auto.*StackInlineSource` — the **Automation API**, which is a Go
   SDK that *drives a `pulumi` binary*: it shells out to whatever `pulumi` is first on `PATH`. There
   is no in-process engine. Treat the CLI as a real dependency with a pinned version:
-  `action.yml` installs it (`pulumi-version` input, currently **3.253.0**) so every consumer gets the
-  engine we validated rather than whatever its runner image ships, and
-  `.github/workflows/{ci,release}.yml` pin their own via `pulumi/actions`.
+  `action.yml` installs it so every consumer gets the engine we validated rather than whatever its
+  runner image ships (see the four-way pin table below).
   Leaving it unpinned is not a theoretical risk — a GitHub runner-image roll moved the preinstalled
   CLI 3.253.0 → 3.256.0 and broke every prd deploy with `InvalidDigest` on the R2 checkpoint write,
   with no diff in inforge itself. When bumping, bump it deliberately and verify a real deploy against
-  the R2 backend.
-- **The Pulumi SDK and the Pulumi CLI must be bumped TOGETHER.** `go.mod`'s
-  `github.com/pulumi/pulumi/sdk/v3` and `action.yml`'s `pulumi-version` are the same product on two
-  sides of a process boundary, and both are currently **3.253.0**. Nothing in the toolchain links
-  them: Dependabot bumps the SDK and cannot see the CLI pin, so accepting an SDK PR on its own
-  silently reopens the skew. Move both in one PR, or neither.
+  the R2 backend. **CI cannot catch a regression here**: our own workflows install the CLI via
+  `pulumi/actions`, not via `action.yml`, so the consumer install path this repo ships is exercised
+  only by a real consumer deploy.
+- **The Pulumi version is pinned in FOUR places and they must move together.** All four are
+  currently **3.253.0**:
+
+  | Where | What it pins |
+  |---|---|
+  | `go.mod` → `github.com/pulumi/pulumi/sdk/v3` | the SDK compiled into the binary |
+  | `action.yml` → `pulumi-version` input | the CLI every **consumer** deploys with |
+  | `.github/workflows/ci.yml` → `pulumi/actions` | the CLI our tests run against |
+  | `.github/workflows/release.yml` → `pulumi/actions` | the CLI the release build runs against |
+
+  The SDK and the CLI are the same product on two sides of a process boundary, and **nothing in the
+  toolchain links any of them** — Dependabot bumps `go.mod` and cannot see the other three, so
+  accepting an SDK PR on its own silently reopens the skew. Move all four in one PR, or none.
+  Grep `3\.25` before claiming they agree; a partial bump is the failure mode, and it is invisible
+  until a deploy behaves differently from CI.
 - **Third-party binaries install from `wardnet/toolchain-mirror`, verified.** The Pulumi CLI
   (`action.yml`) and every provider plugin (`cmd/inforge/plugins.go`) are downloaded from our mirror
   and checked against the `SHA256SUMS` it publishes. **Mirror a version before pinning it here** — an
