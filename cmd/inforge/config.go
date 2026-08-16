@@ -133,16 +133,66 @@ func (b backendConfig) bucket() (string, error) {
 // It translates r2:// to the appropriate s3:// URL with the Cloudflare R2
 // S3-compatible endpoint. The Cloudflare account ID is read from
 // CLOUDFLARE_ACCOUNT_ID.
+//
+// It is also the single choke point every Automation API entry point passes
+// through (upsertStack, createStack, selectStack, ephemeralWorkspace), which is
+// why the S3 checksum opt-out is asserted here: the setting has to be in the
+// environment before the `pulumi` CLI subprocess is spawned, and doing it in one
+// place means a new entry point cannot forget it.
 func (c projectConfig) backendURL() (string, error) {
 	switch c.Backend.Type {
-	case "", "file", "s3", "git-branch":
+	case "", "file", "git-branch":
+		return c.Backend.URL, nil
+	case "s3":
+		// A plain s3:// URL carrying an explicit endpoint= is a third-party store
+		// too (MinIO, IBM COS), not AWS — same checksum problem as R2.
+		if strings.Contains(c.Backend.URL, "endpoint=") {
+			if err := ensureS3ChecksumCompat(); err != nil {
+				return "", err
+			}
+		}
 		return c.Backend.URL, nil
 	case "r2":
+		if err := ensureS3ChecksumCompat(); err != nil {
+			return "", err
+		}
 		return r2ToS3URL(c.Backend.URL)
 	default:
 		return "", fmt.Errorf("unsupported backend type %q (valid: file, git-branch, s3, r2)", c.Backend.Type)
 	}
 }
+
+// ensureS3ChecksumCompat opts the AWS SDK out of computing request checksums it
+// adds by default, for S3-compatible object stores that are not AWS S3.
+//
+// The v2 AWS SDK computes a CRC32 checksum with aws-chunked streaming on every
+// PutObject. Cloudflare R2 rejects those uploads — the state write fails with
+// `InvalidDigest: The checksum or Content-MD5 you specified is not valid` (400)
+// and no checkpoint is ever committed.
+//
+// Pulumi 3.256.0 started defaulting this to when_required itself when the s3://
+// backend URL sets a custom endpoint, but that landed as a fix for a DIFFERENT
+// symptom (403s on IBM COS/MinIO) and did not spare us — prd broke on 3.256.0
+// with the 400 above while 3.253.0 was fine. Rather than depend on the CLI's
+// detection matching our URL shape, we assert the setting ourselves: Pulumi
+// explicitly honours AWS_REQUEST_CHECKSUM_CALCULATION as the escape hatch and
+// leaves it alone when already set, so this behaves the same on every CLI
+// version and on a local run outside CI.
+//
+// An operator who sets the variable deliberately wins — we only fill a blank.
+func ensureS3ChecksumCompat() error {
+	if os.Getenv(awsRequestChecksumEnv) != "" {
+		return nil
+	}
+	if err := os.Setenv(awsRequestChecksumEnv, "when_required"); err != nil {
+		return fmt.Errorf("set %s: %w", awsRequestChecksumEnv, err)
+	}
+	return nil
+}
+
+// awsRequestChecksumEnv is the AWS SDK setting controlling whether request
+// checksums are computed. Named once so the guard and the override agree.
+const awsRequestChecksumEnv = "AWS_REQUEST_CHECKSUM_CALCULATION"
 
 // r2Bucket extracts the bucket name from an r2://<bucket> URL.
 func r2Bucket(raw string) (string, error) {
