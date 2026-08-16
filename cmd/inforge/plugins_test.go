@@ -304,3 +304,107 @@ func TestInstallPulumiPluginLeavesNothingBehindOnMismatch(t *testing.T) {
 		t.Error("a binary was written despite the checksum mismatch — verification must precede extraction")
 	}
 }
+
+// The pinned set must be well-formed: a blank field or a duplicate name is a
+// typo that would otherwise surface as a mirror 404 during a deploy.
+func TestStdPluginsAreWellFormed(t *testing.T) {
+	if len(stdPlugins) == 0 {
+		t.Fatal("stdPlugins is empty — no provider would be installed")
+	}
+	seen := map[string]bool{}
+	for _, p := range stdPlugins {
+		if p.name == "" || p.version == "" {
+			t.Errorf("incomplete entry: %+v", p)
+		}
+		if strings.HasPrefix(p.version, "v") {
+			t.Errorf("%s version %q must not carry a leading v — it is added when building the tag", p.name, p.version)
+		}
+		if seen[p.name] {
+			t.Errorf("duplicate plugin %q", p.name)
+		}
+		seen[p.name] = true
+	}
+}
+
+// The install loop over the real pinned set, against a local stand-in for the
+// mirror: every plugin is fetched, verified and installed, and a failure on any
+// one of them aborts rather than reporting success.
+func TestInstallAllPluginsInstallsEveryPinnedPlugin(t *testing.T) {
+	archives := map[string][]byte{}
+	sums := map[string]string{}
+	for _, p := range stdPlugins {
+		name := pluginArchiveName(p.name, p.version, runtime.GOOS, runtime.GOARCH)
+		a := tarGzWith(t, "pulumi-resource-"+p.name, []byte(p.name))
+		archives[name] = a
+		s := sha256.Sum256(a)
+		sums[name] = hex.EncodeToString(s[:])
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/SHA256SUMS") {
+			// The tag carries the plugin name; serve that plugin's digest.
+			for file, digest := range sums {
+				if strings.Contains(r.URL.Path, tagNameOf(file)) {
+					_, _ = w.Write([]byte(digest + "  " + file + "\n"))
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		for file, a := range archives {
+			if strings.HasSuffix(r.URL.Path, file) {
+				_, _ = w.Write(a)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	base := func(name, ver string) string { return srv.URL + "/plugin-" + name + "-v" + ver }
+	if err := installAllPlugins(context.Background(), base); err != nil {
+		t.Fatalf("installAllPlugins: %v", err)
+	}
+
+	for _, p := range stdPlugins {
+		path := filepath.Join(home, ".pulumi", "plugins", "resource-"+p.name+"-v"+p.version, "pulumi-resource-"+p.name)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s not installed: %v", p.name, err)
+		}
+	}
+}
+
+// tagNameOf maps an archive filename back to its plugin name, so the stub server
+// can tell which plugin's SHA256SUMS is being requested.
+func tagNameOf(archive string) string {
+	rest := strings.TrimPrefix(archive, "pulumi-resource-")
+	if i := strings.Index(rest, "-v"); i >= 0 {
+		return rest[:i]
+	}
+	return rest
+}
+
+// A single plugin failing must abort the run — reporting "all plugins installed"
+// after a partial install would leave the deploy to fail later, further from the
+// cause.
+func TestInstallAllPluginsStopsOnFirstFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	t.Setenv("HOME", t.TempDir())
+	base := func(_, _ string) string { return srv.URL }
+
+	err := installAllPlugins(context.Background(), base)
+	if err == nil {
+		t.Fatal("expected the run to abort, got nil")
+	}
+	if !strings.Contains(err.Error(), stdPlugins[0].name) {
+		t.Errorf("error should name the plugin that failed first, got: %v", err)
+	}
+}

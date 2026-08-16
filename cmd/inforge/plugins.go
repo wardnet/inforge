@@ -35,37 +35,49 @@ func newPluginsCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx := cmd.Context()
-
-			// Provider plugins come from OUR mirror, not from each provider's own
-			// GitHub releases. Versions are pinned to match the SDK modules in go.mod.
-			// See installPulumiPlugin for why the source moved.
-			type stdPlugin struct{ name, version string }
-			for _, p := range []stdPlugin{
-				{"hcloud", "1.38.0"},
-				{"cloudflare", "6.17.0"},
-				// pulumi-random backs stable per-service database passwords (ADR-0036).
-				{"random", "4.16.8"},
-				// pulumiverse/grafana pushes dashboards + alerts (ADR-0038).
-				{"grafana", "1.0.0"},
-			} {
-				fmt.Printf("installing pulumi-resource-%s v%s...\n", p.name, p.version)
-				if err := installPulumiPlugin(ctx, p.name, p.version, mirrorPluginBase(p.name, p.version)); err != nil {
-					return fmt.Errorf("install %s: %w", p.name, err)
-				}
-				fmt.Printf("  installed pulumi-resource-%s\n", p.name)
-			}
-
-			// No custom (raw-binary) providers ship today: ADR-0036 retired the Neon
-			// plugin and self-hosted Postgres needs none. The seam remains if one returns.
-
-			fmt.Println("all plugins installed")
-			return nil
+			return installAllPlugins(cmd.Context(), mirrorPluginBase)
 		},
 	}
 
 	plugins.AddCommand(install)
 	return plugins
+}
+
+// stdPlugin is one pinned provider plugin.
+type stdPlugin struct{ name, version string }
+
+// stdPlugins is the set of provider plugins every deploy needs. It is DATA, kept
+// at package scope rather than buried in the command closure so it can be
+// asserted directly — a typo in a version here surfaces as a mirror 404 at deploy
+// time, which is a slow and confusing way to find it.
+//
+// Versions are pinned to match the SDK modules in go.mod, and each must be
+// mirrored (see mirrorRepo) before it can be installed.
+var stdPlugins = []stdPlugin{
+	{"hcloud", "1.38.0"},
+	{"cloudflare", "6.17.0"},
+	// pulumi-random backs stable per-service database passwords (ADR-0036).
+	{"random", "4.16.8"},
+	// pulumiverse/grafana pushes dashboards + alerts (ADR-0038).
+	{"grafana", "1.0.0"},
+}
+
+// installAllPlugins installs every pinned plugin, resolving each one's source
+// through baseFor. Production passes mirrorPluginBase; a test can pass a stub so
+// the loop is exercisable without reaching the network.
+//
+// No custom (raw-binary) providers ship today: ADR-0036 retired the Neon plugin
+// and self-hosted Postgres needs none. The seam remains if one returns.
+func installAllPlugins(ctx context.Context, baseFor func(name, ver string) string) error {
+	for _, p := range stdPlugins {
+		fmt.Printf("installing pulumi-resource-%s v%s...\n", p.name, p.version)
+		if err := installPulumiPlugin(ctx, p.name, p.version, baseFor(p.name, p.version)); err != nil {
+			return fmt.Errorf("install %s: %w", p.name, err)
+		}
+		fmt.Printf("  installed pulumi-resource-%s\n", p.name)
+	}
+	fmt.Println("all plugins installed")
+	return nil
 }
 
 // mirrorRepo is the release host for every third-party binary the toolchain
