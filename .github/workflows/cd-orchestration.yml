@@ -14,12 +14,19 @@ on:
       - "v*.*.*"
   workflow_dispatch:
 
-# Grouped by ref, so independently-versioned components still release in
-# parallel — wardnet-cloud ships several. Never cancelled: killing a
-# half-finished publish leaves a partial release behind, which is worse than
-# letting a superseded run finish.
+# One delivery at a time per repository, and never cancelled.
+#
+# Deliberately not grouped by ref. wardnet-design-system pushes one tag per
+# package for a single release, and `changeset publish` ships every pending
+# version on the first run — so per-ref grouping would have those runs racing
+# to publish the same versions and 409-ing each other. Its release.yml
+# serialises for exactly that reason.
+#
+# The asymmetry decides it: over-serialising costs latency, under-serialising
+# corrupts a release. A repo that genuinely needs parallel component delivery
+# can make this a setting when one actually does.
 concurrency:
-  group: cd-${{ github.ref }}
+  group: cd-${{ github.workflow }}
   cancel-in-progress: false
 
 permissions:
@@ -51,6 +58,11 @@ jobs:
     # has asked for one yet.
     permissions:
       contents: write
+      # write, not read: delivery both consumes private @scope dependencies and
+      # publishes to GitHub Packages — wardnet-design-system's changeset
+      # publish needs it. A called workflow can only narrow, so a stage that
+      # merely installs can drop this to read in its own block.
+      packages: write
 
   cd-gate:
     name: cd-gate
