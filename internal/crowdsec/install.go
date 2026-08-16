@@ -2,6 +2,7 @@ package crowdsec
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/wardnet/inforge/internal/aptlock"
@@ -15,6 +16,8 @@ import (
 // the bouncer versions independently (0.0.x vs the agent's 1.x), so one pin cannot cover
 // both. The first apt call is an update (through aptlock, retrying a held lists lock) so
 // a fresh image never installs against a missing index.
+//
+// The apt SUITE is probed, never assumed: see suiteResolution and FallbackSuites.
 func InstallScript(agentVersion string) string {
 	agentPkg := AgentPackage
 	if agentVersion != "" {
@@ -22,6 +25,14 @@ func InstallScript(agentVersion string) string {
 	}
 	return fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
+
+# Drop any sources file left by an earlier run BEFORE the first apt call. apt-get update
+# fails hard on an unreachable source, so a stale entry — e.g. one written for a suite
+# packagecloud does not publish — would fail this script on its very first command AND
+# leave the host unable to run any other apt-using provisioning (nginx, otelcol,
+# postgres). Removing it up front makes such a host self-heal; the correct entry is
+# rewritten below, or the run fails with the source absent rather than broken.
+sudo rm -f %[4]s
 
 %[1]s
 sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y curl ca-certificates gnupg
@@ -37,7 +48,9 @@ if [ ! -f %[2]s ]; then
   sudo install -m 0644 "$asc" %[2]s
   rm -f "$asc"
 fi
-echo "deb [signed-by=%[2]s] https://packagecloud.io/crowdsec/crowdsec/${ID}/ ${VERSION_CODENAME} main" \
+
+%[9]s
+echo "deb [signed-by=%[2]s] %[10]s/${ID}/ ${suite} main" \
   | sudo tee %[4]s >/dev/null
 
 %[1]s
@@ -60,7 +73,52 @@ UNIT
 done
 sudo systemctl daemon-reload
 sudo systemctl enable %[7]s %[8]s
-`, aptlock.UpdateCmd(), KeyringPath, RepoKeyURL, RepoListPath, agentPkg, BouncerPackage, AgentService, BouncerService)
+`, aptlock.UpdateCmd(), KeyringPath, RepoKeyURL, RepoListPath, agentPkg, BouncerPackage, AgentService, BouncerService,
+		suiteResolution(), RepoBaseURL)
+}
+
+// suiteResolution renders the shell that sets `suite` to an apt suite packagecloud
+// actually publishes for this host, or exits non-zero having written no sources file.
+//
+// It probes rather than assumes. The old script interpolated ${VERSION_CODENAME}
+// directly, which is only correct while packagecloud happens to have caught up with the
+// host's distro release — it usually has not. CrowdSec's packages are suite-generic, so
+// the newest published suite is a correct answer for a newer host; FallbackSuites holds
+// that per distro. The probe runs BEFORE the sources file is written because the cost of
+// getting it wrong is not a failed CrowdSec install, it is an apt configuration that
+// breaks every subsequent package operation on the host.
+func suiteResolution() string {
+	var b strings.Builder
+	b.WriteString(`# Resolve the apt suite by probing, never by assuming ${VERSION_CODENAME} is published.
+case "${ID}" in
+`)
+	ids := make([]string, 0, len(FallbackSuites))
+	for id := range FallbackSuites {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids) // deterministic: this shell is a Pulumi trigger, it must not churn
+	for _, id := range ids {
+		fmt.Fprintf(&b, "  %s) fallback=%s ;;\n", id, FallbackSuites[id])
+	}
+	b.WriteString(`  *) fallback= ;;
+esac
+suite=
+for candidate in "${VERSION_CODENAME}" "$fallback"; do
+  [ -n "$candidate" ] || continue
+  if curl -fsSL --max-time 30 -o /dev/null "` + RepoBaseURL + `/${ID}/dists/${candidate}/Release"; then
+    suite="$candidate"
+    break
+  fi
+  echo "inforge: CrowdSec publishes no '${candidate}' apt suite for ${ID}" >&2
+done
+if [ -z "$suite" ]; then
+  echo "inforge: CrowdSec has no published apt suite for ${ID} ${VERSION_CODENAME} — set security.crowdsec.enabled: false, or add a fallback to internal/crowdsec.FallbackSuites once packagecloud publishes one" >&2
+  exit 1
+fi
+if [ "$suite" != "${VERSION_CODENAME}" ]; then
+  echo "inforge: CrowdSec has no '${VERSION_CODENAME}' suite; using '${suite}' (packages are suite-generic)" >&2
+fi`)
+	return b.String()
 }
 
 // ConfigScript writes the agent overlays (prometheus config.yaml.local + the nginx

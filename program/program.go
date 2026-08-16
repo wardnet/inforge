@@ -478,6 +478,16 @@ func createInfra(
 	computeOutputs[region] = map[string]types.ComputeOutputs{}
 	databaseOutputs[region] = map[string]types.DatabaseOutputs{}
 
+	// Assert every gateway's FKs resolve BEFORE anything is derived from them. The
+	// derivations below (firewall, nginx, DNS) each skip a gateway they cannot
+	// resolve, which is the right local behaviour but a catastrophic global one: a
+	// gateway that silently resolves to nothing is not a partial deploy, it is a
+	// deleted public edge, applied by an otherwise-green run. See rule
+	// unresolved-gateway-fk-fails-the-deploy.
+	if err := checkGatewayFKs(res); err != nil {
+		return err
+	}
+
 	// Derive each host's inbound firewall port plan up front: the firewall is a
 	// pure consumer of this set, and cp.Create (below) runs before ingress
 	// realization, so the derivation cannot wait for the routes. It is computed
@@ -2245,6 +2255,36 @@ func resolveGateways(res types.Resources, canonical map[string]string, slug, bas
 		})
 	}
 	return out
+}
+
+// checkGatewayFKs fails the deploy when an authored gateway's `host:` or `ingress:`
+// FK does not resolve. Every gateway derivation — firewallPlanByHost, gatewayEdgeByHost,
+// resolveGatewayHealthServices, derivedRecords — reaches the gateway through
+// resolveGateways, which SKIPS an unresolved FK on the (correct) assumption that
+// `inforge validate` rejected it long before. That assumption held only as long as
+// something ran validate: `inforge deploy` did not, so a gateway missing the `ingress:`
+// FK that ADR-0045 made required was dropped from all four derivations at once and the
+// run reloaded nginx with no gateway server at all — a total north-south outage reported
+// as a successful config apply.
+//
+// The skips stay (they keep each derivation total); this makes them unreachable. A
+// deploy that cannot see a declared gateway must stop, not quietly publish an edge
+// without it.
+func checkGatewayFKs(res types.Resources) error {
+	canonical := naming.CanonicalComputeKeys(res.Compute)
+	ingHosts := ingressHostsByName(res, canonical)
+	for _, gw := range res.Gateway {
+		if _, ok := canonical[gw.Host]; !ok {
+			return fmt.Errorf("gateway %q: host %q does not resolve to a compute resource in this scope; run `inforge validate <env>`", gw.Name, gw.Host)
+		}
+		if gw.Ingress == "" {
+			return fmt.Errorf("gateway %q: no ingress declared — a gateway is private and is reachable only through the ingress that fronts it (ADR-0045); add `ingress: <name>` to its manifest and run `inforge validate <env>`", gw.Name)
+		}
+		if _, ok := ingHosts[gw.Ingress]; !ok {
+			return fmt.Errorf("gateway %q: ingress %q does not resolve to an ingress resource in this scope; run `inforge validate <env>`", gw.Name, gw.Ingress)
+		}
+	}
+	return nil
 }
 
 // gatewayEdgeByHost derives the two halves of every private gateway (ADR-0045),
