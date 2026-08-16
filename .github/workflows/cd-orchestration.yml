@@ -1,0 +1,67 @@
+# Managed by gt — edit .gt-repo.yaml, then run `gt repo sync`.
+#
+# gt owns the orchestration; the cd-* stages it calls are yours. It mirrors
+# ci-orchestration deliberately, so there is one pipeline idea to learn.
+#
+# `cd-gate` is not a branch-protection check — nothing merges here. It exists so
+# a release has one status meaning "the whole delivery succeeded" rather than
+# four job results to read.
+name: CD
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Refuses to ship a tree that never passed the gate. Stronger than trusting
+  # that CI ran: a re-run would only say the code passes now, on a runner,
+  # again — this says this exact tree passed the full gate.
+  verify-attestation:
+    uses: pedromvgomes/gt/.github/workflows/reusable-attest.yml@v1
+    with:
+      require: true
+    # Must cover everything reusable-attest declares; a caller granting less
+    # fails the run at parse time.
+    permissions:
+      contents: read
+      statuses: read
+      pull-requests: read
+
+  publish:
+    needs: [verify-attestation]
+    uses: ./.github/workflows/cd-publish.yml
+    secrets: inherit
+    # Delivery writes: a publish stage creates a release, a deploy stage moves
+    # artifacts. A called workflow can only narrow this, so a stage needing
+    # less should say so in its own permissions block. A stage needing *more*
+    # — OIDC id-token, package registries — is a gt change today; no consumer
+    # has asked for one yet.
+    permissions:
+      contents: write
+
+  cd-gate:
+    name: cd-gate
+    needs: [verify-attestation, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify every stage succeeded or was legitimately skipped
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          set -euo pipefail
+          echo "stage results: ${RESULTS}"
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "::error::a delivery stage failed"
+            exit 1
+          fi
+          if [[ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "::error::a delivery stage was cancelled"
+            exit 1
+          fi

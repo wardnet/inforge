@@ -1,0 +1,42 @@
+# cd-publish — this file is yours.
+#
+# gt created it once and will never modify or delete it again. It is called by
+# cd-orchestration.yml, which verifies the tagged tree carries a passing
+# gt/validated-tree attestation before this runs.
+#
+# release.yml's build-and-test job is deliberately gone: re-running the suite
+# on a tag only proves the code passes again, whereas the attestation proves
+# this exact tree passed the full gate.
+name: cd-publish
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  goreleaser:
+    name: goreleaser
+    runs-on: ubuntu-latest
+    permissions:
+      # release.yml declared this at workflow level; extracting the job alone
+      # would silently have dropped it and goreleaser could not create a release.
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26.6"
+          cache: true
+
+      - name: Run goreleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: "~> v2"
+          args: release --clean --parallelism 1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
