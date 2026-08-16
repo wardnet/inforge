@@ -92,11 +92,8 @@ const mirrorRepo = "wardnet/toolchain-mirror"
 // here is stronger than anything upstream offers for these artifacts.
 func installPulumiPlugin(ctx context.Context, name, ver string) error {
 	binary := "pulumi-resource-" + name
-
-	// Provider archives use hyphen-separated os-arch (e.g. linux-amd64) — note
-	// this is the Go GOARCH spelling, unlike the CLI's own linux-x64.
-	archive := fmt.Sprintf("%s-v%s-%s-%s.tar.gz", binary, ver, runtime.GOOS, runtime.GOARCH)
-	base := fmt.Sprintf("https://github.com/%s/releases/download/plugin-%s-v%s", mirrorRepo, name, ver)
+	archive := pluginArchiveName(name, ver, runtime.GOOS, runtime.GOARCH)
+	base := mirrorPluginBase(name, ver)
 
 	want, err := mirrorDigest(ctx, base+"/SHA256SUMS", archive)
 	if err != nil {
@@ -108,6 +105,23 @@ func installPulumiPlugin(ctx context.Context, name, ver string) error {
 		return err
 	}
 	return downloadAndExtractTarGzVerified(ctx, base+"/"+archive, pluginDir, binary, want)
+}
+
+// pluginArchiveName builds the provider archive filename for an os/arch pair.
+//
+// Provider archives use the Go GOARCH spelling (linux-amd64), which is NOT the
+// spelling the Pulumi CLI's own archives use for the same machine (linux-x64).
+// Getting this wrong produces a 404 that reads like "this version was never
+// mirrored", so the convention is isolated here and tested rather than inlined.
+func pluginArchiveName(name, ver, goos, goarch string) string {
+	return fmt.Sprintf("pulumi-resource-%s-v%s-%s-%s.tar.gz", name, ver, goos, goarch)
+}
+
+// mirrorPluginBase is the mirror release URL for one plugin version. The tag
+// scheme (plugin-<name>-v<version>) is the mirror's contract — see that repo's
+// README — so producer and consumer must agree on it exactly.
+func mirrorPluginBase(name, ver string) string {
+	return fmt.Sprintf("https://github.com/%s/releases/download/plugin-%s-v%s", mirrorRepo, name, ver)
 }
 
 // mirrorDigest fetches a mirror release's SHA256SUMS and returns the expected
