@@ -2,3 +2,11 @@
 # application code — out of scope for scanning/coverage (see AGENTS.md).
 typescript:
   enabled: false
+
+# ci-test produces the coverage profile and uploads it as the `gt-coverage`
+# artifact, which the bulwark stage lands at the scan root before bulwark runs.
+# Without this the default is `run` and bulwark would execute the suite a
+# second time — gt scaffolds this setting for repositories that have no
+# .bulwark.yml, but never edits one that already exists.
+coverage:
+  source: report
