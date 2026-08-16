@@ -1,3 +1,20 @@
+# bulwark configuration for inforge.
+
+coverage:
+  # build-test's `go test -race -coverprofile=coverage.out ./...` is the only
+  # place tests run; the bulwark job downloads that artifact rather than
+  # executing the suite again. bulwark's default is `run`, which would do
+  # exactly the second run this pipeline was built to avoid — and would make a
+  # flake fail a job whose purpose is to read a report, not produce one.
+  #
+  # This lives here rather than at the call site because it describes how the
+  # repo's pipeline is built — one answer, true for every workflow — which is
+  # why bulwark v1.7.0 removed the `tests-mode` input that used to carry it.
+  #
+  # No report path is set: the artifact lands coverage.out at the scan root,
+  # already the first candidate bulwark checks.
+  source: report
+
 # typescript is disabled entirely: website/ is a Docusaurus docs site, not
 # application code — out of scope for scanning/coverage (see AGENTS.md).
 typescript:
