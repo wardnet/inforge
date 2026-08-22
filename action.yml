@@ -26,12 +26,63 @@ runs:
     # preinstalled CLI 3.253.0 -> 3.256.0, and 3.256.0 fails to write the R2
     # checkpoint with `InvalidDigest: The checksum or Content-MD5 you specified is
     # not valid` (S3 PutObject 400). The same inforge v6.1.3 binary succeeded on
-    # the older image the day before. Pinning here makes the CLI a version we
-    # control and bump deliberately, like any other dependency.
+    # the older image the day before.
+    #
+    # We install from wardnet/toolchain-mirror, not from Pulumi, and verify the
+    # download against the SHA256SUMS that mirror published. Pinning alone stops
+    # drift but still leaves a third-party host in the deploy path; mirroring means
+    # the bytes are ours and a pinned version cannot change or vanish. The digest
+    # check is the point of the exercise — fetching from a mirror without verifying
+    # moves the trust rather than establishing it.
+    #
+    # $GITHUB_PATH PREPENDS, so this CLI wins over any preinstalled on the image.
     - name: Install Pulumi CLI
-      uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7.0.0
-      with:
-        pulumi-version: ${{ inputs.pulumi-version }}
+      shell: bash
+      env:
+        PULUMI_VERSION: ${{ inputs.pulumi-version }}
+      run: |
+        set -euo pipefail
+
+        case "$(uname -s)/$(uname -m)" in
+          Linux/x86_64)   PLATFORM=linux-x64 ;;
+          Linux/aarch64)  PLATFORM=linux-arm64 ;;
+          Darwin/arm64)   PLATFORM=darwin-arm64 ;;
+          *) echo "::error::no mirrored Pulumi CLI for $(uname -s)/$(uname -m). The mirror carries only the platforms we run; add it in wardnet/toolchain-mirror if this is a real target."; exit 1 ;;
+        esac
+
+        MIRROR="https://github.com/wardnet/toolchain-mirror/releases/download/pulumi-v${PULUMI_VERSION}"
+        ARCHIVE="pulumi-v${PULUMI_VERSION}-${PLATFORM}.tar.gz"
+        DEST="${RUNNER_TEMP}/pulumi-cli"
+        mkdir -p "${DEST}"
+
+        echo "installing Pulumi CLI ${PULUMI_VERSION} (${PLATFORM}) from the mirror..."
+        curl -fsSL -o "${DEST}/${ARCHIVE}" "${MIRROR}/${ARCHIVE}"
+        curl -fsSL -o "${DEST}/SHA256SUMS" "${MIRROR}/SHA256SUMS"
+
+        # Verify ONLY the archive we fetched: SHA256SUMS covers every mirrored
+        # platform, and `sha256sum -c` fails on entries whose files are absent.
+        ( cd "${DEST}" && grep -F " ${ARCHIVE}" SHA256SUMS | sha256sum -c - )
+
+        tar -xzf "${DEST}/${ARCHIVE}" -C "${DEST}"
+        # The archive unpacks to a pulumi/ directory holding the CLI and its
+        # language hosts; they must stay together, so PATH points at that dir.
+        echo "${DEST}/pulumi" >> "$GITHUB_PATH"
+
+    - name: Verify the Pulumi CLI on PATH is the pinned one
+      shell: bash
+      env:
+        PULUMI_VERSION: ${{ inputs.pulumi-version }}
+      run: |
+        set -euo pipefail
+        # Guards the failure this whole change exists to prevent: if PATH ordering
+        # ever resolves to the runner image's CLI instead of ours, fail here with a
+        # clear message rather than silently deploying on an unpinned engine.
+        got="$(pulumi version)"
+        if [ "${got#v}" != "${PULUMI_VERSION}" ]; then
+          echo "::error::pulumi on PATH is ${got}, expected v${PULUMI_VERSION} — the mirrored CLI is not winning PATH resolution"
+          exit 1
+        fi
+        echo "pulumi ${got} (mirrored, verified)"
 
     - name: Install inforge
       shell: bash

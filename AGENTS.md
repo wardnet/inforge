@@ -706,14 +706,36 @@ realized in two halves:
   with `auto.NewLocalWorkspace` / `auto.*StackInlineSource` — the **Automation API**, which is a Go
   SDK that *drives a `pulumi` binary*: it shells out to whatever `pulumi` is first on `PATH`. There
   is no in-process engine. Treat the CLI as a real dependency with a pinned version:
-  `action.yml` installs it (`pulumi-version` input, currently **3.253.0**) so every consumer gets the
-  engine we validated rather than whatever its runner image ships, and
-  `.github/workflows/{ci,release}.yml` pin their own via `pulumi/actions`.
+  `action.yml` installs it so every consumer gets the engine we validated rather than whatever its
+  runner image ships (see the four-way pin table below).
   Leaving it unpinned is not a theoretical risk — a GitHub runner-image roll moved the preinstalled
   CLI 3.253.0 → 3.256.0 and broke every prd deploy with `InvalidDigest` on the R2 checkpoint write,
   with no diff in inforge itself. When bumping, bump it deliberately and verify a real deploy against
-  the R2 backend; a newer CLI may additionally need
-  `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` for S3-compatible stores.
+  the R2 backend. **CI cannot catch a regression here**: our own workflows install the CLI via
+  `pulumi/actions`, not via `action.yml`, so the consumer install path this repo ships is exercised
+  only by a real consumer deploy.
+- **The Pulumi version is pinned in FOUR places and they must move together.** All four are
+  currently **3.253.0**:
+
+  | Where | What it pins |
+  |---|---|
+  | `go.mod` → `github.com/pulumi/pulumi/sdk/v3` | the SDK compiled into the binary |
+  | `action.yml` → `pulumi-version` input | the CLI every **consumer** deploys with |
+  | `.github/workflows/ci.yml` → `pulumi/actions` | the CLI our tests run against |
+  | `.github/workflows/release.yml` → `pulumi/actions` | the CLI the release build runs against |
+
+  The SDK and the CLI are the same product on two sides of a process boundary, and **nothing in the
+  toolchain links any of them** — Dependabot bumps `go.mod` and cannot see the other three, so
+  accepting an SDK PR on its own silently reopens the skew. Move all four in one PR, or none.
+  Grep `3\.25` before claiming they agree; a partial bump is the failure mode, and it is invisible
+  until a deploy behaves differently from CI.
+- **Third-party binaries install from `wardnet/toolchain-mirror`, verified.** The Pulumi CLI
+  (`action.yml`) and every provider plugin (`cmd/inforge/plugins.go`) are downloaded from our mirror
+  and checked against the `SHA256SUMS` it publishes. **Mirror a version before pinning it here** — an
+  unmirrored version fails the install with a message naming the mirror. Fetching from a mirror
+  without verifying the digest would only relocate the trust, so the check is not optional: the plugin
+  path previously ran unverified bytes as part of a production deploy. The mirror's SHA-256 is
+  stronger than upstream's own guarantee for plugins — the provider repos publish only **SHA-1**.
 - **A third-party apt repo must be PROBED before its sources file is written.** `apt-get update`
   fails hard on an unreachable source and our installers wrap it in retry-then-exit-1, so a
   sources file naming a suite the vendor does not publish breaks **every later apt-using step on
