@@ -721,7 +721,7 @@ realized in two halves:
   |---|---|
   | `go.mod` → `github.com/pulumi/pulumi/sdk/v3` | the SDK compiled into the binary |
   | `action.yml` → `pulumi-version` input | the CLI every **consumer** deploys with |
-  | `.github/workflows/ci.yml` → `pulumi/actions` | the CLI our tests run against |
+  | `.github/workflows/ci-test.yml` → `pulumi/actions` | the CLI our tests run against |
   | `.github/workflows/release.yml` → `pulumi/actions` | the CLI the release build runs against |
 
   The SDK and the CLI are the same product on two sides of a process boundary, and **nothing in the
