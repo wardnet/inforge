@@ -2,6 +2,13 @@ module github.com/wardnet/inforge
 
 go 1.25.11
 
+// Stated once, here. Workflows read it through setup-go's go-version-file
+// instead of each restating a version: CI pinned 1.26.6 in five places while
+// this file asked only for 1.25.11, and Dependabot updates neither, so the two
+// drifted silently. govulncheck reports against whichever Go actually builds,
+// which is what makes the drift a security question rather than a tidiness one.
+toolchain go1.26.6
+
 require (
 	filippo.io/age v1.3.1
 	github.com/aws/aws-sdk-go-v2 v1.42.1
@@ -70,8 +77,8 @@ require (
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/go-git/gcfg/v2 v2.0.2 // indirect
-	github.com/go-git/go-billy/v6 v6.0.0-alpha.1 // indirect
-	github.com/go-git/go-git/v6 v6.0.0-alpha.4 // indirect
+	github.com/go-git/go-billy/v6 v6.0.0-alpha.2 // indirect
+	github.com/go-git/go-git/v6 v6.0.0-alpha.5 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
@@ -139,7 +146,7 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
-	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
