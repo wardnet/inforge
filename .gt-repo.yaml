@@ -1,0 +1,54 @@
+# Repository governance for gt. This file is the source of truth; run
+# 'gt repo sync' to render it, and 'gt repo check' to verify.
+#
+# Shared policy (Dependabot cooldown, commit-message prefixes, the weekly sync
+# schedule) lives in gt's templates, not here, so it stays consistent across
+# every governed repo.
+#
+# The pipeline stages below become jobs in ci-orchestration.yml, each calling a
+# ci-*/cd-* workflow that belongs to this repository: gt creates those once and
+# never touches them again. Branch protection needs exactly one check, ci-gate,
+# which waits on all of them.
+#
+# Only deliberate overrides are written here. Everything absent follows gt's
+# default and keeps following it as that default changes — a value pinned in
+# this file stops tracking gt, which is why sync removes the ones that merely
+# restate it. Run 'gt repo config' to see the resolved spec, defaults included.
+
+gt_version: 1.3.0
+dependabot:
+  - ecosystem: github-actions
+    directory: /
+  - ecosystem: gomod
+    directory: /
+    groups:
+      - name: pulumi
+        patterns:
+          - github.com/pulumi/pulumi
+          - github.com/pulumi/pulumi/*
+          - github.com/pulumi/pulumi-go-provider
+        note: |
+          The pulumi core modules are released in lockstep and must move
+          together: sdk/v3 and pkg/v3 share an internal API
+          (plugin.NewContextWithRoot et al.), and pulumi-go-provider tracks
+          pulumi/pkg/v3's codegen/schema types. Bumping any one alone produces
+          an unbuildable tree.
+
+          applies_to keeps this to routine version updates, so a security
+          advisory on any of these is still raised as its own immediate PR
+          rather than waiting to be batched.
+        applies_to: version-updates
+  - ecosystem: npm
+    directory: /website
+    note: |
+      The Docusaurus docs site. Deliberately out of scope for bulwark
+      (.bulwark.yml sets typescript.enabled: false), but its dependencies
+      still need updating.
+pipeline:
+  ci:
+    stages:
+      - preflight
+      - build
+      - test
+  cd:
+    enabled: false

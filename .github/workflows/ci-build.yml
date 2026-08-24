@@ -1,0 +1,48 @@
+# ci-build — this file is yours.
+#
+# gt created it once and will never modify or delete it again. It is called by
+# ci-orchestration.yml and must keep `workflow_call`, or the orchestrator loses
+# the stage.
+#
+# Two jobs, because ci.yml had two and they are independent: `go build` and
+# golangci-lint. gt's stage vocabulary has no lint stage, and lint is not a
+# test — it belongs with the build, and running both here keeps the parallelism
+# ci.yml had. bulwark does NOT cover this: it runs gosec and govulncheck, not
+# golangci-lint, so dropping this job would lose real coverage.
+#
+# Both take their Go version from go.mod rather than restating it, so there is
+# one place to change it and no way for the two to drift.
+name: ci-build
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go build
+        run: go build ./...
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.12.2

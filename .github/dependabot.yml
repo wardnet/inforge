@@ -1,22 +1,57 @@
+# Managed by gt — edit .gt-repo.yaml, then run `gt repo sync`.
+#
+# Shared policy (cooldown, commit-message prefix, schedule) lives in gt's
+# template, not here, so changing it for every repo is a one-line edit in gt.
+#
+# The 7-day cooldown is the supply-chain guard: by the time a PR exists,
+# the upstream release has been in the wild long enough to surface yanks and
+# compromised publishers before an auto-merge-eligible PR lands on the default
+# branch.
 version: 2
 updates:
-  # Go module dependencies.
-  - package-ecosystem: gomod
-    directory: /
+  - package-ecosystem: "github-actions"
+    directory: "/"
     schedule:
-      interval: weekly
-    # Wait 5 days after a release is published before opening an update PR,
-    # so freshly-cut versions have time to be yanked or superseded.
+      interval: "weekly"
+    # Dependabot's commit message is also its PR title, and PRs are
+    # squash-merged, so the prefix is what keeps dependency updates inside
+    # Conventional Commits. `include: scope` appends the dependency scope,
+    # producing e.g. `ci(deps): bump …`.
+    commit-message:
+      prefix: "ci"
+      include: scope
     cooldown:
       default-days: 7
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 25
+
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Dependabot's commit message is also its PR title, and PRs are
+    # squash-merged, so the prefix is what keeps dependency updates inside
+    # Conventional Commits. `include: scope` appends the dependency scope,
+    # producing e.g. `build(deps): bump …`.
+    commit-message:
+      prefix: "build"
+      include: scope
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 25
+    # Grouped dependencies share a single PR. A group exists when its members
+    # must move together: landing one alone breaks the default branch, and the
+    # sibling PR then fails that same broken check — so auto-merge cannot
+    # recover on its own.
     groups:
       # The pulumi core modules are released in lockstep and must move
-      # together: sdk/v3 and pkg/v3 share an internal API (plugin.NewContextWithRoot
-      # et al.), and pulumi-go-provider tracks pulumi/pkg/v3's codegen/schema types.
-      # Bumping any one alone produces an unbuildable tree, so group their routine
-      # bumps into a single PR. applies-to defaults to version-updates, so security
-      # advisories on any of these are still raised as separate, immediate PRs.
+      # together: sdk/v3 and pkg/v3 share an internal API
+      # (plugin.NewContextWithRoot et al.), and pulumi-go-provider tracks
+      # pulumi/pkg/v3's codegen/schema types. Bumping any one alone produces
+      # an unbuildable tree.
+      #
+      # applies_to keeps this to routine version updates, so a security
+      # advisory on any of these is still raised as its own immediate PR
+      # rather than waiting to be batched.
       pulumi:
         applies-to: version-updates
         patterns:
@@ -24,11 +59,20 @@ updates:
           - "github.com/pulumi/pulumi/*"
           - "github.com/pulumi/pulumi-go-provider"
 
-  # GitHub Actions used in our workflows.
-  - package-ecosystem: github-actions
-    directory: /
+  # The Docusaurus docs site. Deliberately out of scope for bulwark
+  # (.bulwark.yml sets typescript.enabled: false), but its dependencies
+  # still need updating.
+  - package-ecosystem: "npm"
+    directory: "/website"
     schedule:
-      interval: weekly
+      interval: "weekly"
+    # Dependabot's commit message is also its PR title, and PRs are
+    # squash-merged, so the prefix is what keeps dependency updates inside
+    # Conventional Commits. `include: scope` appends the dependency scope,
+    # producing e.g. `build(deps): bump …`.
+    commit-message:
+      prefix: "build"
+      include: scope
     cooldown:
       default-days: 7
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 25
