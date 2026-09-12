@@ -1,6 +1,6 @@
 module github.com/wardnet/inforge
 
-go 1.25.11
+go 1.26.0
 
 // Stated once, here. Workflows read it through setup-go's go-version-file
 // instead of each restating a version: CI pinned 1.26.6 in five places while
@@ -25,7 +25,7 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/mod v0.40.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/term v0.45.0
