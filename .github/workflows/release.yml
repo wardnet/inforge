@@ -23,7 +23,7 @@ jobs:
       # Same reason as ci-test.yml: the cmd/inforge Automation API tests skip
       # themselves without the `pulumi` binary, and a release must not ship on a suite
       # that quietly skipped them.
-      - uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7.0.0
+      - uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
         with:
           pulumi-version: "3.253.0"
 
